@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Logs
+*.log
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Frontend (also has its own .gitignore, but cover the root view too)
+ui/frontend/node_modules/
+ui/frontend/dist/

@@ -1,0 +1,25 @@
+# Parallel pipeline: two analysts research independently, results are aggregated.
+# Uses "fake:" model specs so the dashboard demo runs with zero cost / no API key.
+
+name: research_brief
+
+agents:
+  - name: market_analyst
+    role: Market Analyst
+    goal: Summarize market trends relevant to the given topic
+    backstory: Tracks enterprise adoption curves for emerging tech
+    model: "fake:Market trend: enterprise adoption of multi-agent systems is accelerating, driven by cost reduction in repetitive knowledge-work."
+
+  - name: tech_analyst
+    role: Technology Analyst
+    goal: Summarize the technical state of the art relevant to the given topic
+    backstory: Reads every major framework's release notes so nobody else has to
+    model: "fake:Tech landscape: graph-based orchestration (LangGraph) is emerging as the standard substrate for production-grade agent pipelines."
+
+teams:
+  - name: research_team
+    agents: [market_analyst, tech_analyst]
+    mode: parallel
+
+workflow:
+  steps: [research_team]

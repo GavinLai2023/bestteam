@@ -1,0 +1,26 @@
+# Sequential pipeline: a reviewer finds issues, then a fixer patches them.
+# Uses "fake:" model specs so the dashboard demo runs with zero cost / no API key.
+# Swap to "openai:gpt-4o-mini" (+ provider package & API key) for real reviews.
+
+name: code_review_pipeline
+
+agents:
+  - name: reviewer
+    role: Senior Code Reviewer
+    goal: Find correctness bugs and missing edge-case handling in the given code
+    backstory: Has caught countless production incidents caused by unhandled edge cases
+    model: "fake:Found 2 issues: (1) calculate_average() divides by zero on an empty list, (2) get_user() returns None silently when no match is found."
+
+  - name: fixer
+    role: Bug Fix Engineer
+    goal: Patch the issues raised in the review with minimal, targeted changes
+    backstory: Prefers small, safe diffs over rewrites
+    model: "fake:Patched both: calculate_average() now raises ValueError on empty input, get_user() now raises KeyError when no match is found."
+
+teams:
+  - name: qa_team
+    agents: [reviewer, fixer]
+    mode: sequential
+
+workflow:
+  steps: [qa_team]

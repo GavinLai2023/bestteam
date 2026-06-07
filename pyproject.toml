@@ -1,0 +1,26 @@
+[project]
+name = "bestteam"
+version = "0.1.0"
+description = "A business-friendly multi-agent framework wrapper built on LangGraph"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "typer>=0.12",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+ui = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
+
+[project.scripts]
+bestteam = "bestteam.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
