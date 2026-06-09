@@ -6,6 +6,7 @@ from typing import Any, Dict
 import yaml
 
 from ..exceptions import ConfigurationError
+from ..tools import REGISTRY as _TOOL_REGISTRY
 from .agent import Agent
 from .team import CollaborationMode, Team
 from .workflow import Workflow
@@ -39,7 +40,7 @@ def load_workflow(path) -> Workflow:
 
 
 def _build_workflow(raw: Dict[str, Any], *, source: Path) -> Workflow:
-    agents = {spec["name"]: Agent(**spec) for spec in raw.get("agents", [])}
+    agents = {spec["name"]: _build_agent(spec) for spec in raw.get("agents", [])}
 
     teams: Dict[str, Team] = {}
     for spec in raw.get("teams", []):
@@ -57,6 +58,20 @@ def _build_workflow(raw: Dict[str, Any], *, source: Path) -> Workflow:
     steps = [_lookup(teams, name, "team", "workflow") for name in workflow_spec.get("steps", [])]
 
     return Workflow(name=raw.get("name", source.stem), steps=steps)
+
+
+def _build_agent(spec: Dict[str, Any]) -> Agent:
+    spec = dict(spec)
+    raw_tools = spec.pop("tools", []) or []
+    tools = []
+    for name in raw_tools:
+        if name not in _TOOL_REGISTRY:
+            available = ", ".join(sorted(_TOOL_REGISTRY))
+            raise ConfigurationError(
+                f"Unknown tool '{name}'. Available built-in tools: {available}"
+            )
+        tools.append(_TOOL_REGISTRY[name])
+    return Agent(**spec, tools=tools)
 
 
 def _lookup(registry: Dict[str, Any], name: str, kind: str, owner: str) -> Any:

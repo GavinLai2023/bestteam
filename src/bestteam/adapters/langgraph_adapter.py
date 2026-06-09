@@ -72,7 +72,10 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
     def node(state: _TeamState) -> Dict[str, Any]:
         model = _resolve_model(agent.model)
         if agent.tools:
-            model = model.bind_tools(list(agent.tools))
+            try:
+                model = model.bind_tools(list(agent.tools))
+            except NotImplementedError:
+                pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
 
         messages = [
             SystemMessage(content=agent.system_prompt()),

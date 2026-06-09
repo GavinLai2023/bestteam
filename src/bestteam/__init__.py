@@ -6,6 +6,7 @@ from .core.tools import ToolKit
 from .core.trace import TraceEvent
 from .core.workflow import Workflow, WorkflowResult
 from .exceptions import BestTeamError, ConfigurationError, EngineError
+from .tools import calculator, http_get, parse_file, web_search
 
 __version__ = "0.1.0"
 
@@ -23,4 +24,8 @@ __all__ = [
     "BestTeamError",
     "ConfigurationError",
     "EngineError",
+    "web_search",
+    "parse_file",
+    "http_get",
+    "calculator",
 ]

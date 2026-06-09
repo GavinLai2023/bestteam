@@ -12,8 +12,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
-ui = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
+dev          = ["pytest>=8.0"]
+ui           = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
+tools-search = ["tavily-python>=0.3"]
+tools-files  = ["pypdf>=4.0", "openpyxl>=3.1"]
+tools        = ["tavily-python>=0.3", "pypdf>=4.0", "openpyxl>=3.1"]
 
 [project.scripts]
 bestteam = "bestteam.cli:app"
