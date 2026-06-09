@@ -8,8 +8,13 @@ __pycache__/
 # Logs
 *.log
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code (local session data, machine-specific settings)
+.claude/
+
+# Environment variable files (never commit real keys)
+.env
+.env.local
+.env.*.local
 
 # Frontend (also has its own .gitignore, but cover the root view too)
 ui/frontend/node_modules/
