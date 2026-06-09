@@ -12,12 +12,19 @@ from .team import CollaborationMode, Team
 from .workflow import Workflow
 
 
-def load_workflow(path) -> Workflow:
+def load_workflow(path, *, toolkits=None) -> Workflow:
     """Build a Workflow from a declarative YAML file.
 
     This is what lets customers define agents/teams/pipelines without writing
     any orchestration code — the CLI's `run`/`graph` commands are thin
     wrappers around this loader plus Workflow.run()/.visualize().
+
+    Args:
+        path: Path to the YAML workflow file.
+        toolkits: Optional list of ToolKit instances whose tools are made
+            available to agents defined in this workflow. Custom tools are
+            merged with the built-in REGISTRY and can be referenced by name
+            in the YAML ``tools:`` list.
     """
     path = Path(path)
     try:
@@ -33,14 +40,19 @@ def load_workflow(path) -> Workflow:
     if not isinstance(raw, dict):
         raise ConfigurationError(f"'{path}' must contain a YAML mapping at the top level")
 
+    extra_tools: Dict[str, Any] = {}
+    for tk in (toolkits or []):
+        extra_tools.update(tk.items())
+
     try:
-        return _build_workflow(raw, source=path)
+        return _build_workflow(raw, source=path, extra_tools=extra_tools)
     except (KeyError, TypeError) as exc:
         raise ConfigurationError(f"Malformed workflow config in '{path}': missing or invalid field {exc}") from exc
 
 
-def _build_workflow(raw: Dict[str, Any], *, source: Path) -> Workflow:
-    agents = {spec["name"]: _build_agent(spec) for spec in raw.get("agents", [])}
+def _build_workflow(raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str, Any]) -> Workflow:
+    tool_lookup = {**_TOOL_REGISTRY, **extra_tools}
+    agents = {spec["name"]: _build_agent(spec, tool_lookup) for spec in raw.get("agents", [])}
 
     teams: Dict[str, Team] = {}
     for spec in raw.get("teams", []):
@@ -60,17 +72,17 @@ def _build_workflow(raw: Dict[str, Any], *, source: Path) -> Workflow:
     return Workflow(name=raw.get("name", source.stem), steps=steps)
 
 
-def _build_agent(spec: Dict[str, Any]) -> Agent:
+def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any]) -> Agent:
     spec = dict(spec)
     raw_tools = spec.pop("tools", []) or []
     tools = []
     for name in raw_tools:
-        if name not in _TOOL_REGISTRY:
-            available = ", ".join(sorted(_TOOL_REGISTRY))
+        if name not in tool_lookup:
+            available = ", ".join(sorted(tool_lookup))
             raise ConfigurationError(
-                f"Unknown tool '{name}'. Available built-in tools: {available}"
+                f"Unknown tool '{name}'. Available tools: {available}"
             )
-        tools.append(_TOOL_REGISTRY[name])
+        tools.append(tool_lookup[name])
     return Agent(**spec, tools=tools)
 
 

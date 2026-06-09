@@ -43,6 +43,9 @@ class ToolKit:
         except KeyError as exc:
             raise KeyError(f"ToolKit '{self.name}' has no tool named '{name}'") from exc
 
+    def items(self):
+        return self._tools.items()
+
     def __iter__(self) -> Iterator[Callable[..., Any]]:
         return iter(self._tools.values())
 

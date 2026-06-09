@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from ..exceptions import ConfigurationError
+from ._retry import with_retry
 
 
 def web_search(query: str, max_results: int = 5) -> str:
@@ -35,7 +36,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         )
 
     client = TavilyClient(api_key=api_key)
-    response = client.search(query, max_results=max_results)
+    response = with_retry(lambda: client.search(query, max_results=max_results))
 
     results = response.get("results", [])
     if not results:

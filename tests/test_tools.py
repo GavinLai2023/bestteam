@@ -1,6 +1,6 @@
 """Tests for the built-in tools package."""
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -238,3 +238,181 @@ workflow:
     p.write_text(yaml_text, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="Unknown tool 'nonexistent_tool'"):
         load_workflow(str(p))
+
+
+# ---------------------------------------------------------------------------
+# ToolKit → YAML loader integration
+# ---------------------------------------------------------------------------
+
+_TOOLKIT_YAML = """
+name: custom_tool_test
+agents:
+  - name: helper
+    role: Helper
+    goal: Help
+    model: "fake:done"
+    tools: [send_slack]
+teams:
+  - name: team1
+    agents: [helper]
+    mode: sequential
+workflow:
+  steps: [team1]
+"""
+
+
+def test_loader_resolves_custom_toolkit_tool(tmp_path):
+    from bestteam import load_workflow
+    from bestteam.core.tools import ToolKit
+
+    my_tools = ToolKit("company")
+
+    @my_tools.register
+    def send_slack(message: str) -> str:
+        return "sent"
+
+    p = tmp_path / "custom.yaml"
+    p.write_text(_TOOLKIT_YAML, encoding="utf-8")
+    wf = load_workflow(str(p), toolkits=[my_tools])
+    agent = wf.steps[0].agents[0]
+    assert len(agent.tools) == 1
+    assert agent.tools[0] is send_slack
+
+
+def test_loader_custom_tool_appears_in_error_message(tmp_path):
+    from bestteam import load_workflow
+    from bestteam.core.tools import ToolKit
+    from bestteam.exceptions import ConfigurationError
+
+    my_tools = ToolKit("company")
+
+    @my_tools.register
+    def send_slack(message: str) -> str:
+        return "sent"
+
+    yaml_text = """
+name: err_test
+agents:
+  - name: a
+    role: R
+    goal: G
+    model: "fake:x"
+    tools: [not_a_tool]
+teams:
+  - name: t
+    agents: [a]
+    mode: sequential
+workflow:
+  steps: [t]
+"""
+    p = tmp_path / "err.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_workflow(str(p), toolkits=[my_tools])
+    assert "send_slack" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# web_search retry
+# ---------------------------------------------------------------------------
+
+def test_web_search_retries_on_transient_error(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    mock_client = MagicMock()
+    mock_client.search.side_effect = [
+        RuntimeError("transient"),
+        RuntimeError("transient"),
+        {"results": [{"title": "T", "url": "http://x.com", "content": "ok"}]},
+    ]
+    fake_tavily = MagicMock()
+    fake_tavily.TavilyClient.return_value = mock_client
+    with patch.dict("sys.modules", {"tavily": fake_tavily}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            result = web_search("query")
+    assert mock_client.search.call_count == 3
+    assert mock_sleep.call_count == 2
+    assert "T" in result
+
+
+def test_web_search_raises_after_max_retries(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    mock_client = MagicMock()
+    mock_client.search.side_effect = RuntimeError("always fails")
+    fake_tavily = MagicMock()
+    fake_tavily.TavilyClient.return_value = mock_client
+    with patch.dict("sys.modules", {"tavily": fake_tavily}):
+        with patch("bestteam.tools._retry.time.sleep"):
+            with pytest.raises(RuntimeError, match="always fails"):
+                web_search("query")
+    assert mock_client.search.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# http_get retry
+# ---------------------------------------------------------------------------
+
+def _make_mock_httpx(side_effects):
+    """Build a fake httpx module whose Client.get raises/returns side_effects."""
+    import httpx as _real_httpx
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
+    mock_client_instance.__exit__ = MagicMock(return_value=False)
+    mock_client_instance.get.side_effect = side_effects
+
+    mock_httpx = MagicMock()
+    mock_httpx.Client.return_value = mock_client_instance
+    mock_httpx.RequestError = _real_httpx.RequestError
+    return mock_httpx, mock_client_instance
+
+
+def test_http_get_retries_on_connection_error():
+    import httpx as _real_httpx
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.text = "ok"
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([
+        _real_httpx.ConnectError("timeout"),
+        _real_httpx.ConnectError("timeout"),
+        ok_response,
+    ])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            result = http_get("https://example.com")
+    assert mock_client_instance.get.call_count == 3
+    assert mock_sleep.call_count == 2
+    assert "[200]" in result
+
+
+def test_http_get_retries_on_5xx():
+    server_error = MagicMock()
+    server_error.status_code = 503
+    server_error.text = "Service Unavailable"
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.text = "ok"
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([server_error, ok_response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            result = http_get("https://example.com")
+    assert mock_client_instance.get.call_count == 2
+    assert mock_sleep.call_count == 1
+    assert "[200]" in result
+
+
+def test_http_get_does_not_retry_on_4xx():
+    not_found = MagicMock()
+    not_found.status_code = 404
+    not_found.text = "Not Found"
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([not_found])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            result = http_get("https://example.com")
+    assert mock_client_instance.get.call_count == 1
+    assert mock_sleep.call_count == 0
+    assert "[404]" in result
