@@ -69,7 +69,7 @@ Four ready-made tools clients can attach directly to any Agent:
 | Tool | Import | Env var required | Extra dep |
 |---|---|---|---|
 | `web_search(query, max_results=5)` | `from bestteam import web_search` | `TAVILY_API_KEY` | `pip install 'bestteam[tools-search]'` |
-| `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel only) |
+| `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word) |
 | `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `httpx` (indirect dep via FastAPI) |
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
 
@@ -91,14 +91,51 @@ agents:
 
 Tier 2 tools (SQL executor, Python sandbox) and email integration are planned but not yet implemented.
 
+## Knowledge bases (`core/knowledge_base.py`)
+
+The most common client request is "connect our agents to the client's
+knowledge base." For the common case — a folder of a handful to a couple
+dozen documents, with no existing vector store — the loader supports a
+`local_folder` knowledge base: point it at a directory and it parses
+(`tools.parse_file`), chunks, and indexes the files in memory with **BM25
+keyword search** (`rank-bm25`). No API key, no vector store, no persistence.
+
+The resulting knowledge base is exposed to agents as an ordinary tool (named
+after the KB), so it slots into the existing `tools:` / `REGISTRY` mechanism
+with no `LangGraphAdapter` changes.
+
+**YAML usage:**
+```yaml
+knowledge_bases:
+  - name: product_docs
+    path: ./docs/product   # relative to the workflow YAML's directory
+    # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
+
+agents:
+  - name: support_agent
+    role: Support Specialist
+    goal: Answer customer questions using the product documentation
+    model: "openai:gpt-4o-mini"
+    tools: [product_docs, calculator]
+```
+
+Requires `pip install 'bestteam[tools-rag]'`. See
+`ui/backend/workflows/knowledge_base_demo.yaml` for a runnable example.
+
+Larger corpora, semantic/vector retrieval, and connectors for DMS platforms
+(SharePoint, Confluence, etc.) are future work — see "Known limitations"
+below.
+
 ## Known limitations / unimplemented extension points
 
 These are intentionally abstracted behind interfaces but **not yet
 implemented** — don't assume they exist:
 
-- **Vector memory**: `core/memory.py` defines an abstract `Memory`
-  (`remember`/`recall`); the only implementation is `InMemoryStore` (a plain
-  dict). No embeddings or vector store (Chroma/FAISS/Pinecone) are wired up.
+- **Semantic/vector knowledge bases**: `LocalFolderKnowledgeBase` only does
+  BM25 keyword search. No embeddings or vector store (Chroma/FAISS/Pinecone)
+  are wired up, and there's no DMS connector (SharePoint/Confluence/Google
+  Drive). `core/memory.py`'s `Memory` ABC (`remember`/`recall`) is similarly
+  unused beyond the in-process `InMemoryStore`.
 - **Persistent run state**: `ui/backend/registry.py`'s `RunRegistry` is
   in-process memory only — runs vanish on restart. Designed to be swapped
   for a Redis/Postgres-backed implementation behind the same interface.

@@ -29,12 +29,14 @@ def parse_file(path: str) -> str:
         return _parse_pdf(file_path)
     if suffix in (".xlsx", ".xls", ".xlsm"):
         return _parse_excel(file_path)
+    if suffix == ".docx":
+        return _parse_docx(file_path)
     if suffix in _TEXT_SUFFIXES:
         return file_path.read_text(encoding="utf-8")
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
-        f"Supported types: .pdf, .xlsx, .xls, {', '.join(sorted(_TEXT_SUFFIXES))}"
+        f"Supported types: .pdf, .xlsx, .xls, .docx, {', '.join(sorted(_TEXT_SUFFIXES))}"
     )
 
 
@@ -51,6 +53,21 @@ def _parse_pdf(path: Path) -> str:
     pages = [page.extract_text() or "" for page in reader.pages]
     header = f"[PDF: {path.name} — {len(pages)} page(s)]\n"
     return header + "\n\n".join(pages)
+
+
+def _parse_docx(path: Path) -> str:
+    try:
+        import docx
+    except ImportError as exc:
+        raise ConfigurationError(
+            "Parsing Word files requires the 'python-docx' package. "
+            "Install it with: pip install 'bestteam[tools-files]'"
+        ) from exc
+
+    document = docx.Document(str(path))
+    paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+    header = f"[Word: {path.name}]\n"
+    return header + "\n".join(paragraphs)
 
 
 def _parse_excel(path: Path) -> str:

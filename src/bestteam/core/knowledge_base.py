@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Callable, List, NamedTuple, Optional, Set
+
+from ..exceptions import ConfigurationError
+from ..tools import parse_file
+
+_SUPPORTED_SUFFIXES = {
+    ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
+    ".pdf", ".xlsx", ".xls", ".xlsm", ".docx",
+}
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# Common English function words, ignored when deciding whether a chunk is
+# relevant to a query. Without this, tiny corpora (a handful of documents)
+# can match every chunk on words like "and"/"the", and BM25's IDF term is
+# too unstable at this scale to rely on alone.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do",
+    "does", "for", "from", "has", "have", "how", "i", "if", "in", "into",
+    "is", "it", "its", "of", "on", "or", "our", "should", "that", "the",
+    "their", "this", "to", "was", "we", "were", "what", "when", "where",
+    "which", "who", "will", "with", "you", "your",
+})
+
+
+class KnowledgeBase(ABC):
+    """A queryable source of client documents that agents can search.
+
+    Implementations are responsible for ingesting documents from wherever
+    they live and answering free-text queries with relevant excerpts.
+    """
+
+    name: str
+
+    @abstractmethod
+    def query(self, query: str, top_k: Optional[int] = None) -> str:
+        """Return formatted excerpts most relevant to the query."""
+
+
+class _Chunk(NamedTuple):
+    source: str
+    text: str
+
+
+class LocalFolderKnowledgeBase(KnowledgeBase):
+    """A knowledge base backed by a folder of documents on disk.
+
+    Documents are parsed (via :func:`bestteam.tools.parse_file`), split into
+    overlapping chunks, and indexed in memory with BM25 keyword search. This
+    is intentionally lightweight — no embeddings, no vector store, no API
+    keys — which suits the common case of a client handing over a folder
+    with a handful to a couple dozen documents.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        path: str | Path,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 100,
+        top_k: int = 5,
+    ) -> None:
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError as exc:
+            raise ConfigurationError(
+                "Knowledge bases require the 'rank-bm25' package. "
+                "Install it with: pip install 'bestteam[tools-rag]'"
+            ) from exc
+
+        self.name = name
+        self.path = Path(path)
+        self.default_top_k = top_k
+
+        self._chunks = self._load_chunks(chunk_size, chunk_overlap)
+        if not self._chunks:
+            raise ConfigurationError(
+                f"Knowledge base '{name}' has no readable documents in {self.path}"
+            )
+
+        self._chunk_tokens = [self._tokenize(chunk.text) for chunk in self._chunks]
+        self._chunk_terms = [self._significant_terms(tokens) for tokens in self._chunk_tokens]
+        self._bm25 = BM25Okapi(self._chunk_tokens)
+
+    def _load_chunks(self, chunk_size: int, chunk_overlap: int) -> List[_Chunk]:
+        chunks: List[_Chunk] = []
+        for file_path in sorted(self.path.rglob("*")):
+            if not file_path.is_file() or file_path.suffix.lower() not in _SUPPORTED_SUFFIXES:
+                continue
+            try:
+                text = parse_file(str(file_path))
+            except ConfigurationError:
+                continue
+            source = file_path.relative_to(self.path).as_posix()
+            for piece in _chunk_text(text, chunk_size, chunk_overlap):
+                chunks.append(_Chunk(source=source, text=piece))
+        return chunks
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        return _TOKEN_RE.findall(text.lower())
+
+    @staticmethod
+    def _significant_terms(tokens: List[str]) -> Set[str]:
+        return {t for t in tokens if t not in _STOPWORDS}
+
+    def query(self, query: str, top_k: Optional[int] = None) -> str:
+        top_k = top_k or self.default_top_k
+        query_tokens = self._tokenize(query)
+        query_terms = self._significant_terms(query_tokens)
+        scores = self._bm25.get_scores(query_tokens)
+
+        matches = [
+            (len(query_terms & chunk_terms), score, chunk)
+            for score, chunk, chunk_terms in zip(scores, self._chunks, self._chunk_terms)
+            if query_terms & chunk_terms
+        ]
+        matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        results = [(score, chunk) for _overlap, score, chunk in matches[:top_k]]
+
+        if not results:
+            return f"No results found in knowledge base '{self.name}' for: {query}"
+
+        lines = [f"Knowledge base '{self.name}' results for: {query}\n"]
+        for i, (_score, chunk) in enumerate(results, 1):
+            lines.append(f"{i}. [source: {chunk.source}]")
+            lines.append(chunk.text.strip())
+            lines.append("")
+        return "\n".join(lines)
+
+
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+    """Split text into overlapping fixed-size chunks."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    step = chunk_size - chunk_overlap
+    while start < len(text):
+        chunks.append(text[start : start + chunk_size])
+        start += step
+    return chunks
+
+
+def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
+    """Wrap a :class:`KnowledgeBase` as a single-argument agent tool.
+
+    The returned callable's ``__name__`` matches ``kb.name``, so it can be
+    referenced directly by name in a workflow's ``tools:`` list — exactly
+    like a built-in tool.
+    """
+
+    def _tool(query: str) -> str:
+        return kb.query(query)
+
+    _tool.__name__ = kb.name
+    _tool.__doc__ = (
+        f"Search the '{kb.name}' knowledge base for information relevant to "
+        "the query. Returns the most relevant document excerpts along with "
+        "the source file each excerpt came from.\n\n"
+        "Args:\n"
+        "    query: The search query string.\n\n"
+        "Returns:\n"
+        "    Formatted text containing matching excerpts and their sources."
+    )
+    return _tool

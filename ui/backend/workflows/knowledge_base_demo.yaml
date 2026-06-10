@@ -1,0 +1,26 @@
+# Single-agent support workflow backed by a local-folder knowledge base.
+# "support_agent" can call the "company_docs" tool (BM25 keyword search over
+# kb_docs/) to ground its answers in the company's policy documents.
+# Uses a "fake:" model so the dashboard demo runs with zero cost / no API key.
+
+name: knowledge_base_demo
+
+knowledge_bases:
+  - name: company_docs
+    path: ./kb_docs
+
+agents:
+  - name: support_agent
+    role: Customer Support Specialist
+    goal: Answer customer questions using the company's policy documents
+    backstory: Always checks the knowledge base before answering
+    model: "fake:Based on our policy documents, here is the answer to your question."
+    tools: [company_docs]
+
+teams:
+  - name: support_team
+    agents: [support_agent]
+    mode: sequential
+
+workflow:
+  steps: [support_team]

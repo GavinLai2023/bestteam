@@ -184,6 +184,28 @@ def test_parse_file_excel_raises_without_package(tmp_path):
             parse_file(str(f))
 
 
+def test_parse_file_docx_raises_without_package(tmp_path):
+    f = tmp_path / "doc.docx"
+    f.write_bytes(b"PK")
+    with patch.dict("sys.modules", {"docx": None}):
+        with pytest.raises(ConfigurationError, match="python-docx"):
+            parse_file(str(f))
+
+
+def test_parse_file_reads_docx(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_paragraph("Hello from Word.")
+    document.add_paragraph("Second paragraph.")
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    assert "Hello from Word." in result
+    assert "Second paragraph." in result
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 from .core.agent import Agent
+from .core.knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase
 from .core.loader import load_workflow
 from .core.memory import InMemoryStore, Memory
 from .core.team import CollaborationMode, Team
@@ -20,6 +21,8 @@ __all__ = [
     "TraceEvent",
     "Memory",
     "InMemoryStore",
+    "KnowledgeBase",
+    "LocalFolderKnowledgeBase",
     "load_workflow",
     "BestTeamError",
     "ConfigurationError",

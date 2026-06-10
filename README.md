@@ -2,6 +2,8 @@
 
 > 把复杂留给自己，把简单留给客户。
 
+**GitHub:** https://github.com/GavinLai2023/bestteam
+
 A commercial multi-agent framework that wraps [LangGraph](https://github.com/langchain-ai/langgraph) behind a clean, business-friendly API. Clients define agents and workflows in a few lines of Python or a YAML file — the framework handles all orchestration complexity.
 
 ## Architecture
@@ -103,9 +105,31 @@ bestteam run code_review.yaml "def divide(a, b): return a / b"
 | Tool | Description | Requires |
 |---|---|---|
 | `web_search(query)` | Tavily web search, LLM-optimised output | `TAVILY_API_KEY` |
-| `parse_file(path)` | Extract text from PDF, Excel, or plain text | `pip install 'bestteam[tools-files]'` |
+| `parse_file(path)` | Extract text from PDF, Excel, Word, or plain text | `pip install 'bestteam[tools-files]'` |
 | `http_get(url)` | HTTP GET with optional JSON headers | — |
 | `calculator(expr)` | Safe arithmetic via AST — prevents hallucination | — |
+
+## Knowledge bases
+
+Connect agents to a client's documents — point at a folder and the framework
+parses, chunks, and indexes it in memory with BM25 keyword search (no vector
+store or API key required):
+
+```yaml
+knowledge_bases:
+  - name: product_docs
+    path: ./docs/product
+
+agents:
+  - name: support_agent
+    role: Support Specialist
+    goal: Answer customer questions using the product documentation
+    model: "openai:gpt-4o-mini"
+    tools: [product_docs]
+```
+
+Requires `pip install 'bestteam[tools-rag]'`. See
+`ui/backend/workflows/knowledge_base_demo.yaml` for a runnable example.
 
 ## Monitoring dashboard
 
@@ -143,7 +167,9 @@ See `.env.example` for the full list. Copy it to `.env` — it is git-ignored.
 
 ## Roadmap
 
-- [ ] Vector memory (Chroma / FAISS / Pinecone)
+- [x] Local-folder knowledge base (BM25 keyword search)
+- [ ] Semantic/vector knowledge bases (Chroma / FAISS / Pinecone)
+- [ ] DMS connectors (SharePoint / Confluence / Google Drive)
 - [ ] SQL executor (read-only, SQLAlchemy)
 - [ ] Python code sandbox (subprocess-isolated)
 - [ ] CrewAI adapter

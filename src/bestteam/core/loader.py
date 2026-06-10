@@ -8,6 +8,7 @@ import yaml
 from ..exceptions import ConfigurationError
 from ..tools import REGISTRY as _TOOL_REGISTRY
 from .agent import Agent
+from .knowledge_base import LocalFolderKnowledgeBase, make_knowledge_base_tool
 from .team import CollaborationMode, Team
 from .workflow import Workflow
 
@@ -52,6 +53,10 @@ def load_workflow(path, *, toolkits=None) -> Workflow:
 
 def _build_workflow(raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str, Any]) -> Workflow:
     tool_lookup = {**_TOOL_REGISTRY, **extra_tools}
+    for spec in raw.get("knowledge_bases", []):
+        kb = _build_knowledge_base(spec, source)
+        tool_lookup[kb.name] = make_knowledge_base_tool(kb)
+
     agents = {spec["name"]: _build_agent(spec, tool_lookup) for spec in raw.get("agents", [])}
 
     teams: Dict[str, Team] = {}
@@ -70,6 +75,23 @@ def _build_workflow(raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str,
     steps = [_lookup(teams, name, "team", "workflow") for name in workflow_spec.get("steps", [])]
 
     return Workflow(name=raw.get("name", source.stem), steps=steps)
+
+
+def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> LocalFolderKnowledgeBase:
+    spec = dict(spec)
+    name = spec.pop("name")
+    raw_path = spec.pop("path")
+
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (source.parent / path).resolve()
+
+    if not path.is_dir():
+        raise ConfigurationError(
+            f"Knowledge base '{name}' path does not exist or is not a directory: {path}"
+        )
+
+    return LocalFolderKnowledgeBase(name=name, path=path, **spec)
 
 
 def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any]) -> Agent:
