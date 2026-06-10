@@ -55,6 +55,19 @@ def test_knowledge_base_skips_unsupported_files(tmp_path):
     assert kb._chunks[0].source == "doc.txt"
 
 
+def test_knowledge_base_skips_corrupt_file_with_warning(tmp_path):
+    pytest.importorskip("docx")
+    (tmp_path / "good.md").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "bad.docx").write_bytes(b"not a real docx file")
+
+    with pytest.warns(UserWarning, match="bad.docx"):
+        kb = LocalFolderKnowledgeBase("kb", tmp_path)
+
+    sources = {chunk.source for chunk in kb._chunks}
+    assert "good.md" in sources
+    assert "bad.docx" not in sources
+
+
 @pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])
 def test_rejects_chunk_overlap_gte_chunk_size(tmp_path, chunk_size, chunk_overlap):
     (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")

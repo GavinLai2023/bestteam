@@ -13,7 +13,7 @@ import asyncio
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,7 +36,7 @@ app.add_middleware(
 
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
-_workflow_cache: Dict[str, Workflow] = {}
+_workflow_cache: Dict[str, Tuple[Workflow, float]] = {}
 
 
 class RunRequest(BaseModel):
@@ -46,16 +46,22 @@ class RunRequest(BaseModel):
 
 def _get_workflow(name: str) -> Workflow:
     """Load and cache a workflow by name (Workflow already memoizes its own
-    compiled graph, so repeat runs of the same workflow stay cheap)."""
-    if name not in _workflow_cache:
-        path = WORKFLOWS_DIR / f"{name}.yaml"
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
+    compiled graph, so repeat runs of the same workflow stay cheap).
+
+    The cache is keyed on the YAML file's mtime, so editing a workflow file
+    on disk is picked up on the next request."""
+    path = WORKFLOWS_DIR / f"{name}.yaml"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
+
+    mtime = path.stat().st_mtime
+    cached = _workflow_cache.get(name)
+    if cached is None or cached[1] != mtime:
         try:
-            _workflow_cache[name] = load_workflow(path)
+            _workflow_cache[name] = (load_workflow(path), mtime)
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _workflow_cache[name]
+    return _workflow_cache[name][0]
 
 
 def _run_in_background(run_id: str, workflow: Workflow, input: str, loop: asyncio.AbstractEventLoop) -> None:

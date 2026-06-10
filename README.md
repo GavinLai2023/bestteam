@@ -105,9 +105,13 @@ bestteam run code_review.yaml "def divide(a, b): return a / b"
 | Tool | Description | Requires |
 |---|---|---|
 | `web_search(query)` | Tavily web search, LLM-optimised output | `TAVILY_API_KEY` |
-| `parse_file(path)` | Extract text from PDF, Excel, Word, or plain text | `pip install 'bestteam[tools-files]'` |
-| `http_get(url)` | HTTP GET with optional JSON headers | — |
+| `parse_file(path)` | Extract text from PDF, Excel, Word (incl. tables), or plain text | `pip install 'bestteam[tools-files]'` |
+| `http_get(url)` | HTTP GET with optional JSON headers; blocks requests to private/internal addresses | — |
 | `calculator(expr)` | Safe arithmetic via AST — prevents hallucination | — |
+
+`parse_file` reads any local path it's given, with no sandboxing — if you
+expose it to an agent, constrain which paths the agent can be prompted to
+access.
 
 ## Knowledge bases
 

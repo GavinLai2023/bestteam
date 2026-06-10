@@ -75,7 +75,10 @@ def calculator(expression: str) -> str:
                 "Only numeric arithmetic is supported."
             )
 
-    result = _eval_node(tree.body)
-    if isinstance(result, float) and result == int(result):
-        return str(int(result))
-    return str(result)
+    try:
+        result = _eval_node(tree.body)
+        if isinstance(result, float) and result == int(result):
+            return str(int(result))
+        return str(result)
+    except (ValueError, OverflowError) as exc:
+        raise ConfigurationError(f"Result is too large to compute: {exc}") from exc

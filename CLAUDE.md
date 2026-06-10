@@ -89,6 +89,14 @@ agents:
     tools: [web_search, calculator]
 ```
 
+**Trust boundaries**: `parse_file` reads any local path it's given (no
+sandboxing) and `http_get` fetches any URL whose host doesn't resolve to a
+private/internal address (see `_check_host_allowed` in `http_client.py`).
+Both are intentional — the tools' purpose is to read files / fetch URLs the
+agent is told to — but callers exposing these tools to an LLM agent are
+responsible for constraining which paths/URLs the agent can be prompted to
+access.
+
 Tier 2 tools (SQL executor, Python sandbox) and email integration are planned but not yet implemented.
 
 ## Knowledge bases (`core/knowledge_base.py`)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, List, NamedTuple, Optional, Set
@@ -105,6 +106,9 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             try:
                 text = parse_file(str(file_path))
             except ConfigurationError:
+                continue
+            except Exception as exc:
+                warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
                 continue
             source = file_path.relative_to(self.path).as_posix()
             for piece in _chunk_text(text, chunk_size, chunk_overlap):

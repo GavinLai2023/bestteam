@@ -11,7 +11,13 @@ def parse_file(path: str) -> str:
     """Extract text content from a file.
 
     Supports PDF (text extraction), Excel (.xlsx/.xls, rendered as CSV rows),
-    and common plain-text formats (.txt, .md, .csv, .json, .yaml).
+    Word (.docx, including tables), and common plain-text formats (.txt, .md,
+    .csv, .json, .yaml).
+
+    This tool reads whatever local path it is given, with no sandboxing —
+    the same trust boundary as `http_get` fetching arbitrary URLs. If this
+    tool is exposed to an LLM agent, the caller is responsible for
+    constraining which paths the agent can be prompted to access.
 
     Args:
         path: Absolute or relative path to the file to parse.
@@ -66,8 +72,20 @@ def _parse_docx(path: Path) -> str:
 
     document = docx.Document(str(path))
     paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+
+    table_parts = []
+    for i, table in enumerate(document.tables, 1):
+        rows = [
+            ",".join(cell.text.strip() for cell in row.cells)
+            for row in table.rows
+        ]
+        table_parts.append(f"[Table {i}]\n" + "\n".join(rows))
+
     header = f"[Word: {path.name}]\n"
-    return header + "\n".join(paragraphs)
+    body = "\n".join(paragraphs)
+    if table_parts:
+        body += "\n\n" + "\n\n".join(table_parts)
+    return header + body
 
 
 def _parse_excel(path: Path) -> str:

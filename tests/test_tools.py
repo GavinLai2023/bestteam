@@ -65,6 +65,11 @@ def test_calculator_rejects_huge_exponent():
         calculator("2 ** 9999")
 
 
+def test_calculator_rejects_oversized_result():
+    with pytest.raises(ConfigurationError, match="too large"):
+        calculator("99999 ** 1000")
+
+
 # ---------------------------------------------------------------------------
 # web_search
 # ---------------------------------------------------------------------------
@@ -273,6 +278,27 @@ def test_parse_file_reads_docx(tmp_path):
     result = parse_file(str(f))
     assert "Hello from Word." in result
     assert "Second paragraph." in result
+
+
+def test_parse_file_reads_docx_tables(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_paragraph("Intro paragraph.")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Price"
+    table.cell(1, 0).text = "Widget"
+    table.cell(1, 1).text = "9.99"
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    assert "Intro paragraph." in result
+    assert "Name" in result
+    assert "Price" in result
+    assert "Widget" in result
+    assert "9.99" in result
 
 
 # ---------------------------------------------------------------------------
