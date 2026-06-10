@@ -55,6 +55,20 @@ def test_knowledge_base_skips_unsupported_files(tmp_path):
     assert kb._chunks[0].source == "doc.txt"
 
 
+@pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])
+def test_rejects_chunk_overlap_gte_chunk_size(tmp_path, chunk_size, chunk_overlap):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="chunk_overlap"):
+        LocalFolderKnowledgeBase("kb", tmp_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_rejects_non_positive_chunk_size(tmp_path, chunk_size):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="chunk_size"):
+        LocalFolderKnowledgeBase("kb", tmp_path, chunk_size=chunk_size, chunk_overlap=0)
+
+
 # ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase.query
 # ---------------------------------------------------------------------------

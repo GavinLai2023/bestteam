@@ -1,5 +1,6 @@
 """Tests for the built-in tools package."""
 import json
+import socket
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -103,6 +104,19 @@ def test_web_search_returns_formatted_string(monkeypatch):
 # http_get
 # ---------------------------------------------------------------------------
 
+def _patch_getaddrinfo(monkeypatch, ip_or_map):
+    """Monkeypatch socket.getaddrinfo used by http_client's SSRF check.
+
+    `ip_or_map` is either a single IP string (used for any host) or a dict
+    mapping hostname -> IP string.
+    """
+    def fake_getaddrinfo(host, *args, **kwargs):
+        ip = ip_or_map[host] if isinstance(ip_or_map, dict) else ip_or_map
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr("bestteam.tools.http_client.socket.getaddrinfo", fake_getaddrinfo)
+
+
 def test_http_get_raises_without_package():
     with patch.dict("sys.modules", {"httpx": None}):
         with pytest.raises(ConfigurationError, match="httpx"):
@@ -124,10 +138,12 @@ def test_http_get_rejects_non_dict_headers():
         http_get("https://example.com", headers_json='["list", "not", "dict"]')
 
 
-def test_http_get_returns_status_and_body():
+def test_http_get_returns_status_and_body(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.text = '{"ok": true}'
+    mock_response.is_redirect = False
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
@@ -138,6 +154,59 @@ def test_http_get_returns_status_and_body():
         result = http_get("https://example.com")
     assert "[200]" in result
     assert '{"ok": true}' in result
+
+
+# ---------------------------------------------------------------------------
+# http_get SSRF protection
+# ---------------------------------------------------------------------------
+
+def test_http_get_blocks_loopback_address(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, "127.0.0.1")
+    with pytest.raises(ConfigurationError, match="private/internal"):
+        http_get("http://localhost/admin")
+
+
+def test_http_get_blocks_link_local_metadata_address(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, "169.254.169.254")
+    with pytest.raises(ConfigurationError, match="private/internal"):
+        http_get("http://169.254.169.254/latest/meta-data/")
+
+
+def test_http_get_rejects_redirect_to_private_address(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, {"example.com": "93.184.216.34", "127.0.0.1": "127.0.0.1"})
+
+    redirect_response = MagicMock()
+    redirect_response.status_code = 302
+    redirect_response.is_redirect = True
+    redirect_response.headers = {"location": "http://127.0.0.1/admin"}
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([redirect_response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with pytest.raises(ConfigurationError, match="private/internal"):
+            http_get("https://example.com")
+    assert mock_client_instance.get.call_count == 1
+
+
+def test_http_get_follows_safe_redirect(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, {"example.com": "93.184.216.34", "example.org": "93.184.216.35"})
+
+    redirect_response = MagicMock()
+    redirect_response.status_code = 302
+    redirect_response.is_redirect = True
+    redirect_response.headers = {"location": "https://example.org/final"}
+
+    final_response = MagicMock()
+    final_response.status_code = 200
+    final_response.text = "final body"
+    final_response.is_redirect = False
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([redirect_response, final_response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        result = http_get("https://example.com")
+    assert mock_client_instance.get.call_count == 2
+    assert "[200]" in result
+    assert "example.org/final" in result
+    assert "final body" in result
 
 
 # ---------------------------------------------------------------------------
@@ -385,15 +454,19 @@ def _make_mock_httpx(side_effects):
     mock_httpx = MagicMock()
     mock_httpx.Client.return_value = mock_client_instance
     mock_httpx.RequestError = _real_httpx.RequestError
+    mock_httpx.URL = _real_httpx.URL
     return mock_httpx, mock_client_instance
 
 
-def test_http_get_retries_on_connection_error():
+def test_http_get_retries_on_connection_error(monkeypatch):
     import httpx as _real_httpx
+
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
 
     ok_response = MagicMock()
     ok_response.status_code = 200
     ok_response.text = "ok"
+    ok_response.is_redirect = False
 
     mock_httpx, mock_client_instance = _make_mock_httpx([
         _real_httpx.ConnectError("timeout"),
@@ -408,7 +481,9 @@ def test_http_get_retries_on_connection_error():
     assert "[200]" in result
 
 
-def test_http_get_retries_on_5xx():
+def test_http_get_retries_on_5xx(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
+
     server_error = MagicMock()
     server_error.status_code = 503
     server_error.text = "Service Unavailable"
@@ -416,6 +491,7 @@ def test_http_get_retries_on_5xx():
     ok_response = MagicMock()
     ok_response.status_code = 200
     ok_response.text = "ok"
+    ok_response.is_redirect = False
 
     mock_httpx, mock_client_instance = _make_mock_httpx([server_error, ok_response])
     with patch.dict("sys.modules", {"httpx": mock_httpx}):
@@ -426,10 +502,13 @@ def test_http_get_retries_on_5xx():
     assert "[200]" in result
 
 
-def test_http_get_does_not_retry_on_4xx():
+def test_http_get_does_not_retry_on_4xx(monkeypatch):
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
+
     not_found = MagicMock()
     not_found.status_code = 404
     not_found.text = "Not Found"
+    not_found.is_redirect = False
 
     mock_httpx, mock_client_instance = _make_mock_httpx([not_found])
     with patch.dict("sys.modules", {"httpx": mock_httpx}):

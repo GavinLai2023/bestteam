@@ -73,6 +73,16 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
 
+        if chunk_size <= 0:
+            raise ConfigurationError(
+                f"Knowledge base '{name}': chunk_size must be positive, got {chunk_size}"
+            )
+        if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+            raise ConfigurationError(
+                f"Knowledge base '{name}': chunk_overlap ({chunk_overlap}) must be "
+                f"non-negative and less than chunk_size ({chunk_size})"
+            )
+
         self.name = name
         self.path = Path(path)
         self.default_top_k = top_k
