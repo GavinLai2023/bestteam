@@ -4,7 +4,7 @@ import operator
 from typing import Annotated, Any, Dict, Iterator, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
@@ -13,6 +13,12 @@ from ..core.trace import TraceEvent
 from ..core.workflow import Workflow, WorkflowResult
 from ..exceptions import BestTeamError, ConfigurationError, EngineError
 from .base import EngineAdapter
+
+
+# Upper bound on how many times an agent node will execute tool calls and
+# re-invoke the model in a single turn. Guards against a model that keeps
+# requesting tools and never settles on a final answer.
+_MAX_TOOL_ITERATIONS = 5
 
 
 class _TeamState(TypedDict):
@@ -71,6 +77,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
 
     def node(state: _TeamState) -> Dict[str, Any]:
         model = _resolve_model(agent.model)
+        tools_by_name = {fn.__name__: fn for fn in agent.tools}
         if agent.tools:
             try:
                 model = model.bind_tools(list(agent.tools))
@@ -82,6 +89,24 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
             HumanMessage(content=state["context"] or state["input"]),
         ]
         response = model.invoke(messages)
+
+        for _ in range(_MAX_TOOL_ITERATIONS):
+            tool_calls = getattr(response, "tool_calls", None)
+            if not tool_calls:
+                break
+            messages.append(response)
+            for call in tool_calls:
+                tool_fn = tools_by_name.get(call["name"])
+                if tool_fn is None:
+                    result = f"Error: unknown tool '{call['name']}'"
+                else:
+                    try:
+                        result = tool_fn(**call["args"])
+                    except Exception as exc:
+                        result = f"Error calling tool '{call['name']}': {exc}"
+                messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+            response = model.invoke(messages)
+
         text = response.content if hasattr(response, "content") else str(response)
 
         update: Dict[str, Any] = {"contributions": {agent.name: text}}
