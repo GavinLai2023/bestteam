@@ -158,3 +158,25 @@ class UsageRecord(Base):
     output_tokens: Mapped[int] = mapped_column(default=0)
     cost_estimate: Mapped[Optional[float]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class ModelCatalogEntry(Base):
+    """Maps a model `spec` string (e.g. "openai:gpt-4o-mini" or "fake:hi") to a
+    customer-friendly name, a complexity `tier`, and per-1K-token pricing.
+
+    Used by the Solution Architect when generating a Specification (so it
+    picks models by "role complexity" rather than raw provider names) and by
+    `usage_records` for cost-estimate conversion (Phase 3)."""
+
+    __tablename__ = "model_catalog"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    spec: Mapped[str] = mapped_column(unique=True)
+    display_name: Mapped[str]
+    description: Mapped[str] = mapped_column(default="")
+    # fast | balanced | advanced -- a rough complexity/cost tier.
+    tier: Mapped[str] = mapped_column(default="balanced")
+    input_price_per_1k: Mapped[float] = mapped_column(default=0.0)
+    output_price_per_1k: Mapped[float] = mapped_column(default=0.0)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)

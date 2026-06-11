@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -12,9 +12,15 @@ class TraceEvent:
     whatever engine produced it, the UI only ever sees this shape.
 
     `type` is one of: "run_started", "agent_completed", "run_completed", "run_failed"
+
+    `usage` holds zero or more per-model-call token usage entries (each
+    `{"model": <spec str>, "input_tokens": int, "output_tokens": int}`)
+    recorded while producing this event -- empty for engines/models that
+    don't report `usage_metadata` (e.g. `fake:` models).
     """
 
     type: str
     workflow: str
     agent: Optional[str] = None
     data: Any = None
+    usage: List[Dict[str, Any]] = field(default_factory=list)

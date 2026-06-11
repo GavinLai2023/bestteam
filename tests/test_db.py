@@ -41,6 +41,7 @@ def test_init_db_creates_all_tables():
         "knowledge_bases",
         "workflows",
         "builder_sessions",
+        "model_catalog",
         "runs",
         "trace_events",
         "usage_records",

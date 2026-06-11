@@ -4,6 +4,7 @@ from .models import (
     Base,
     BuilderSession,
     KnowledgeBaseRecord,
+    ModelCatalogEntry,
     Run,
     TeamRecord,
     TraceEventRecord,
@@ -26,4 +27,5 @@ __all__ = [
     "Run",
     "TraceEventRecord",
     "UsageRecord",
+    "ModelCatalogEntry",
 ]

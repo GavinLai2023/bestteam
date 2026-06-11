@@ -23,6 +23,7 @@ from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .db.builder_sessions import append_feedback, create_session, get_session, update_session
+from .db.model_catalog import list_entries, to_prompt_text
 from .db.models import BuilderSession, WorkflowRecord
 from .db_session import get_db
 from .runtime import _executor, registry, run_in_background
@@ -86,6 +87,14 @@ def _requirements_text(session: BuilderSession) -> str:
     if session.as_is_text:
         parts.append(f"Current process:\n{session.as_is_text}")
     return "\n\n".join(part for part in parts if part)
+
+
+def _with_model_catalog(db: Session, text: str) -> str:
+    """Append the `model_catalog` (if any) so the Solution Architect picks
+    `AgentSpec.model` specs by role complexity, per
+    docs/team_builder_methodology.md's Phase 3."""
+    catalog_text = to_prompt_text(list_entries(db))
+    return f"{text}\n\n{catalog_text}" if catalog_text else text
 
 
 def _validate_spec_payload(payload: Dict[str, Any], source: Path) -> Specification:
@@ -177,6 +186,7 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
         requirements_text = _requirements_text(session)
         if req.feedback:
             requirements_text += f"\n\nCustomer feedback on the previous design:\n{req.feedback}"
+        requirements_text = _with_model_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
         spec = _call_model(generate_specification, chat_model, requirements_text, source=source)
     else:
@@ -208,6 +218,7 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
             f"The current team design is:\n{current.model_dump_json()}\n\n"
             f"Customer feedback on this design:\n{req.feedback}"
         )
+        requirements_text = _with_model_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
         spec = _call_model(generate_specification, chat_model, requirements_text, source=source)
     else:
@@ -237,7 +248,7 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
 
     run = registry.create(spec.name, req.input)
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop)
+    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop, db.get_bind())
     return {"run_id": run.id}
 
 

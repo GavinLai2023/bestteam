@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Callable, Dict, Iterator, Sequence, Tuple, TypedDict
+from typing import Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -29,6 +29,10 @@ class _TeamState(TypedDict):
     # them instead of raising a concurrent-update error. Sequential agents run
     # in separate supersteps, where the same reducer just accumulates in order.
     contributions: Annotated[Dict[str, str], operator.or_]
+    # Same shape/reducer as `contributions`, but each entry is the list of
+    # per-model-call usage_metadata dicts recorded while that agent ran (see
+    # `_record_usage`). Empty for `fake:` models, which don't report usage.
+    usage: Annotated[Dict[str, List[Dict[str, Any]]], operator.or_]
     output: str
 
 
@@ -64,14 +68,51 @@ def _resolve_model(model: Any) -> BaseChatModel:
     )
 
 
-def _run_agent(agent: Agent, input_text: str, *, extra_tools: Sequence[Callable[..., Any]] = ()) -> str:
+def _model_spec(agent: Agent) -> str:
+    """A best-effort spec string identifying `agent.model`, for usage attribution.
+
+    String specs (e.g. "openai:gpt-4o-mini" or "fake:hi") are used as-is, since
+    those are exactly the keys a `model_catalog` entry is looked up by. A
+    pre-built `BaseChatModel` instance has no such spec, so fall back to
+    whatever model name it reports (or its class name).
+    """
+    if isinstance(agent.model, str):
+        return agent.model
+    return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
+
+
+def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
+    """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
+    if usage_sink is None:
+        return
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        return
+    usage_sink.append(
+        {
+            "model": _model_spec(agent),
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        }
+    )
+
+
+def _run_agent(
+    agent: Agent,
+    input_text: str,
+    *,
+    extra_tools: Sequence[Callable[..., Any]] = (),
+    usage_sink: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
 
     Shared by `_agent_node` (SEQUENTIAL/PARALLEL team members) and
     `_make_delegate_tool` (a HIERARCHICAL manager's subordinates), so both
     paths get identical tool-calling behavior, including the iteration guard.
     `extra_tools` lets a manager additionally bind its subordinates'
-    `delegate_to_<name>` tools alongside the agent's own `tools`.
+    `delegate_to_<name>` tools alongside the agent's own `tools`. If
+    `usage_sink` is given, each model invocation's `usage_metadata` (when
+    reported) is appended to it for usage metering.
     """
     model = _resolve_model(agent.model)
     all_tools = [*agent.tools, *extra_tools]
@@ -87,6 +128,7 @@ def _run_agent(agent: Agent, input_text: str, *, extra_tools: Sequence[Callable[
         HumanMessage(content=input_text),
     ]
     response = model.invoke(messages)
+    _record_usage(agent, response, usage_sink)
 
     for _ in range(_MAX_TOOL_ITERATIONS):
         tool_calls = getattr(response, "tool_calls", None)
@@ -104,20 +146,23 @@ def _run_agent(agent: Agent, input_text: str, *, extra_tools: Sequence[Callable[
                     result = f"Error calling tool '{call['name']}': {exc}"
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         response = model.invoke(messages)
+        _record_usage(agent, response, usage_sink)
 
     return response.content if hasattr(response, "content") else str(response)
 
 
-def _make_delegate_tool(agent: Agent) -> Callable[[str], str]:
+def _make_delegate_tool(agent: Agent, *, usage_sink: Optional[List[Dict[str, Any]]] = None) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
     Calling the tool runs the subordinate's full tool-calling turn on `task`
     (via `_run_agent`) and returns its final text, so a manager's tool-calling
     loop can treat "delegate to a teammate" exactly like any other tool call.
+    `usage_sink`, if given, collects this subordinate's usage alongside the
+    manager's own, so a hierarchical turn's total usage is reported in one place.
     """
 
     def delegate(task: str) -> str:
-        return _run_agent(agent, task)
+        return _run_agent(agent, task, usage_sink=usage_sink)
 
     delegate.__name__ = f"delegate_to_{agent.name}"
     delegate.__doc__ = (
@@ -139,9 +184,10 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
         raise ConfigurationError(f"Agent '{agent.name}' has no model configured")
 
     def node(state: _TeamState) -> Dict[str, Any]:
-        text = _run_agent(agent, state["context"] or state["input"])
+        usage_sink: List[Dict[str, Any]] = []
+        text = _run_agent(agent, state["context"] or state["input"], usage_sink=usage_sink)
 
-        update: Dict[str, Any] = {"contributions": {agent.name: text}}
+        update: Dict[str, Any] = {"contributions": {agent.name: text}, "usage": {agent.name: usage_sink}}
         if propagate_context:
             update["context"] = text
             update["output"] = text
@@ -168,17 +214,17 @@ def _hierarchical_node(team: Team):
         if member.model is None:
             raise ConfigurationError(f"Agent '{member.name}' has no model configured")
 
-    delegate_tools = [_make_delegate_tool(agent) for agent in team.agents]
-
     def node(state: _TeamState) -> Dict[str, Any]:
-        text = _run_agent(manager, state["context"] or state["input"], extra_tools=delegate_tools)
-        return {"contributions": {manager.name: text}, "context": text, "output": text}
+        usage_sink: List[Dict[str, Any]] = []
+        delegate_tools = [_make_delegate_tool(agent, usage_sink=usage_sink) for agent in team.agents]
+        text = _run_agent(manager, state["context"] or state["input"], extra_tools=delegate_tools, usage_sink=usage_sink)
+        return {"contributions": {manager.name: text}, "usage": {manager.name: usage_sink}, "context": text, "output": text}
 
     return node
 
 
 def _initial_state(input: str) -> _TeamState:
-    return {"input": input, "context": "", "contributions": {}, "output": ""}
+    return {"input": input, "context": "", "contributions": {}, "usage": {}, "output": ""}
 
 
 def _passthrough_node(_state: _TeamState) -> Dict[str, Any]:
@@ -299,8 +345,15 @@ class LangGraphAdapter(EngineAdapter):
                 for partial in update.values():
                     if not isinstance(partial, dict):
                         continue
+                    usage_by_agent = partial.get("usage", {})
                     for agent_name, text in partial.get("contributions", {}).items():
-                        yield TraceEvent(type="agent_completed", workflow="", agent=agent_name, data=text)
+                        yield TraceEvent(
+                            type="agent_completed",
+                            workflow="",
+                            agent=agent_name,
+                            data=text,
+                            usage=usage_by_agent.get(agent_name, []),
+                        )
         except BestTeamError:
             raise
         except Exception as exc:

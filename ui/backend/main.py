@@ -23,6 +23,7 @@ from bestteam import Workflow, load_workflow
 from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
+from .auth_api import router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
 from .db.models import WorkflowRecord
@@ -38,6 +39,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(builder_router)
 app.include_router(crud_router)
 
@@ -122,7 +124,7 @@ async def create_run(req: RunRequest, db: Session = Depends(get_db)):
     run = registry.create(req.workflow, req.input)
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop)
+    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop, db.get_bind())
 
     return {"run_id": run.id}
 

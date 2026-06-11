@@ -209,9 +209,17 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   recording each round of customer feedback.
 - `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
   in-memory state (wired up in Phase 5).
-- `usage_records` — per-agent token usage per run, for usage metering
-  (Phase 3).
-- `users` — simple per-deployment login (Phase 3).
+- `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
+  `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
+  (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
+  (Phase 3). Seeded with `DEFAULT_MODEL_CATALOG` (`db/model_catalog.py`) on
+  first use of the production engine via `seed_default_catalog()`
+  (idempotent — no-op if the table is non-empty).
+- `usage_records` — per-agent token usage per run, plus a `cost_estimate`
+  computed from `model_catalog` pricing where the model's spec matches an
+  entry (Phase 3, `db/usage.py::record_usage`).
+- `users` — simple per-deployment login (Phase 3, `db/users.py` +
+  `ui/backend/auth.py`/`auth_api.py`).
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry
@@ -269,6 +277,44 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   deployed via the wizard or edited via `/api/config/workflows` is
   immediately runnable through `/api/runs`, alongside the YAML demo
   workflows.
+
+## Auth, model catalog, and usage metering (Phase 3)
+
+- **`ui/backend/auth.py`** — stdlib-only password hashing (PBKDF2-HMAC-SHA256,
+  260,000 iterations, `pbkdf2_sha256$<iterations>$<salt>$<hash>`) and
+  JWT-shaped bearer tokens (`create_access_token`/`decode_access_token`,
+  HS256-equivalent via `hmac`, `sub`+`exp` claims, `AuthError` on
+  malformed/tampered/expired tokens). No `passlib`/`PyJWT`/`bcrypt` dependency.
+  `SECRET_KEY` and `ACCESS_TOKEN_EXPIRE_MINUTES` come from
+  `BESTTEAM_SECRET_KEY` / `BESTTEAM_ACCESS_TOKEN_EXPIRE_MINUTES` env vars
+  (defaults: a dev-only secret, 1440 minutes).
+- **`ui/backend/auth_api.py`** (`/api/auth`) — `POST /register`,
+  `POST /login` (both return `{access_token, token_type}`), `GET /me`
+  (requires `Authorization: Bearer <token>`). Exports `get_current_user`, a
+  FastAPI dependency resolving the bearer token to a `User` row — **not yet
+  applied** to `/api/builder` or `/api/config` routes (a documented follow-up,
+  since wiring it in touches every existing test and the not-yet-built
+  frontend login flow).
+- **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
+  CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
+  Solution Architect's prompt. `builder.py::_with_model_catalog(db, text)`
+  appends this to the requirements text before `generate_specification()` (in
+  both `submit_specification` and `submit_solution_feedback`'s `model=`
+  paths), so the architect picks `AgentSpec.model` specs by role complexity
+  and pricing rather than guessing provider names.
+- **Usage metering** — `core/trace.py::TraceEvent.usage` is a
+  `List[Dict[str, Any]]` of `{"model", "input_tokens", "output_tokens"}`
+  entries, populated by `adapters/langgraph_adapter.py::_record_usage()`
+  whenever a model response has `usage_metadata` (real provider models;
+  `fake:` models leave it empty). For `HIERARCHICAL` teams, the manager and
+  all delegated subordinates share one `usage_sink` per turn, so the total
+  surfaces on the manager's single `agent_completed` event.
+  `ui/backend/runtime.py::run_in_background(run_id, workflow, input, loop,
+  engine=None)` — if `engine` is given (callers pass `db.get_bind()` so tests
+  using an overridden in-memory DB still work), opens its own `Session` and
+  calls `db/usage.py::record_usage()` for each `usage` entry on every
+  `agent_completed` event, computing `cost_estimate` from `model_catalog` when
+  the model spec matches a catalog entry (`None` otherwise).
 
 ## Known limitations / unimplemented extension points
 

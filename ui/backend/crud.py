@@ -25,6 +25,7 @@ from bestteam import AgentSpec, KnowledgeBaseSpec, TeamSpec
 from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
+from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
 
@@ -130,3 +131,61 @@ def delete_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Res
 
 
 router.include_router(_workflows)
+
+
+class ModelCatalogEntrySpec(BaseModel):
+    """Field shape for a `model_catalog` entry (Phase 3)."""
+
+    display_name: str
+    description: str = ""
+    tier: str = "balanced"
+    input_price_per_1k: float = 0.0
+    output_price_per_1k: float = 0.0
+
+
+def _model_catalog_entry_to_dict(entry) -> Dict[str, Any]:
+    return {
+        "spec": entry.spec,
+        "display_name": entry.display_name,
+        "description": entry.description,
+        "tier": entry.tier,
+        "input_price_per_1k": entry.input_price_per_1k,
+        "output_price_per_1k": entry.output_price_per_1k,
+    }
+
+
+_model_catalog = APIRouter(prefix="/model-catalog")
+
+
+@_model_catalog.get("")
+def list_model_catalog(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
+    return [_model_catalog_entry_to_dict(entry) for entry in list_entries(db)]
+
+
+@_model_catalog.get("/{spec:path}")
+def get_model_catalog_entry(spec: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    entry = get_entry(db, spec)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Unknown model catalog entry '{spec}'")
+    return _model_catalog_entry_to_dict(entry)
+
+
+@_model_catalog.put("/{spec:path}")
+def upsert_model_catalog_entry(spec: str, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    try:
+        item = ModelCatalogEntrySpec.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    entry = upsert_entry(db, spec, **item.model_dump())
+    return _model_catalog_entry_to_dict(entry)
+
+
+@_model_catalog.delete("/{spec:path}", status_code=204)
+def delete_model_catalog_entry(spec: str, db: Session = Depends(get_db)) -> Response:
+    if not delete_entry(db, spec):
+        raise HTTPException(status_code=404, detail=f"Unknown model catalog entry '{spec}'")
+    return Response(status_code=204)
+
+
+router.include_router(_model_catalog)

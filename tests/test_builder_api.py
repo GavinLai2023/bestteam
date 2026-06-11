@@ -8,7 +8,9 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 
 from ui.backend import main as backend_main
+from ui.backend.builder import _with_model_catalog
 from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db_session import get_db
 
 
@@ -194,3 +196,20 @@ def test_deployed_workflow_can_be_run_via_get_workflow(client):
     resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
 
     assert resp.status_code == 200
+
+
+def test_with_model_catalog_appends_catalog_text_when_present():
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    with Session() as db:
+        assert _with_model_catalog(db, "Requirements text") == "Requirements text"
+
+        upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", tier="fast")
+
+        with_catalog = _with_model_catalog(db, "Requirements text")
+
+    assert with_catalog.startswith("Requirements text\n\n")
+    assert "openai:gpt-4o-mini" in with_catalog
+    assert "Quick Assistant" in with_catalog
