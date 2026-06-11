@@ -73,6 +73,14 @@ cd ui\frontend && npm run dev   # http://localhost:5173, talks to backend on :80
   self-corrects on `ConfigurationError` (up to `max_attempts`) — the
   Specification-stage engine described in
   `docs/team_builder_methodology.md`.
+- **Requirements = Business Analyst's structured output** (`core/requirements.py`):
+  `Requirements` (summary/pain_points/goals/success_criteria/constraints/
+  clarifying_questions) is the Requirements-stage counterpart to
+  `Specification`. `generate_requirements(model, intent_text, as_is_text,
+  feedback=...)` calls `model.with_structured_output(Requirements)` —
+  no `_build_workflow` validation applies at this stage (it's a plain-language
+  summary, not yet a team design). `Requirements.to_prompt()` renders it as
+  text for the Solution Architect's `requirements` argument.
 
 ## Built-in tools (`src/bestteam/tools/`)
 
@@ -208,10 +216,59 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry
 runs), `init_db(engine)` (`Base.metadata.create_all`), and
-`session_factory(engine)`. Only `builder_sessions` has a CRUD module so far
-(`db/builder_sessions.py`: `create_session`/`get_session`/`update_session`/
-`append_feedback`); CRUD for the other tables and wiring `main.py` to read
-from the DB are Phase 2.
+`session_factory(engine)`. `db/builder_sessions.py` has the
+`builder_sessions` CRUD (`create_session`/`get_session`/`update_session`/
+`append_feedback`); CRUD for `agents`/`teams`/`knowledge_bases`/`workflows`
+lives in `ui/backend/crud.py` (Phase 2, see "Backend API" below).
+`ui/backend/db_session.py` wires up the per-deployment engine (default
+`ui/backend/data/bestteam.db`, override with `BESTTEAM_DB_PATH`) and a
+`get_db()` FastAPI dependency.
+
+## Backend API (`ui/backend/`)
+
+Beyond the existing monitoring endpoints (`/api/health`, `/api/workflows`,
+`/api/workflows/{name}/graph`, `/api/runs`, the `/api/runs/{id}/stream`
+WebSocket — all in `main.py`), Phase 2 adds two routers:
+
+- **`builder.py`** (`/api/builder/sessions`) — the wizard's session
+  state machine, a thin layer over `db/builder_sessions.py` plus
+  `core/requirements.py` / `core/specification.py`:
+  - `POST /` — start a session (Stage 1, Intent: `intent_text`/`as_is_text`).
+  - `GET /{id}` — fetch session state.
+  - `POST /{id}/requirements` — Stage 2: pass `requirements` (a confirmed/
+    edited `Requirements` dict) to store directly, or `model` (+ optional
+    `feedback`) to call `generate_requirements()`.
+  - `POST /{id}/specification` — Stage 3: pass `specification` (a
+    `Specification` dict, validated via `validate_specification()`) or
+    `model` (+ optional `feedback`) to call `generate_specification()`
+    against the session's requirements.
+  - `POST /{id}/solution` — Stage 4: like `/specification`, but requires
+    `feedback` and always records it via `append_feedback()`; with `model`,
+    the current Specification + feedback are fed back to the architect.
+  - `POST /{id}/test-runs` — Stage 5: validates `specification_json` and
+    runs it through the same `RunRegistry`/`Workflow.stream()`/
+    `ThreadPoolExecutor` machinery as `/api/runs` (factored into
+    `ui/backend/runtime.py` so both routers can use it without a circular
+    import).
+  - `POST /{id}/deploy` — Stage 6: upserts a `WorkflowRecord` (`status=
+    deployed`) from `specification.to_raw()` and marks the session
+    `deployed`.
+  - All generation endpoints (`model=...`) translate `BestTeamError` (e.g.
+    an invalid spec the architect couldn't self-correct) to `400`, and any
+    other exception (e.g. a real provider call without an API key) to `502`
+    — see `_call_model()`.
+- **`crud.py`** (`/api/config/...`) — the "advanced view": `GET`/`PUT`/
+  `DELETE` for `agents`/`teams`/`knowledge_bases` (validated as standalone
+  components via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec` — field shape
+  only, not cross-referenced into any workflow) and `workflows` (a complete
+  `Specification.to_raw()`-shaped dict, validated via `_build_workflow()`
+  exactly like the wizard's Specification stage).
+- **`_get_workflow()`** (`main.py`) now checks for a `WorkflowRecord` in the
+  DB first (cached on `updated_at`) and falls back to
+  `WORKFLOWS_DIR/<name>.yaml` (cached on mtime) — so a workflow
+  deployed via the wizard or edited via `/api/config/workflows` is
+  immediately runnable through `/api/runs`, alongside the YAML demo
+  workflows.
 
 ## Known limitations / unimplemented extension points
 

@@ -22,3 +22,7 @@ ui/frontend/dist/
 
 # Vector knowledge base embedding caches (generated, machine/run-specific)
 .bestteam_cache/
+
+# Per-deployment SQLite database + builder session workspaces (ui/backend)
+ui/backend/data/
+*.db

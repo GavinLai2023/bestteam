@@ -2,6 +2,7 @@ from .core.agent import Agent
 from .core.knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase
 from .core.loader import load_workflow
 from .core.memory import InMemoryStore, Memory
+from .core.requirements import Requirements, generate_requirements
 from .core.specification import (
     AgentSpec,
     KnowledgeBaseSpec,
@@ -34,6 +35,8 @@ __all__ = [
     "KnowledgeBase",
     "LocalFolderKnowledgeBase",
     "VectorKnowledgeBase",
+    "Requirements",
+    "generate_requirements",
     "Specification",
     "AgentSpec",
     "TeamSpec",

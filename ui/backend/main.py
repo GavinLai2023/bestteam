@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from bestteam import Workflow, load_workflow
+from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
-from .registry import RunRegistry
+from .builder import router as builder_router
+from .crud import router as crud_router
+from .db.models import WorkflowRecord
+from .db_session import SessionLocal, get_db
+from .runtime import _executor, registry, run_in_background
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
@@ -33,10 +38,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(builder_router)
+app.include_router(crud_router)
 
-registry = RunRegistry()
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
-_workflow_cache: Dict[str, Tuple[Workflow, float]] = {}
+_workflow_cache: Dict[str, Tuple[Workflow, Any]] = {}
 
 
 class RunRequest(BaseModel):
@@ -44,33 +49,50 @@ class RunRequest(BaseModel):
     input: str
 
 
-def _get_workflow(name: str) -> Workflow:
+def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     """Load and cache a workflow by name (Workflow already memoizes its own
     compiled graph, so repeat runs of the same workflow stay cheap).
 
-    The cache is keyed on the YAML file's mtime, so editing a workflow file
-    on disk is picked up on the next request."""
+    A `WorkflowRecord` in the database (e.g. one deployed via the Team
+    Builder Wizard, or edited through the `/api/config` CRUD API) takes
+    priority over a YAML file of the same name, and is cached on its
+    `updated_at`. Otherwise falls back to `WORKFLOWS_DIR/<name>.yaml`, cached
+    by the file's mtime, so editing a workflow file on disk is picked up on
+    the next request.
+
+    `db` is the request's `get_db`-provided session, if available, so this
+    sees the same data as the `/api/builder` and `/api/config` routers
+    (including in tests, which override `get_db`); if omitted, a one-off
+    session against the module-level engine is used."""
+    if db is not None:
+        record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
+    else:
+        with SessionLocal() as session:
+            record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
+
+    if record is not None:
+        cache_key: Any = ("db", record.updated_at)
+        cached = _workflow_cache.get(name)
+        if cached is None or cached[1] != cache_key:
+            try:
+                workflow = _build_workflow(record.config, source=WORKFLOWS_DIR / f"{name}.yaml", extra_tools={})
+            except (KeyError, TypeError, BestTeamError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _workflow_cache[name] = (workflow, cache_key)
+        return _workflow_cache[name][0]
+
     path = WORKFLOWS_DIR / f"{name}.yaml"
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
 
-    mtime = path.stat().st_mtime
+    cache_key = ("file", path.stat().st_mtime)
     cached = _workflow_cache.get(name)
-    if cached is None or cached[1] != mtime:
+    if cached is None or cached[1] != cache_key:
         try:
-            _workflow_cache[name] = (load_workflow(path), mtime)
+            _workflow_cache[name] = (load_workflow(path), cache_key)
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _workflow_cache[name][0]
-
-
-def _run_in_background(run_id: str, workflow: Workflow, input: str, loop: asyncio.AbstractEventLoop) -> None:
-    """Drains Workflow.stream() on a worker thread — LangGraph's underlying
-    .stream() is a blocking generator — and relays each TraceEvent back onto
-    the asyncio loop so WebSocket subscribers see it as it happens."""
-    for event in workflow.stream(input):
-        payload = dataclasses.asdict(event)
-        loop.call_soon_threadsafe(registry.publish, run_id, payload)
 
 
 @app.get("/api/health")
@@ -79,13 +101,15 @@ def health():
 
 
 @app.get("/api/workflows")
-def list_workflows():
-    return {"workflows": sorted(p.stem for p in WORKFLOWS_DIR.glob("*.yaml"))}
+def list_workflows(db: Session = Depends(get_db)):
+    db_names = {row.name for row in db.query(WorkflowRecord.name).all()}
+    yaml_names = {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")}
+    return {"workflows": sorted(db_names | yaml_names)}
 
 
 @app.get("/api/workflows/{name}/graph")
-def workflow_graph(name: str):
-    workflow = _get_workflow(name)
+def workflow_graph(name: str, db: Session = Depends(get_db)):
+    workflow = _get_workflow(name, db)
     try:
         return {"mermaid": workflow.visualize()}
     except BestTeamError as exc:
@@ -93,12 +117,12 @@ def workflow_graph(name: str):
 
 
 @app.post("/api/runs")
-async def create_run(req: RunRequest):
-    workflow = _get_workflow(req.workflow)
+async def create_run(req: RunRequest, db: Session = Depends(get_db)):
+    workflow = _get_workflow(req.workflow, db)
     run = registry.create(req.workflow, req.input)
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(_executor, _run_in_background, run.id, workflow, req.input, loop)
+    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop)
 
     return {"run_id": run.id}
 
