@@ -163,8 +163,13 @@ instance is used as-is, `"fake:<dim>"` (dim optional, default 32) gives a $0
 deterministic embedding for dry runs/tests, and other provider strings (e.g.
 `"openai:..."`) are resolved via `langchain.embeddings.init_embeddings`
 (requires `pip install langchain`). Requires `pip install 'bestteam[tools-rag-vector]'`
-(numpy). See `ui/backend/workflows/vector_knowledge_base_demo.yaml` for a
-runnable example.
+(numpy). See `ui/backend/workflows/vector_knowledge_base_demo.yaml` for a $0
+dry-run example using `"fake:"` specs, or
+`ui/backend/workflows/vector_knowledge_base_demo_live.yaml` for the same
+workflow wired to real OpenAI embeddings + chat model
+(`text-embedding-3-small` + `gpt-4o-mini`), which demonstrates true semantic
+retrieval (e.g. matching "money back" queries to a "refund" policy doc with
+no shared keywords). The live variant requires `OPENAI_API_KEY`.
 
 ## Known limitations / unimplemented extension points
 
@@ -194,5 +199,7 @@ implemented** — don't assume they exist:
 ## Testing notes
 
 - All current tests use `FakeListChatModel` / `fake:` specs — zero API cost,
-  deterministic. A live-model example (`examples/code_review_demo_live.py`,
-  `ChatOpenAI`-based) exists but requires real API quota to run.
+  deterministic. Live-model examples (`examples/code_review_demo_live.py` and
+  `ui/backend/workflows/vector_knowledge_base_demo_live.yaml`, both
+  `ChatOpenAI`/OpenAI-embeddings-based) exist but require real API quota to
+  run.
