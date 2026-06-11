@@ -1,0 +1,37 @@
+# Same as vector_knowledge_base_demo.yaml, but wired to real OpenAI models
+# instead of "fake:" specs - mirrors the examples/code_review_demo_live.py
+# convention (same workflow, real provider).
+#
+# "support_agent" calls the "company_docs" tool (cosine-similarity search
+# over OpenAI embeddings of kb_docs/) to ground its answers in the company's
+# policy documents using true semantic (not just keyword) matching.
+#
+# cache_path persists the per-chunk embeddings to disk so repeated runs
+# don't re-call the embeddings API for unchanged documents.
+#
+# Requires OPENAI_API_KEY in the environment.
+
+name: vector_knowledge_base_demo_live
+
+knowledge_bases:
+  - name: company_docs
+    type: vector
+    path: ./kb_docs
+    embedding_model: "openai:text-embedding-3-small"
+    cache_path: ./.bestteam_cache/vector_demo_live.json
+
+agents:
+  - name: support_agent
+    role: Customer Support Specialist
+    goal: Answer customer questions using the company's policy documents
+    backstory: Always checks the knowledge base before answering
+    model: "openai:gpt-4o-mini"
+    tools: [company_docs]
+
+teams:
+  - name: support_team
+    agents: [support_agent]
+    mode: sequential
+
+workflow:
+  steps: [support_team]
