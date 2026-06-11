@@ -183,6 +183,36 @@ workflow wired to real OpenAI embeddings + chat model
 retrieval (e.g. matching "money back" queries to a "refund" policy doc with
 no shared keywords). The live variant requires `OPENAI_API_KEY`.
 
+## Persistence layer (`ui/backend/db/`)
+
+Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
+'bestteam[ui]'`). `db/models.py` defines the full Phase 1 schema from
+`docs/team_builder_methodology.md`:
+
+- `agents` / `teams` / `knowledge_bases` / `workflows` — each row's `config`
+  is a JSON `raw` dict (the technical fields from `AgentSpec`/`TeamSpec`/
+  `KnowledgeBaseSpec`/`Specification.to_raw()`, see `core/specification.py`);
+  `workflows.status` tracks `draft` / `ready_for_testing` / `deployed`.
+- `builder_sessions` — the wizard's session state machine. `status` is one
+  of `intent | requirements | spec | solution | testing | deployed`
+  (`db/builder_sessions.py::STATUSES`); `requirements_json`/
+  `specification_json` hold the Business Analyst / Solution Architect
+  agents' structured outputs; `feedback_history` is an append-only JSON list
+  recording each round of customer feedback.
+- `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
+  in-memory state (wired up in Phase 5).
+- `usage_records` — per-agent token usage per run, for usage metering
+  (Phase 3).
+- `users` — simple per-deployment login (Phase 3).
+
+`db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
+`StaticPool` so all connections share one database — needed for tests/dry
+runs), `init_db(engine)` (`Base.metadata.create_all`), and
+`session_factory(engine)`. Only `builder_sessions` has a CRUD module so far
+(`db/builder_sessions.py`: `create_session`/`get_session`/`update_session`/
+`append_feedback`); CRUD for the other tables and wiring `main.py` to read
+from the DB are Phase 2.
+
 ## Known limitations / unimplemented extension points
 
 These are intentionally abstracted behind interfaces but **not yet
@@ -200,8 +230,9 @@ implemented** — don't assume they exist:
   `core/memory.py`'s `Memory` ABC (`remember`/`recall`) is similarly unused
   beyond the in-process `InMemoryStore`.
 - **Persistent run state**: `ui/backend/registry.py`'s `RunRegistry` is
-  in-process memory only — runs vanish on restart. Designed to be swapped
-  for a Redis/Postgres-backed implementation behind the same interface.
+  still in-process memory only — runs vanish on restart. The SQLite schema
+  to replace it (`runs`/`trace_events`, see "Persistence layer" below)
+  exists but isn't wired into `RunRegistry` or `main.py` yet (Phase 5).
 - **General-purpose cache**: only local caches exist (`_workflow_cache` in
   `ui/backend/main.py`, `Workflow._compiled`) — no shared/cross-request cache
   layer.

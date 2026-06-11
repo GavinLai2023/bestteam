@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev          = ["pytest>=8.0"]
-ui           = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
+ui           = ["fastapi>=0.110", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0"]
 tools-search = ["tavily-python>=0.3"]
 tools-files  = ["pypdf>=4.0", "openpyxl>=3.1", "python-docx>=1.0"]
 tools-rag    = ["rank-bm25>=0.2.2"]
