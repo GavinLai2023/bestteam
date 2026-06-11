@@ -8,9 +8,15 @@ import yaml
 from ..exceptions import ConfigurationError
 from ..tools import REGISTRY as _TOOL_REGISTRY
 from .agent import Agent
-from .knowledge_base import LocalFolderKnowledgeBase, make_knowledge_base_tool
+from .knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase, make_knowledge_base_tool
 from .team import CollaborationMode, Team
+from .vector_knowledge_base import VectorKnowledgeBase
 from .workflow import Workflow
+
+_KNOWLEDGE_BASE_TYPES = {
+    "local_folder": LocalFolderKnowledgeBase,
+    "vector": VectorKnowledgeBase,
+}
 
 
 def load_workflow(path, *, toolkits=None) -> Workflow:
@@ -77,10 +83,11 @@ def _build_workflow(raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str,
     return Workflow(name=raw.get("name", source.stem), steps=steps)
 
 
-def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> LocalFolderKnowledgeBase:
+def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> KnowledgeBase:
     spec = dict(spec)
     name = spec.pop("name")
     raw_path = spec.pop("path")
+    kb_type = spec.pop("type", "local_folder")
 
     path = Path(raw_path)
     if not path.is_absolute():
@@ -91,7 +98,21 @@ def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> LocalFolderKnow
             f"Knowledge base '{name}' path does not exist or is not a directory: {path}"
         )
 
-    return LocalFolderKnowledgeBase(name=name, path=path, **spec)
+    try:
+        kb_cls = _KNOWLEDGE_BASE_TYPES[kb_type]
+    except KeyError as exc:
+        valid = ", ".join(sorted(_KNOWLEDGE_BASE_TYPES))
+        raise ConfigurationError(
+            f"Knowledge base '{name}' has unknown type '{kb_type}'. Valid types: {valid}"
+        ) from exc
+
+    if "cache_path" in spec:
+        cache_path = Path(spec["cache_path"])
+        if not cache_path.is_absolute():
+            cache_path = (source.parent / cache_path).resolve()
+        spec["cache_path"] = cache_path
+
+    return kb_cls(name=name, path=path, **spec)
 
 
 def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any]) -> Agent:

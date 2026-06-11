@@ -5,6 +5,7 @@ from .core.memory import InMemoryStore, Memory
 from .core.team import CollaborationMode, Team
 from .core.tools import ToolKit
 from .core.trace import TraceEvent
+from .core.vector_knowledge_base import VectorKnowledgeBase
 from .core.workflow import Workflow, WorkflowResult
 from .exceptions import BestTeamError, ConfigurationError, EngineError
 from .tools import calculator, http_get, parse_file, web_search
@@ -23,6 +24,7 @@ __all__ = [
     "InMemoryStore",
     "KnowledgeBase",
     "LocalFolderKnowledgeBase",
+    "VectorKnowledgeBase",
     "load_workflow",
     "BestTeamError",
     "ConfigurationError",

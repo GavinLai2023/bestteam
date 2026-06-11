@@ -19,3 +19,6 @@ __pycache__/
 # Frontend (also has its own .gitignore, but cover the root view too)
 ui/frontend/node_modules/
 ui/frontend/dist/
+
+# Vector knowledge base embedding caches (generated, machine/run-specific)
+.bestteam_cache/

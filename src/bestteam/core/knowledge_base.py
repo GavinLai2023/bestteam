@@ -74,21 +74,13 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
 
-        if chunk_size <= 0:
-            raise ConfigurationError(
-                f"Knowledge base '{name}': chunk_size must be positive, got {chunk_size}"
-            )
-        if chunk_overlap < 0 or chunk_overlap >= chunk_size:
-            raise ConfigurationError(
-                f"Knowledge base '{name}': chunk_overlap ({chunk_overlap}) must be "
-                f"non-negative and less than chunk_size ({chunk_size})"
-            )
+        _validate_chunk_params(name, chunk_size, chunk_overlap)
 
         self.name = name
         self.path = Path(path)
         self.default_top_k = top_k
 
-        self._chunks = self._load_chunks(chunk_size, chunk_overlap)
+        self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
             raise ConfigurationError(
                 f"Knowledge base '{name}' has no readable documents in {self.path}"
@@ -97,23 +89,6 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self._chunk_tokens = [self._tokenize(chunk.text) for chunk in self._chunks]
         self._chunk_terms = [self._significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
-
-    def _load_chunks(self, chunk_size: int, chunk_overlap: int) -> List[_Chunk]:
-        chunks: List[_Chunk] = []
-        for file_path in sorted(self.path.rglob("*")):
-            if not file_path.is_file() or file_path.suffix.lower() not in _SUPPORTED_SUFFIXES:
-                continue
-            try:
-                text = parse_file(str(file_path))
-            except ConfigurationError:
-                continue
-            except Exception as exc:
-                warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
-                continue
-            source = file_path.relative_to(self.path).as_posix()
-            for piece in _chunk_text(text, chunk_size, chunk_overlap):
-                chunks.append(_Chunk(source=source, text=piece))
-        return chunks
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
@@ -162,6 +137,36 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
     while start < len(text):
         chunks.append(text[start : start + chunk_size])
         start += step
+    return chunks
+
+
+def _validate_chunk_params(name: str, chunk_size: int, chunk_overlap: int) -> None:
+    if chunk_size <= 0:
+        raise ConfigurationError(
+            f"Knowledge base '{name}': chunk_size must be positive, got {chunk_size}"
+        )
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise ConfigurationError(
+            f"Knowledge base '{name}': chunk_overlap ({chunk_overlap}) must be "
+            f"non-negative and less than chunk_size ({chunk_size})"
+        )
+
+
+def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> List[_Chunk]:
+    chunks: List[_Chunk] = []
+    for file_path in sorted(path.rglob("*")):
+        if not file_path.is_file() or file_path.suffix.lower() not in _SUPPORTED_SUFFIXES:
+            continue
+        try:
+            text = parse_file(str(file_path))
+        except ConfigurationError:
+            continue
+        except Exception as exc:
+            warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
+            continue
+        source = file_path.relative_to(path).as_posix()
+        for piece in _chunk_text(text, chunk_size, chunk_overlap):
+            chunks.append(_Chunk(source=source, text=piece))
     return chunks
 
 
