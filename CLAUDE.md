@@ -193,8 +193,12 @@ implemented** — don't assume they exist:
 - **General-purpose cache**: only local caches exist (`_workflow_cache` in
   `ui/backend/main.py`, `Workflow._compiled`) — no shared/cross-request cache
   layer.
-- **CrewAI adapter, hierarchical/debate collaboration modes, deployment
-  templates**: planned on the roadmap, not started.
+- **CrewAI adapter, DEBATE collaboration mode, deployment templates**:
+  planned on the roadmap, not started. (HIERARCHICAL is implemented: the
+  `manager` agent gets a `delegate_to_<name>(task)` tool per subordinate,
+  bound alongside its own `tools` and run through the same tool-calling loop
+  as SEQUENTIAL/PARALLEL agents — see `_hierarchical_node` in
+  `adapters/langgraph_adapter.py`.)
 
 ## Testing notes
 

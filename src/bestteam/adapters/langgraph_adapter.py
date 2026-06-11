@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Dict, Iterator, Tuple, TypedDict
+from typing import Annotated, Any, Callable, Dict, Iterator, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -64,6 +64,69 @@ def _resolve_model(model: Any) -> BaseChatModel:
     )
 
 
+def _run_agent(agent: Agent, input_text: str, *, extra_tools: Sequence[Callable[..., Any]] = ()) -> str:
+    """Run one agent's full tool-calling turn on `input_text`, returning its final text.
+
+    Shared by `_agent_node` (SEQUENTIAL/PARALLEL team members) and
+    `_make_delegate_tool` (a HIERARCHICAL manager's subordinates), so both
+    paths get identical tool-calling behavior, including the iteration guard.
+    `extra_tools` lets a manager additionally bind its subordinates'
+    `delegate_to_<name>` tools alongside the agent's own `tools`.
+    """
+    model = _resolve_model(agent.model)
+    all_tools = [*agent.tools, *extra_tools]
+    tools_by_name = {fn.__name__: fn for fn in all_tools}
+    if all_tools:
+        try:
+            model = model.bind_tools(all_tools)
+        except NotImplementedError:
+            pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
+
+    messages = [
+        SystemMessage(content=agent.system_prompt()),
+        HumanMessage(content=input_text),
+    ]
+    response = model.invoke(messages)
+
+    for _ in range(_MAX_TOOL_ITERATIONS):
+        tool_calls = getattr(response, "tool_calls", None)
+        if not tool_calls:
+            break
+        messages.append(response)
+        for call in tool_calls:
+            tool_fn = tools_by_name.get(call["name"])
+            if tool_fn is None:
+                result = f"Error: unknown tool '{call['name']}'"
+            else:
+                try:
+                    result = tool_fn(**call["args"])
+                except Exception as exc:
+                    result = f"Error calling tool '{call['name']}': {exc}"
+            messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+        response = model.invoke(messages)
+
+    return response.content if hasattr(response, "content") else str(response)
+
+
+def _make_delegate_tool(agent: Agent) -> Callable[[str], str]:
+    """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
+
+    Calling the tool runs the subordinate's full tool-calling turn on `task`
+    (via `_run_agent`) and returns its final text, so a manager's tool-calling
+    loop can treat "delegate to a teammate" exactly like any other tool call.
+    """
+
+    def delegate(task: str) -> str:
+        return _run_agent(agent, task)
+
+    delegate.__name__ = f"delegate_to_{agent.name}"
+    delegate.__doc__ = (
+        f"Delegate a task to {agent.name}, a {agent.role} whose goal is: "
+        f"{agent.goal}. Returns their response as text."
+    )
+    return delegate
+
+
 def _agent_node(agent: Agent, *, propagate_context: bool):
     """Build a LangGraph node function that runs a single agent.
 
@@ -76,44 +139,40 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
         raise ConfigurationError(f"Agent '{agent.name}' has no model configured")
 
     def node(state: _TeamState) -> Dict[str, Any]:
-        model = _resolve_model(agent.model)
-        tools_by_name = {fn.__name__: fn for fn in agent.tools}
-        if agent.tools:
-            try:
-                model = model.bind_tools(list(agent.tools))
-            except NotImplementedError:
-                pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
-
-        messages = [
-            SystemMessage(content=agent.system_prompt()),
-            HumanMessage(content=state["context"] or state["input"]),
-        ]
-        response = model.invoke(messages)
-
-        for _ in range(_MAX_TOOL_ITERATIONS):
-            tool_calls = getattr(response, "tool_calls", None)
-            if not tool_calls:
-                break
-            messages.append(response)
-            for call in tool_calls:
-                tool_fn = tools_by_name.get(call["name"])
-                if tool_fn is None:
-                    result = f"Error: unknown tool '{call['name']}'"
-                else:
-                    try:
-                        result = tool_fn(**call["args"])
-                    except Exception as exc:
-                        result = f"Error calling tool '{call['name']}': {exc}"
-                messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
-            response = model.invoke(messages)
-
-        text = response.content if hasattr(response, "content") else str(response)
+        text = _run_agent(agent, state["context"] or state["input"])
 
         update: Dict[str, Any] = {"contributions": {agent.name: text}}
         if propagate_context:
             update["context"] = text
             update["output"] = text
         return update
+
+    return node
+
+
+def _hierarchical_node(team: Team):
+    """Build a LangGraph node function for a HIERARCHICAL team's manager.
+
+    The manager is run with one extra `delegate_to_<name>` tool per
+    subordinate agent (see `_make_delegate_tool`), bound alongside its own
+    `tools`. The existing tool-calling loop in `_run_agent` then lets the
+    manager delegate to teammates and incorporate their answers, exactly like
+    it would call a knowledge-base or web-search tool.
+    """
+    manager = team.manager
+    if manager is None:
+        raise ConfigurationError(
+            f"Team '{team.name}' uses hierarchical mode and requires a 'manager' agent"
+        )
+    for member in (manager, *team.agents):
+        if member.model is None:
+            raise ConfigurationError(f"Agent '{member.name}' has no model configured")
+
+    delegate_tools = [_make_delegate_tool(agent) for agent in team.agents]
+
+    def node(state: _TeamState) -> Dict[str, Any]:
+        text = _run_agent(manager, state["context"] or state["input"], extra_tools=delegate_tools)
+        return {"contributions": {manager.name: text}, "context": text, "output": text}
 
     return node
 
@@ -137,9 +196,9 @@ def _aggregate_node(state: _TeamState) -> Dict[str, Any]:
 class LangGraphAdapter(EngineAdapter):
     """Default engine adapter, built on top of LangGraph's StateGraph.
 
-    Supports SEQUENTIAL and PARALLEL collaboration modes today. HIERARCHICAL
-    and DEBATE are on the roadmap — they raise NotImplementedError with a
-    clear message rather than silently behaving like SEQUENTIAL.
+    Supports SEQUENTIAL, PARALLEL, and HIERARCHICAL collaboration modes.
+    DEBATE is on the roadmap — it raises NotImplementedError with a clear
+    message rather than silently behaving like SEQUENTIAL.
     """
 
     def compile(self, workflow: Workflow) -> Any:
@@ -159,10 +218,12 @@ class LangGraphAdapter(EngineAdapter):
             return self._wire_sequential(graph, team)
         if team.mode == CollaborationMode.PARALLEL:
             return self._wire_parallel(graph, team)
+        if team.mode == CollaborationMode.HIERARCHICAL:
+            return self._wire_hierarchical(graph, team)
         raise NotImplementedError(
             f"Collaboration mode '{team.mode.value}' is not implemented yet "
-            f"(team '{team.name}'). SEQUENTIAL and PARALLEL are available; "
-            "HIERARCHICAL and DEBATE are on the roadmap."
+            f"(team '{team.name}'). SEQUENTIAL, PARALLEL, and HIERARCHICAL are "
+            "available; DEBATE is on the roadmap."
         )
 
     def _wire_sequential(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
@@ -191,6 +252,16 @@ class LangGraphAdapter(EngineAdapter):
             graph.add_edge(node_name, exit_name)
 
         return entry_name, exit_name
+
+    def _wire_hierarchical(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+        manager = team.manager
+        if manager is None:
+            raise ConfigurationError(
+                f"Team '{team.name}' uses hierarchical mode and requires a 'manager' agent"
+            )
+        node_name = f"{team.name}.{manager.name}"
+        graph.add_node(node_name, _hierarchical_node(team))
+        return node_name, node_name
 
     def execute(self, compiled: Any, input: str) -> WorkflowResult:
         try:
