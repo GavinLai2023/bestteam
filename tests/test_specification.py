@@ -1,0 +1,152 @@
+from typing import Any, List
+
+import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import RunnableLambda
+from pydantic import Field
+
+from bestteam import (
+    AgentSpec,
+    KnowledgeBaseSpec,
+    Specification,
+    TeamSpec,
+    WorkflowSpec,
+    generate_specification,
+    validate_specification,
+)
+from bestteam.exceptions import ConfigurationError
+
+
+class _FakeArchitectChatModel(BaseChatModel):
+    """Cycles through pre-scripted Specification objects via `with_structured_output`,
+    independent of `bind_tools`/tool-calling -- lets tests script a Solution
+    Architect's structured outputs without a real provider."""
+
+    responses: List[Any] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise NotImplementedError
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-architect"
+
+    def with_structured_output(self, schema, **kwargs):
+        responses = self.responses
+        state = {"index": 0}
+
+        def _invoke(_input):
+            i = min(state["index"], len(responses) - 1)
+            state["index"] += 1
+            return responses[i]
+
+        return RunnableLambda(_invoke)
+
+
+def _basic_spec(*, mode: str = "sequential", agent_tools=None, manager: str | None = None) -> Specification:
+    return Specification(
+        name="support_workflow",
+        agents=[
+            AgentSpec(
+                name="support_agent",
+                role="Customer Support Specialist",
+                goal="Answer customer questions",
+                model="fake:hello",
+                tools=agent_tools or [],
+                display_name="Support Specialist",
+                friendly_description="Answers customer questions.",
+            )
+        ],
+        teams=[
+            TeamSpec(
+                name="support_team",
+                agents=["support_agent"],
+                mode=mode,
+                manager=manager,
+                display_name="Support Team",
+                friendly_description="The support specialist handles every request.",
+            )
+        ],
+        workflow=WorkflowSpec(steps=["support_team"]),
+    )
+
+
+def test_to_raw_strips_friendly_fields_and_matches_loader_shape():
+    spec = _basic_spec()
+    raw = spec.to_raw()
+
+    assert raw == {
+        "name": "support_workflow",
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+
+
+def test_validate_specification_accepts_a_valid_spec_and_runs(tmp_path):
+    spec = _basic_spec()
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml")
+
+    result = workflow.run("hi")
+    assert result.output == "hello"
+
+
+def test_validate_specification_rejects_unknown_tool(tmp_path):
+    spec = _basic_spec(agent_tools=["does_not_exist"])
+
+    with pytest.raises(ConfigurationError, match="Unknown tool"):
+        validate_specification(spec, source=tmp_path / "workflow.yaml")
+
+
+def test_validate_specification_rejects_hierarchical_team_without_manager(tmp_path):
+    spec = _basic_spec(mode="hierarchical")
+
+    with pytest.raises(ConfigurationError, match="manager"):
+        validate_specification(spec, source=tmp_path / "workflow.yaml")
+
+
+def test_knowledge_base_spec_omits_vector_only_fields_for_local_folder():
+    kb = KnowledgeBaseSpec(name="docs", path="./docs", embedding_model="fake:8", score_threshold=0.5)
+
+    raw = kb.to_raw()
+
+    assert raw["type"] == "local_folder"
+    assert "embedding_model" not in raw
+    assert "score_threshold" not in raw
+
+
+def test_generate_specification_returns_first_valid_spec(tmp_path):
+    valid = _basic_spec()
+    model = _FakeArchitectChatModel(responses=[valid])
+
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+
+    assert spec == valid
+
+
+def test_generate_specification_retries_after_validation_error(tmp_path):
+    invalid = _basic_spec(agent_tools=["does_not_exist"])
+    valid = _basic_spec()
+    model = _FakeArchitectChatModel(responses=[invalid, valid])
+
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+
+    assert spec == valid
+
+
+def test_generate_specification_raises_after_max_attempts(tmp_path):
+    invalid = _basic_spec(agent_tools=["does_not_exist"])
+    model = _FakeArchitectChatModel(responses=[invalid])
+
+    with pytest.raises(ConfigurationError, match="could not produce a valid specification"):
+        generate_specification(
+            model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml", max_attempts=2
+        )

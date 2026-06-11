@@ -61,6 +61,18 @@ cd ui\frontend && npm run dev   # http://localhost:5173, talks to backend on :80
   `compiled.stream()` are blocking generators. The FastAPI backend runs them
   in a `ThreadPoolExecutor` and hands events back to the event loop via
   `loop.call_soon_threadsafe(registry.publish, ...)`.
+- **Specification = loader schema + wizard-only friendly fields**
+  (`core/specification.py`): `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/
+  `WorkflowSpec`/`Specification` are pydantic models that mirror the YAML
+  loader's raw dict (see `core/loader.py::_build_workflow`), plus
+  presentation-only fields (`display_name`, `friendly_description`) that
+  `to_raw()` strips before validation. `validate_specification()` compiles
+  the stripped dict via `_build_workflow()` and raises `ConfigurationError`
+  on an invalid design. `generate_specification()` drives a "Solution
+  Architect" model via `with_structured_output(Specification)` and
+  self-corrects on `ConfigurationError` (up to `max_attempts`) — the
+  Specification-stage engine described in
+  `docs/team_builder_methodology.md`.
 
 ## Built-in tools (`src/bestteam/tools/`)
 
