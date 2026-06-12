@@ -16,9 +16,11 @@ not orchestration code.
 2. **CLI** (`src/bestteam/cli/`) — Typer + Rich. Commands: `init` (scaffold a
    project), `run` (execute a YAML workflow), `graph` (render Mermaid).
    Thin wrappers over `load_workflow()` + `Workflow.run()/.visualize()`.
-3. **UI** (`ui/`) — runtime monitoring dashboard. FastAPI + WebSocket backend
+3. **UI** (`ui/`) — runtime monitoring dashboard *and* a guided "Team
+   Builder" wizard for non-technical customers. FastAPI + WebSocket backend
    (`ui/backend/`) reuses the SDK directly (no duplicated logic); React +
-   Vite frontend (`ui/frontend/`) streams live agent trace events.
+   Vite frontend (`ui/frontend/`) streams live agent trace events and drives
+   the six-stage wizard (see "Frontend — wizard UI" below).
 
 Workflows are declarative YAML (parsed by `core/loader.py`) — see
 `ui/backend/workflows/*.yaml` for examples of sequential and parallel
@@ -315,6 +317,52 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   calls `db/usage.py::record_usage()` for each `usage` entry on every
   `agent_completed` event, computing `cost_estimate` from `model_catalog` when
   the model spec matches a catalog entry (`None` otherwise).
+
+## Frontend — wizard UI (Phase 4, `ui/frontend/src/`)
+
+`react-router-dom` (`main.jsx` wraps `<App/>` in `<BrowserRouter>`) drives
+three areas, all under a shared `<Layout/>` nav shell (`components/Layout.jsx`):
+
+- **`/`** — `pages/MonitorPage.jsx` (the original runtime-monitoring
+  dashboard, unchanged apart from reading an optional `?workflow=` query
+  param via `useSearchParams` to pre-select a workflow).
+- **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
+  `/api/config/{agents|teams|knowledge_bases|workflows|model-catalog}` — the
+  "advanced view" fallback for direct edits.
+- **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
+  — the six-stage Team Builder wizard, `components/WizardLayout.jsx` as the
+  shared chrome:
+  - `lib/api.js` — shared `fetch` wrapper (`API_BASE`/`WS_BASE` point at
+    `http://127.0.0.1:8000`) exposing every backend endpoint as `api.*`
+    methods.
+  - `lib/useBuilderSession.js` / `lib/useModelCatalog.js` — fetch-on-mount
+    hooks; `WizardLayout` calls `useBuilderSession(sessionId)` once and hands
+    `{session, setSession, loading, refresh, sessionId}` to the active stage
+    page via `useOutletContext()`.
+  - `components/WizardProgress.jsx` — the 6-step progress bar. A step is
+    "unlocked" based on **data presence** (`session.requirements_json` /
+    `session.specification_json`), not the session's `status` string, so
+    revisiting earlier stages after a `solution`/`testing`/`deployed` status
+    doesn't relock later steps.
+  - `pages/wizard/*.jsx` — one page per stage (`IntentPage` has no
+    `sessionId` yet and creates the session via `api.createSession()`;
+    `RequirementsPage`/`TeamPage`/`RefinePage` each support both a "generate
+    with `model` (+ optional `feedback`)" path and a "confirm/edit the
+    drafted JSON directly" path via `BulletEditor`/raw field edits;
+    `TestPage` runs `api.createTestRun()` then streams the same
+    `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `DeployPage` calls
+    `api.deploySession()` and links to `/?workflow=<name>` for "Talk to your
+    team").
+  - `components/TeamFlow.jsx` + `EmployeeCard.jsx` — the customer-facing
+    "meet your team" diagram: renders `Specification.teams`/`agents` as
+    grouped "virtual employee" cards (avatar-initial + `display_name` +
+    `friendly_description`, falling back to `name`/`role`/`goal`), laid out
+    per `team.mode` (sequential = arrows between cards, parallel =
+    side-by-side, hierarchical = manager card above member cards). No
+    Mermaid — pure CSS/HTML, since the audience is non-technical.
+  - All wizard pages/components share styles from
+    `components/WizardLayout.css` (cards, fields, buttons, banners, bullet
+    editor, team-flow/employee-card, activity feed).
 
 ## Known limitations / unimplemented extension points
 
