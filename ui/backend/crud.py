@@ -25,6 +25,7 @@ from bestteam import AgentSpec, KnowledgeBaseSpec, TeamSpec
 from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
+from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
@@ -33,7 +34,7 @@ from .db_session import get_db
 # the default workflow name -- same directory as the YAML demo workflows.
 _WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
-router = APIRouter(prefix="/api/config", tags=["config"])
+router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
 
 
 def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel]) -> APIRouter:

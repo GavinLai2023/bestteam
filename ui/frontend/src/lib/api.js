@@ -1,11 +1,23 @@
-export const API_BASE = 'http://127.0.0.1:8000'
-export const WS_BASE = 'ws://127.0.0.1:8000'
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
+export const WS_BASE = import.meta.env.VITE_WS_BASE ?? 'ws://127.0.0.1:8000'
+
+const TOKEN_KEY = 'bestteam_token'
 
 async function request(path, options = {}) {
+  const token = localStorage.getItem(TOKEN_KEY)
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers,
     ...options,
   })
+
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY)
+    window.location.assign('/login')
+    throw new Error('Not authenticated')
+  }
 
   if (!res.ok) {
     let detail = res.statusText
@@ -23,6 +35,10 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  // Auth
+  login: (username, password) =>
+    request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+
   // Monitoring
   listWorkflows: () => request('/api/workflows'),
   workflowGraph: (name) => request(`/api/workflows/${encodeURIComponent(name)}/graph`),

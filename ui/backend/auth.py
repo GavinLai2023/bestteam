@@ -19,7 +19,8 @@ import secrets
 import time
 from typing import Optional
 
-SECRET_KEY = os.environ.get("BESTTEAM_SECRET_KEY", "bestteam-dev-secret-change-me")
+_DEFAULT_SECRET_KEY = "bestteam-dev-secret-change-me"
+SECRET_KEY = os.environ.get("BESTTEAM_SECRET_KEY", _DEFAULT_SECRET_KEY)
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("BESTTEAM_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 _PBKDF2_ALGORITHM = "sha256"

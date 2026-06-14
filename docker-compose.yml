@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - bestteam_data:/app/ui/backend/data
+
+  frontend:
+    build:
+      context: ./ui/frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE}
+        VITE_WS_BASE: ${VITE_WS_BASE}
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  bestteam_data:

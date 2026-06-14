@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -23,19 +24,26 @@ from bestteam import Workflow, load_workflow
 from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
-from .auth_api import router as auth_router
+from . import auth
+from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
-from .db.models import WorkflowRecord
+from .db.models import User, WorkflowRecord
 from .db_session import SessionLocal, get_db
 from .runtime import _executor, registry, run_in_background
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
+if os.environ.get("BESTTEAM_ENV") == "production" and auth.SECRET_KEY == auth._DEFAULT_SECRET_KEY:
+    raise RuntimeError("BESTTEAM_SECRET_KEY must be set when BESTTEAM_ENV=production")
+
+_default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
+
 app = FastAPI(title="bestteam monitoring dashboard")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -103,14 +111,14 @@ def health():
 
 
 @app.get("/api/workflows")
-def list_workflows(db: Session = Depends(get_db)):
+def list_workflows(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     db_names = {row.name for row in db.query(WorkflowRecord.name).all()}
     yaml_names = {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")}
     return {"workflows": sorted(db_names | yaml_names)}
 
 
 @app.get("/api/workflows/{name}/graph")
-def workflow_graph(name: str, db: Session = Depends(get_db)):
+def workflow_graph(name: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     workflow = _get_workflow(name, db)
     try:
         return {"mermaid": workflow.visualize()}
@@ -119,7 +127,7 @@ def workflow_graph(name: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/runs")
-async def create_run(req: RunRequest, db: Session = Depends(get_db)):
+async def create_run(req: RunRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     workflow = _get_workflow(req.workflow, db)
     run = registry.create(req.workflow, req.input)
 
@@ -130,7 +138,7 @@ async def create_run(req: RunRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/api/runs/{run_id}")
-def get_run(run_id: str):
+def get_run(run_id: str, user: User = Depends(get_current_user)):
     run = registry.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")

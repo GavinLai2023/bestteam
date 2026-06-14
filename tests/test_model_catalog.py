@@ -116,7 +116,10 @@ def client(tmp_path, monkeypatch):
 
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
-        yield TestClient(backend_main.app)
+        test_client = TestClient(backend_main.app)
+        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
+        test_client.headers["Authorization"] = f"Bearer {token}"
+        yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
 

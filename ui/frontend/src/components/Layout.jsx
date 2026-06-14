@@ -1,7 +1,14 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import './Layout.css'
 
 export default function Layout() {
+  const navigate = useNavigate()
+
+  const logOut = () => {
+    localStorage.removeItem('bestteam_token')
+    navigate('/login')
+  }
+
   return (
     <div className="app-shell">
       <nav className="top-nav">
@@ -16,6 +23,9 @@ export default function Layout() {
           <NavLink to="/advanced" className={({ isActive }) => (isActive ? 'active' : '')}>
             Advanced
           </NavLink>
+          <button type="button" className="logout-button" onClick={logOut}>
+            Log out
+          </button>
         </div>
       </nav>
       <main className="app-main">

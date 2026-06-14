@@ -22,13 +22,14 @@ from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
+from .auth_api import get_current_user
 from .db.builder_sessions import append_feedback, create_session, get_session, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .db.models import BuilderSession, WorkflowRecord
 from .db_session import get_db
 from .runtime import _executor, registry, run_in_background
 
-router = APIRouter(prefix="/api/builder/sessions", tags=["builder"])
+router = APIRouter(prefix="/api/builder/sessions", tags=["builder"], dependencies=[Depends(get_current_user)])
 
 _SESSIONS_DIR = Path(__file__).parent / "data" / "builder_sessions"
 
