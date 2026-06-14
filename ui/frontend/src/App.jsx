@@ -4,10 +4,8 @@ import WizardLayout from './components/WizardLayout'
 import MonitorPage from './pages/MonitorPage'
 import AdvancedPage from './pages/AdvancedPage'
 import IntentPage from './pages/wizard/IntentPage'
-import RequirementsPage from './pages/wizard/RequirementsPage'
-import TeamPage from './pages/wizard/TeamPage'
-import RefinePage from './pages/wizard/RefinePage'
-import TestPage from './pages/wizard/TestPage'
+import PreviewPage from './pages/wizard/PreviewPage'
+import ConfirmPage from './pages/wizard/ConfirmPage'
 import DeployPage from './pages/wizard/DeployPage'
 
 function App() {
@@ -19,10 +17,8 @@ function App() {
 
         <Route path="/wizard" element={<WizardLayout />}>
           <Route index element={<IntentPage />} />
-          <Route path=":sessionId/requirements" element={<RequirementsPage />} />
-          <Route path=":sessionId/team" element={<TeamPage />} />
-          <Route path=":sessionId/refine" element={<RefinePage />} />
-          <Route path=":sessionId/test" element={<TestPage />} />
+          <Route path=":sessionId/preview" element={<PreviewPage />} />
+          <Route path=":sessionId/confirm" element={<ConfirmPage />} />
           <Route path=":sessionId/deploy" element={<DeployPage />} />
         </Route>
 

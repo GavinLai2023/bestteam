@@ -18,8 +18,8 @@ export default function DeployPage() {
         <h2>Go live</h2>
         <p className="subtitle">Design your team first, then come back here to launch it.</p>
         <div className="wizard-actions">
-          <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/team`)}>
-            Go to "Meet your team"
+          <button className="btn btn-primary" onClick={() => navigate('/wizard')}>
+            Start over
           </button>
         </div>
       </div>
@@ -51,7 +51,7 @@ export default function DeployPage() {
           <button className="btn btn-primary" onClick={() => navigate(`/?workflow=${encodeURIComponent(spec.name)}`)}>
             Talk to your team
           </button>
-          <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/refine`)}>
+          <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
             Make more adjustments
           </button>
         </div>

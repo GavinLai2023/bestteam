@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useModelCatalog } from '../lib/useModelCatalog'
+import { pickDefaultModel } from '../lib/models'
 
 // Lets the customer pick which model the AI "team builder" agents should use
 // for this generation step. Defaults to the first non-`fake:` catalog entry
@@ -9,8 +10,7 @@ export default function ModelPicker({ value, onChange, label = 'Model' }) {
 
   useEffect(() => {
     if (value || !entries.length) return
-    const preferred = entries.find((entry) => !entry.spec.startsWith('fake:')) ?? entries[0]
-    onChange(preferred.spec)
+    onChange(pickDefaultModel(entries))
   }, [entries, value, onChange])
 
   if (!entries.length) return null

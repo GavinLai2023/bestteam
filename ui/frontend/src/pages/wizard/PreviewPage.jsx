@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
 
-export default function TestPage() {
+export default function PreviewPage() {
   const { session, loading, sessionId } = useOutletContext()
   const navigate = useNavigate()
 
@@ -20,18 +21,19 @@ export default function TestPage() {
   if (!session.specification_json) {
     return (
       <div className="wizard-card">
-        <h2>Try out your team</h2>
-        <p className="subtitle">Design your team first, then come back here to give it a real task.</p>
+        <h2>Meet your team</h2>
+        <p className="subtitle">We need a bit more information first.</p>
         <div className="wizard-actions">
-          <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/team`)}>
-            Go to "Meet your team"
+          <button className="btn btn-primary" onClick={() => navigate('/wizard')}>
+            Start over
           </button>
         </div>
       </div>
     )
   }
 
-  const agentsByName = Object.fromEntries((session.specification_json.agents ?? []).map((a) => [a.name, a]))
+  const spec = session.specification_json
+  const agentsByName = Object.fromEntries((spec.agents ?? []).map((a) => [a.name, a]))
 
   const friendlyName = (agentName) => {
     const agent = agentsByName[agentName]
@@ -77,15 +79,20 @@ export default function TestPage() {
     }
   }
 
-  const finalEvent = events.find((e) => e.type === 'run_completed' || e.type === 'run_failed')
-
   return (
     <div className="wizard-card">
-      <h2>Try out your team</h2>
-      <p className="subtitle">Give your team a real example to work on, and watch them go.</p>
+      <h2>Meet your team</h2>
+      <p className="subtitle">
+        Here's the team we've put together for "{spec.name}". Try giving them a real task below.
+      </p>
 
       {error && <p className="banner banner-error">{error}</p>}
 
+      <TeamFlow specification={spec} />
+
+      <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
+
+      <h3>Try them out</h3>
       <div className="field">
         <label htmlFor="test-input">A real task or message for your team</label>
         <textarea
@@ -115,15 +122,8 @@ export default function TestPage() {
       )}
 
       <div className="wizard-actions" style={{ marginTop: 16 }}>
-        <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/refine`)}>
-          Not quite right — go back and adjust
-        </button>
-        <button
-          className="btn btn-primary"
-          onClick={() => navigate(`/wizard/${sessionId}/deploy`)}
-          disabled={!finalEvent || finalEvent.type !== 'run_completed'}
-        >
-          Looks great, continue
+        <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
+          Continue
         </button>
       </div>
     </div>
