@@ -112,3 +112,15 @@ def test_me_rejects_invalid_token(client):
     resp = client.get("/api/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
 
     assert resp.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/workflows",
+        "/api/builder/sessions/missing-id",
+        "/api/config/agents",
+    ],
+)
+def test_protected_endpoints_reject_missing_token(client, path):
+    assert client.get(path).status_code == 401

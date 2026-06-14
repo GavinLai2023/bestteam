@@ -37,6 +37,11 @@ docker compose build
 docker compose up -d
 ```
 
+`docker compose` automatically loads `.env` from the project root to
+substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
+is separate from the backend's `env_file: .env`), so the values you set in
+step 1 are baked into the frontend image at build time.
+
 ## 3. Create the first user
 
 There is no public registration UI — create the first login via the API:

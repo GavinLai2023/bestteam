@@ -30,7 +30,7 @@ class RunRegistry:
         self._subscribers: Dict[str, List[asyncio.Queue]] = {}
 
     def create(self, workflow: str, input: str) -> Run:
-        run = Run(id=uuid.uuid4().hex[:8], workflow=workflow, input=input)
+        run = Run(id=uuid.uuid4().hex, workflow=workflow, input=input)
         self._runs[run.id] = run
         self._subscribers[run.id] = []
         return run

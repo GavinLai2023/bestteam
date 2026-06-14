@@ -13,7 +13,7 @@ async function request(path, options = {}) {
     ...options,
   })
 
-  if (res.status === 401) {
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
     localStorage.removeItem(TOKEN_KEY)
     window.location.assign('/login')
     throw new Error('Not authenticated')
