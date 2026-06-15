@@ -2,9 +2,10 @@
 
 No multi-tenancy / cross-customer isolation -- one deployment, optionally a
 handful of users sharing it. `get_current_user` is a FastAPI dependency other
-routers can use to require a logged-in user; it isn't yet applied to the
-existing `/api/builder` and `/api/config` routers (a follow-up hardening
-step), but is exported here for that purpose.
+routers can use to require a logged-in user; it is applied at the
+router level (`dependencies=[Depends(get_current_user)]`) to
+`/api/builder/sessions` (`builder.py`) and `/api/config` (`crud.py`), and is
+exported here for that purpose.
 """
 
 from __future__ import annotations

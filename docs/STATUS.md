@@ -35,9 +35,6 @@ Nothing currently in flight (working tree clean as of this writing).
   `trace_events` tables (Phase 5). See `ui/backend/db/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
-- **`ui/backend/auth_api.py` module docstring is stale** — it still says
-  `get_current_user` "isn't yet applied" to the builder/config routers, but
-  it now is (since commit `bb2e7f6`).
 - **Flaky test**: `tests/test_auth.py::test_access_token_rejects_tampered_signature`
   occasionally fails (base64 tampering of the last char can produce an
   equivalent decoded value).
