@@ -9,6 +9,7 @@ from bestteam import (
     AgentSpec,
     KnowledgeBaseSpec,
     Specification,
+    SkillSpec,
     TeamSpec,
     WorkflowSpec,
     generate_specification,
@@ -89,6 +90,43 @@ def test_to_raw_strips_friendly_fields_and_matches_loader_shape():
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
         "workflow": {"steps": ["support_team"]},
     }
+
+
+def test_skill_spec_round_trips_basic_fields():
+    skill = SkillSpec(
+        name="research_skill",
+        description="Research helper",
+        instructions="Use the calculator for math.",
+        tools=["calculator"],
+    )
+
+    assert skill.name == "research_skill"
+    assert skill.description == "Research helper"
+    assert skill.instructions == "Use the calculator for math."
+    assert skill.tools == ["calculator"]
+
+
+def test_agent_spec_to_raw_omits_skills_when_empty():
+    spec = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+    )
+
+    assert "skills" not in spec.to_raw()
+
+
+def test_agent_spec_to_raw_includes_skills_when_set():
+    spec = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+        skills=["research_skill"],
+    )
+
+    assert spec.to_raw()["skills"] == ["research_skill"]
 
 
 def test_validate_specification_accepts_a_valid_spec_and_runs(tmp_path):

@@ -55,6 +55,7 @@ class AgentSpec(BaseModel):
     backstory: str = ""
     model: str
     tools: List[str] = Field(default_factory=list)
+    skills: List[str] = Field(default_factory=list)
     display_name: Optional[str] = None
     friendly_description: Optional[str] = None
 
@@ -64,7 +65,24 @@ class AgentSpec(BaseModel):
             raw["backstory"] = self.backstory
         if self.tools:
             raw["tools"] = list(self.tools)
+        if self.skills:
+            raw["skills"] = list(self.skills)
         return raw
+
+
+class SkillSpec(BaseModel):
+    """A reusable instruction document plus the tools it depends on.
+
+    Referenced by name from `AgentSpec.skills` and resolved against
+    `extra_skills` in `core/loader.py::_build_workflow` -- the skill's
+    `instructions` are appended to the referencing agent's `backstory` and
+    its `tools` are merged into the agent's `tools`.
+    """
+
+    name: str
+    description: str = ""
+    instructions: str
+    tools: List[str] = Field(default_factory=list)
 
 
 class TeamSpec(BaseModel):
