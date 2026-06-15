@@ -172,7 +172,11 @@ class Specification(BaseModel):
 
 
 def validate_specification(
-    spec: Specification, *, source: Path, extra_tools: Optional[Dict[str, Any]] = None
+    spec: Specification,
+    *,
+    source: Path,
+    extra_tools: Optional[Dict[str, Any]] = None,
+    extra_skills: Optional[Dict[str, Any]] = None,
 ) -> Workflow:
     """Compile a Specification through the same pipeline as a YAML workflow file.
 
@@ -182,7 +186,7 @@ def validate_specification(
     """
     raw = spec.to_raw()
     try:
-        return _build_workflow(raw, source=source, extra_tools=extra_tools or {})
+        return _build_workflow(raw, source=source, extra_tools=extra_tools or {}, extra_skills=extra_skills or {})
     except (KeyError, TypeError) as exc:
         raise ConfigurationError(f"Specification is malformed: missing or invalid field {exc}") from exc
 
@@ -193,6 +197,7 @@ def generate_specification(
     *,
     source: Path,
     extra_tools: Optional[Dict[str, Any]] = None,
+    extra_skills: Optional[Dict[str, Any]] = None,
     max_attempts: int = 3,
 ) -> Specification:
     """Generate a Specification from Requirements, self-correcting on validation errors.
@@ -214,7 +219,7 @@ def generate_specification(
         result = structured_model.invoke(messages)
         spec = result if isinstance(result, Specification) else Specification.model_validate(result)
         try:
-            validate_specification(spec, source=source, extra_tools=extra_tools)
+            validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills)
             return spec
         except ConfigurationError as exc:
             last_error = exc

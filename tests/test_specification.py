@@ -12,6 +12,7 @@ from bestteam import (
     SkillSpec,
     TeamSpec,
     WorkflowSpec,
+    calculator,
     generate_specification,
     validate_specification,
 )
@@ -44,7 +45,9 @@ class _FakeArchitectChatModel(BaseChatModel):
         return RunnableLambda(_invoke)
 
 
-def _basic_spec(*, mode: str = "sequential", agent_tools=None, manager: str | None = None) -> Specification:
+def _basic_spec(
+    *, mode: str = "sequential", agent_tools=None, agent_skills=None, manager: str | None = None
+) -> Specification:
     return Specification(
         name="support_workflow",
         agents=[
@@ -54,6 +57,7 @@ def _basic_spec(*, mode: str = "sequential", agent_tools=None, manager: str | No
                 goal="Answer customer questions",
                 model="fake:hello",
                 tools=agent_tools or [],
+                skills=agent_skills or [],
                 display_name="Support Specialist",
                 friendly_description="Answers customer questions.",
             )
@@ -142,6 +146,73 @@ def test_validate_specification_rejects_unknown_tool(tmp_path):
 
     with pytest.raises(ConfigurationError, match="Unknown tool"):
         validate_specification(spec, source=tmp_path / "workflow.yaml")
+
+
+def test_validate_specification_resolves_skill_into_tools_and_backstory(tmp_path):
+    spec = _basic_spec(agent_skills=["research_skill"])
+    extra_skills = {
+        "research_skill": SkillSpec(
+            name="research_skill",
+            instructions="Use the calculator for any math in the customer's question.",
+            tools=["calculator"],
+        )
+    }
+
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
+    agent = workflow.steps[0].agents[0]
+
+    assert calculator in agent.tools
+    assert "Use the calculator for any math in the customer's question." in agent.backstory
+
+
+def test_validate_specification_dedupes_skill_tools_with_agent_tools(tmp_path):
+    spec = _basic_spec(agent_tools=["calculator"], agent_skills=["research_skill"])
+    extra_skills = {
+        "research_skill": SkillSpec(
+            name="research_skill",
+            instructions="Use the calculator for any math in the customer's question.",
+            tools=["calculator"],
+        )
+    }
+
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
+    agent = workflow.steps[0].agents[0]
+
+    assert agent.tools.count(calculator) == 1
+
+
+def test_validate_specification_concatenates_multiple_skill_instructions_in_order(tmp_path):
+    spec = _basic_spec(agent_skills=["skill_a", "skill_b"])
+    extra_skills = {
+        "skill_a": SkillSpec(name="skill_a", instructions="Follow step A first."),
+        "skill_b": SkillSpec(name="skill_b", instructions="Then follow step B."),
+    }
+
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
+    agent = workflow.steps[0].agents[0]
+
+    assert agent.backstory.index("Follow step A first.") < agent.backstory.index("Then follow step B.")
+
+
+def test_validate_specification_rejects_unknown_skill(tmp_path):
+    spec = _basic_spec(agent_skills=["does_not_exist"])
+
+    with pytest.raises(ConfigurationError, match="Unknown skill"):
+        validate_specification(spec, source=tmp_path / "workflow.yaml")
+
+
+def test_validate_specification_rejects_skill_with_unknown_tool(tmp_path):
+    spec = _basic_spec(agent_skills=["research_skill"])
+    extra_skills = {
+        "research_skill": SkillSpec(
+            name="research_skill",
+            instructions="Use a tool that doesn't exist.",
+            tools=["does_not_exist"],
+        )
+    }
+
+    with pytest.raises(ConfigurationError, match="Unknown tool"):
+        validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
 
 
 def test_validate_specification_rejects_hierarchical_team_without_manager(tmp_path):

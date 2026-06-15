@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -57,13 +57,16 @@ def load_workflow(path, *, toolkits=None) -> Workflow:
         raise ConfigurationError(f"Malformed workflow config in '{path}': missing or invalid field {exc}") from exc
 
 
-def _build_workflow(raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str, Any]) -> Workflow:
+def _build_workflow(
+    raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str, Any], extra_skills: Optional[Dict[str, Any]] = None
+) -> Workflow:
     tool_lookup = {**_TOOL_REGISTRY, **extra_tools}
+    skill_lookup = extra_skills or {}
     for spec in raw.get("knowledge_bases", []):
         kb = _build_knowledge_base(spec, source)
         tool_lookup[kb.name] = make_knowledge_base_tool(kb)
 
-    agents = {spec["name"]: _build_agent(spec, tool_lookup) for spec in raw.get("agents", [])}
+    agents = {spec["name"]: _build_agent(spec, tool_lookup, skill_lookup) for spec in raw.get("agents", [])}
 
     teams: Dict[str, Team] = {}
     for spec in raw.get("teams", []):
@@ -115,9 +118,25 @@ def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> KnowledgeBase:
     return kb_cls(name=name, path=path, **spec)
 
 
-def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any]) -> Agent:
+def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any], skill_lookup: Dict[str, Any]) -> Agent:
     spec = dict(spec)
-    raw_tools = spec.pop("tools", []) or []
+
+    skill_names = spec.pop("skills", []) or []
+    resolved_skills = []
+    for name in skill_names:
+        if name not in skill_lookup:
+            available = ", ".join(sorted(skill_lookup))
+            raise ConfigurationError(
+                f"Unknown skill '{name}'. Available skills: {available}"
+            )
+        resolved_skills.append(skill_lookup[name])
+
+    raw_tools = list(spec.pop("tools", []) or [])
+    for skill in resolved_skills:
+        for name in skill.tools:
+            if name not in raw_tools:
+                raw_tools.append(name)
+
     tools = []
     for name in raw_tools:
         if name not in tool_lookup:
@@ -126,6 +145,11 @@ def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any]) -> Agent:
                 f"Unknown tool '{name}'. Available tools: {available}"
             )
         tools.append(tool_lookup[name])
+
+    spec["backstory"] = "\n\n".join(
+        [spec.get("backstory", "")] + [skill.instructions for skill in resolved_skills]
+    ).strip()
+
     return Agent(**spec, tools=tools)
 
 
