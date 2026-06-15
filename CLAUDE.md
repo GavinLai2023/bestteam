@@ -63,6 +63,12 @@ relevant file below the first time it reads a file in that directory:
 - `ui/backend/db/CLAUDE.md` — SQLAlchemy persistence schema.
 - `ui/frontend/CLAUDE.md` — React/Vite monitoring dashboard and Team Builder
   wizard, including the login UI.
+- `docs/ARCHITECTURE.md` — 5-minute orientation: architecture diagram,
+  module map, tech stack and rationale.
+- `docs/STATUS.md` — living kanban: done / in progress / known issues and
+  tech debt / next steps.
+- `docs/DECISIONS.md` — why significant decisions were made (e.g. LangGraph
+  vs CrewAI, no multi-tenancy), so they aren't re-litigated.
 
 ## Known limitations / unimplemented extension points
 
