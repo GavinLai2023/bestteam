@@ -27,6 +27,30 @@ overview, architecture, and commands.
   summary, not yet a team design). `Requirements.to_prompt()` renders it as
   text for the Solution Architect's `requirements` argument.
 
+## Skills (`SkillSpec`, `AgentSpec.skills`)
+
+`SkillSpec` (`core/specification.py`) is a reusable instruction document plus
+the tools it depends on: `{name, description, instructions, tools}`. An
+`AgentSpec` can reference skills by name via `skills: List[str]` -- a real
+loader-level field (unlike `display_name`/`friendly_description`, `to_raw()`
+keeps it).
+
+`core/loader.py::_build_workflow` resolves `skills:` via an optional
+`extra_skills: Dict[str, SkillSpec]` parameter (mirrors `extra_tools`;
+`load_workflow(..., skills=[...])` builds it by `.name`). For each agent:
+
+- Each skill name is looked up in `extra_skills`; an unknown name raises
+  `ConfigurationError("Unknown skill '<name>'. Available skills: <...>")`.
+- The skill's `tools` are appended to the agent's own `tools` (agent's tools
+  first), de-duplicated preserving order, then resolved through the same
+  `tool_lookup` as ordinary `tools:` -- an unresolvable name raises the
+  existing `"Unknown tool '<name>'. Available tools: <...>"` error.
+- The skill's `instructions` are appended to the agent's `backstory`, one per
+  skill in `skills:` order, joined by `"\n\n"`.
+
+`validate_specification()`/`generate_specification()` accept the same
+`extra_skills` parameter, passed through to `_build_workflow()`.
+
 ## Knowledge bases (`core/knowledge_base.py`, `core/vector_knowledge_base.py`)
 
 The most common client request is "connect our agents to the client's
