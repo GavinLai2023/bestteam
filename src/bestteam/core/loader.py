@@ -19,7 +19,7 @@ _KNOWLEDGE_BASE_TYPES = {
 }
 
 
-def load_workflow(path, *, toolkits=None) -> Workflow:
+def load_workflow(path, *, toolkits=None, skills=None) -> Workflow:
     """Build a Workflow from a declarative YAML file.
 
     This is what lets customers define agents/teams/pipelines without writing
@@ -32,6 +32,9 @@ def load_workflow(path, *, toolkits=None) -> Workflow:
             available to agents defined in this workflow. Custom tools are
             merged with the built-in REGISTRY and can be referenced by name
             in the YAML ``tools:`` list.
+        skills: Optional list of SkillSpec instances that agents in this
+            workflow can reference by name via ``skills:`` in their
+            ``agents:`` entry. Looked up by ``.name``.
     """
     path = Path(path)
     try:
@@ -51,8 +54,10 @@ def load_workflow(path, *, toolkits=None) -> Workflow:
     for tk in (toolkits or []):
         extra_tools.update(tk.items())
 
+    extra_skills: Dict[str, Any] = {s.name: s for s in (skills or [])}
+
     try:
-        return _build_workflow(raw, source=path, extra_tools=extra_tools)
+        return _build_workflow(raw, source=path, extra_tools=extra_tools, extra_skills=extra_skills)
     except (KeyError, TypeError) as exc:
         raise ConfigurationError(f"Malformed workflow config in '{path}': missing or invalid field {exc}") from exc
 

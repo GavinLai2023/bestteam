@@ -396,6 +396,37 @@ def test_loader_resolves_custom_toolkit_tool(tmp_path):
     assert agent.tools[0] is send_slack
 
 
+def test_loader_resolves_skill_via_skills_param(tmp_path):
+    from bestteam import SkillSpec, load_workflow
+
+    yaml_text = """
+name: skill_test
+agents:
+  - name: cruncher
+    role: Number Cruncher
+    goal: Crunch numbers
+    model: "fake:42"
+    skills: [research_skill]
+teams:
+  - name: math_team
+    agents: [cruncher]
+    mode: sequential
+workflow:
+  steps: [math_team]
+"""
+    p = tmp_path / "skill_test.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    research_skill = SkillSpec(
+        name="research_skill",
+        instructions="Use the calculator for any math.",
+        tools=["calculator"],
+    )
+    wf = load_workflow(str(p), skills=[research_skill])
+    agent = wf.steps[0].agents[0]
+    assert agent.tools[0] is calculator
+    assert "Use the calculator for any math." in agent.backstory
+
+
 def test_loader_custom_tool_appears_in_error_message(tmp_path):
     from bestteam import load_workflow
     from bestteam.core.tools import ToolKit
