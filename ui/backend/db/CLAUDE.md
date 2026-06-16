@@ -10,9 +10,9 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 'bestteam[ui]'`). `db/models.py` defines the full Phase 1 schema from
 `docs/team_builder_methodology.md`:
 
-- `agents` / `teams` / `knowledge_bases` / `workflows` — each row's `config`
+- `agents` / `teams` / `knowledge_bases` / `skills` / `workflows` — each row's `config`
   is a JSON `raw` dict (the technical fields from `AgentSpec`/`TeamSpec`/
-  `KnowledgeBaseSpec`/`Specification.to_raw()`, see `core/specification.py`);
+  `KnowledgeBaseSpec`/`SkillSpec`/`Specification.to_raw()`, see `core/specification.py`);
   `workflows.status` tracks `draft` / `ready_for_testing` / `deployed`.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`

@@ -31,6 +31,7 @@ from .crud import router as crud_router
 from .db.models import User, WorkflowRecord
 from .db_session import SessionLocal, get_db
 from .runtime import _executor, registry, run_in_background
+from .skills import load_skills
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
@@ -76,16 +77,23 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     session against the module-level engine is used."""
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
+        skill_lookup = load_skills(db) if record is not None else {}
     else:
         with SessionLocal() as session:
             record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
+            skill_lookup = load_skills(session) if record is not None else {}
 
     if record is not None:
         cache_key: Any = ("db", record.updated_at)
         cached = _workflow_cache.get(name)
         if cached is None or cached[1] != cache_key:
             try:
-                workflow = _build_workflow(record.config, source=WORKFLOWS_DIR / f"{name}.yaml", extra_tools={})
+                workflow = _build_workflow(
+                    record.config,
+                    source=WORKFLOWS_DIR / f"{name}.yaml",
+                    extra_tools={},
+                    extra_skills=skill_lookup,
+                )
             except (KeyError, TypeError, BestTeamError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             _workflow_cache[name] = (workflow, cache_key)

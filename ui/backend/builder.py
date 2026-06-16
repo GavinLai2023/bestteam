@@ -28,6 +28,7 @@ from .db.model_catalog import list_entries, to_prompt_text
 from .db.models import BuilderSession, WorkflowRecord
 from .db_session import get_db
 from .runtime import _executor, registry, run_in_background
+from .skills import load_skills
 
 router = APIRouter(prefix="/api/builder/sessions", tags=["builder"], dependencies=[Depends(get_current_user)])
 
@@ -98,10 +99,28 @@ def _with_model_catalog(db: Session, text: str) -> str:
     return f"{text}\n\n{catalog_text}" if catalog_text else text
 
 
-def _validate_spec_payload(payload: Dict[str, Any], source: Path) -> Specification:
+def _with_skill_catalog(db: Session, text: str) -> str:
+    """Append available skills (if any) so the Solution Architect can assign
+    them to agents by name, parallel to `_with_model_catalog`."""
+    skills = load_skills(db)
+    if not skills:
+        return text
+    lines = ["", "", "Available skills (from the platform's skill library):"]
+    for spec in skills.values():
+        tools_note = f" (tools: {', '.join(spec.tools)})" if spec.tools else ""
+        desc = spec.description if spec.description else (
+            spec.instructions[:80] + "..." if len(spec.instructions) > 80 else spec.instructions
+        )
+        lines.append(f"- {spec.name}: {desc}{tools_note}")
+    return text + "\n".join(lines)
+
+
+def _validate_spec_payload(
+    payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
+) -> Specification:
     try:
         spec = Specification.model_validate(payload)
-        validate_specification(spec, source=source)
+        validate_specification(spec, source=source, extra_skills=extra_skills or {})
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConfigurationError as exc:
@@ -182,14 +201,15 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(req.specification, source)
+        spec = _validate_spec_payload(req.specification, source, extra_skills=load_skills(db))
     elif req.model is not None:
         requirements_text = _requirements_text(session)
         if req.feedback:
             requirements_text += f"\n\nCustomer feedback on the previous design:\n{req.feedback}"
         requirements_text = _with_model_catalog(db, requirements_text)
+        requirements_text = _with_skill_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(generate_specification, chat_model, requirements_text, source=source)
+        spec = _call_model(generate_specification, chat_model, requirements_text, source=source, extra_skills=load_skills(db))
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
@@ -209,7 +229,7 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(req.specification, source)
+        spec = _validate_spec_payload(req.specification, source, extra_skills=load_skills(db))
     elif req.model is not None:
         if session.specification_json is None:
             raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
@@ -220,8 +240,9 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
             f"Customer feedback on this design:\n{req.feedback}"
         )
         requirements_text = _with_model_catalog(db, requirements_text)
+        requirements_text = _with_skill_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(generate_specification, chat_model, requirements_text, source=source)
+        spec = _call_model(generate_specification, chat_model, requirements_text, source=source, extra_skills=load_skills(db))
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
@@ -241,7 +262,7 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
     spec = Specification.model_validate(session.specification_json)
     source = _source_for(session_id)
     try:
-        workflow = validate_specification(spec, source=source)
+        workflow = validate_specification(spec, source=source, extra_skills=load_skills(db))
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -264,7 +285,7 @@ def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, 
     spec = Specification.model_validate(session.specification_json)
     source = _source_for(session_id)
     try:
-        validate_specification(spec, source=source)
+        validate_specification(spec, source=source, extra_skills=load_skills(db))
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
