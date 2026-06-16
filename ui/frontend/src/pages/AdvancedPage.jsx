@@ -8,6 +8,7 @@ const KINDS = [
   { key: 'teams', label: 'Teams', idField: 'name', editableField: 'config' },
   { key: 'knowledge_bases', label: 'Knowledge bases', idField: 'name', editableField: 'config' },
   { key: 'workflows', label: 'Workflows', idField: 'name', editableField: 'config' },
+  { key: 'skills', label: 'Skills', idField: 'name', editableField: 'config' },
   { key: 'model-catalog', label: 'Model catalog', idField: 'spec', editableField: null },
 ]
 
