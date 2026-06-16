@@ -45,8 +45,8 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     other exception (e.g. a real provider call without an API key) to `502`
     — see `_call_model()`.
 - **`crud.py`** (`/api/config/...`) — the "advanced view": `GET`/`PUT`/
-  `DELETE` for `agents`/`teams`/`knowledge_bases` (validated as standalone
-  components via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec` — field shape
+  `DELETE` for `agents`/`teams`/`knowledge_bases`/`skills` (validated as standalone
+  components via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/`SkillSpec` — field shape
   only, not cross-referenced into any workflow) and `workflows` (a complete
   `Specification.to_raw()`-shaped dict, validated via `_build_workflow()`
   exactly like the wizard's Specification stage).
@@ -85,6 +85,13 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   both `submit_specification` and `submit_solution_feedback`'s `model=`
   paths), so the architect picks `AgentSpec.model` specs by role complexity
   and pricing rather than guessing provider names.
+- **Skills library** (`ui/backend/skills.py` + `/api/config/skills` CRUD in `crud.py`)
+  — `load_skills(db)` queries all `SkillRecord` rows and returns `Dict[str, SkillSpec]`
+  keyed by name, used by `main.py`, `crud.py`, and `builder.py` to pass `extra_skills=`
+  to `_build_workflow()` (returns `{}` when no skills exist, backward compatible).
+  `builder.py::_with_skill_catalog(db, text)` appends "Available skills..." list
+  (name/description/tools) to the requirements text before `generate_specification()`,
+  so the Solution Architect knows what skills exist for assignment to agents.
 - **Usage metering** — `core/trace.py::TraceEvent.usage` is a
   `List[Dict[str, Any]]` of `{"model", "input_tokens", "output_tokens"}`
   entries, populated by `adapters/langgraph_adapter.py::_record_usage()`

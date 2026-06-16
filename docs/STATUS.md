@@ -20,6 +20,9 @@
   `Dockerfile`s, nginx for the frontend).
 - `CLAUDE.md` split into root + per-directory files for progressive
   disclosure.
+- Sub-project 2: Agent Skills Library — persistent DB-backed skills via
+  `SkillRecord`, `/api/config/skills` CRUD, Solution Architect auto-assignment
+  of skills to agents, frontend Skills tab in AdvancedPage.
 
 ## In Progress
 
@@ -52,7 +55,3 @@ Nothing currently in flight (working tree clean as of this writing).
 - Phase 6: multi-customer update-distribution strategy (see
   `team_builder_methodology.md`).
 - Refresh `ui/frontend/CLAUDE.md` to describe the current 4-stage wizard.
-- Sub-project 2: persistent Skills library (`SkillRecord` table,
-  `/api/config/skills` CRUD, Solution Architect auto-assignment, frontend
-  picker) -- builds on the `SkillSpec`/`AgentSpec.skills`/`extra_skills`
-  primitive (see `docs/superpowers/specs/2026-06-15-agent-skills-design.md`).
