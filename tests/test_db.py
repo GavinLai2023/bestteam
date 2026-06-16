@@ -10,7 +10,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import inspect
 
-from ui.backend.db import AgentRecord, WorkflowRecord, init_db, make_engine, session_factory
+from ui.backend.db import AgentRecord, SkillRecord, WorkflowRecord, init_db, make_engine, session_factory
 from ui.backend.db.builder_sessions import (
     STATUSES,
     append_feedback,
@@ -39,6 +39,7 @@ def test_init_db_creates_all_tables():
         "agents",
         "teams",
         "knowledge_bases",
+        "skills",
         "workflows",
         "builder_sessions",
         "model_catalog",
@@ -126,3 +127,16 @@ def test_all_statuses_are_settable(db_session):
     for status in STATUSES:
         updated = update_session(db_session, session.id, status=status)
         assert updated.status == status
+
+
+def test_skill_record_round_trip(db_session):
+    record = SkillRecord(
+        name="research_skill",
+        config={"name": "research_skill", "instructions": "Use web_search.", "tools": ["web_search"]},
+    )
+    db_session.add(record)
+    db_session.commit()
+
+    fetched = db_session.query(SkillRecord).filter_by(name="research_skill").one()
+    assert fetched.config["instructions"] == "Use web_search."
+    assert fetched.config["tools"] == ["web_search"]

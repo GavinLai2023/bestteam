@@ -84,6 +84,14 @@ class SkillSpec(BaseModel):
     instructions: str
     tools: List[str] = Field(default_factory=list)
 
+    def to_raw(self) -> Dict[str, Any]:
+        raw: Dict[str, Any] = {"name": self.name, "instructions": self.instructions}
+        if self.description:
+            raw["description"] = self.description
+        if self.tools:
+            raw["tools"] = list(self.tools)
+        return raw
+
 
 class TeamSpec(BaseModel):
     """Mirrors a `teams:` entry in the loader's raw dict (see `core/loader.py`)."""

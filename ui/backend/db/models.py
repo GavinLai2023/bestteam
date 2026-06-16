@@ -71,6 +71,18 @@ class KnowledgeBaseRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class SkillRecord(Base):
+    """A Skill's `raw` config (the technical fields from `SkillSpec.to_raw()`)."""
+
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(unique=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
 class WorkflowRecord(Base):
     """A Workflow's `raw` config (agents/teams/knowledge_bases/workflow.steps,
     i.e. `Specification.to_raw()`) plus its lifecycle status."""

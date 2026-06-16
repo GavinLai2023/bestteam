@@ -259,3 +259,27 @@ def test_generate_specification_raises_after_max_attempts(tmp_path):
         generate_specification(
             model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml", max_attempts=2
         )
+
+
+def test_skill_spec_to_raw_omits_empty_optional_fields():
+    skill = SkillSpec(name="minimal", instructions="Do the thing.")
+    raw = skill.to_raw()
+    assert raw == {"name": "minimal", "instructions": "Do the thing."}
+    assert "description" not in raw
+    assert "tools" not in raw
+
+
+def test_skill_spec_to_raw_includes_all_non_empty_fields():
+    skill = SkillSpec(
+        name="research_skill",
+        description="Research helper",
+        instructions="Use web_search.",
+        tools=["web_search"],
+    )
+    raw = skill.to_raw()
+    assert raw == {
+        "name": "research_skill",
+        "description": "Research helper",
+        "instructions": "Use web_search.",
+        "tools": ["web_search"],
+    }
