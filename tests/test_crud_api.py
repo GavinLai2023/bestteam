@@ -135,3 +135,27 @@ def test_workflow_config_is_runnable_via_get_workflow(client):
     resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
 
     assert resp.status_code == 200
+
+
+def test_skill_crud_round_trip(client):
+    config = {"instructions": "Use web_search for research.", "tools": []}
+
+    create = client.put("/api/config/skills/research_skill", json=config)
+    assert create.status_code == 200
+    assert create.json()["config"]["instructions"] == "Use web_search for research."
+
+    listed = client.get("/api/config/skills")
+    assert [item["name"] for item in listed.json()] == ["research_skill"]
+
+    fetched = client.get("/api/config/skills/research_skill")
+    assert fetched.status_code == 200
+    assert fetched.json()["config"].get("tools", []) == []
+
+    deleted = client.delete("/api/config/skills/research_skill")
+    assert deleted.status_code == 204
+    assert client.get("/api/config/skills/research_skill").status_code == 404
+
+
+def test_skill_put_rejects_missing_instructions(client):
+    resp = client.put("/api/config/skills/bad_skill", json={"description": "no instructions"})
+    assert resp.status_code == 400

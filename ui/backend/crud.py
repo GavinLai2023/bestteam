@@ -21,13 +21,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from bestteam import AgentSpec, KnowledgeBaseSpec, TeamSpec
+from bestteam import AgentSpec, KnowledgeBaseSpec, SkillSpec, TeamSpec
 from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
-from .db.models import AgentRecord, KnowledgeBaseRecord, TeamRecord, WorkflowRecord
+from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
@@ -84,6 +84,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
 router.include_router(_make_component_router("agents", AgentRecord, AgentSpec))
 router.include_router(_make_component_router("teams", TeamRecord, TeamSpec))
 router.include_router(_make_component_router("knowledge_bases", KnowledgeBaseRecord, KnowledgeBaseSpec))
+router.include_router(_make_component_router("skills", SkillRecord, SkillSpec))
 
 
 _workflows = APIRouter(prefix="/workflows")
