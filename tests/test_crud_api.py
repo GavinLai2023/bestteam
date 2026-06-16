@@ -159,3 +159,44 @@ def test_skill_crud_round_trip(client):
 def test_skill_put_rejects_missing_instructions(client):
     resp = client.put("/api/config/skills/bad_skill", json={"description": "no instructions"})
     assert resp.status_code == 400
+
+
+def test_workflow_put_accepts_skill_reference_when_skill_exists(client):
+    client.put("/api/config/skills/research_skill", json={
+        "instructions": "Research topics thoroughly.",
+        "tools": [],
+    })
+    config = {
+        "knowledge_bases": [],
+        "agents": [{
+            "name": "agent1",
+            "role": "Researcher",
+            "goal": "Research topics",
+            "model": "fake:hello",
+            "tools": [],
+            "skills": ["research_skill"],
+        }],
+        "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
+        "workflow": {"steps": ["team1"]},
+    }
+    resp = client.put("/api/config/workflows/my_workflow", json=config)
+    assert resp.status_code == 200
+
+
+def test_workflow_put_rejects_unknown_skill_reference(client):
+    config = {
+        "knowledge_bases": [],
+        "agents": [{
+            "name": "agent1",
+            "role": "Researcher",
+            "goal": "Research topics",
+            "model": "fake:hello",
+            "tools": [],
+            "skills": ["nonexistent_skill"],
+        }],
+        "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
+        "workflow": {"steps": ["team1"]},
+    }
+    resp = client.put("/api/config/workflows/my_workflow", json=config)
+    assert resp.status_code == 400
+    assert "Unknown skill" in resp.json()["detail"]
