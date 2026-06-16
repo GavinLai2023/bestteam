@@ -8,10 +8,43 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 
 from ui.backend import main as backend_main
-from ui.backend.builder import _with_model_catalog
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.builder import _with_model_catalog, _with_skill_catalog
+from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db_session import get_db
+
+
+@pytest.fixture
+def db_session():
+    from ui.backend.db import init_db, make_engine, session_factory
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as session:
+        yield session
+
+
+def test_with_skill_catalog_unchanged_when_no_skills(db_session):
+    text = "Some requirements."
+    assert _with_skill_catalog(db_session, text) == text
+
+
+def test_with_skill_catalog_appends_skill_list(db_session):
+    db_session.add(SkillRecord(
+        name="research_skill",
+        config={
+            "name": "research_skill",
+            "description": "Deep research assistant",
+            "instructions": "Use web_search to research topics.",
+            "tools": ["web_search"],
+        },
+    ))
+    db_session.commit()
+
+    result = _with_skill_catalog(db_session, "Requirements here.")
+    assert "research_skill" in result
+    assert "Deep research assistant" in result
+    assert "web_search" in result
 
 
 @pytest.fixture

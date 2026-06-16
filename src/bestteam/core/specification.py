@@ -28,6 +28,12 @@ friendly_description that a non-technical person would understand. Choose \
 tools from the ones available to the workflow, and pick a model spec string \
 appropriate to the task.
 
+If skills are listed in the input, assign them to agents via each agent's \
+`skills` field (a list of skill names from the provided list). A Skill is a \
+reusable instruction document for a repeatable task -- prefer assigning one \
+over re-describing the same task in `backstory`. Only use skill names from \
+the provided list; never invent names.
+
 Group agents into teams. Use 'sequential' mode when agents hand work to each \
 other in order, 'parallel' mode when they work independently on the same \
 input, and 'hierarchical' mode (with a 'manager' agent) when one agent \
