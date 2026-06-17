@@ -55,6 +55,15 @@ function MonitorPage() {
       if (event.type === 'run_completed') setStatus('completed')
       if (event.type === 'run_failed') setStatus('failed')
     }
+    ws.onerror = () => {
+      setStatus('unreachable')
+    }
+    ws.onclose = () => {
+      // onclose always fires, including after a clean run_completed/run_failed
+      // that onmessage already handled -- only downgrade to 'unreachable' if
+      // the socket closed while still running.
+      setStatus((current) => (current === 'running' ? 'unreachable' : current))
+    }
   }
 
   const finalEvent = events.find((e) => e.type === 'run_completed' || e.type === 'run_failed')
