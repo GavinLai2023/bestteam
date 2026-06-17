@@ -124,3 +124,29 @@ def test_me_rejects_invalid_token(client):
 )
 def test_protected_endpoints_reject_missing_token(client, path):
     assert client.get(path).status_code == 401
+
+
+import importlib
+
+
+def test_secret_key_guard_fires_regardless_of_env(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setattr(auth, "SECRET_KEY", auth._DEFAULT_SECRET_KEY)
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_SECRET_KEY"):
+        importlib.reload(backend_main)
+
+    # Restore a valid secret and reload again so later tests in this process
+    # (which import backend_main.app directly) see a working app.
+    monkeypatch.setattr(auth, "SECRET_KEY", "test-secret-key-not-for-production-use")
+    importlib.reload(backend_main)
+
+
+def test_secret_key_guard_allows_custom_secret_without_env(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setattr(auth, "SECRET_KEY", "a-real-random-secret")
+
+    importlib.reload(backend_main)  # must not raise
+
+    monkeypatch.setattr(auth, "SECRET_KEY", "test-secret-key-not-for-production-use")
+    importlib.reload(backend_main)

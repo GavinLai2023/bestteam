@@ -15,12 +15,11 @@ Edit `.env` and fill in:
 
 - LLM provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`
   if using web search).
-- `BESTTEAM_SECRET_KEY` — generate with:
+- `BESTTEAM_SECRET_KEY` — the backend refuses to start (in any environment)
+  if this is left at the default value; generate a real one with:
   ```bash
   python -c "import secrets; print(secrets.token_hex(32))"
   ```
-- `BESTTEAM_ENV=production` — the backend refuses to start in production
-  with the default `BESTTEAM_SECRET_KEY`.
 - `BESTTEAM_CORS_ORIGINS` — the customer's frontend URL(s), comma-separated,
   no trailing slash.
 - `VITE_API_BASE` / `VITE_WS_BASE` — the backend's public URL, as reachable

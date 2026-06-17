@@ -35,8 +35,12 @@ from .skills import load_skills
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
-if os.environ.get("BESTTEAM_ENV") == "production" and auth.SECRET_KEY == auth._DEFAULT_SECRET_KEY:
-    raise RuntimeError("BESTTEAM_SECRET_KEY must be set when BESTTEAM_ENV=production")
+if auth.SECRET_KEY == auth._DEFAULT_SECRET_KEY:
+    raise RuntimeError(
+        "BESTTEAM_SECRET_KEY is unset (using the insecure dev default). "
+        "Set BESTTEAM_SECRET_KEY to a long random value before starting this service "
+        "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
 
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
