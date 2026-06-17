@@ -65,13 +65,6 @@ the same way.
   with the user created above; you should land on the monitoring page
   (`/`) with a "Log out" link in the nav.
 
-## Known limitation: unauthenticated WebSocket
-
-`/api/runs/{run_id}/stream` is not auth-protected. This is an accepted
-limitation for the first pilot: run IDs are unguessable UUIDs, only
-obtainable via an authenticated `POST /api/runs` or
-`POST /api/builder/sessions/{id}/test-runs`.
-
 ## Data persistence
 
 The SQLite database (agents, teams, workflows, users — config persistence,

@@ -25,10 +25,12 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
+from .auth import AuthError, decode_access_token
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
 from .db.models import User, WorkflowRecord
+from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
@@ -158,9 +160,26 @@ def get_run(run_id: str, user: User = Depends(get_current_user)):
 
 
 @app.websocket("/api/runs/{run_id}/stream")
-async def stream_run(websocket: WebSocket, run_id: str):
+async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None, db: Session = Depends(get_db)):
     """Replays any events already produced, then relays new ones live until
-    the run reaches a terminal state (run_completed / run_failed)."""
+    the run reaches a terminal state (run_completed / run_failed).
+
+    Requires the same bearer token used for REST routes, passed as a
+    `?token=` query parameter -- browsers can't set custom headers when
+    opening a WebSocket, so this can't reuse the HTTPBearer-based
+    get_current_user dependency directly."""
+    if token is None:
+        await websocket.close(code=4401)
+        return
+    try:
+        username = decode_access_token(token)
+    except AuthError:
+        await websocket.close(code=4401)
+        return
+    if get_user_by_username(db, username) is None:
+        await websocket.close(code=4401)
+        return
+
     run = registry.get(run_id)
     if run is None:
         await websocket.close(code=4404)

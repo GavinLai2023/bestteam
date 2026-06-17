@@ -75,9 +75,11 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   `/api/builder/sessions` (`builder.py`) and `/api/config/*` (`crud.py`), and
   per-endpoint to `/api/workflows`, `/api/workflows/{name}/graph`,
   `/api/runs` (POST), and `/api/runs/{id}` (GET) in `main.py`. `/api/health`
-  and `/api/auth/*` stay public; `/api/runs/{run_id}/stream` is intentionally
-  unauthenticated (run IDs are unguessable UUID hex strings, only obtainable
-  via an authenticated endpoint).
+  and `/api/auth/*` stay public;
+  `/api/runs/{run_id}/stream` requires the same bearer token passed as a
+  `?token=` query parameter (browsers can't set custom headers when opening a
+  WebSocket), validated with the same `decode_access_token`/
+  `get_user_by_username` logic as `get_current_user`.
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
   Solution Architect's prompt. `builder.py::_with_model_catalog(db, text)`
