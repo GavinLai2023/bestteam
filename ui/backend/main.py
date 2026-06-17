@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -57,6 +59,19 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(builder_router)
 app.include_router(crud_router)
+
+logger = logging.getLogger("bestteam.api")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all for anything not already turned into an HTTPException by a
+    route handler (BestTeamError/ValidationError/KeyError/TypeError are
+    handled inline and never reach here). Logs the full traceback
+    server-side and returns a generic, non-leaking 500 to the client."""
+    logger.exception("Unhandled exception in %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 
 _workflow_cache: Dict[str, Tuple[Workflow, Any]] = {}
 
