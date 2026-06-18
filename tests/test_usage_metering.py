@@ -1,8 +1,6 @@
 """Tests for Phase 3 usage metering: `TraceEvent.usage`, `db/usage.py`, and
 `runtime.run_in_background` persisting `usage_records`."""
 
-import asyncio
-
 import pytest
 from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
@@ -125,11 +123,7 @@ def test_run_in_background_persists_usage_records(db_session_factory):
 
     run = registry.create("wf", "do the thing")
 
-    async def go():
-        loop = asyncio.get_running_loop()
-        run_in_background(run.id, workflow, "do the thing", loop, engine)
-
-    asyncio.run(go())
+    run_in_background(run.id, workflow, "do the thing", engine)
 
     with Session() as db:
         records = list_usage_for_run(db, run.id)
@@ -148,11 +142,7 @@ def test_run_in_background_records_nothing_for_fake_models(db_session_factory):
 
     run = registry.create("wf", "do the thing")
 
-    async def go():
-        loop = asyncio.get_running_loop()
-        run_in_background(run.id, workflow, "do the thing", loop, engine)
-
-    asyncio.run(go())
+    run_in_background(run.id, workflow, "do the thing", engine)
 
     with Session() as db:
         assert list_usage_for_run(db, run.id) == []

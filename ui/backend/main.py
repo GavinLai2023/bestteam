@@ -9,7 +9,6 @@ from LangGraph's blocking `.stream()` generator into asyncio.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import logging
 import os
@@ -160,8 +159,7 @@ async def create_run(req: RunRequest, db: Session = Depends(get_db), user: User 
     workflow = _get_workflow(req.workflow, db)
     run = registry.create(req.workflow, req.input)
 
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop, db.get_bind())
+    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind())
 
     return {"run_id": run.id}
 
@@ -201,14 +199,14 @@ async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = N
         return
 
     await websocket.accept()
-    queue = registry.subscribe(run_id)
+    subscriber_queue = registry.subscribe(run_id)
     try:
         while True:
-            event = await queue.get()
+            event = await subscriber_queue.get()
             await websocket.send_json(event)
             if event["type"] in ("run_completed", "run_failed"):
                 break
     except WebSocketDisconnect:
         pass
     finally:
-        registry.unsubscribe(run_id, queue)
+        registry.unsubscribe(run_id, subscriber_queue)

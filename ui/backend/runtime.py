@@ -7,7 +7,6 @@ other.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -25,10 +24,10 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
 
 def run_in_background(
-    run_id: str, workflow: Workflow, input: str, loop: asyncio.AbstractEventLoop, engine: Optional[Engine] = None
+    run_id: str, workflow: Workflow, input: str, engine: Optional[Engine] = None
 ) -> None:
-    """Drain `Workflow.stream()` on a worker thread and relay each event back
-    onto the asyncio loop so WebSocket subscribers see it as it happens.
+    """Drain `Workflow.stream()` on a worker thread and publish each event to
+    the registry (thread-safe) so WebSocket subscribers see it as it happens.
 
     If `engine` is given, each `agent_completed` event's per-model-call
     `usage` entries (see `core/trace.py`) are persisted as `usage_records`
@@ -40,7 +39,7 @@ def run_in_background(
     try:
         for event in workflow.stream(input):
             payload = dataclasses.asdict(event)
-            loop.call_soon_threadsafe(registry.publish, run_id, payload)
+            registry.publish(run_id, payload)
             if db is not None and event.type == "agent_completed":
                 for entry in event.usage:
                     record_usage(

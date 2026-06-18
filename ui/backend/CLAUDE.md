@@ -9,7 +9,19 @@ Directory-scoped notes for the FastAPI + WebSocket backend. See the root
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The
 FastAPI backend runs them in a `ThreadPoolExecutor` and hands events back to
-the event loop via `loop.call_soon_threadsafe(registry.publish, ...)`.
+the event loop via `loop.call_soon_threadsafe(queue.put_nowait, ...)`.
+Each subscriber's `asyncio.Queue` is paired with the event loop captured at
+`registry.subscribe()` time -- i.e. the WebSocket handler's own loop, which
+stays alive for as long as that connection is open -- rather than the loop
+of the `POST /api/runs` request that started the run, which is gone by the
+time the background thread finishes. An earlier version captured the
+request's loop at run-creation time instead; under `TestClient`'s
+per-request ephemeral loops that loop was already torn down by the time the
+worker thread's callback ran, so `publish()` silently never happened and
+the WebSocket handler's `queue.get()` blocked forever. (A `queue.SimpleQueue`
++ `asyncio.to_thread(queue.get)` variant was tried next and rejected: a
+blocking `to_thread` call isn't cancellable, so it hung the same way when a
+client disconnected before the run finished.)
 
 ## Backend API (`ui/backend/`)
 
@@ -101,7 +113,7 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   `fake:` models leave it empty). For `HIERARCHICAL` teams, the manager and
   all delegated subordinates share one `usage_sink` per turn, so the total
   surfaces on the manager's single `agent_completed` event.
-  `ui/backend/runtime.py::run_in_background(run_id, workflow, input, loop,
+  `ui/backend/runtime.py::run_in_background(run_id, workflow, input,
   engine=None)` — if `engine` is given (callers pass `db.get_bind()` so tests
   using an overridden in-memory DB still work), opens its own `Session` and
   calls `db/usage.py::record_usage()` for each `usage` entry on every
