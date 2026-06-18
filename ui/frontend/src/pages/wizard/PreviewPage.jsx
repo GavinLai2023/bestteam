@@ -74,6 +74,16 @@ export default function PreviewPage() {
         if (event.type === 'run_completed') setStatus('completed')
         if (event.type === 'run_failed') setStatus('failed')
       }
+      ws.onerror = () => {
+        setStatus('failed')
+        setError('Lost connection to the backend while your team was working. Please try again.')
+      }
+      ws.onclose = () => {
+        if (status === 'running') {
+          setStatus('failed')
+          setError('Lost connection to the backend while your team was working. Please try again.')
+        }
+      }
     } catch (e) {
       setError(e.message)
       setStatus('idle')
