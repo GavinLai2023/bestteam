@@ -83,3 +83,30 @@ The SQLite database (agents, teams, workflows, users — config persistence,
 not run history) lives in the `bestteam_data` named volume, mounted at
 `/app/ui/backend/data` in the backend container. It survives
 `docker compose restart` / `docker compose down` (without `-v`).
+
+## Backup and restore
+
+Back up the live database (safe to run while the backend is running):
+
+```bash
+./scripts/backup-db.sh
+# or with an explicit path:
+./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
+```
+
+To restore from a backup:
+
+1. Stop the backend so nothing writes to the database during restore:
+   ```bash
+   docker compose stop backend
+   ```
+2. Copy the backup file into the container, overwriting the live database:
+   ```bash
+   docker compose cp /path/to/backups/bestteam-2026-06-17.db backend:/app/ui/backend/data/bestteam.db
+   ```
+3. Restart the backend:
+   ```bash
+   docker compose start backend
+   ```
+4. Verify: `curl http://localhost:8000/api/health` returns `200`, and a
+   login with a known user from before the backup succeeds.
