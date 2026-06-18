@@ -41,7 +41,19 @@ substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
 is separate from the backend's `env_file: .env`), so the values you set in
 step 1 are baked into the frontend image at build time.
 
-## 3. Create the first user
+## 3. Apply database migrations
+
+```bash
+docker compose exec backend alembic upgrade head
+```
+
+Run this once after the first `docker compose up -d`, and again after
+pulling any update that includes a new file under `alembic/versions/`. This
+is the canonical way the database schema is created/updated going forward
+(replacing a bare `Base.metadata.create_all()`, which still runs
+automatically as a harmless no-op safety net on a brand-new database).
+
+## 4. Create the first user
 
 There is no public registration UI — create the first login via the API:
 
@@ -54,7 +66,7 @@ curl -X POST http://localhost:8000/api/auth/register \
 This returns an `access_token`. Subsequent users (if needed) can be created
 the same way.
 
-## 4. Verify
+## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,
   no auth required).
