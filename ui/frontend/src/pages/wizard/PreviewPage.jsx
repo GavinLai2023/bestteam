@@ -79,10 +79,13 @@ export default function PreviewPage() {
         setError('Lost connection to the backend while your team was working. Please try again.')
       }
       ws.onclose = () => {
-        if (status === 'running') {
-          setStatus('failed')
-          setError('Lost connection to the backend while your team was working. Please try again.')
-        }
+        setStatus((current) => {
+          if (current === 'running') {
+            setError('Lost connection to the backend while your team was working. Please try again.')
+            return 'failed'
+          }
+          return current
+        })
       }
     } catch (e) {
       setError(e.message)
