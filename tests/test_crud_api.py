@@ -287,3 +287,36 @@ def test_workflow_put_rejects_unknown_skill_reference(client):
     resp = client.put("/api/config/workflows/my_workflow", json=config)
     assert resp.status_code == 400
     assert "Unknown skill" in resp.json()["detail"]
+
+
+def test_load_knowledge_base_tools_builds_only_referenced_kbs(client, tmp_path):
+    from sqlalchemy.orm import Session
+
+    from ui.backend.knowledge_bases import load_knowledge_base_tools
+
+    docs_dir = tmp_path / "policy_docs"
+    docs_dir.mkdir()
+    (docs_dir / "policy.txt").write_text("Refund processing is completed within 5 business days.")
+
+    client.put(
+        "/api/config/knowledge_bases/policy_kb",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    )
+    client.put(
+        "/api/config/knowledge_bases/unused_kb",
+        json={"path": "./does/not/exist", "type": "local_folder"},
+    )
+
+    # Use the same DB the test client's overridden get_db uses.
+    from ui.backend.db_session import get_db as real_get_db
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db: Session = next(db_gen)
+    try:
+        raw = {"agents": [{"name": "a", "tools": ["policy_kb", "calculator"]}]}
+        tools = load_knowledge_base_tools(db, raw, tmp_path / "wf.yaml")
+    finally:
+        db_gen.close()
+
+    assert set(tools) == {"policy_kb"}
+    assert "Refund" in tools["policy_kb"]("refund processing")
