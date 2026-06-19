@@ -36,6 +36,9 @@ export default function AdvancedPage() {
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [createMode, setCreateMode] = useState('manual') // 'manual' | 'upload'
+  const [uploadFiles, setUploadFiles] = useState([])
+  const [uploading, setUploading] = useState(false)
 
   const kind = KINDS.find((k) => k.key === activeKey)
 
@@ -55,6 +58,8 @@ export default function AdvancedPage() {
     setJsonText('')
     setMessage(null)
     setNewId('')
+    setCreateMode('manual')
+    setUploadFiles([])
     loadItems()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey])
@@ -74,6 +79,26 @@ export default function AdvancedPage() {
     setMessage(null)
     setError(null)
     setJsonText('{\n  \n}')
+  }
+
+  const uploadNew = async () => {
+    if (!newId.trim() || uploadFiles.length === 0) return
+    setUploading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await api.uploadKnowledgeBaseFiles(newId.trim(), uploadFiles)
+      setMessage(`Created '${result.name}' — ${result.file_count} file(s), ${result.chunk_count} chunk(s) indexed.`)
+      setNewId('')
+      setUploadFiles([])
+      setSelectedId(result.name)
+      setJsonText(JSON.stringify(result.config, null, 2))
+      loadItems()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setUploading(false)
+    }
   }
 
   const save = async () => {
@@ -155,10 +180,37 @@ export default function AdvancedPage() {
           )}
 
           <div className="advanced-new">
-            <input type="text" placeholder={`New ${kind.idField}`} value={newId} onChange={(e) => setNewId(e.target.value)} />
-            <button className="btn btn-secondary" onClick={startNew} disabled={!newId.trim()}>
-              New
-            </button>
+            {activeKey === 'knowledge_bases' && (
+              <div className="advanced-create-mode">
+                <button className={createMode === 'manual' ? 'active' : ''} onClick={() => setCreateMode('manual')}>
+                  Manual JSON
+                </button>
+                <button className={createMode === 'upload' ? 'active' : ''} onClick={() => setCreateMode('upload')}>
+                  Upload files
+                </button>
+              </div>
+            )}
+
+            {activeKey === 'knowledge_bases' && createMode === 'upload' ? (
+              <>
+                <input type="text" placeholder="Knowledge base name" value={newId} onChange={(e) => setNewId(e.target.value)} />
+                <input type="file" multiple onChange={(e) => setUploadFiles(Array.from(e.target.files))} />
+                <button
+                  className="btn btn-secondary"
+                  onClick={uploadNew}
+                  disabled={!newId.trim() || uploadFiles.length === 0 || uploading}
+                >
+                  {uploading ? 'Uploading…' : 'Create from files'}
+                </button>
+              </>
+            ) : (
+              <>
+                <input type="text" placeholder={`New ${kind.idField}`} value={newId} onChange={(e) => setNewId(e.target.value)} />
+                <button className="btn btn-secondary" onClick={startNew} disabled={!newId.trim()}>
+                  New
+                </button>
+              </>
+            )}
           </div>
         </div>
 
