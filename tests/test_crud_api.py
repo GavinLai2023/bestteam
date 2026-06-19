@@ -8,6 +8,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db_session import get_db
@@ -16,6 +17,7 @@ from ui.backend.db_session import get_db
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setattr(backend_crud, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     backend_main._workflow_cache.clear()
 
     engine = make_engine(":memory:")
@@ -86,6 +88,60 @@ def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
 def test_unknown_agent_returns_404(client):
     assert client.get("/api/config/agents/does-not-exist").status_code == 404
     assert client.delete("/api/config/agents/does-not-exist").status_code == 404
+
+
+def test_upload_creates_queryable_local_folder_kb(client):
+    files = [
+        ("files", ("doc1.txt", b"The refund policy allows returns within 30 days.", "text/plain")),
+        ("files", ("doc2.md", b"# Shipping\nStandard shipping takes 5-7 business days.", "text/markdown")),
+    ]
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload", files=files)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "support_docs"
+    assert body["file_count"] == 2
+    assert body["chunk_count"] >= 2
+    assert body["config"]["type"] == "local_folder"
+    assert "knowledge_base_uploads" in body["config"]["path"]
+
+    get_resp = client.get("/api/config/knowledge_bases/support_docs")
+    assert get_resp.status_code == 200
+
+
+def test_upload_rejects_too_many_files(client):
+    files = [("files", (f"doc{i}.txt", b"x", "text/plain")) for i in range(31)]
+    resp = client.post("/api/config/knowledge_bases/too_many/upload", files=files)
+    assert resp.status_code == 413
+
+
+def test_upload_rejects_oversized_file(client):
+    big = b"x" * (30 * 1024 * 1024 + 1)
+    files = [("files", ("big.txt", big, "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/too_big/upload", files=files)
+    assert resp.status_code == 413
+
+
+def test_upload_rejects_unparseable_file_and_cleans_up(client):
+    files = [("files", ("bad.exe", b"\x00\x01\x02", "application/octet-stream"))]
+    resp = client.post("/api/config/knowledge_bases/bad_kb/upload", files=files)
+    assert resp.status_code == 400
+    get_resp = client.get("/api/config/knowledge_bases/bad_kb")
+    assert get_resp.status_code == 404
+
+
+def test_delete_knowledge_base_removes_uploaded_files(client):
+    files = [("files", ("doc.txt", b"some content here", "text/plain"))]
+    client.post("/api/config/knowledge_bases/to_delete/upload", files=files)
+
+    from ui.backend.crud import _KB_UPLOADS_DIR
+
+    upload_dir = _KB_UPLOADS_DIR / "to_delete"
+    assert upload_dir.is_dir()
+
+    resp = client.delete("/api/config/knowledge_bases/to_delete")
+    assert resp.status_code == 204
+    assert not upload_dir.exists()
 
 
 _VALID_WORKFLOW_CONFIG = {
