@@ -59,7 +59,9 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
 - **`crud.py`** (`/api/config/...`) — the "advanced view": `GET`/`PUT`/
   `DELETE` for `agents`/`teams`/`knowledge_bases`/`skills` (validated as standalone
   components via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/`SkillSpec` — field shape
-  only, not cross-referenced into any workflow) and `workflows` (a complete
+  only; `agents`/`teams`/`skills` are not cross-referenced into any workflow, but
+  `knowledge_bases` are resolvable by name from a workflow's `tools:` list via
+  `ui/backend/knowledge_bases.py::load_knowledge_base_tools`) and `workflows` (a complete
   `Specification.to_raw()`-shaped dict, validated via `_build_workflow()`
   exactly like the wizard's Specification stage).
 - **`_get_workflow()`** (`main.py`) now checks for a `WorkflowRecord` in the

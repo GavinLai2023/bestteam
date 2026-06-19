@@ -100,17 +100,23 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
         skill_lookup = load_skills(db) if record is not None else {}
-        kb_tools = load_knowledge_base_tools(db, record.config, source) if record is not None else {}
     else:
         with SessionLocal() as session:
             record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
             skill_lookup = load_skills(session) if record is not None else {}
-            kb_tools = load_knowledge_base_tools(session, record.config, source) if record is not None else {}
 
     if record is not None:
         cache_key: Any = ("db", record.updated_at)
         cached = _workflow_cache.get(name)
         if cached is None or cached[1] != cache_key:
+            # Only build standalone KB tools (which may re-chunk files and,
+            # for type: vector, call a paid embedding model) on a cache
+            # miss -- not on every request.
+            if db is not None:
+                kb_tools = load_knowledge_base_tools(db, record.config, source)
+            else:
+                with SessionLocal() as session:
+                    kb_tools = load_knowledge_base_tools(session, record.config, source)
             try:
                 workflow = _build_workflow(
                     record.config,

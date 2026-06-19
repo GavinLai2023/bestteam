@@ -5,11 +5,13 @@ a fine-tuning surface for already-deployed configs, reusing the same
 `*Spec.to_raw()` / `_build_workflow()` validation as the wizard.
 
 `agents`/`teams`/`knowledge_bases` are validated as standalone components
-(field shape only, via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`) -- they
-aren't cross-referenced into a `workflows` config automatically. A
-`workflows` entry is a complete, self-contained `Specification.to_raw()`
-dict and is validated as a whole via `_build_workflow`, exactly like the
-wizard's Specification stage.
+(field shape only, via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`) -- of
+these, only `knowledge_bases` are also resolvable by name from a workflow's
+`tools:` list (via `ui/backend/knowledge_bases.py::load_knowledge_base_tools`);
+`agents`/`teams`/`skills` are not cross-referenced into a `workflows` config
+automatically. A `workflows` entry is a complete, self-contained
+`Specification.to_raw()` dict and is validated as a whole via
+`_build_workflow`, exactly like the wizard's Specification stage.
 """
 
 from __future__ import annotations

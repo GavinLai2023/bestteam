@@ -368,9 +368,38 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     put_resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
     assert put_resp.status_code == 200
 
+    # Defensive only: the `client` fixture already clears the cache at setup,
+    # and the workflow PUT route never populates `_workflow_cache` itself.
     backend_main._workflow_cache.clear()
     run_resp = client.post("/api/runs", json={"workflow": "policy_wf", "input": "How long do refunds take?"})
     assert run_resp.status_code == 200
+
+
+def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, tmp_path):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
+    client.put(
+        "/api/config/knowledge_bases/policy_kb",
+        json={"path": str(docs_dir), "type": "vector", "embedding_model": "fake:8"},
+    )
+
+    workflow_config = {
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Support",
+                "goal": "Answer policy questions",
+                "model": "fake:hi",
+                "tools": ["policy_kb"],
+            }
+        ],
+        "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
+
+    assert resp.status_code == 200
 
 
 def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_path):
