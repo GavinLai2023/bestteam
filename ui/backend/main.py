@@ -33,6 +33,7 @@ from .crud import router as crud_router
 from .db.models import User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
+from .knowledge_bases import load_knowledge_base_tools
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -95,13 +96,16 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     sees the same data as the `/api/builder` and `/api/config` routers
     (including in tests, which override `get_db`); if omitted, a one-off
     session against the module-level engine is used."""
+    source = WORKFLOWS_DIR / f"{name}.yaml"
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
         skill_lookup = load_skills(db) if record is not None else {}
+        kb_tools = load_knowledge_base_tools(db, record.config, source) if record is not None else {}
     else:
         with SessionLocal() as session:
             record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
             skill_lookup = load_skills(session) if record is not None else {}
+            kb_tools = load_knowledge_base_tools(session, record.config, source) if record is not None else {}
 
     if record is not None:
         cache_key: Any = ("db", record.updated_at)
@@ -110,8 +114,8 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
             try:
                 workflow = _build_workflow(
                     record.config,
-                    source=WORKFLOWS_DIR / f"{name}.yaml",
-                    extra_tools={},
+                    source=source,
+                    extra_tools=kb_tools,
                     extra_skills=skill_lookup,
                 )
             except (KeyError, TypeError, BestTeamError) as exc:
