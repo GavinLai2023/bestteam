@@ -34,6 +34,39 @@ async function request(path, options = {}) {
   return res.json()
 }
 
+async function uploadFiles(path, files, fields = {}) {
+  const token = localStorage.getItem(TOKEN_KEY)
+  const headers = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const formData = new FormData()
+  for (const file of files) formData.append('files', file)
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined && value !== null) formData.append(key, value)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: formData })
+
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY)
+    window.location.assign('/login')
+    throw new Error('Not authenticated')
+  }
+
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      detail = body.detail ?? detail
+    } catch {
+      // response had no JSON body
+    }
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+  }
+
+  return res.json()
+}
+
 export const api = {
   // Auth
   login: (username, password) =>
@@ -56,6 +89,8 @@ export const api = {
     request(`/api/config/${kind}/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteConfigItem: (kind, name) =>
     request(`/api/config/${kind}/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  uploadKnowledgeBaseFiles: (name, files, options = {}) =>
+    uploadFiles(`/api/config/knowledge_bases/${encodeURIComponent(name)}/upload`, files, options),
 
   // Builder wizard sessions
   createSession: (intent_text, as_is_text) =>
