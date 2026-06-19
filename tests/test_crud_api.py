@@ -371,3 +371,67 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     backend_main._workflow_cache.clear()
     run_resp = client.post("/api/runs", json={"workflow": "policy_wf", "input": "How long do refunds take?"})
     assert run_resp.status_code == 200
+
+
+def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_path):
+    standalone_dir = tmp_path / "standalone_docs"
+    standalone_dir.mkdir()
+    (standalone_dir / "doc.txt").write_text("STANDALONE: days")
+    client.put("/api/config/knowledge_bases/shared_name", json={"path": str(standalone_dir), "type": "local_folder"})
+
+    inline_dir = tmp_path / "inline_docs"
+    inline_dir.mkdir()
+    (inline_dir / "doc.txt").write_text("INLINE: policy")
+
+    workflow_config = {
+        "knowledge_bases": [{"name": "shared_name", "path": str(inline_dir), "type": "local_folder"}],
+        "agents": [
+            {
+                "name": "a",
+                "role": "Support",
+                "goal": "Answer",
+                "model": "fake:hi",
+                "tools": ["shared_name"],
+            }
+        ],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    resp = client.put("/api/config/workflows/priority_wf", json=workflow_config)
+    assert resp.status_code == 200
+
+    from ui.backend.main import _get_workflow
+    from ui.backend.db_session import get_db as real_get_db
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db = next(db_gen)
+    try:
+        workflow = _get_workflow("priority_wf", db)
+    finally:
+        db_gen.close()
+
+    team = workflow.steps[0]
+    agent = team.agents[0]
+    tool = next(t for t in agent.tools if t.__name__ == "shared_name")
+    assert "INLINE" in tool("policy")
+
+
+def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
+    client.put("/api/config/knowledge_bases/broken_kb", json={"path": "/no/such/path", "type": "local_folder"})
+
+    broken_workflow = {
+        "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["broken_kb"]}],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    resp = client.put("/api/config/workflows/broken_wf", json=broken_workflow)
+    assert resp.status_code == 400
+    assert "broken_kb" in resp.json()["detail"]
+
+    unrelated_workflow = {
+        "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    resp2 = client.put("/api/config/workflows/unrelated_wf", json=unrelated_workflow)
+    assert resp2.status_code == 200
