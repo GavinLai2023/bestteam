@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -e ".[ui,dev]"
+        run: pip install -e ".[ui,dev,tools]"
       - name: Run pytest
         run: python -m pytest
 
