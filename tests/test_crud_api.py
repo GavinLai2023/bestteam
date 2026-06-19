@@ -320,3 +320,27 @@ def test_load_knowledge_base_tools_builds_only_referenced_kbs(client, tmp_path):
 
     assert set(tools) == {"policy_kb"}
     assert "Refund" in tools["policy_kb"]("refund processing")
+
+
+def test_workflow_put_resolves_standalone_knowledge_base_by_name(client, tmp_path):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
+    client.put("/api/config/knowledge_bases/policy_kb", json={"path": str(docs_dir), "type": "local_folder"})
+
+    workflow_config = {
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Support",
+                "goal": "Answer policy questions",
+                "model": "fake:hi",
+                "tools": ["policy_kb"],
+            }
+        ],
+        "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
+
+    assert resp.status_code == 200

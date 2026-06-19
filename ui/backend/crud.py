@@ -31,6 +31,7 @@ from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
+from .knowledge_bases import load_knowledge_base_tools
 from .skills import load_skills
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
@@ -203,7 +204,9 @@ def get_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Dict[s
 def upsert_workflow_config(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
     raw = {**config, "name": item_name}
     try:
-        _build_workflow(raw, source=_WORKFLOWS_DIR / f"{item_name}.yaml", extra_tools={}, extra_skills=load_skills(db))
+        source = _WORKFLOWS_DIR / f"{item_name}.yaml"
+        kb_tools = load_knowledge_base_tools(db, raw, source)
+        _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db))
     except (KeyError, TypeError, BestTeamError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
