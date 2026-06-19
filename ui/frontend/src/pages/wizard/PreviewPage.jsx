@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import TeamFlow from '../../components/TeamFlow'
-import { WS_BASE, api } from '../../lib/api'
+import { WS_BASE, TOKEN_KEY, api } from '../../lib/api'
 
 export default function PreviewPage() {
   const { session, loading, sessionId } = useOutletContext()
@@ -65,13 +65,27 @@ export default function PreviewPage() {
     try {
       const { run_id: runId } = await api.createTestRun(sessionId, input.trim())
 
-      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream`)
+      const token = localStorage.getItem(TOKEN_KEY)
+      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
       wsRef.current = ws
       ws.onmessage = (message) => {
         const event = JSON.parse(message.data)
         setEvents((prev) => [...prev, event])
         if (event.type === 'run_completed') setStatus('completed')
         if (event.type === 'run_failed') setStatus('failed')
+      }
+      ws.onerror = () => {
+        setStatus('failed')
+        setError('Lost connection to the backend while your team was working. Please try again.')
+      }
+      ws.onclose = () => {
+        setStatus((current) => {
+          if (current === 'running') {
+            setError('Lost connection to the backend while your team was working. Please try again.')
+            return 'failed'
+          }
+          return current
+        })
       }
     } catch (e) {
       setError(e.message)

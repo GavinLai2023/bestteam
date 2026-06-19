@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { API_BASE, WS_BASE } from '../lib/api'
+import { API_BASE, WS_BASE, TOKEN_KEY, api } from '../lib/api'
 import './MonitorPage.css'
 
 const EVENT_LABELS = {
@@ -20,8 +20,7 @@ function MonitorPage() {
   const wsRef = useRef(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/workflows`)
-      .then((r) => r.json())
+    api.listWorkflows()
       .then((data) => {
         setWorkflows(data.workflows)
         const preferred = searchParams.get('workflow')
@@ -45,20 +44,25 @@ function MonitorPage() {
     setStatus('running')
     wsRef.current?.close()
 
-    const res = await fetch(`${API_BASE}/api/runs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflow: selected, input }),
-    })
-    const { run_id: runId } = await res.json()
+    const { run_id: runId } = await api.createRun(selected, input)
 
-    const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream`)
+    const token = localStorage.getItem(TOKEN_KEY)
+    const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
     wsRef.current = ws
     ws.onmessage = (message) => {
       const event = JSON.parse(message.data)
       setEvents((prev) => [...prev, event])
       if (event.type === 'run_completed') setStatus('completed')
       if (event.type === 'run_failed') setStatus('failed')
+    }
+    ws.onerror = () => {
+      setStatus('unreachable')
+    }
+    ws.onclose = () => {
+      // onclose always fires, including after a clean run_completed/run_failed
+      // that onmessage already handled -- only downgrade to 'unreachable' if
+      // the socket closed while still running.
+      setStatus((current) => (current === 'running' ? 'unreachable' : current))
     }
   }
 
@@ -99,7 +103,7 @@ function MonitorPage() {
           />
         </label>
 
-        <button onClick={startRun} disabled={status === 'running' || !selected}>
+        <button onClick={startRun} disabled={status === 'running' || !selected || !input.trim()}>
           {status === 'running' ? 'Running…' : 'Run'}
         </button>
       </section>

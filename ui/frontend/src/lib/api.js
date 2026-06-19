@@ -1,7 +1,7 @@
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
 export const WS_BASE = import.meta.env.VITE_WS_BASE ?? 'ws://127.0.0.1:8000'
 
-const TOKEN_KEY = 'bestteam_token'
+export const TOKEN_KEY = 'bestteam_token'
 
 async function request(path, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY)

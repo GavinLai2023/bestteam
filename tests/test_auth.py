@@ -47,10 +47,14 @@ def test_access_token_rejects_expired_token():
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def workflows_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
+    return tmp_path
 
+
+@pytest.fixture
+def client(workflows_dir, monkeypatch):
     engine = make_engine(":memory:")
     init_db(engine)
     TestSessionLocal = session_factory(engine)
@@ -124,3 +128,56 @@ def test_me_rejects_invalid_token(client):
 )
 def test_protected_endpoints_reject_missing_token(client, path):
     assert client.get(path).status_code == 401
+
+
+import importlib
+
+
+def test_secret_key_guard_fires_regardless_of_env(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setattr(auth, "SECRET_KEY", auth._DEFAULT_SECRET_KEY)
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_SECRET_KEY"):
+        importlib.reload(backend_main)
+
+    # Restore a valid secret and reload again so later tests in this process
+    # (which import backend_main.app directly) see a working app.
+    monkeypatch.setattr(auth, "SECRET_KEY", "test-secret-key-not-for-production-use")
+    importlib.reload(backend_main)
+
+
+def test_secret_key_guard_allows_custom_secret_without_env(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setattr(auth, "SECRET_KEY", "a-real-random-secret")
+
+    importlib.reload(backend_main)  # must not raise
+
+    monkeypatch.setattr(auth, "SECRET_KEY", "test-secret-key-not-for-production-use")
+    importlib.reload(backend_main)
+
+
+def test_stream_run_rejects_missing_token(client):
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/runs/some-run-id/stream") as ws:
+            ws.receive_json()
+
+
+def test_stream_run_rejects_invalid_token(client):
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/runs/some-run-id/stream?token=not-a-real-token") as ws:
+            ws.receive_json()
+
+
+def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
+    from tests.test_ui_backend import _write_workflow
+
+    _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
+
+    token = client.post("/api/auth/register", json={"username": "bob", "password": "hunter2"}).json()["access_token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+
+    run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+
+    with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+        event = ws.receive_json()
+        assert event["type"] == "run_started"

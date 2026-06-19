@@ -9,7 +9,6 @@ intent -> requirements -> spec -> solution -> testing -> deployed.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -269,8 +268,7 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
     update_session(db, session_id, status="testing")
 
     run = registry.create(spec.name, req.input)
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(_executor, run_in_background, run.id, workflow, req.input, loop, db.get_bind())
+    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind())
     return {"run_id": run.id}
 
 

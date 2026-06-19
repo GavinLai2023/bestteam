@@ -41,6 +41,7 @@ Windows).
 .\.venv\Scripts\python.exe -m bestteam graph workflow.yaml
 
 # Monitoring dashboard — needs BOTH running simultaneously
+$env:BESTTEAM_SECRET_KEY = "dev-only-secret-change-me-for-real-use"
 .\.venv\Scripts\python.exe -m uvicorn ui.backend.main:app --port 8000 --host 127.0.0.1
 cd ui\frontend && npm run dev   # http://localhost:5173, talks to backend on :8000
 ```
