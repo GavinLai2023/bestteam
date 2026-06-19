@@ -130,6 +130,37 @@ def test_upload_rejects_unparseable_file_and_cleans_up(client):
     assert get_resp.status_code == 404
 
 
+def test_uploaded_kb_is_queryable_by_a_workflow(client):
+    files = [("files", ("policy.txt", b"Refunds are processed within 5 business days of approval.", "text/plain"))]
+    upload_resp = client.post("/api/config/knowledge_bases/policy_kb/upload", files=files)
+    assert upload_resp.status_code == 200
+    uploaded_path = upload_resp.json()["config"]["path"]
+
+    # Standalone knowledge_bases created via /api/config aren't auto-wired into a
+    # workflow's tools (see module docstring) -- a workflow only sees knowledge_bases
+    # it embeds inline itself. Point the workflow's own entry at the same uploaded
+    # directory to prove the uploaded content is real, indexed, and queryable.
+    workflow_config = {
+        "knowledge_bases": [{"name": "policy_kb", "path": uploaded_path, "type": "local_folder"}],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Support",
+                "goal": "Answer policy questions",
+                "model": "fake:Refunds take 5 business days per the policy doc.",
+                "tools": ["policy_kb"],
+            }
+        ],
+        "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    put_resp = client.put("/api/config/workflows/policy_test_wf", json=workflow_config)
+    assert put_resp.status_code == 200
+
+    run_resp = client.post("/api/runs", json={"workflow": "policy_test_wf", "input": "How long do refunds take?"})
+    assert run_resp.status_code == 200
+
+
 def test_delete_knowledge_base_removes_uploaded_files(client):
     files = [("files", ("doc.txt", b"some content here", "text/plain"))]
     client.post("/api/config/knowledge_bases/to_delete/upload", files=files)
