@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
@@ -41,6 +41,11 @@ export default function AdvancedPage() {
   const [uploading, setUploading] = useState(false)
 
   const kind = KINDS.find((k) => k.key === activeKey)
+  const activeKeyRef = useRef(activeKey)
+
+  useEffect(() => {
+    activeKeyRef.current = activeKey
+  }, [activeKey])
 
   const loadItems = () => {
     setLoading(true)
@@ -83,6 +88,7 @@ export default function AdvancedPage() {
 
   const uploadNew = async () => {
     if (!newId.trim() || uploadFiles.length === 0) return
+    const startedFor = activeKey
     setUploading(true)
     setError(null)
     setMessage(null)
@@ -93,7 +99,7 @@ export default function AdvancedPage() {
       setUploadFiles([])
       setSelectedId(result.name)
       setJsonText(JSON.stringify(result.config, null, 2))
-      loadItems()
+      if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -110,13 +116,14 @@ export default function AdvancedPage() {
       return
     }
 
+    const startedFor = activeKey
     setSaving(true)
     setError(null)
     setMessage(null)
     try {
       await api.putConfigItem(activeKey, selectedId, parsed)
       setMessage('Saved.')
-      loadItems()
+      if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -126,6 +133,7 @@ export default function AdvancedPage() {
 
   const remove = async () => {
     if (!selectedId) return
+    const startedFor = activeKey
     setSaving(true)
     setError(null)
     setMessage(null)
@@ -134,7 +142,7 @@ export default function AdvancedPage() {
       setSelectedId(null)
       setJsonText('')
       setMessage('Deleted.')
-      loadItems()
+      if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
       setError(e.message)
     } finally {
