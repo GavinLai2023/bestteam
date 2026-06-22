@@ -68,6 +68,29 @@ def test_knowledge_base_skips_corrupt_file_with_warning(tmp_path):
     assert "bad.docx" not in sources
 
 
+def test_skips_file_with_configuration_error_and_warns(tmp_path, monkeypatch):
+    import bestteam.core.knowledge_base as kb_module
+
+    (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "bad.txt").write_text("irrelevant", encoding="utf-8")
+
+    real_parse_file = kb_module.parse_file
+
+    def fake_parse_file(path):
+        if str(path).endswith("bad.txt"):
+            raise ConfigurationError("simulated parse failure")
+        return real_parse_file(path)
+
+    monkeypatch.setattr(kb_module, "parse_file", fake_parse_file)
+
+    with pytest.warns(UserWarning, match="bad.txt"):
+        kb = LocalFolderKnowledgeBase("kb", tmp_path)
+
+    sources = {chunk.source for chunk in kb._chunks}
+    assert "good.txt" in sources
+    assert "bad.txt" not in sources
+
+
 @pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])
 def test_rejects_chunk_overlap_gte_chunk_size(tmp_path, chunk_size, chunk_overlap):
     (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")

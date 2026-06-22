@@ -159,7 +159,8 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
             continue
         try:
             text = parse_file(str(file_path))
-        except ConfigurationError:
+        except ConfigurationError as exc:
+            warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
             continue
         except Exception as exc:
             warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
