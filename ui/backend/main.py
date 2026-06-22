@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from bestteam import Workflow, load_workflow
@@ -30,7 +31,7 @@ from .auth import AuthError, decode_access_token
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
-from .db.models import User, WorkflowRecord
+from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
 from .knowledge_bases import load_knowledge_base_tools
@@ -81,6 +82,20 @@ class RunRequest(BaseModel):
     input: str
 
 
+def _dependency_freshness(db: Session) -> Tuple[Optional[Any], Optional[Any]]:
+    """Max `updated_at` across all SkillRecords and all KnowledgeBaseRecords,
+    folded into a cached Workflow's cache key so editing either invalidates
+    any already-cached workflow that might depend on them.
+
+    Deliberately global rather than scoped to only the names a given
+    workflow references -- see
+    docs/superpowers/specs/2026-06-22-code-review-fixes-design.md, "Design
+    > A" for why."""
+    skills_max = db.query(func.max(SkillRecord.updated_at)).scalar()
+    kb_max = db.query(func.max(KnowledgeBaseRecord.updated_at)).scalar()
+    return (skills_max, kb_max)
+
+
 def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     """Load and cache a workflow by name (Workflow already memoizes its own
     compiled graph, so repeat runs of the same workflow stay cheap).
@@ -99,23 +114,25 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     source = WORKFLOWS_DIR / f"{name}.yaml"
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
-        skill_lookup = load_skills(db) if record is not None else {}
+        dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
             record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
-            skill_lookup = load_skills(session) if record is not None else {}
+            dependency_freshness = _dependency_freshness(session) if record is not None else None
 
     if record is not None:
-        cache_key: Any = ("db", record.updated_at)
+        cache_key: Any = ("db", record.updated_at, *dependency_freshness)
         cached = _workflow_cache.get(name)
         if cached is None or cached[1] != cache_key:
-            # Only build standalone KB tools (which may re-chunk files and,
-            # for type: vector, call a paid embedding model) on a cache
-            # miss -- not on every request.
+            # Only load skills and build standalone KB tools (which may
+            # re-chunk files and, for type: vector, call a paid embedding
+            # model) on a cache miss -- not on every request.
             if db is not None:
+                skill_lookup = load_skills(db)
                 kb_tools = load_knowledge_base_tools(db, record.config, source)
             else:
                 with SessionLocal() as session:
+                    skill_lookup = load_skills(session)
                     kb_tools = load_knowledge_base_tools(session, record.config, source)
             try:
                 workflow = _build_workflow(

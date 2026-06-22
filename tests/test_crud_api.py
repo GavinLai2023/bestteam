@@ -420,6 +420,70 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
     assert resp.status_code == 200
 
 
+def test_cached_workflow_picks_up_skill_update(client):
+    client.put(
+        "/api/config/skills/greeting",
+        json={"description": "How to greet", "instructions": "Say hello warmly.", "tools": []},
+    )
+    workflow_config = {
+        "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "skills": ["greeting"]}],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    client.put("/api/config/workflows/skill_wf", json=workflow_config)
+
+    from ui.backend.main import _get_workflow
+    from ui.backend.db_session import get_db as real_get_db
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db = next(db_gen)
+    try:
+        wf1 = _get_workflow("skill_wf", db)
+        assert "Say hello warmly." in wf1.steps[0].agents[0].backstory
+
+        client.put(
+            "/api/config/skills/greeting",
+            json={"description": "How to greet", "instructions": "Say hello formally.", "tools": []},
+        )
+
+        wf2 = _get_workflow("skill_wf", db)
+        assert "Say hello formally." in wf2.steps[0].agents[0].backstory
+        assert wf2 is not wf1
+    finally:
+        db_gen.close()
+
+
+def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
+    workflow_config = {
+        "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    client.put("/api/config/workflows/cached_wf", json=workflow_config)
+
+    calls = []
+    original = backend_main.load_skills
+
+    def counting_load_skills(db):
+        calls.append(1)
+        return original(db)
+
+    monkeypatch.setattr(backend_main, "load_skills", counting_load_skills)
+
+    from ui.backend.main import _get_workflow
+    from ui.backend.db_session import get_db as real_get_db
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db = next(db_gen)
+    try:
+        _get_workflow("cached_wf", db)
+        _get_workflow("cached_wf", db)
+    finally:
+        db_gen.close()
+
+    assert len(calls) == 1
+
+
 def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_path):
     standalone_dir = tmp_path / "standalone_docs"
     standalone_dir.mkdir()
