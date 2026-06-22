@@ -126,11 +126,18 @@ def upload_knowledge_base_files(
     contents: Dict[str, bytes] = {}
     total_size = 0
     for f in files:
+        # f.filename comes from the client-controlled Content-Disposition
+        # header -- strip it to a bare filename so it can't escape upload_dir
+        # via "../" segments or an absolute path.
+        filename = Path(f.filename or "").name
+        if filename in ("", ".", ".."):
+            raise HTTPException(status_code=400, detail=f"Invalid filename: '{f.filename}'")
+
         data = f.file.read()
         if len(data) > _MAX_FILE_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"File '{f.filename}' exceeds the {_MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB per-file limit",
+                detail=f"File '{filename}' exceeds the {_MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB per-file limit",
             )
         total_size += len(data)
         if total_size > _MAX_TOTAL_SIZE_BYTES:
@@ -138,7 +145,7 @@ def upload_knowledge_base_files(
                 status_code=413,
                 detail=f"Total upload size exceeds the {_MAX_TOTAL_SIZE_BYTES // (1024 * 1024)}MB limit",
             )
-        contents[f.filename] = data
+        contents[filename] = data
 
     upload_dir = _KB_UPLOADS_DIR / item_name
     upload_dir.mkdir(parents=True, exist_ok=True)

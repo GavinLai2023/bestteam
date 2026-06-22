@@ -122,6 +122,24 @@ def test_upload_rejects_oversized_file(client):
     assert resp.status_code == 413
 
 
+def test_upload_sanitizes_path_traversal_filename(client):
+    from ui.backend.crud import _KB_UPLOADS_DIR
+
+    files = [("files", ("../../evil.txt", b"some content here for parsing", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/traversal_kb/upload", files=files)
+
+    assert resp.status_code == 200
+    upload_dir = _KB_UPLOADS_DIR / "traversal_kb"
+    assert (upload_dir / "evil.txt").is_file()
+    assert not (_KB_UPLOADS_DIR.parent / "evil.txt").exists()
+
+
+def test_upload_rejects_filename_with_no_basename(client):
+    files = [("files", ("..", b"some content here for parsing", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/dotdot_kb/upload", files=files)
+    assert resp.status_code == 400
+
+
 def test_upload_rejects_unparseable_file_and_cleans_up(client):
     files = [("files", ("bad.exe", b"\x00\x01\x02", "application/octet-stream"))]
     resp = client.post("/api/config/knowledge_bases/bad_kb/upload", files=files)
