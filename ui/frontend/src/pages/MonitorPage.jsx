@@ -17,6 +17,7 @@ function MonitorPage() {
   const [input, setInput] = useState('')
   const [events, setEvents] = useState([])
   const [status, setStatus] = useState('idle') // idle | running | completed | failed | unreachable
+  const [error, setError] = useState(null)
   const wsRef = useRef(null)
 
   useEffect(() => {
@@ -42,27 +43,33 @@ function MonitorPage() {
 
     setEvents([])
     setStatus('running')
+    setError(null)
     wsRef.current?.close()
 
-    const { run_id: runId } = await api.createRun(selected, input)
+    try {
+      const { run_id: runId } = await api.createRun(selected, input)
 
-    const token = localStorage.getItem(TOKEN_KEY)
-    const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
-    wsRef.current = ws
-    ws.onmessage = (message) => {
-      const event = JSON.parse(message.data)
-      setEvents((prev) => [...prev, event])
-      if (event.type === 'run_completed') setStatus('completed')
-      if (event.type === 'run_failed') setStatus('failed')
-    }
-    ws.onerror = () => {
-      setStatus('unreachable')
-    }
-    ws.onclose = () => {
-      // onclose always fires, including after a clean run_completed/run_failed
-      // that onmessage already handled -- only downgrade to 'unreachable' if
-      // the socket closed while still running.
-      setStatus((current) => (current === 'running' ? 'unreachable' : current))
+      const token = localStorage.getItem(TOKEN_KEY)
+      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
+      wsRef.current = ws
+      ws.onmessage = (message) => {
+        const event = JSON.parse(message.data)
+        setEvents((prev) => [...prev, event])
+        if (event.type === 'run_completed') setStatus('completed')
+        if (event.type === 'run_failed') setStatus('failed')
+      }
+      ws.onerror = () => {
+        setStatus('unreachable')
+      }
+      ws.onclose = () => {
+        // onclose always fires, including after a clean run_completed/run_failed
+        // that onmessage already handled -- only downgrade to 'unreachable' if
+        // the socket closed while still running.
+        setStatus((current) => (current === 'running' ? 'unreachable' : current))
+      }
+    } catch (e) {
+      setError(e.message)
+      setStatus('idle')
     }
   }
 
@@ -80,6 +87,8 @@ function MonitorPage() {
           Can't reach the backend at {API_BASE}. Is `uvicorn ui.backend.main:app` running?
         </p>
       )}
+
+      {error && <p className="banner banner-error">{error}</p>}
 
       <section className="controls">
         <label>
