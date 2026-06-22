@@ -293,37 +293,59 @@ Expected: PASS — this documents *existing* behavior (the bug being fixed
 is the session's lifetime, not this rejection logic, which already works).
 This test exists to guard against a regression during the refactor below.
 
-- [ ] **Step 3: Refactor `stream_run` to use a short-lived session**
+- [ ] **Step 3: Release the DB session right after the existence check instead of holding it for the whole connection**
 
-In `ui/backend/main.py`, change the route signature (line 186) from:
+**Correction during implementation:** the original plan called for dropping
+`db: Session = Depends(get_db)` and using `with SessionLocal() as session:`
+instead. That breaks test overridability: `SessionLocal` is a fixed
+module-level sessionmaker bound to the real production engine at import
+time (`ui/backend/db_session.py`), and tests only override the `get_db`
+FastAPI dependency, not `SessionLocal` itself — calling `SessionLocal()`
+directly inside the handler silently queries the real DB instead of the
+test's in-memory one (confirmed by `test_stream_run_accepts_valid_token_for_known_run`
+failing with that approach). The actual fix: keep `Depends(get_db)` for
+test compatibility, and just call `db.close()` as soon as the existence
+check is done, well before the long-lived streaming loop, instead of
+leaving it open for the framework to close at request teardown.
 
-```python
-async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None, db: Session = Depends(get_db)):
-```
-
-to:
-
-```python
-async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None):
-```
-
-Then replace the existence check (lines 202-204):
+In `ui/backend/main.py`, change (current lines 202-204):
 
 ```python
     if get_user_by_username(db, username) is None:
         await websocket.close(code=4401)
         return
+
+    run = registry.get(run_id)
+    if run is None:
+        await websocket.close(code=4404)
+        return
+
+    await websocket.accept()
 ```
 
-with:
+to:
 
 ```python
-    with SessionLocal() as session:
-        user_exists = get_user_by_username(session, username) is not None
-    if not user_exists:
+    if get_user_by_username(db, username) is None:
+        db.close()
         await websocket.close(code=4401)
         return
+
+    run = registry.get(run_id)
+    if run is None:
+        db.close()
+        await websocket.close(code=4404)
+        return
+
+    # Release the DB connection now -- it's only needed for the checks
+    # above, but `Depends(get_db)` would otherwise hold it open for the
+    # entire streaming connection below, which can run for a long time.
+    db.close()
+
+    await websocket.accept()
 ```
+
+Leave the route's signature (`db: Session = Depends(get_db)`) unchanged.
 
 - [ ] **Step 4: Run the new test and the existing WS tests to verify no regression**
 
@@ -331,11 +353,11 @@ Run: `./.venv/Scripts/python.exe -m pytest tests/test_auth.py -k stream_run -v`
 Expected: all 4 pass (`rejects_missing_token`, `rejects_invalid_token`,
 `accepts_valid_token_for_known_run`, `rejects_token_for_deleted_user`)
 
-- [ ] **Step 5: Confirm no `db` parameter remains on the route**
+- [ ] **Step 5: Confirm `db.close()` is now called before the streaming loop**
 
-Run: `grep -n "async def stream_run" ui/backend/main.py`
-Expected output: `async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None):`
-(no `db` parameter)
+Run: `grep -n "db.close()" ui/backend/main.py`
+Expected output: three matches inside `stream_run` (the two early-return
+branches plus the one right before `await websocket.accept()`).
 
 - [ ] **Step 6: Run the full backend test suite to check for regressions**
 

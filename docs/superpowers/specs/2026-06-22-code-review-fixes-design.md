@@ -83,12 +83,15 @@ used once (`get_user_by_username(db, username)`) before
 session open until the coroutine returns, i.e. for the entire streaming
 connection.
 
-**Fix:** drop the `db: Session = Depends(get_db)` parameter from
-`stream_run`'s signature. Replace the single `get_user_by_username(db, ...)`
-call with `with SessionLocal() as session: get_user_by_username(session, ...)`,
-scoped to just that check, so the session closes immediately afterward.
-`SessionLocal` is already imported in `main.py` (used elsewhere in
-`_get_workflow`'s `db is None` branch).
+**Fix (corrected during implementation):** keep `db: Session =
+Depends(get_db)` on the route signature -- dropping it in favor of a
+direct `SessionLocal()` call would bypass FastAPI's dependency-override
+mechanism, which is how tests substitute an in-memory database; `SessionLocal`
+itself stays bound to the real production engine regardless of test
+overrides. Instead, call `db.close()` immediately after the
+`get_user_by_username(db, ...)` check (and on both early-return branches),
+releasing the connection well before the long-lived streaming loop instead
+of leaving it open until the WebSocket closes.
 
 ### C. Four independent minor fixes (findings 4-7)
 

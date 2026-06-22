@@ -217,13 +217,20 @@ async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = N
         await websocket.close(code=4401)
         return
     if get_user_by_username(db, username) is None:
+        db.close()
         await websocket.close(code=4401)
         return
 
     run = registry.get(run_id)
     if run is None:
+        db.close()
         await websocket.close(code=4404)
         return
+
+    # Release the DB connection now -- it's only needed for the checks
+    # above, but `Depends(get_db)` would otherwise hold it open for the
+    # entire streaming connection below, which can run for a long time.
+    db.close()
 
     await websocket.accept()
     subscriber_queue = registry.subscribe(run_id)

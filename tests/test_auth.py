@@ -181,3 +181,26 @@ def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
     with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
         event = ws.receive_json()
         assert event["type"] == "run_started"
+
+
+def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
+    from tests.test_ui_backend import _write_workflow
+    from ui.backend.db.models import User
+
+    _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
+
+    token = client.post("/api/auth/register", json={"username": "carol", "password": "hunter2"}).json()["access_token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+    run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+
+    db_gen = backend_main.app.dependency_overrides[get_db]()
+    db = next(db_gen)
+    try:
+        db.query(User).filter_by(username="carol").delete()
+        db.commit()
+    finally:
+        db_gen.close()
+
+    with pytest.raises(Exception):
+        with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+            ws.receive_json()
