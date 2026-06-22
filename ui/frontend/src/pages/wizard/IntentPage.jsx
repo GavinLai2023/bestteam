@@ -88,7 +88,7 @@ export default function IntentPage() {
         <div className="banner banner-error">
           {error}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
-            <button className="btn btn-secondary" onClick={retry}>
+            <button className="btn btn-secondary" onClick={retry} disabled={submitting}>
               Try again
             </button>
           </div>
