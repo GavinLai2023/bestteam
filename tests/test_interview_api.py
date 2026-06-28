@@ -1,0 +1,226 @@
+"""Tests for the interview transcription API (ui/backend/interview.py)."""
+
+import pytest
+from unittest.mock import MagicMock, patch
+
+fastapi = pytest.importorskip("fastapi")
+pytest.importorskip("sqlalchemy")
+
+from fastapi.testclient import TestClient
+
+from ui.backend import main as backend_main
+from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db_session import get_db
+from ui.backend.interview import InterviewExtraction
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    backend_main._workflow_cache.clear()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    TestSessionLocal = session_factory(engine)
+
+    def override_get_db():
+        db = TestSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    backend_main.app.dependency_overrides[get_db] = override_get_db
+    try:
+        test_client = TestClient(backend_main.app)
+        token = test_client.post(
+            "/api/auth/register", json={"username": "test", "password": "test"}
+        ).json()["access_token"]
+        test_client.headers["Authorization"] = f"Bearer {token}"
+        yield test_client
+    finally:
+        backend_main.app.dependency_overrides.pop(get_db, None)
+
+
+def _make_mock_llm(extraction: InterviewExtraction) -> MagicMock:
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value.invoke.return_value = extraction
+    return mock_llm
+
+
+def _make_whisper_response(text: str) -> MagicMock:
+    resp = MagicMock()
+    resp.text = text
+    return resp
+
+
+_SMALL_MP3 = b"\x00" * 100  # well under 25 MB
+
+
+def test_transcribe_returns_all_three_fields(client):
+    transcript = "Consultant: What's slowing you down? Customer: Email replies take all day."
+    extraction = InterviewExtraction(
+        intent_text="We need help handling customer email replies.",
+        as_is_text="One person manually reads and replies to all emails every day.",
+    )
+    mock_llm = _make_mock_llm(extraction)
+
+    with patch("openai.OpenAI") as mock_cls, \
+         patch("ui.backend.interview._resolve_model", return_value=mock_llm):
+        mock_cls.return_value.audio.transcriptions.create.return_value = _make_whisper_response(transcript)
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["transcript"] == transcript
+    assert body["intent_text"] == extraction.intent_text
+    assert body["as_is_text"] == extraction.as_is_text
+
+
+def test_unsupported_file_extension_returns_400(client):
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("notes.pdf", b"pdf content", "application/pdf")},
+    )
+    assert resp.status_code == 400
+    assert "Unsupported file type" in resp.json()["detail"]
+
+
+def test_file_with_no_extension_returns_400(client):
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("recording", b"\x00" * 100, "application/octet-stream")},
+    )
+    assert resp.status_code == 400
+    assert "Unsupported file type" in resp.json()["detail"]
+
+
+def test_file_over_25mb_without_ffmpeg_returns_413(client):
+    large_data = b"\x00" * (25 * 1024 * 1024 + 1)
+    with patch("ui.backend.interview._is_ffmpeg_available", return_value=False):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("long_meeting.mp3", large_data, "audio/mpeg")},
+        )
+    assert resp.status_code == 413
+    detail = resp.json()["detail"]
+    assert "ffmpeg" in detail
+    assert "64 kbps" in detail
+
+
+def test_file_over_25mb_with_ffmpeg_transcribes_chunks(client):
+    large_data = b"\x00" * (25 * 1024 * 1024 + 1)
+    chunk_paths = ["/fake/chunk_000.mp3", "/fake/chunk_001.mp3"]
+    transcripts = ["First half of the interview.", "Second half of the interview."]
+    extraction = InterviewExtraction(intent_text="We need a bot.", as_is_text="Manual today.")
+    mock_llm = _make_mock_llm(extraction)
+
+    whisper_responses = [_make_whisper_response(t) for t in transcripts]
+
+    with patch("ui.backend.interview._is_ffmpeg_available", return_value=True), \
+         patch("ui.backend.interview._split_audio", return_value=chunk_paths), \
+         patch("builtins.open", create=True) as mock_open, \
+         patch("openai.OpenAI") as mock_cls, \
+         patch("ui.backend.interview._resolve_model", return_value=mock_llm):
+        mock_cls.return_value.audio.transcriptions.create.side_effect = whisper_responses
+        mock_open.return_value.__enter__ = lambda s: MagicMock()
+        mock_open.return_value.__exit__ = MagicMock(return_value=False)
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("long.mp3", large_data, "audio/mpeg")},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert transcripts[0] in body["transcript"]
+    assert transcripts[1] in body["transcript"]
+
+
+def test_missing_api_key_returns_503(client, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+    )
+    assert resp.status_code == 503
+    assert "OPENAI_API_KEY" in resp.json()["detail"]
+
+
+def test_whisper_failure_returns_502(client):
+    with patch("openai.OpenAI") as mock_cls, \
+         patch("ui.backend.interview._resolve_model", return_value=MagicMock()):
+        mock_cls.return_value.audio.transcriptions.create.side_effect = RuntimeError("quota exceeded")
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+    assert resp.status_code == 502
+    assert "Transcription failed" in resp.json()["detail"]
+
+
+def test_bad_model_spec_returns_400(client):
+    from bestteam.exceptions import BestTeamError
+
+    with patch("ui.backend.interview._resolve_model", side_effect=BestTeamError("Unknown model 'bad:model'")):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "bad:model"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+    assert resp.status_code == 400
+    assert "Unknown model" in resp.json()["detail"]
+
+
+def test_extraction_failure_falls_back_to_raw_transcript(client):
+    transcript = "Raw interview text that couldn't be structured."
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value.invoke.side_effect = RuntimeError("LLM error")
+
+    with patch("openai.OpenAI") as mock_cls, \
+         patch("ui.backend.interview._resolve_model", return_value=mock_llm):
+        mock_cls.return_value.audio.transcriptions.create.return_value = _make_whisper_response(transcript)
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent_text"] == transcript
+    assert body["as_is_text"] == ""
+
+
+def test_no_auth_header_returns_401(client):
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        headers={"Authorization": ""},
+    )
+    assert resp.status_code == 401
+
+
+def test_ffmpeg_failure_returns_502(client):
+    large_data = b"\x00" * (25 * 1024 * 1024 + 1)
+
+    with patch("ui.backend.interview._is_ffmpeg_available", return_value=True), \
+         patch("ui.backend.interview._split_audio", side_effect=RuntimeError("ffmpeg failed: ...")), \
+         patch("ui.backend.interview._resolve_model", return_value=MagicMock()):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("long.mp3", large_data, "audio/mpeg")},
+        )
+    assert resp.status_code == 502

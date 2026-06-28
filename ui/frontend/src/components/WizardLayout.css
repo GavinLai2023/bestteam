@@ -350,3 +350,60 @@
   line-height: 1.45;
   font-size: 0.92rem;
 }
+
+/* --- Interview recording upload (IntentPage) --- */
+
+.upload-section {
+  margin-bottom: 12px;
+}
+
+.transcript-section {
+  margin: 8px 0 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.transcript-section summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4f46e5;
+  user-select: none;
+  list-style: none;
+  background: #f9fafb;
+}
+
+.transcript-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.transcript-text {
+  margin: 0;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  font-size: 0.83rem;
+  color: #374151;
+  line-height: 1.6;
+  max-height: 280px;
+  overflow-y: auto;
+  font-family: inherit;
+  border-top: 1px solid #e5e7eb;
+}
+
+.or-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  color: #9ca3af;
+  font-size: 0.83rem;
+}
+
+.or-divider::before,
+.or-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid #e5e7eb;
+}

@@ -31,6 +31,7 @@ from .auth import AuthError, decode_access_token
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
+from .interview import router as interview_router
 from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
@@ -59,6 +60,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(builder_router)
+app.include_router(interview_router)
 app.include_router(crud_router)
 
 logger = logging.getLogger("bestteam.api")
