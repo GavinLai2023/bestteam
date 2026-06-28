@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import operator
 from typing import Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
@@ -14,6 +15,7 @@ from ..core.workflow import Workflow, WorkflowResult
 from ..exceptions import BestTeamError, ConfigurationError, EngineError
 from .base import EngineAdapter
 
+_logger = logging.getLogger(__name__)
 
 # Upper bound on how many times an agent node will execute tool calls and
 # re-invoke the model in a single turn. Guards against a model that keeps
@@ -102,6 +104,8 @@ def _run_agent(
     input_text: str,
     *,
     extra_tools: Sequence[Callable[..., Any]] = (),
+    extra_system_prompt: str = "",
+    require_tool_use_on_first_call: bool = False,
     usage_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
@@ -110,24 +114,42 @@ def _run_agent(
     `_make_delegate_tool` (a HIERARCHICAL manager's subordinates), so both
     paths get identical tool-calling behavior, including the iteration guard.
     `extra_tools` lets a manager additionally bind its subordinates'
-    `delegate_to_<name>` tools alongside the agent's own `tools`. If
-    `usage_sink` is given, each model invocation's `usage_metadata` (when
-    reported) is appended to it for usage metering.
+    `delegate_to_<name>` tools alongside the agent's own `tools`.
+    `extra_system_prompt`, if non-empty, is appended (separated by a blank
+    line) after `agent.system_prompt()` -- used by `_hierarchical_node` to
+    give a manager delegation guidance without changing `Agent.system_prompt()`
+    itself, which every agent type uses. `require_tool_use_on_first_call`, if
+    True and tools are bound, forces the very first model call to use
+    `tool_choice="required"` -- a real model can otherwise just ignore prompt
+    text and answer directly, so `_hierarchical_node` uses this to make a
+    manager's first turn always delegate rather than merely suggesting it
+    should. Later iterations in this same call always use the unforced
+    binding, so the agent can still settle on a final text answer once it has
+    gathered what it needs. If `usage_sink` is given, each model invocation's
+    `usage_metadata` (when reported) is appended to it for usage metering.
     """
     model = _resolve_model(agent.model)
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
+    first_call_model = model
     if all_tools:
         try:
             model = model.bind_tools(all_tools)
+            first_call_model = (
+                model.bind_tools(all_tools, tool_choice="required") if require_tool_use_on_first_call else model
+            )
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
 
+    system_prompt = agent.system_prompt()
+    if extra_system_prompt:
+        system_prompt = f"{system_prompt}\n\n{extra_system_prompt}"
+
     messages = [
-        SystemMessage(content=agent.system_prompt()),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=input_text),
     ]
-    response = model.invoke(messages)
+    response = first_call_model.invoke(messages)
     _record_usage(agent, response, usage_sink)
 
     for _ in range(_MAX_TOOL_ITERATIONS):
@@ -143,6 +165,9 @@ def _run_agent(
                 try:
                     result = tool_fn(**call["args"])
                 except Exception as exc:
+                    _logger.warning(
+                        "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
+                    )
                     result = f"Error calling tool '{call['name']}': {exc}"
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         response = model.invoke(messages)
@@ -157,12 +182,19 @@ def _make_delegate_tool(agent: Agent, *, usage_sink: Optional[List[Dict[str, Any
     Calling the tool runs the subordinate's full tool-calling turn on `task`
     (via `_run_agent`) and returns its final text, so a manager's tool-calling
     loop can treat "delegate to a teammate" exactly like any other tool call.
-    `usage_sink`, if given, collects this subordinate's usage alongside the
-    manager's own, so a hierarchical turn's total usage is reported in one place.
+    If the subordinate has its own `tools` (e.g. a knowledge base), its first
+    call is also forced to use one of them (`require_tool_use_on_first_call`)
+    -- otherwise a real model can just answer from its own guesswork instead
+    of actually consulting the tool it was delegated to use. `usage_sink`, if
+    given, collects this subordinate's usage alongside the manager's own, so
+    a hierarchical turn's total usage is reported in one place.
     """
 
     def delegate(task: str) -> str:
-        return _run_agent(agent, task, usage_sink=usage_sink)
+        _logger.info("Manager delegated to '%s': %s", agent.name, task[:200])
+        return _run_agent(
+            agent, task, require_tool_use_on_first_call=bool(agent.tools), usage_sink=usage_sink
+        )
 
     delegate.__name__ = f"delegate_to_{agent.name}"
     delegate.__doc__ = (
@@ -203,7 +235,14 @@ def _hierarchical_node(team: Team):
     subordinate agent (see `_make_delegate_tool`), bound alongside its own
     `tools`. The existing tool-calling loop in `_run_agent` then lets the
     manager delegate to teammates and incorporate their answers, exactly like
-    it would call a knowledge-base or web-search tool.
+    it would call a knowledge-base or web-search tool. The manager also gets
+    explicit delegation guidance appended to its system prompt (via
+    `extra_system_prompt`) naming each subordinate and their
+    `delegate_to_<name>` tool. Guidance text alone is only a suggestion a
+    real model can ignore, so the manager's first call also forces
+    `tool_choice="required"` (via `require_tool_use_on_first_call`) --
+    without this, a real LLM can just answer directly and never call a
+    delegate tool at all.
     """
     manager = team.manager
     if manager is None:
@@ -214,10 +253,33 @@ def _hierarchical_node(team: Team):
         if member.model is None:
             raise ConfigurationError(f"Agent '{member.name}' has no model configured")
 
+    guidance_lines = [
+        "You manage a team of specialists. For any part of the request that "
+        "falls within a specialist's domain below, delegate that sub-task to "
+        "them using their tool rather than answering it yourself. If the "
+        "request touches more than one specialist's domain, delegate to "
+        "EVERY relevant specialist (not just one) before composing your "
+        "final answer -- a request can need input from several of them at "
+        "once:",
+    ]
+    for agent in team.agents:
+        guidance_lines.append(
+            f"- {agent.name} ({agent.role}, goal: {agent.goal}): "
+            f"call delegate_to_{agent.name}(task) to delegate to them."
+        )
+    delegation_guidance = "\n".join(guidance_lines)
+
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
         delegate_tools = [_make_delegate_tool(agent, usage_sink=usage_sink) for agent in team.agents]
-        text = _run_agent(manager, state["context"] or state["input"], extra_tools=delegate_tools, usage_sink=usage_sink)
+        text = _run_agent(
+            manager,
+            state["context"] or state["input"],
+            extra_tools=delegate_tools,
+            extra_system_prompt=delegation_guidance,
+            require_tool_use_on_first_call=True,
+            usage_sink=usage_sink,
+        )
         return {"contributions": {manager.name: text}, "usage": {manager.name: usage_sink}, "context": text, "output": text}
 
     return node

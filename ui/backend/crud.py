@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from bestteam import AgentSpec, KnowledgeBaseSpec, SkillSpec, TeamSpec
 from bestteam.core.knowledge_base import LocalFolderKnowledgeBase
 from bestteam.core.loader import _build_workflow
+from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError
 
 from .auth_api import get_current_user
@@ -114,6 +115,11 @@ def upload_knowledge_base_files(
     top_k: int = 5,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    try:
+        _validate_tool_name(item_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) > _MAX_FILES_PER_UPLOAD:

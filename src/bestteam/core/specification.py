@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..exceptions import ConfigurationError
 from .loader import _build_workflow
 from .workflow import Workflow
+
+_VALID_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_tool_name(name: str) -> None:
+    """Knowledge base names become literal tool-call function names (see
+    `make_knowledge_base_tool`); most LLM provider APIs reject function names
+    containing spaces or other punctuation, so reject them here rather than
+    failing silently inside a real model call."""
+    if not _VALID_TOOL_NAME_RE.match(name):
+        raise ValueError(
+            f"'{name}' is not a valid knowledge base name: use only letters, "
+            "numbers, underscores, and hyphens (no spaces or other "
+            "punctuation) -- this name is used directly as a tool name when "
+            "an agent calls it."
+        )
 
 # Guides the "Solution Architect" agent (see docs/team_builder_methodology.md,
 # Specification stage) from confirmed Requirements to a Specification. Written
@@ -33,6 +50,14 @@ If skills are listed in the input, assign them to agents via each agent's \
 reusable instruction document for a repeatable task -- prefer assigning one \
 over re-describing the same task in `backstory`. Only use skill names from \
 the provided list; never invent names.
+
+Knowledge bases work the same way: only reference one by adding its exact \
+name to an agent's `tools` list, and only if it appears in an "Available \
+knowledge bases" list provided in the input. Never add a `knowledge_bases` \
+entry of your own with an invented `path` -- there is no way for you to \
+know what exists on the server's filesystem. If no available knowledge \
+base matches what the customer needs (including when none are listed at \
+all), design the team without one rather than fabricating one.
 
 Group agents into teams. Use 'sequential' mode when agents hand work to each \
 other in order, 'parallel' mode when they work independently on the same \
@@ -134,6 +159,12 @@ class KnowledgeBaseSpec(BaseModel):
     embedding_model: Optional[str] = None
     score_threshold: Optional[float] = None
     cache_path: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_valid_tool_identifier(cls, v: str) -> str:
+        _validate_tool_name(v)
+        return v
 
     def to_raw(self) -> Dict[str, Any]:
         raw: Dict[str, Any] = {

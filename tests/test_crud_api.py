@@ -85,6 +85,14 @@ def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
     assert "embedding_model" not in resp.json()["config"]
 
 
+def test_knowledge_base_put_rejects_name_with_spaces(client):
+    config = {"path": "./docs", "type": "local_folder"}
+
+    resp = client.put("/api/config/knowledge_bases/bad name", json=config)
+
+    assert resp.status_code == 400
+
+
 def test_unknown_agent_returns_404(client):
     assert client.get("/api/config/agents/does-not-exist").status_code == 404
     assert client.delete("/api/config/agents/does-not-exist").status_code == 404
@@ -107,6 +115,16 @@ def test_upload_creates_queryable_local_folder_kb(client):
 
     get_resp = client.get("/api/config/knowledge_bases/support_docs")
     assert get_resp.status_code == 200
+
+
+def test_upload_rejects_name_with_spaces_before_writing_files(client):
+    from ui.backend.crud import _KB_UPLOADS_DIR
+
+    files = [("files", ("doc1.txt", b"some content here for parsing", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/bad name/upload", files=files)
+
+    assert resp.status_code == 400
+    assert not (_KB_UPLOADS_DIR / "bad name").exists()
 
 
 def test_upload_rejects_too_many_files(client):

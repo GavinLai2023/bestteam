@@ -7,7 +7,7 @@ const KINDS = [
   { key: 'agents', label: 'Agents', idField: 'name', editableField: 'config' },
   { key: 'teams', label: 'Teams', idField: 'name', editableField: 'config' },
   { key: 'knowledge_bases', label: 'Knowledge bases', idField: 'name', editableField: 'config' },
-  { key: 'workflows', label: 'Workflows', idField: 'name', editableField: 'config' },
+  { key: 'workflows', label: 'AI Teams', idField: 'name', editableField: 'config' },
   { key: 'skills', label: 'Skills', idField: 'name', editableField: 'config' },
   { key: 'model-catalog', label: 'Model catalog', idField: 'spec', editableField: null },
 ]
@@ -133,6 +133,7 @@ export default function AdvancedPage() {
 
   const remove = async () => {
     if (!selectedId) return
+    if (!window.confirm(`Delete "${selectedId}" from ${kind.label}? This cannot be undone.`)) return
     const startedFor = activeKey
     setSaving(true)
     setError(null)
@@ -154,7 +155,7 @@ export default function AdvancedPage() {
     <div className="advanced">
       <header>
         <h1>Advanced configuration</h1>
-        <p>Direct access to the underlying agents, teams, knowledge bases, workflows, and model catalog.</p>
+        <p>Direct access to the underlying agents, teams, knowledge bases, AI teams, and model catalog.</p>
       </header>
 
       <div className="advanced-layout">

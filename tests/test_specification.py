@@ -232,6 +232,11 @@ def test_knowledge_base_spec_omits_vector_only_fields_for_local_folder():
     assert "score_threshold" not in raw
 
 
+def test_knowledge_base_spec_rejects_name_with_spaces():
+    with pytest.raises(ValueError, match="not a valid knowledge base name"):
+        KnowledgeBaseSpec(name="bad name", path="./docs")
+
+
 def test_generate_specification_returns_first_valid_spec(tmp_path):
     valid = _basic_spec()
     model = _FakeArchitectChatModel(responses=[valid])

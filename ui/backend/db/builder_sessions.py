@@ -50,6 +50,13 @@ def get_session(db: Session, session_id: str) -> Optional[BuilderSession]:
     return db.get(BuilderSession, session_id)
 
 
+def list_sessions(db: Session, *, limit: int = 50) -> list[BuilderSession]:
+    """All builder sessions, most-recently-updated first, for an "AI teams
+    I've built" list. No pagination -- per-deployment scale is small (see
+    ui/backend/CLAUDE.md's auth section)."""
+    return db.query(BuilderSession).order_by(BuilderSession.updated_at.desc()).limit(limit).all()
+
+
 def update_session(db: Session, session_id: str, **fields: Any) -> BuilderSession:
     """Update one or more fields of a builder session.
 

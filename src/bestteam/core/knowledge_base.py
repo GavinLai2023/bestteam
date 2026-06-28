@@ -16,6 +16,34 @@ _SUPPORTED_SUFFIXES = {
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# CJK (Chinese/Japanese/Korean) text has no whitespace between words, so the
+# word-boundary `_TOKEN_RE` above never matches it -- every all-CJK query
+# tokenizes to nothing and silently never matches any document. There's no
+# segmentation library here (by design -- see core/CLAUDE.md's "no API key,
+# no vector store" rationale for this knowledge base type), so each maximal
+# run of CJK characters is split into overlapping bigrams (a lone character
+# becomes its own single-character token) -- a common cheap fallback for
+# keyword-overlap search without a proper word segmenter. Plain
+# single-character unigrams were tried first and rejected: they make
+# unrelated chunks that merely share one common character (e.g. a return
+# policy and a shipping policy both containing the character for "goods")
+# match as readily as truly related ones. Ranges (via \\u escapes to avoid
+# any source-encoding ambiguity with raw CJK literals): CJK Unified
+# Ideographs (U+4E00-U+9FFF), Extension A (U+3400-U+4DBF), and Compatibility
+# Ideographs (U+F900-U+FAFF).
+_CJK_RUN_RE = re.compile("[一-鿿㐀-䶿豈-﫿]+")
+
+
+def _cjk_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    for run in _CJK_RUN_RE.findall(text):
+        if len(run) == 1:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
 # Common English function words, ignored when deciding whether a chunk is
 # relevant to a query. Without this, tiny corpora (a handful of documents)
 # can match every chunk on words like "and"/"the", and BM25's IDF term is
@@ -92,7 +120,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        return _TOKEN_RE.findall(text.lower())
+        text = text.lower()
+        return _TOKEN_RE.findall(text) + _cjk_tokens(text)
 
     @staticmethod
     def _significant_terms(tokens: List[str]) -> Set[str]:

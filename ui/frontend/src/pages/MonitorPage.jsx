@@ -79,7 +79,7 @@ function MonitorPage() {
     <div className="dashboard">
       <header>
         <h1>bestteam · runtime monitor</h1>
-        <p>Pick a workflow, give it an input, and watch agents hand off live.</p>
+        <p>Pick a team, give it an input, and watch agents hand off live.</p>
       </header>
 
       {status === 'unreachable' && (
@@ -92,7 +92,7 @@ function MonitorPage() {
 
       <section className="controls">
         <label>
-          Workflow
+          Team
           <select value={selected} onChange={(e) => setSelected(e.target.value)}>
             {workflows.map((name) => (
               <option key={name} value={name}>
@@ -120,7 +120,7 @@ function MonitorPage() {
       <section className="trace">
         <h2>Live trace</h2>
         {events.length === 0 ? (
-          <p className="hint">No run yet — pick a workflow and hit Run.</p>
+          <p className="hint">No run yet — pick a team and hit Run.</p>
         ) : (
           <ul>
             {events.map((event, i) => (

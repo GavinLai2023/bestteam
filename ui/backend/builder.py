@@ -18,14 +18,17 @@ from sqlalchemy.orm import Session
 
 from bestteam import Specification, generate_requirements, generate_specification, validate_specification
 from bestteam.adapters.langgraph_adapter import _resolve_model
+from bestteam.core.knowledge_base import make_knowledge_base_tool
+from bestteam.core.loader import _build_knowledge_base
 from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_user
-from .db.builder_sessions import append_feedback, create_session, get_session, update_session
+from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
-from .db.models import BuilderSession, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, WorkflowRecord
 from .db_session import get_db
+from .knowledge_bases import load_knowledge_base_tools
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -114,12 +117,48 @@ def _with_skill_catalog(db: Session, text: str) -> str:
     return text + "\n".join(lines)
 
 
+def _with_knowledge_base_catalog(db: Session, text: str) -> str:
+    """Append available standalone knowledge bases (if any) so the Solution
+    Architect can reference them by name, parallel to `_with_skill_catalog`.
+
+    Returns `text` unchanged when none exist, so the architect sees no
+    "Available knowledge bases" section and has nothing to draw a name
+    from -- combined with `_ARCHITECT_SYSTEM_PROMPT`'s instruction not to
+    invent one, this is what stops it from fabricating a `path`.
+    """
+    records = db.query(KnowledgeBaseRecord).all()
+    if not records:
+        return text
+    lines = ["", "", "Available knowledge bases (reference by name in an agent's tools, do not redeclare):"]
+    for record in records:
+        kb_type = record.config.get("type", "local_folder")
+        lines.append(f"- {record.name} (type: {kb_type})")
+    return text + "\n".join(lines)
+
+
+def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
+    """Build a tool for every standalone knowledge base in the database.
+
+    Used before a Specification exists yet (at generation time), when we
+    don't yet know which knowledge bases the architect's agents will
+    reference -- unlike `load_knowledge_base_tools`, which filters to a
+    known `raw` config's referenced names.
+    """
+    records = db.query(KnowledgeBaseRecord).all()
+    tools: Dict[str, Any] = {}
+    for record in records:
+        kb = _build_knowledge_base(record.config, source)
+        tools[kb.name] = make_knowledge_base_tool(kb)
+    return tools
+
+
 def _validate_spec_payload(
-    payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
+    db: Session, payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
 ) -> Specification:
     try:
         spec = Specification.model_validate(payload)
-        validate_specification(spec, source=source, extra_skills=extra_skills or {})
+        extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
+        validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills or {})
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConfigurationError as exc:
@@ -161,6 +200,14 @@ def create_builder_session(req: CreateSessionRequest, db: Session = Depends(get_
     return _session_to_dict(session)
 
 
+@router.get("")
+def list_builder_sessions(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """List builder sessions (most recent first), for an "AI teams I've
+    built" list page. A session with status 'deployed' has a live
+    WorkflowRecord matching specification_json['name']."""
+    return {"sessions": [_session_to_dict(s) for s in list_sessions(db)]}
+
+
 @router.get("/{session_id}")
 def get_builder_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
     return _session_to_dict(_get_session_or_404(db, session_id))
@@ -200,15 +247,23 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(req.specification, source, extra_skills=load_skills(db))
+        spec = _validate_spec_payload(db, req.specification, source, extra_skills=load_skills(db))
     elif req.model is not None:
         requirements_text = _requirements_text(session)
         if req.feedback:
             requirements_text += f"\n\nCustomer feedback on the previous design:\n{req.feedback}"
         requirements_text = _with_model_catalog(db, requirements_text)
         requirements_text = _with_skill_catalog(db, requirements_text)
+        requirements_text = _with_knowledge_base_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(generate_specification, chat_model, requirements_text, source=source, extra_skills=load_skills(db))
+        spec = _call_model(
+            generate_specification,
+            chat_model,
+            requirements_text,
+            source=source,
+            extra_tools=_all_knowledge_base_tools(db, source),
+            extra_skills=load_skills(db),
+        )
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
@@ -228,7 +283,7 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(req.specification, source, extra_skills=load_skills(db))
+        spec = _validate_spec_payload(db, req.specification, source, extra_skills=load_skills(db))
     elif req.model is not None:
         if session.specification_json is None:
             raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
@@ -240,8 +295,16 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
         )
         requirements_text = _with_model_catalog(db, requirements_text)
         requirements_text = _with_skill_catalog(db, requirements_text)
+        requirements_text = _with_knowledge_base_catalog(db, requirements_text)
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(generate_specification, chat_model, requirements_text, source=source, extra_skills=load_skills(db))
+        spec = _call_model(
+            generate_specification,
+            chat_model,
+            requirements_text,
+            source=source,
+            extra_tools=_all_knowledge_base_tools(db, source),
+            extra_skills=load_skills(db),
+        )
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
@@ -260,8 +323,9 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
 
     spec = Specification.model_validate(session.specification_json)
     source = _source_for(session_id)
+    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:
-        workflow = validate_specification(spec, source=source, extra_skills=load_skills(db))
+        workflow = validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -282,8 +346,9 @@ def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, 
 
     spec = Specification.model_validate(session.specification_json)
     source = _source_for(session_id)
+    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:
-        validate_specification(spec, source=source, extra_skills=load_skills(db))
+        validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

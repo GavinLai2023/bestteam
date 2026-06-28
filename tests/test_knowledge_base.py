@@ -133,6 +133,25 @@ def test_knowledge_base_query_no_match_returns_message(docs_kb):
     assert "No results found in knowledge base 'docs'" in result
 
 
+@pytest.fixture
+def chinese_docs_kb(tmp_path):
+    (tmp_path / "policy.txt").write_text(
+        "退货政策：商品在签收后7天内，因质量问题可申请全额退款。",
+        encoding="utf-8",
+    )
+    (tmp_path / "shipping.txt").write_text(
+        "发货时间：订单提交后通常在两个工作日内发货。",
+        encoding="utf-8",
+    )
+    return LocalFolderKnowledgeBase("docs", tmp_path)
+
+
+def test_knowledge_base_query_matches_chinese_text(chinese_docs_kb):
+    result = chinese_docs_kb.query("退货政策")
+    assert "policy.txt" in result
+    assert "shipping.txt" not in result
+
+
 # ---------------------------------------------------------------------------
 # make_knowledge_base_tool
 # ---------------------------------------------------------------------------

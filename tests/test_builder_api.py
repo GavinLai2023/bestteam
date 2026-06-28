@@ -8,9 +8,10 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 
 from ui.backend import main as backend_main
-from ui.backend.builder import _with_model_catalog, _with_skill_catalog
+from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
 from ui.backend.db.model_catalog import upsert_entry
+from ui.backend.db.models import KnowledgeBaseRecord
 from ui.backend.db_session import get_db
 
 
@@ -45,6 +46,23 @@ def test_with_skill_catalog_appends_skill_list(db_session):
     assert "research_skill" in result
     assert "Deep research assistant" in result
     assert "web_search" in result
+
+
+def test_with_knowledge_base_catalog_unchanged_when_no_knowledge_bases(db_session):
+    text = "Some requirements."
+    assert _with_knowledge_base_catalog(db_session, text) == text
+
+
+def test_with_knowledge_base_catalog_appends_kb_list(db_session):
+    db_session.add(KnowledgeBaseRecord(
+        name="product_info_kb",
+        config={"name": "product_info_kb", "path": "/tmp/does-not-matter-here", "type": "local_folder"},
+    ))
+    db_session.commit()
+
+    result = _with_knowledge_base_catalog(db_session, "Requirements here.")
+    assert "product_info_kb" in result
+    assert "local_folder" in result
 
 
 @pytest.fixture
@@ -116,6 +134,17 @@ def test_create_session_starts_in_intent_stage(client):
 def test_get_session_returns_404_for_unknown_id(client):
     resp = client.get("/api/builder/sessions/does-not-exist")
     assert resp.status_code == 404
+
+
+def test_list_sessions_returns_most_recently_updated_first(client):
+    first = client.post("/api/builder/sessions", json={"intent_text": "First team"}).json()
+    second = client.post("/api/builder/sessions", json={"intent_text": "Second team"}).json()
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
+    ids = [s["id"] for s in resp.json()["sessions"]]
+    assert ids.index(second["id"]) < ids.index(first["id"])
 
 
 def test_submit_requirements_with_confirmed_payload(client):
@@ -231,6 +260,33 @@ def test_deployed_workflow_can_be_run_via_get_workflow(client):
 
     resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
 
+    assert resp.status_code == 200
+
+
+def test_specification_can_reference_existing_knowledge_base_by_name(client, tmp_path):
+    kb_dir = tmp_path / "product_info"
+    kb_dir.mkdir()
+    (kb_dir / "policy.txt").write_text("Refunds accepted within 7 days.", encoding="utf-8")
+
+    resp = client.put(
+        "/api/config/knowledge_bases/product_info_kb",
+        json={"path": str(kb_dir), "type": "local_folder"},
+    )
+    assert resp.status_code == 200
+
+    spec_with_kb = {
+        **_VALID_SPEC,
+        "agents": [{**_VALID_SPEC["agents"][0], "tools": ["product_info_kb"]}],
+    }
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    resp = client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": spec_with_kb})
+    assert resp.status_code == 200
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/test-runs", json={"input": "Can I get a refund?"})
+    assert resp.status_code == 200
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/deploy")
     assert resp.status_code == 200
 
 

@@ -96,6 +96,7 @@ export const api = {
   createSession: (intent_text, as_is_text) =>
     request('/api/builder/sessions', { method: 'POST', body: JSON.stringify({ intent_text, as_is_text }) }),
   getSession: (id) => request(`/api/builder/sessions/${id}`),
+  listSessions: () => request('/api/builder/sessions'),
   submitRequirements: (id, payload) =>
     request(`/api/builder/sessions/${id}/requirements`, { method: 'POST', body: JSON.stringify(payload) }),
   submitSpecification: (id, payload) =>
