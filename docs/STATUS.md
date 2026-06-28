@@ -23,10 +23,23 @@
 - Sub-project 2: Agent Skills Library — persistent DB-backed skills via
   `SkillRecord`, `/api/config/skills` CRUD, Solution Architect auto-assignment
   of skills to agents, frontend Skills tab in AdvancedPage.
+- HIERARCHICAL mode improvements: manager gets explicit delegation guidance
+  injected into system prompt + `tool_choice="required"` on first call so real
+  LLMs actually delegate; subordinates with tools also force tool use on first
+  call; tool call failures logged as warnings.
+- KB-aware builder: Solution Architect told about existing KB records so it
+  references them by name; KB tools passed through `validate_specification` at
+  every builder stage; KB names validated as tool-safe identifiers.
+- BM25 CJK tokenization: bigram fallback for Chinese/Japanese/Korean text.
+- "My teams" page (`/teams`): lists resumable builder sessions, sorted by
+  most-recently-updated; nav link in sidebar.
+- Interview recording upload: consultant uploads audio/video of customer
+  interview; Whisper API transcribes it; LLM extracts `intent_text`/`as_is_text`
+  to pre-fill IntentPage; files >25 MB split via ffmpeg into 10-min chunks.
 
 ## In Progress
 
-Nothing currently in flight (working tree clean as of this writing).
+Nothing currently in flight.
 
 ## Known issues / tech debt
 
