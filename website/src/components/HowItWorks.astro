@@ -1,0 +1,34 @@
+---
+const steps = [
+  {
+    n: '1',
+    title: 'Describe your need',
+    desc: 'Type what you want the team to accomplish — or upload a client discovery recording for automatic brief generation.',
+  },
+  {
+    n: '2',
+    title: 'AI designs the team',
+    desc: 'The Solution Architect proposes agents, assigns roles and tools, and selects the right collaboration mode. You review and confirm.',
+  },
+  {
+    n: '3',
+    title: 'Deploy and monitor',
+    desc: 'One Docker Compose command launches your team. The monitoring dashboard streams every agent action live so nothing is a black box.',
+  },
+];
+---
+<section class="py-20 px-6 bg-gray-50">
+  <div class="max-w-4xl mx-auto text-center">
+    <h2 class="text-3xl font-bold text-gray-900 mb-4">From idea to deployed team in three steps</h2>
+    <p class="text-gray-500 mb-14 max-w-lg mx-auto">No orchestration expertise required. The platform handles the complexity.</p>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-left">
+      {steps.map((s) => (
+        <div>
+          <div class="w-10 h-10 rounded-full bg-brand text-white font-bold text-sm flex items-center justify-center mb-4">{s.n}</div>
+          <h3 class="font-semibold text-gray-900 mb-2">{s.title}</h3>
+          <p class="text-sm text-gray-500 leading-relaxed">{s.desc}</p>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

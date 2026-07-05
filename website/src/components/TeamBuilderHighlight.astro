@@ -1,0 +1,52 @@
+---
+const steps = [
+  { n: '01', label: 'Describe your intent in plain language' },
+  { n: '02', label: 'AI proposes the team — agents, roles, and tools' },
+  { n: '03', label: 'Review with a live test run before committing' },
+  { n: '04', label: 'Deploy with one click' },
+];
+---
+<section class="py-20 px-6 bg-gray-50">
+  <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+    <div>
+      <div class="text-brand text-xs font-semibold tracking-widest uppercase mb-4">Team Builder Wizard</div>
+      <h2 class="text-3xl font-bold text-gray-900 mb-6 leading-tight">
+        Non-technical users build<br />production AI teams
+      </h2>
+      <p class="text-gray-500 mb-8 leading-relaxed">
+        No YAML. No Python. No orchestration code. Anyone on your team can configure and deploy a custom AI workflow in under ten minutes.
+      </p>
+      <div class="space-y-4">
+        {steps.map((s) => (
+          <div class="flex items-start gap-4">
+            <span class="text-brand font-mono text-sm font-bold w-8 flex-shrink-0 pt-0.5">{s.n}</span>
+            <span class="text-gray-700 text-sm leading-relaxed">{s.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-lg overflow-hidden">
+      <div class="bg-ink px-6 py-4">
+        <div class="text-white/50 text-xs mb-2 font-mono">Team Builder</div>
+        <div class="flex gap-2">
+          {['Intent', 'Preview', 'Confirm', 'Deploy'].map((label, i) => (
+            <div class="flex-1">
+              <div class:list={['h-1 rounded-full', i === 0 ? 'bg-brand' : i === 1 ? 'bg-brand/40' : 'bg-white/15']}></div>
+              <div class:list={['text-xs mt-1.5', i === 0 ? 'text-white' : 'text-white/40']}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div class="px-6 py-5">
+        <div class="text-xs text-gray-400 mb-2 font-medium">What should your AI team accomplish?</div>
+        <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 min-h-[4rem] mb-4">
+          Automate our weekly client report — research industry news, summarise key trends, and draft a 1-page brief…
+        </div>
+        <div class="flex gap-2">
+          <div class="h-8 w-28 bg-gray-100 rounded-md"></div>
+          <div class="h-8 w-28 bg-brand rounded-md"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
