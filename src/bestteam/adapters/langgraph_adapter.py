@@ -36,6 +36,10 @@ class _TeamState(TypedDict):
     # `_record_usage`). Empty for `fake:` models, which don't report usage.
     usage: Annotated[Dict[str, List[Dict[str, Any]]], operator.or_]
     output: str
+    # Recalled per-user memory for this run, injected into each agent's system
+    # prompt (see core/memory.py). Plain (no reducer): nodes only read it, and
+    # it's set once by `_initial_state` and never written by a node.
+    memory_preamble: str
 
 
 def _resolve_model(model: Any) -> BaseChatModel:
@@ -217,7 +221,12 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
 
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
-        text = _run_agent(agent, state["context"] or state["input"], usage_sink=usage_sink)
+        text = _run_agent(
+            agent,
+            state["context"] or state["input"],
+            extra_system_prompt=state.get("memory_preamble", ""),
+            usage_sink=usage_sink,
+        )
 
         update: Dict[str, Any] = {"contributions": {agent.name: text}, "usage": {agent.name: usage_sink}}
         if propagate_context:
@@ -272,11 +281,13 @@ def _hierarchical_node(team: Team):
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
         delegate_tools = [_make_delegate_tool(agent, usage_sink=usage_sink) for agent in team.agents]
+        preamble = state.get("memory_preamble", "")
+        extra_system_prompt = f"{preamble}\n\n{delegation_guidance}" if preamble else delegation_guidance
         text = _run_agent(
             manager,
             state["context"] or state["input"],
             extra_tools=delegate_tools,
-            extra_system_prompt=delegation_guidance,
+            extra_system_prompt=extra_system_prompt,
             require_tool_use_on_first_call=True,
             usage_sink=usage_sink,
         )
@@ -285,8 +296,15 @@ def _hierarchical_node(team: Team):
     return node
 
 
-def _initial_state(input: str) -> _TeamState:
-    return {"input": input, "context": "", "contributions": {}, "usage": {}, "output": ""}
+def _initial_state(input: str, memory_preamble: str = "") -> _TeamState:
+    return {
+        "input": input,
+        "context": "",
+        "contributions": {},
+        "usage": {},
+        "output": "",
+        "memory_preamble": memory_preamble,
+    }
 
 
 def _passthrough_node(_state: _TeamState) -> Dict[str, Any]:
@@ -371,9 +389,9 @@ class LangGraphAdapter(EngineAdapter):
         graph.add_node(node_name, _hierarchical_node(team))
         return node_name, node_name
 
-    def execute(self, compiled: Any, input: str) -> WorkflowResult:
+    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> WorkflowResult:
         try:
-            final_state = compiled.invoke(_initial_state(input))
+            final_state = compiled.invoke(_initial_state(input, memory_preamble))
         except BestTeamError:
             # Already a framework-level error (e.g. ConfigurationError raised
             # lazily during model resolution) — surface it as-is rather than
@@ -395,7 +413,7 @@ class LangGraphAdapter(EngineAdapter):
     def to_mermaid(self, compiled: Any) -> str:
         return compiled.get_graph().draw_mermaid()
 
-    def stream(self, compiled: Any, input: str) -> Iterator[TraceEvent]:
+    def stream(self, compiled: Any, input: str, memory_preamble: str = "") -> Iterator[TraceEvent]:
         """Yield an `agent_completed` TraceEvent each time a node finishes.
 
         Built on LangGraph's `stream_mode="updates"`, which yields exactly the
@@ -403,7 +421,7 @@ class LangGraphAdapter(EngineAdapter):
         just that node's own entry, never a merged view of the whole run.
         """
         try:
-            for update in compiled.stream(_initial_state(input), stream_mode="updates"):
+            for update in compiled.stream(_initial_state(input, memory_preamble), stream_mode="updates"):
                 for partial in update.values():
                     if not isinstance(partial, dict):
                         continue

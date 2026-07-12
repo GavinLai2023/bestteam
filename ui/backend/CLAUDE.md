@@ -116,11 +116,23 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   all delegated subordinates share one `usage_sink` per turn, so the total
   surfaces on the manager's single `agent_completed` event.
   `ui/backend/runtime.py::run_in_background(run_id, workflow, input,
-  engine=None)` — if `engine` is given (callers pass `db.get_bind()` so tests
-  using an overridden in-memory DB still work), opens its own `Session` and
-  calls `db/usage.py::record_usage()` for each `usage` entry on every
-  `agent_completed` event, computing `cost_estimate` from `model_catalog` when
-  the model spec matches a catalog entry (`None` otherwise).
+  engine=None, user_id=None)` — if `engine` is given (callers pass
+  `db.get_bind()` so tests using an overridden in-memory DB still work), opens
+  its own `Session` and calls `db/usage.py::record_usage()` for each `usage`
+  entry on every `agent_completed` event, computing `cost_estimate` from
+  `model_catalog` when the model spec matches a catalog entry (`None` otherwise).
+
+## Per-user memory
+
+`ui/backend/runtime.py::_make_memory()` builds a `bestteam.MemoryManager`
+**on the worker thread** (so the `SqliteBM25Memory` connection is thread-local)
+from env: `BESTTEAM_MEMORY_DB` (unset/empty → memory disabled, runs unchanged;
+set → the SQLite path) and `BESTTEAM_MEMORY_MODEL` (optional → enables one
+extraction LLM call per run for semantic/procedural records). `run_in_background`
+passes it plus `user_id` into `workflow.stream(...)`; `main.py::create_run`
+threads the JWT `user.username` through as `user_id` (the wizard's
+`builder.py` test-runs omit it, so sandbox runs never touch memory). See
+`src/bestteam/core/CLAUDE.md` for the SDK-side design.
 
 ## Known limitation: general-purpose cache
 

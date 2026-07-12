@@ -210,10 +210,10 @@ re-chunking files (and, for `vector`, calling an embedding model).
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
-- **`core/memory.py`'s `Memory` ABC is unused.** It defines a
-  `remember`/`recall` interface for persistent agent memory, but only an
-  in-process `InMemoryStore` implementation exists today — it isn't wired
-  into knowledge base retrieval or anything else.
+- **`core/memory.py` now implements per-user memory** (`Memory` ABC +
+  `SqliteBM25Memory` + `MemoryManager`), separate from knowledge bases but
+  sharing the same CJK-aware tokenizer via `core/text_tokenize.py`. See
+  `src/bestteam/core/CLAUDE.md`. It is not wired into knowledge base retrieval.
 
 ## File reference
 

@@ -78,8 +78,11 @@ implemented** — don't assume they exist:
 
 - **Vector knowledge base retrieval is single-stage** (no query
   rewriting/expansion or reranking, no external vector store, no DMS
-  connectors); `core/memory.py`'s `Memory` ABC is similarly unused — see
-  `src/bestteam/core/CLAUDE.md`.
+  connectors) — see `src/bestteam/core/CLAUDE.md`.
+- **Per-user memory recall is single-stage BM25** (no rerank/expansion),
+  semantic/procedural records have no auto-dedup, and there's no frontend
+  memory-management UI. Disabled by default (`BESTTEAM_MEMORY_DB`) — see
+  `core/memory.py` and `src/bestteam/core/CLAUDE.md`.
 - **Persistent run state**: `RunRegistry` is in-memory only, not yet wired
   to the `runs`/`trace_events` tables — see `ui/backend/db/CLAUDE.md`.
 - **General-purpose cache**: only local per-process caches exist — see

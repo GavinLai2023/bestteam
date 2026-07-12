@@ -1,34 +1,337 @@
+"""Per-user memory: what the platform remembers about an end-user across runs.
+
+The `Memory` ABC is a storage abstraction so customers don't have to pick a
+vector store or persistence backend before memory works. The default
+`SqliteBM25Memory` mirrors `core/knowledge_base.py`'s local-folder KB — stdlib
+`sqlite3` for persistence plus `rank-bm25` keyword search, no API key and no
+external service. Production deployments can swap in a Redis-, Postgres-, or
+vector-store-backed implementation (or a mem0-backed one) behind this same
+interface without touching agents, the adapter, or the API.
+
+Four memory "types" are modelled as rows tagged by `MemoryRecord.type`:
+
+- ``working``   — the live run state (`_TeamState`); not stored here.
+- ``episodic``  — one "user asked X, team answered Y" record per run.
+- ``semantic``  — abstracted facts about the user ("prefers bullet points").
+- ``procedural``— notes on what handled a kind of request well.
+
+`MemoryManager` ties a store to the execution path: `recall_preamble()` turns
+the top search hits into a system-prompt block seeded into a run, and
+`record_run()` writes the episodic record (always) plus, when an extraction
+model is configured, the semantic/procedural records from a single LLM call.
+"""
+
 from __future__ import annotations
 
+import json
+import logging
+import sqlite3
+import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence
+
+from ..exceptions import ConfigurationError
+
+_logger = logging.getLogger(__name__)
+
+# The recognized memory types. `add()` doesn't enforce this set (a custom
+# store may model others), but these are the ones the framework writes/reads.
+EPISODIC = "episodic"
+SEMANTIC = "semantic"
+PROCEDURAL = "procedural"
+
+
+@dataclass
+class MemoryRecord:
+    """A single remembered item, independent of the storage backend."""
+
+    id: str
+    user_id: str
+    type: str
+    content: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
 
 
 class Memory(ABC):
-    """Storage abstraction so customers don't have to pick a vector store or
-    persistence backend before they can write their first workflow.
+    """Storage abstraction for per-user memory records.
 
-    Production deployments can swap in a Redis-, Postgres-, or vector-store
-    backed implementation behind this same interface.
+    Implementations decide where records live (in-process, SQLite, a vector
+    store, mem0, ...) and how `search` ranks them; the framework only relies
+    on this interface.
     """
 
     @abstractmethod
-    def remember(self, key: str, value: Any) -> None:
-        """Persist a value under a key."""
+    def add(
+        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> MemoryRecord:
+        """Persist one record for `user_id` and return it (with id/timestamp filled in)."""
 
     @abstractmethod
-    def recall(self, key: str) -> Optional[Any]:
-        """Retrieve a previously remembered value, or None if absent."""
+    def search(
+        self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
+    ) -> List[MemoryRecord]:
+        """Return up to `top_k` of `user_id`'s records most relevant to `query`."""
+
+    @abstractmethod
+    def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
+        """Return all of `user_id`'s records (optionally filtered by type), newest first."""
+
+    @abstractmethod
+    def delete(self, memory_id: str) -> None:
+        """Delete the record with `memory_id` (no-op if absent)."""
 
 
-class InMemoryStore(Memory):
-    """Default in-process memory — good for development and simple deployments."""
+class SqliteBM25Memory(Memory):
+    """Default memory store: stdlib SQLite persistence + BM25 keyword search.
 
-    def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+    Deliberately lightweight, exactly like `LocalFolderKnowledgeBase` — no
+    embeddings, no vector store, no API key. Records are persisted to a SQLite
+    file (or ``":memory:"`` for tests); a `search` loads the user's rows and
+    ranks them with `rank-bm25` over the same CJK-aware tokenizer the knowledge
+    base uses (`core/text_tokenize.py`), so English and Chinese queries both
+    work.
 
-    def remember(self, key: str, value: Any) -> None:
-        self._data[key] = value
+    The connection is created here and used only from the thread that
+    constructs the store (``check_same_thread=False`` is *not* set); the
+    backend builds one per worker thread so the connection stays thread-local.
+    """
 
-    def recall(self, key: str) -> Optional[Any]:
-        return self._data.get(key)
+    def __init__(self, path: str = ":memory:") -> None:
+        try:
+            import rank_bm25  # noqa: F401
+        except ImportError as exc:
+            raise ConfigurationError(
+                "Memory requires the 'rank-bm25' package. "
+                "Install it with: pip install 'bestteam[tools-rag]'"
+            ) from exc
+
+        self.path = str(path)
+        self._conn = sqlite3.connect(self.path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
+        self._conn.commit()
+
+    def add(
+        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> MemoryRecord:
+        record = MemoryRecord(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            type=type,
+            content=content,
+            metadata=metadata or {},
+            created_at=datetime.utcnow().isoformat(),
+        )
+        self._conn.execute(
+            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record.id,
+                record.user_id,
+                record.type,
+                record.content,
+                json.dumps(record.metadata),
+                record.created_at,
+            ),
+        )
+        self._conn.commit()
+        return record
+
+    def _rows_to_records(self, rows: Sequence[sqlite3.Row]) -> List[MemoryRecord]:
+        records = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"])
+            except (ValueError, TypeError):
+                metadata = {}
+            records.append(
+                MemoryRecord(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    type=row["type"],
+                    content=row["content"],
+                    metadata=metadata,
+                    created_at=row["created_at"],
+                )
+            )
+        return records
+
+    def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
+        sql = "SELECT * FROM memories WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if types:
+            placeholders = ",".join("?" for _ in types)
+            sql += f" AND type IN ({placeholders})"
+            params.extend(types)
+        sql += " ORDER BY created_at DESC"
+        rows = self._conn.execute(sql, params).fetchall()
+        return self._rows_to_records(rows)
+
+    def search(
+        self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
+    ) -> List[MemoryRecord]:
+        from rank_bm25 import BM25Okapi
+
+        from .text_tokenize import significant_terms, tokenize
+
+        candidates = self.all(user_id, types)
+        if not candidates:
+            return []
+
+        # Same overlap-then-score ranking as LocalFolderKnowledgeBase.query:
+        # keep only records sharing at least one significant (non-stopword)
+        # term with the query, then sort by (term overlap, BM25 score).
+        candidate_tokens = [tokenize(r.content) for r in candidates]
+        candidate_terms = [significant_terms(toks) for toks in candidate_tokens]
+        query_tokens = tokenize(query)
+        query_terms = significant_terms(query_tokens)
+        if not query_terms:
+            return []
+
+        bm25 = BM25Okapi(candidate_tokens)
+        scores = bm25.get_scores(query_tokens)
+
+        matches = [
+            (len(query_terms & terms), score, record)
+            for score, record, terms in zip(scores, candidates, candidate_terms)
+            if query_terms & terms
+        ]
+        matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        return [record for _overlap, _score, record in matches[:top_k]]
+
+    def delete(self, memory_id: str) -> None:
+        self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        self._conn.commit()
+
+
+# Instructs the extraction model to summarize a run into durable facts. Kept
+# terse and JSON-only so a cheap model can follow it and parsing stays simple.
+_EXTRACTION_SYSTEM_PROMPT = (
+    "You distill a completed AI-team interaction into durable memory about the "
+    "user, for use in future sessions. Respond with ONLY a JSON object of the "
+    'form {"facts": ["..."], "procedural": "..."}. "facts" is a list of stable, '
+    "user-specific facts or preferences worth remembering (empty list if none). "
+    '"procedural" is one short note on what kind of request this was and how it '
+    "was handled well (empty string if nothing useful). No prose outside the JSON."
+)
+
+
+class MemoryManager:
+    """Ties a `Memory` store into a workflow run.
+
+    `recall_preamble` is called before a run to seed recalled memory into every
+    agent's system prompt; `record_run` is called after a successful run to
+    persist what happened. When `extraction_model` is set (a model spec string
+    like ``"fake:..."``/``"openai:..."`` or a `BaseChatModel`), `record_run`
+    makes one extra LLM call to derive semantic/procedural records; otherwise
+    only the $0 episodic record is written.
+    """
+
+    def __init__(self, store: Memory, extraction_model: Any = None, top_k: int = 5) -> None:
+        self.store = store
+        self.extraction_model = extraction_model
+        self.top_k = top_k
+
+    def recall_preamble(self, user_id: Optional[str], query: str) -> str:
+        """Format the top recalled records for `user_id` into a system-prompt block.
+
+        Returns ``""`` when there's no user or nothing relevant, so callers can
+        pass the result straight through as `memory_preamble` (empty = no-op).
+        """
+        if not user_id:
+            return ""
+        hits = self.store.search(user_id, query, top_k=self.top_k)
+        if not hits:
+            return ""
+        lines = ["What you already know about this user (from previous sessions):"]
+        for hit in hits:
+            lines.append(f"- ({hit.type}) {hit.content}")
+        lines.append(
+            "Use this to personalize your response where relevant; do not mention "
+            "these notes explicitly."
+        )
+        return "\n".join(lines)
+
+    def record_run(self, user_id: Optional[str], input: str, output: str) -> None:
+        """Persist an episodic record for the run, plus extracted facts if enabled."""
+        if not user_id:
+            return
+
+        self.store.add(
+            user_id,
+            EPISODIC,
+            f"User asked: {input}\nTeam answered: {output}",
+            metadata={"input": input, "output": output},
+        )
+
+        if self.extraction_model is None:
+            return
+        try:
+            self._extract_and_store(user_id, input, output)
+        except Exception as exc:  # noqa: BLE001 — extraction is best-effort
+            _logger.warning("Memory extraction failed for user '%s': %s", user_id, exc, exc_info=True)
+
+    def _extract_and_store(self, user_id: str, input: str, output: str) -> None:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Reuse the adapter's model resolver so "fake:" specs stay $0 in tests
+        # and provider strings resolve the same way as an agent's model.
+        from ..adapters.langgraph_adapter import _resolve_model
+
+        model = _resolve_model(self.extraction_model)
+        response = model.invoke(
+            [
+                SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
+                HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
+            ]
+        )
+        content = response.content if hasattr(response, "content") else str(response)
+        parsed = _parse_extraction(content)
+        if parsed is None:
+            _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
+            return
+
+        for fact in parsed.get("facts", []):
+            if isinstance(fact, str) and fact.strip():
+                self.store.add(user_id, SEMANTIC, fact.strip())
+        procedural = parsed.get("procedural")
+        if isinstance(procedural, str) and procedural.strip():
+            self.store.add(user_id, PROCEDURAL, procedural.strip())
+
+
+def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:
+    """Best-effort parse of the extraction model's JSON reply.
+
+    Tolerates surrounding prose / code fences by extracting the first
+    ``{...}`` span. Returns None if nothing parseable is found.
+    """
+    if not content:
+        return None
+    text = content.strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except ValueError:
+            return None
+    return parsed if isinstance(parsed, dict) else None

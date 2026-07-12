@@ -1,7 +1,7 @@
 from .core.agent import Agent
 from .core.knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase
 from .core.loader import load_workflow
-from .core.memory import InMemoryStore, Memory
+from .core.memory import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
 from .core.requirements import Requirements, generate_requirements
 from .core.specification import (
     AgentSpec,
@@ -32,7 +32,9 @@ __all__ = [
     "ToolKit",
     "TraceEvent",
     "Memory",
-    "InMemoryStore",
+    "MemoryRecord",
+    "SqliteBM25Memory",
+    "MemoryManager",
     "KnowledgeBase",
     "LocalFolderKnowledgeBase",
     "VectorKnowledgeBase",
