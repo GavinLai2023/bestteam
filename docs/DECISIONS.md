@@ -58,3 +58,28 @@ Append new entries at the bottom using this template:
   - Distributing code updates *across* many customer deployments is a
     separate, deferred concern (Phase 6 in `team_builder_methodology.md`),
     not something app-level multi-tenancy would solve anyway.
+
+## Memory: SQLite + BM25 in-house, not the mem0 library
+
+- **Status**: Accepted
+- **Context**: The platform needed per-user memory so runs can recall a
+  user's preferences/history across sessions (working / episodic / semantic /
+  procedural). `mem0` was evaluated as an off-the-shelf option.
+- **Decision**: Implement memory in-house on **stdlib `sqlite3` + BM25**
+  (reusing the CJK-aware tokenizer already shared with the knowledge base),
+  behind the existing `Memory` ABC — **no `mem0` dependency**.
+- **Reasons**:
+  - Matches the project's established "no vector store, no extra service, own
+    SQLite file" posture (same stack as `local_folder` knowledge bases), so it
+    deploys with zero new infrastructure.
+  - Default path is **$0 and offline** (episodic recall needs no LLM); richer
+    semantic/procedural extraction is opt-in via `BESTTEAM_MEMORY_MODEL`.
+  - mem0 would pull in a vector store + per-run LLM extraction calls,
+    contradicting the zero-infra default.
+- **Consequences**:
+  - The `Memory` ABC keeps the store swappable — a `Mem0Memory(Memory)` (or
+    Redis/Postgres-backed) implementation can drop in later with **no changes
+    to agents, the adapter, or the API**.
+  - Recall is single-stage BM25 (no rerank/expansion) and semantic/procedural
+    records aren't auto-deduped — accepted trade-offs for the in-house MVP,
+    tracked in `STATUS.md`.
