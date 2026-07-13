@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
+pytest.importorskip("openai")  # these tests patch openai.OpenAI; skip when the optional dep is absent
 
 from fastapi.testclient import TestClient
 

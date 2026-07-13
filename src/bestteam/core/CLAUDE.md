@@ -134,5 +134,46 @@ external vector store (Chroma/FAISS/Pinecone) and no hierarchical/
 "small-to-big" indexing. Without `cache_path`, every workflow load re-embeds
 all chunks (real embedding APIs incur cost/latency on each run). There's no
 DMS connector (SharePoint/Confluence/Google Drive) for either knowledge base
-type. `core/memory.py`'s `Memory` ABC (`remember`/`recall`) is similarly
-unused beyond the in-process `InMemoryStore`.
+type.
+
+## Per-user memory (`core/memory.py`, `core/text_tokenize.py`)
+
+`core/memory.py` implements a per-user memory system so the platform remembers
+an end-user across sessions. It shares the CJK-aware tokenizer with the
+knowledge base — both now import `tokenize`/`significant_terms` from
+`core/text_tokenize.py` (extracted so the BM25 logic lives in one place).
+
+- **`Memory` ABC** — `add`/`search`/`all`/`delete` over `MemoryRecord`
+  (`id, user_id, type, content, metadata, created_at`). The old
+  `remember`/`recall` key-value stub and `InMemoryStore` were removed (unused).
+- **`SqliteBM25Memory`** — the default store: stdlib `sqlite3` persistence
+  (own connection + DB file, no SQLAlchemy) + `rank-bm25` keyword search over
+  `content`, using the same overlap-then-score ranking as
+  `LocalFolderKnowledgeBase.query`. Requires `bestteam[tools-rag]`; raises
+  `ConfigurationError` otherwise (mirrors the KB).
+- **`MemoryManager`** — the execution-path glue. `recall_preamble(user_id,
+  query)` formats the top search hits into a system-prompt block (`""` if none);
+  `record_run(user_id, input, output)` always writes one **episodic** record
+  and, when `extraction_model` is set, makes one LLM call (`_resolve_model`, so
+  `fake:` specs are $0) to also write **semantic** (facts) and **procedural**
+  (how-handled) records.
+
+The four memory types: **working** = the live `_TeamState` (not stored here);
+**episodic**/**semantic**/**procedural** = `MemoryRecord` rows tagged by `type`.
+
+`Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
+(threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`
+→ each agent's `extra_system_prompt`, so the cached compiled graph is reused
+with no recompile) and record the run afterward. Both kwargs default to None →
+current behavior unchanged. The backend enables it per worker thread from
+`BESTTEAM_MEMORY_DB` (opt-in path) + `BESTTEAM_MEMORY_MODEL` (opt-in
+extraction) — see `ui/backend/runtime.py::_make_memory`.
+
+### Known limitations (per-user memory)
+
+- Procedural/semantic memory has no auto-scoring or dedup — every extraction
+  may add a near-duplicate note (BM25 surfaces the most relevant). Consolidation
+  is future work.
+- Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
+- No frontend "my memories" management UI (backend only).
+- Procedural memory is per-user (could be promoted to global/agent-level later).

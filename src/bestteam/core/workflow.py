@@ -10,6 +10,7 @@ from .trace import TraceEvent
 
 if TYPE_CHECKING:
     from ..adapters.base import EngineAdapter
+    from .memory import MemoryManager
 
 
 @dataclass
@@ -50,13 +51,36 @@ class Workflow:
 
         return LangGraphAdapter()
 
-    def run(self, input: str) -> WorkflowResult:
-        """Execute the workflow end-to-end and return a normalized result."""
+    def run(
+        self,
+        input: str,
+        *,
+        user_id: Optional[str] = None,
+        memory: Optional["MemoryManager"] = None,
+    ) -> WorkflowResult:
+        """Execute the workflow end-to-end and return a normalized result.
+
+        When both `user_id` and `memory` are given, per-user memory is recalled
+        into every agent's system prompt before the run and the run is recorded
+        afterward (see `core/memory.py`). Both default to None → no memory,
+        current behavior unchanged.
+        """
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
-        return self._adapter.execute(self._compiled, input)
 
-    def stream(self, input: str) -> Iterator[TraceEvent]:
+        preamble = memory.recall_preamble(user_id, input) if memory else ""
+        result = self._adapter.execute(self._compiled, input, memory_preamble=preamble)
+        if memory:
+            memory.record_run(user_id, input, result.output)
+        return result
+
+    def stream(
+        self,
+        input: str,
+        *,
+        user_id: Optional[str] = None,
+        memory: Optional["MemoryManager"] = None,
+    ) -> Iterator[TraceEvent]:
         """Run the workflow while yielding live TraceEvents — what the
         monitoring UI subscribes to.
 
@@ -65,15 +89,22 @@ class Workflow:
         with this workflow's name. A failure surfaces as a terminal
         `run_failed` event rather than an exception breaking the generator
         mid-iteration — simpler for consumers like a WebSocket handler to relay.
+
+        When both `user_id` and `memory` are given, per-user memory is recalled
+        into the run before the first event and the run is recorded after
+        `run_completed` (not on the `run_failed` path). Both default to None →
+        no memory, current behavior unchanged.
         """
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
+
+        preamble = memory.recall_preamble(user_id, input) if memory else ""
 
         yield TraceEvent(type="run_started", workflow=self.name, data=input)
 
         last_output = ""
         try:
-            for event in self._adapter.stream(self._compiled, input):
+            for event in self._adapter.stream(self._compiled, input, memory_preamble=preamble):
                 event = dataclasses.replace(event, workflow=self.name)
                 if event.type == "agent_completed":
                     last_output = event.data
@@ -83,6 +114,9 @@ class Workflow:
             return
 
         yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
+
+        if memory:
+            memory.record_run(user_id, input, last_output)
 
     def visualize(self) -> str:
         """Render the compiled graph as Mermaid markup (for the future CLI/UI)."""

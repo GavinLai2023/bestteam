@@ -21,13 +21,20 @@ class EngineAdapter(ABC):
         """Build and return an executable representation of the workflow."""
 
     @abstractmethod
-    def execute(self, compiled: Any, input: str) -> "WorkflowResult":
-        """Run the compiled workflow against `input` and normalize the result."""
+    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> "WorkflowResult":
+        """Run the compiled workflow against `input` and normalize the result.
+
+        `memory_preamble`, if non-empty, is recalled per-user memory injected
+        into each agent's system prompt for this run (see `core/memory.py`).
+        """
 
     @abstractmethod
     def to_mermaid(self, compiled: Any) -> str:
         """Render the compiled graph as Mermaid markup, for the CLI/UI to display."""
 
     @abstractmethod
-    def stream(self, compiled: Any, input: str) -> Iterator["TraceEvent"]:
-        """Yield TraceEvents live as the workflow executes, for monitoring/observability."""
+    def stream(self, compiled: Any, input: str, memory_preamble: str = "") -> Iterator["TraceEvent"]:
+        """Yield TraceEvents live as the workflow executes, for monitoring/observability.
+
+        `memory_preamble` behaves as in `execute`.
+        """

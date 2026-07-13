@@ -188,7 +188,7 @@ async def create_run(req: RunRequest, db: Session = Depends(get_db), user: User 
     workflow = _get_workflow(req.workflow, db)
     run = registry.create(req.workflow, req.input)
 
-    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind())
+    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind(), user.username)
 
     return {"run_id": run.id}
 

@@ -36,6 +36,12 @@
 - Interview recording upload: consultant uploads audio/video of customer
   interview; Whisper API transcribes it; LLM extracts `intent_text`/`as_is_text`
   to pre-fill IntentPage; files >25 MB split via ffmpeg into 10-min chunks.
+- Per-user memory system: `Memory` ABC + `SqliteBM25Memory` store +
+  `MemoryManager`, wired end-to-end (JWT user → run → recall/record). Four
+  types — working (`_TeamState`), episodic (always-on, $0), semantic +
+  procedural (opt-in via `BESTTEAM_MEMORY_MODEL`). Disabled by default
+  (`BESTTEAM_MEMORY_DB`); swappable behind the ABC (e.g. future mem0). See
+  `src/bestteam/core/CLAUDE.md`.
 
 ## In Progress
 
@@ -45,8 +51,10 @@ Nothing currently in flight.
 
 - **Vector knowledge base retrieval is single-stage** — no query
   rewriting/expansion or reranking, no external vector store, no DMS
-  connectors. `core/memory.py`'s `Memory` ABC is similarly unused. See
-  `src/bestteam/core/CLAUDE.md`.
+  connectors. See `src/bestteam/core/CLAUDE.md`.
+- **Per-user memory recall is single-stage BM25** — no rerank/expansion;
+  semantic/procedural records have no auto-dedup; no frontend
+  memory-management UI. See `core/memory.py`.
 - **`RunRegistry` is in-memory only** — not yet wired to the `runs`/
   `trace_events` tables (Phase 5). See `ui/backend/db/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
