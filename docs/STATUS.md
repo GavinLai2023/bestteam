@@ -42,6 +42,13 @@
   procedural (opt-in via `BESTTEAM_MEMORY_MODEL`). Disabled by default
   (`BESTTEAM_MEMORY_DB`); swappable behind the ABC (e.g. future mem0). See
   `src/bestteam/core/CLAUDE.md`.
+- Code-review triage remediation: all 17 findings (CR-001…CR-017) resolved
+  across PRs #4 and #5 — KB path containment + atomic versioned uploads,
+  startup secret-key guard, team-scoped aggregation, terminal-run guarantees,
+  `RunRegistry` subscription locking, packaging/entry-point/`.xls`/doc
+  corrections, single-use WS tickets, oversized-upload middleware, tool-loop
+  exhaustion notice, and up-front `runs`-row persistence. No deferrals remain.
+  See `docs/CODE_REVIEW_TRIAGE.md`.
 
 ## In Progress
 
@@ -55,13 +62,12 @@ Nothing currently in flight.
 - **Per-user memory recall is single-stage BM25** — no rerank/expansion;
   semantic/procedural records have no auto-dedup; no frontend
   memory-management UI. See `core/memory.py`.
-- **`RunRegistry` is in-memory only** — not yet wired to the `runs`/
-  `trace_events` tables (Phase 5). See `ui/backend/db/CLAUDE.md`.
+- **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
+  persisted per run (CR-012) so usage/trace foreign keys are valid, but
+  `trace_events` persistence, restart recovery, and a run-history API remain
+  Phase 5. See `ui/backend/db/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
-- **Flaky test**: `tests/test_auth.py::test_access_token_rejects_tampered_signature`
-  occasionally fails (base64 tampering of the last char can produce an
-  equivalent decoded value).
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage
   wizard** (`/wizard/:sessionId/{requirements|team|refine|test|deploy}`),
   not the current 4-stage flow introduced in commit `0d2490a` (flagged in
