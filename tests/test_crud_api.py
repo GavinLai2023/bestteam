@@ -297,6 +297,35 @@ def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
     assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # record intact
 
 
+def test_backup_is_preserved_when_restore_fails(client, tmp_path):
+    # CR-008: if rollback can't restore the prior KB, the backup dir (the last
+    # valid copy) must be preserved for manual recovery, not silently deleted.
+    uploads = tmp_path / "knowledge_base_uploads"
+    client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
+    )
+
+    real_replace = backend_crud.os.replace
+
+    def flaky_replace(src, dst):
+        if ".backup_" in str(src):  # fail specifically on the restore step
+            raise OSError("cannot restore backup")
+        return real_replace(src, dst)
+
+    with patch.object(backend_crud.os, "replace", flaky_replace), \
+         patch("sqlalchemy.orm.Session.commit", side_effect=RuntimeError("db down")):
+        with pytest.raises(RuntimeError, match="db down"):
+            client.post(
+                "/api/config/knowledge_bases/kb/upload",
+                files=[("files", ("doc2.txt", b"replacement content", "text/plain"))],
+            )
+
+    backups = list(uploads.glob(".backup_kb_*"))
+    assert backups, "backup holding the last valid copy must be preserved"
+    assert (backups[0] / "doc1.txt").exists()
+
+
 def test_upload_creates_queryable_local_folder_kb(client):
     files = [
         ("files", ("doc1.txt", b"The refund policy allows returns within 30 days.", "text/plain")),

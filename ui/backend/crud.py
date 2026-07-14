@@ -16,6 +16,7 @@ automatically. A `workflows` entry is a complete, self-contained
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import uuid
@@ -51,7 +52,27 @@ _MAX_FILES_PER_UPLOAD = 30
 _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
+
+
+def _restore_backup(backup_dir: Path, live_dir: Path, name: str) -> None:
+    """Best-effort restore of the prior KB after an aborted upload.
+
+    If the restore itself fails, the backup directory is deliberately left in
+    place -- it holds the last valid copy of the KB -- and the failure is logged
+    loudly rather than silently discarded by later cleanup (CR-008)."""
+    try:
+        os.replace(backup_dir, live_dir)
+    except OSError:
+        logger.critical(
+            "Knowledge base '%s': could not restore the previous version after an "
+            "aborted upload. The last valid copy is preserved at %s -- restore it "
+            "manually.",
+            name,
+            backup_dir,
+        )
 
 
 def _has_traversal(value: str) -> bool:
@@ -257,7 +278,7 @@ def upload_knowledge_base_files(
             os.replace(staging_dir, live_dir)
         except Exception:
             if had_live:
-                os.replace(backup_dir, live_dir)
+                _restore_backup(backup_dir, live_dir, item_name)
             raise
 
         spec = KnowledgeBaseSpec(
@@ -284,7 +305,7 @@ def upload_knowledge_base_files(
             db.rollback()
             shutil.rmtree(live_dir, ignore_errors=True)
             if had_live:
-                os.replace(backup_dir, live_dir)
+                _restore_backup(backup_dir, live_dir, item_name)
             raise
         # Commit succeeded: the new KB is durable, so the backup can go.
         if had_live:
@@ -298,10 +319,12 @@ def upload_knowledge_base_files(
             "chunk_count": len(kb._chunks),
         }
     finally:
-        # Only staging/backup scratch dirs are ever removed here -- never the
-        # promoted live directory -- so a failure preserves the prior KB.
+        # Only the staging scratch dir is unconditionally safe to remove. The
+        # backup is handled explicitly: dropped on success, restored on a
+        # recoverable failure, and deliberately preserved if a restore failed
+        # (it is then the last valid copy) -- so it must NOT be blindly removed
+        # here (CR-008).
         shutil.rmtree(staging_dir, ignore_errors=True)
-        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 _workflows = APIRouter(prefix="/workflows")

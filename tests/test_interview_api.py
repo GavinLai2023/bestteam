@@ -229,6 +229,21 @@ def test_oversized_upload_returns_413(client, monkeypatch):
     assert "upload limit" in resp.json()["detail"]
 
 
+def test_oversized_content_length_rejected_early(client, monkeypatch):
+    # CR-009: an upload whose declared Content-Length exceeds the ceiling is
+    # rejected up front, before the multipart body is parsed/spooled.
+    from ui.backend import interview
+
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("huge.mp3", b"\x00" * 500, "audio/mpeg")},
+    )
+    assert resp.status_code == 413
+    assert "upload limit" in resp.json()["detail"]
+
+
 def test_is_ffmpeg_available_false_when_binary_missing():
     # CR-009: a missing ffmpeg binary must read as "unavailable", not raise.
     from ui.backend import interview

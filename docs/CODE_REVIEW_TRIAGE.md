@@ -1,8 +1,8 @@
 # Code Review Triage Register
 
-Date: 2026-07-13
-Scope: repository-wide independent audit issue list
-Reviewed against: implementation, tests, `README.md`, `CLAUDE.md`, project instructions, dependency manifests, and deployment documentation.
+Date: 2026-07-14
+Scope: repository-wide independent audit issue list and post-fix verification
+Reviewed against: implementation, tests, `README.md`, `CLAUDE.md`, project instructions, dependency manifests, deployment documentation, and commit `62ca0ae` against `62ca0ae^`.
 
 ## Codex triage definitions
 
@@ -38,25 +38,35 @@ There are no exact duplicate findings. The principal overlaps are:
 
 ## Issue register
 
-| ID | Codex finding | Claude validation | Agreement | Your decision | Status |
-|---|---|---|---|---|---|
-| CR-001 | Public registration plus unrestricted KB paths enables server-file replacement | Confirmed; lexical path guards added at all API boundaries | Agree | Fix (Option A done; resolved-root containment pending) | Partially fixed - containment unit pending |
-| CR-002 | Example secret bypasses the startup sentinel | Confirmed; guard now rejects a set of insecure placeholders incl. the example | Agree | Fixed | Fixed - awaiting independent verification |
-| CR-003 | Validated workflows can be non-executable and background failures can remain running | Confirmed; stream() compiles before its handler, worker had no catch-all | Agree | Fix worker terminal-event guarantee (compile-in-validation deferred) | Fixed - awaiting independent verification |
-| CR-004 | Multi-team contribution state contaminates parallel results and overwrites duplicate names | Confirmed; aggregate merged run-global contributions | Agree | Fix contamination (team-scoped aggregate); duplicate-name history deferred | Fixed - awaiting independent verification |
-| CR-005 | Deleting an older dependency can leave cached workflows serving deleted data | Confirmed; max(updated_at) key misses deletes | Agree | Fixed (explicit cache clear on KB/skill mutation) | Fixed - awaiting independent verification |
-| CR-006 | Alembic migrations are absent from the backend image | Confirmed; alembic.ini + alembic/ not copied | Agree | Fixed (Dockerfile copies them) | Fixed - awaiting independent verification |
-| CR-007 | Production image omits dependencies required by advertised real-model and interview paths | Confirmed | Agree | Fixed (providers-openai extra installed in image) | Fixed - awaiting independent verification |
-| CR-008 | KB upload replacement is non-atomic and has destructive rollback | Confirmed | Agree | Fixed (stage -> validate -> atomic swap, prior KB preserved on failure) | Fixed - awaiting independent verification |
-| CR-009 | Interview upload and ffmpeg processing are unbounded | Confirmed | Agree | Fixed (hard upload ceiling + ffmpeg timeouts; missing-ffmpeg no longer 500s) | Fixed - awaiting independent verification |
-| CR-010 | RunRegistry subscription can miss a terminal event | Confirmed | Agree | Fixed (single lock over append/replay/subscribe) | Fixed - awaiting independent verification |
-| CR-011 | Tool-loop exhaustion completes successfully with empty output | Confirmed behavior; existing test asserts intentional empty-success | Agree it needs a product decision | Defer (no behavior change until contract is decided) | Deferred - product decision |
-| CR-012 | Usage rows reference runs that are never persisted | Confirmed; runs are RunRegistry-only | Agree | Defer to Phase 5 persistent-run-state (do not enable FK independently) | Deferred - Phase 5 |
-| CR-013 | Long-lived bearer token is stored in localStorage and placed in the WebSocket URL | Confirmed | Agree | Fix WS URL exposure (single-use ticket); localStorage/cookie migration deferred | Fixed (backend+frontend) - awaiting independent verification |
-| CR-014 | The aggregate tools extra omits the dependency required by http_get | Confirmed | Agree | Fixed (httpx added to tools + tools-http extra; docs corrected) | Fixed - awaiting independent verification |
-| CR-015 | Documented python -m bestteam entry point is missing | Confirmed | Agree | Fixed (added src/bestteam/__main__.py) | Fixed - awaiting independent verification |
-| CR-016 | Legacy .xls support is advertised but not implemented | Confirmed (openpyxl can't read .xls) | Agree | Fixed (removed .xls from routing + docs; rejection test) | Fixed - awaiting independent verification |
-| CR-017 | README and marketing claims drift from current implementation | Confirmed | Agree | Fixed (test count, vector-KB roadmap, narrowed marketing claims) | Fixed - awaiting independent verification |
+| ID | Codex finding | Claude validation | Agreement | Independent verification | Your decision | Status |
+|---|---|---|---|---|---|---|
+| CR-001 | Public registration plus unrestricted KB paths enables server-file replacement | Confirmed; lexical path guards added at all API boundaries | Agree | Absolute/traversing paths are rejected, but resolved-root, persisted-record, and model-generated paths remain unguarded | Keep containment follow-up open | Partially resolved |
+| CR-002 | Example secret bypasses the startup sentinel | Confirmed; guard now rejects a set of insecure placeholders incl. the example | Agree | Example placeholder is rejected at startup | Accept fix | Verified |
+| CR-003 | Validated workflows can be non-executable and background failures can remain running | Confirmed; stream() compiles before its handler, worker had no catch-all | Agree | Worker emits one terminal event; post-completion memory failures are best-effort | Accept fix | Verified |
+| CR-004 | Multi-team contribution state contaminates parallel results and overwrites duplicate names | Confirmed; aggregate merged run-global contributions | Agree | Aggregation is scoped to the current team's declared agents | Accept contamination fix; duplicate-name history remains deferred | Verified |
+| CR-005 | Deleting an older dependency can leave cached workflows serving deleted data | Confirmed; max(updated_at) key misses deletes | Agree | Generation prevents stale repopulation, but a post-commit/pre-invalidation cache hit can still use stale data | Keep concurrency follow-up open | Partially resolved |
+| CR-006 | Alembic migrations are absent from the backend image | Confirmed; alembic.ini + alembic/ not copied | Agree | Image now copies `alembic.ini` and revision tree | Accept fix | Verified |
+| CR-007 | Production image omits dependencies required by advertised real-model and interview paths | Confirmed | Agree | Image and README include the `providers-openai` extra | Accept fix | Verified |
+| CR-008 | KB upload replacement is non-atomic and has destructive rollback | Confirmed | Agree | Commit-before-backup-discard + rollback; a failed restore now preserves the backup (last valid copy) instead of deleting it | Accept rollback hardening; non-empty-dir swap window remains | Fixed - awaiting independent verification |
+| CR-009 | Interview upload and ffmpeg processing are unbounded | Confirmed | Agree | ffmpeg timeouts + capped read; Content-Length gate rejects oversize before multipart parsing (proxy client_max_body_size remains the hard bound) | Accept fix | Fixed - awaiting independent verification |
+| CR-010 | RunRegistry subscription can miss a terminal event | Confirmed | Agree | Append, replay, and subscription registration share one lock | Accept fix | Verified |
+| CR-011 | Tool-loop exhaustion completes successfully with empty output | Confirmed behavior; existing test asserts intentional empty-success | Agree it needs a product decision | No contract change; empty-success behavior remains | Retain product decision | Deferred |
+| CR-012 | Usage rows reference runs that are never persisted | Confirmed; runs are RunRegistry-only | Agree | No persistent-run-state implementation; usage FK inconsistency remains | Retain Phase 5 dependency | Deferred |
+| CR-013 | Long-lived bearer token is stored in localStorage and placed in the WebSocket URL | Confirmed | Agree | Single-use, short-lived WS tickets replace URL bearer tokens; ticket store is locked | Accept WS-ticket fix; localStorage migration remains deferred | Verified |
+| CR-014 | The aggregate tools extra omits the dependency required by http_get | Confirmed | Agree | `httpx` is included in HTTP and aggregate tools extras | Accept fix | Verified |
+| CR-015 | Documented python -m bestteam entry point is missing | Confirmed | Agree | Package module entry point delegates to the existing Typer app | Accept fix | Verified |
+| CR-016 | Legacy .xls support is advertised but not implemented | Confirmed (openpyxl can't read .xls) | Agree | `.xls` removed from parser, KB discovery, and documentation | Accept fix | Verified |
+| CR-017 | README and marketing claims drift from current implementation | Confirmed | Agree | Vector-KB, test-count, and streaming/retention wording now match implementation | Accept fix | Verified |
+
+## Post-fix independent verification
+
+**Overall verdict: Partially resolved.** Commit `62ca0ae` was independently reviewed against `62ca0ae^`: 11 issues are verified, 4 are partially resolved, and 2 remain intentional deferrals. No new regression was confirmed in the reviewed commit.
+
+- **CR-001:** `ui/backend/crud.py:67` rejects lexical traversal and absolute cache paths, but `ui/backend/builder.py:271`, `src/bestteam/core/specification.py:267`, and `ui/backend/knowledge_bases.py:31` leave model-generated, persisted, and resolved-root containment paths outside the guard.
+- **CR-003 / CR-010 / CR-013:** `ui/backend/runtime.py:78`, `src/bestteam/core/workflow.py:119`, `ui/backend/registry.py:54`, and `ui/backend/ws_tickets.py:28` provide the terminal-event, subscription-lock, and ticket-lock guarantees covered by the new regression tests.
+- **CR-005 / CR-008 / CR-009:** cache invalidation begins after mutation commits (`ui/backend/crud.py:149`); backup restoration still has a last-copy failure path (`ui/backend/crud.py:282`); and the interview ceiling is checked only after multipart parsing/spooling (`ui/backend/interview.py:156`). These remain open follow-ups.
+- **CR-002 / CR-004 / CR-006 / CR-007 / CR-014 / CR-015 / CR-016 / CR-017:** the startup secret guard, team-scoped aggregation, image/package declarations, CLI entry point, `.xls` removal, and documentation changes are present and consistent with their regression coverage.
+- **CR-011 / CR-012:** no behavior change was introduced; their documented product and persistent-run-state deferrals remain valid.
 
 ## Detailed Codex assessments
 
@@ -244,7 +254,7 @@ There are no exact duplicate findings. The principal overlaps are:
 
 ## Validation notes
 
-- This triage used static evidence from the cited implementation and adjacent tests/documentation.
-- The preceding independent audit reported 269 passing tests and a passing frontend lint run.
-- No code was modified as part of this triage.
-- No live provider calls, network requests, Docker builds, migrations, or destructive filesystem probes were performed.
+- Independent review compared commit `62ca0ae` with `62ca0ae^` and inspected its relevant callers, tests, and documentation.
+- The independent reviewer reported 178 changed-surface tests passing with one deprecation warning; no network calls were made.
+- A local full-suite attempt was blocked by sandbox permissions for pytest temporary directories (`C:\Users\User\AppData\Local\Temp` and `C:\tmp`), so it is not treated as product-test evidence.
+- Docker build, live-provider, migration, frontend build/lint, symlink-containment, and rollback-failure injection were not executed during independent verification.

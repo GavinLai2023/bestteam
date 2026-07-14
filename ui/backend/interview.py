@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
@@ -63,6 +63,28 @@ Do not invent information not present in the transcript.\
 class InterviewExtraction(BaseModel):
     intent_text: str
     as_is_text: str
+
+
+def _reject_oversized_content_length(request: Request) -> None:
+    """Reject an over-ceiling upload from its declared Content-Length, before the
+    multipart body is parsed/spooled (CR-009).
+
+    Content-Length can be absent (chunked transfer) or spoofed, so this is a
+    cheap first gate, not the hard bound -- the capped read in the handler bounds
+    memory regardless, and a reverse-proxy `client_max_body_size` remains the
+    authoritative ingress limit for a real deployment."""
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return
+    try:
+        size = int(content_length)
+    except ValueError:
+        return
+    if size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.",
+        )
 
 
 @functools.lru_cache(maxsize=1)
@@ -123,6 +145,7 @@ def _split_audio(data: bytes, ext: str, tmp_dir: str) -> list[str]:
 def transcribe_interview(
     file: UploadFile = File(...),
     model: str = Form(...),
+    _: None = Depends(_reject_oversized_content_length),
 ) -> Dict[str, Any]:
     """Transcribe an interview recording and extract intent/as-is text.
 
