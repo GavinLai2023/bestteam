@@ -31,9 +31,30 @@ def test_access_token_round_trip():
     assert auth.decode_access_token(token) == "alice"
 
 
+def _flip_char(segment: str, index: int) -> str:
+    """Change one base64url char to a definitely-different one."""
+    replacement = "A" if segment[index] != "A" else "B"
+    return segment[:index] + replacement + segment[index + 1:]
+
+
 def test_access_token_rejects_tampered_signature():
     token = auth.create_access_token("alice")
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+    # Flip the FIRST signature char, not the last: the last base64url char of a
+    # 32-byte HMAC encodes only padding bits, so flipping it can decode to the
+    # same bytes and spuriously verify (the earlier last-char version flaked).
+    tampered = f"{header}.{payload}.{_flip_char(signature, 0)}"
+
+    with pytest.raises(auth.AuthError):
+        auth.decode_access_token(tampered)
+
+
+def test_access_token_rejects_tampered_payload():
+    token = auth.create_access_token("alice")
+    header, payload, signature = token.split(".")
+    # Altering the payload changes the signing input, so the original signature
+    # no longer matches -- deterministic regardless of base64 bit alignment.
+    tampered = f"{header}.{_flip_char(payload, 0)}.{signature}"
 
     with pytest.raises(auth.AuthError):
         auth.decode_access_token(tampered)
