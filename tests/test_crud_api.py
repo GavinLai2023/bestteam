@@ -247,6 +247,30 @@ def test_contain_workflow_config_for_load_confines_inline_kb():
     assert out["knowledge_bases"][0]["cache_path"] == "_kb_cache/evil.json"
 
 
+def test_resolved_cache_path_must_stay_in_the_owned_cache_directory(tmp_path, monkeypatch):
+    # CR-001: lexical containment alone is insufficient if _kb_cache is a
+    # symlink/junction. Simulate a resolved target outside the workflow root
+    # without requiring Windows symlink-creation privileges in the test runner.
+    from fastapi import HTTPException
+    from ui.backend import knowledge_bases
+
+    source = tmp_path / "workflow.yaml"
+    outside = tmp_path.parent / "outside" / "embeddings.json"
+    original_resolve = knowledge_bases.Path.resolve
+
+    def redirected_resolve(path, *args, **kwargs):
+        if path.name == "embeddings.json":
+            return outside
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(knowledge_bases.Path, "resolve", redirected_resolve)
+
+    with pytest.raises(HTTPException, match="outside"):
+        knowledge_bases.ensure_contained_cache_path_for_source(
+            {"cache_path": "_kb_cache/embeddings.json"}, source
+        )
+
+
 def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):
     # CR-008: re-uploading must replace the KB's files wholesale -- a file
     # present before but omitted from the new upload must not linger.

@@ -1,5 +1,7 @@
 """Tests for the interview transcription API (ui/backend/interview.py)."""
 
+import asyncio
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -245,6 +247,41 @@ def test_oversized_content_length_rejected_before_body_is_parsed(client, monkeyp
     )
     assert resp.status_code == 413
     assert "limit" in resp.json()["detail"]
+
+
+def test_chunked_oversized_body_is_rejected_before_the_downstream_app(monkeypatch):
+    # CR-009: no Content-Length (or an understated one) must not let multipart
+    # parsing/spooling consume an unbounded body. Exercise the ASGI receive
+    # wrapper directly with two streamed chunks, as normal HTTP clients fill in
+    # Content-Length automatically.
+    from ui.backend import interview
+    from ui.backend.main import _RequestBodyLimitMiddleware
+
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    chunks = iter(
+        [
+            {"type": "http.request", "body": b"a" * 30, "more_body": True},
+            {"type": "http.request", "body": b"b" * 30, "more_body": False},
+        ]
+    )
+    sent = []
+
+    async def receive():
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    async def downstream(scope, receive, send):
+        while True:
+            message = await receive()
+            if not message.get("more_body", False):
+                return
+
+    scope = {"type": "http", "path": "/api/builder/interview/transcribe", "headers": []}
+    asyncio.run(_RequestBodyLimitMiddleware(downstream)(scope, receive, send))
+
+    assert sent[0]["status"] == 413
 
 
 def test_is_ffmpeg_available_false_when_binary_missing():

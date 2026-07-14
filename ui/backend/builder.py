@@ -32,6 +32,8 @@ from .knowledge_bases import (
     check_path_traversal,
     checked_contained_cache_path,
     contain_kb_config_for_load,
+    ensure_contained_cache_path_for_source,
+    ensure_workflow_cache_paths_for_source,
     load_knowledge_base_tools,
     resolve_kb_upload_path,
 )
@@ -154,6 +156,7 @@ def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
     tools: Dict[str, Any] = {}
     for record in records:
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
+        ensure_contained_cache_path_for_source(config, source)
         kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
@@ -177,12 +180,25 @@ def _reject_unsafe_kb_paths(spec: Specification) -> None:
             kb.cache_path = checked_contained_cache_path(kb.cache_path)
 
 
+def _prepare_generated_specification(spec: Specification, source: Path) -> None:
+    """Contain an untrusted model candidate before SDK validation builds it."""
+    try:
+        _reject_unsafe_kb_paths(spec)
+        ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
+    except HTTPException as exc:
+        # ``generate_specification`` treats ConfigurationError as feedback for
+        # the architect and, after retries, `_call_model` returns it as a 400.
+        # Do not let a candidate reach vector-KB construction first (CR-001).
+        raise ConfigurationError(str(exc.detail)) from exc
+
+
 def _validate_spec_payload(
     db: Session, payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
 ) -> Specification:
     try:
         spec = Specification.model_validate(payload)
         _reject_unsafe_kb_paths(spec)
+        ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
         extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
         validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills or {})
     except ValidationError as exc:
@@ -289,6 +305,7 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
             source=source,
             extra_tools=_all_knowledge_base_tools(db, source),
             extra_skills=load_skills(db),
+            pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
@@ -299,7 +316,7 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
     # Contain KB paths on the stored spec so a model-generated spec (which the
     # user-dict path already contains in _validate_spec_payload) can't persist an
     # uncontained cache_path that test-run/deploy would later build (CR-001).
-    _reject_unsafe_kb_paths(spec)
+    _prepare_generated_specification(spec, source)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="spec")
     return _session_to_dict(session)
 
@@ -334,12 +351,13 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
             source=source,
             extra_tools=_all_knowledge_base_tools(db, source),
             extra_skills=load_skills(db),
+            pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
     append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
-    _reject_unsafe_kb_paths(spec)  # contain the stored spec's KB paths (CR-001)
+    _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
     return _session_to_dict(session)
 
@@ -355,6 +373,7 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built
     source = _source_for(session_id)
+    ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
     extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:
         workflow = validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))
@@ -379,6 +398,7 @@ def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, 
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
     source = _source_for(session_id)
+    ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
     extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:
         validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))

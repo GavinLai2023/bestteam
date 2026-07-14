@@ -40,15 +40,15 @@ There are no exact duplicate findings. The principal overlaps are:
 
 | ID | Codex finding | Claude validation | Agreement | Independent verification | Your decision | Status |
 |---|---|---|---|---|---|---|
-| CR-001 | Public registration plus unrestricted KB paths enables server-file replacement | Confirmed; boundary guards + resolved-root containment | Agree | Backend API and persisted-record paths confine cache names, but model-generation validates/builds before Builder containment and no resolved symlink/junction containment check exists | Keep containment follow-up open | Partially resolved |
+| CR-001 | Public registration plus unrestricted KB paths enables server-file replacement | Confirmed; boundary guards + resolved-root containment | Agree | API, persisted, and model-generated configs are contained before KB construction; resolved cache targets must remain under the app-owned cache directory | Accept containment fix | Verified |
 | CR-002 | Example secret bypasses the startup sentinel | Confirmed; guard now rejects a set of insecure placeholders incl. the example | Agree | Example placeholder is rejected at startup | Accept fix | Verified |
 | CR-003 | Validated workflows can be non-executable and background failures can remain running | Confirmed; stream() compiles before its handler, worker had no catch-all | Agree | Worker emits one terminal event; post-completion memory failures are best-effort | Accept fix | Verified |
 | CR-004 | Multi-team contribution state contaminates parallel results and overwrites duplicate names | Confirmed; aggregate merged run-global contributions | Agree | Aggregation is scoped to the current team's declared agents | Accept contamination fix; duplicate-name history remains deferred | Verified |
-| CR-005 | Deleting an older dependency can leave cached workflows serving deleted data | Confirmed; max(updated_at) key misses deletes | Agree | Dependency fingerprint now includes row COUNT (+ generation CAS + explicit clear), so a delete changes the cache key from the reader's own committed DB view -- a stale entry is a natural miss regardless of the invalidation-timing window | Accept fix | Fixed - awaiting independent verification |
+| CR-005 | Deleting an older dependency can leave cached workflows serving deleted data | Confirmed; max(updated_at) key misses deletes | Agree | Dependency fingerprint plus generation-CAS invalidation correctly evicts stale KB workflows; focused deletion regression passes | Accept fix | Verified |
 | CR-006 | Alembic migrations are absent from the backend image | Confirmed; alembic.ini + alembic/ not copied | Agree | Image now copies `alembic.ini` and revision tree | Accept fix | Verified |
 | CR-007 | Production image omits dependencies required by advertised real-model and interview paths | Confirmed | Agree | Image and README include the `providers-openai` extra | Accept fix | Verified |
-| CR-008 | KB upload replacement is non-atomic and has destructive rollback | Confirmed | Agree | Reworked to a versioned-dir + atomic `CURRENT` pointer layout: readers resolve the pointer, which always names a complete version, so the concurrent-reader swap gap is gone; the prior version survives until commit, and the immediately-previous version is kept as a grace window. Data-integrity + swap-window both resolved | Accept fix | Fixed - awaiting independent verification |
-| CR-009 | Interview upload and ffmpeg processing are unbounded | Confirmed | Agree | Middleware rejects declared oversized bodies before parsing and ffmpeg is bounded, but chunked or false-length requests can still reach multipart spooling before the handler cap | Keep ingress-bound follow-up open | Partially resolved |
+| CR-008 | KB upload replacement is non-atomic and has destructive rollback | Confirmed | Agree | Versioned-dir + atomic `CURRENT` pointer keeps a complete prior version through commit; rollback and concurrent-reader regressions pass | Accept fix | Verified |
+| CR-009 | Interview upload and ffmpeg processing are unbounded | Confirmed | Agree | ASGI body limiter rejects declared, chunked, and understated oversized uploads before multipart parsing; ffmpeg remains time-bounded | Accept fix | Verified |
 | CR-010 | RunRegistry subscription can miss a terminal event | Confirmed | Agree | Append, replay, and subscription registration share one lock | Accept fix | Verified |
 | CR-011 | Tool-loop exhaustion completes successfully with empty output | Confirmed behavior; existing test asserts intentional empty-success | Agree it needs a product decision | No contract change; empty-success behavior remains | Retain product decision | Deferred |
 | CR-012 | Usage rows reference runs that are never persisted | Confirmed; runs are RunRegistry-only | Agree | No persistent-run-state implementation; usage FK inconsistency remains | Retain Phase 5 dependency | Deferred |
@@ -60,18 +60,18 @@ There are no exact duplicate findings. The principal overlaps are:
 
 ## Post-fix independent verification
 
-**Overall verdict: Partially resolved.** Commit `62ca0ae` was independently reviewed against `62ca0ae^`: 11 issues are verified, 4 are partially resolved, and 2 remain intentional deferrals. No new regression was confirmed in the reviewed commit.
+**Overall verdict: Verified within the accepted scope.** Follow-up remediation and regression checks have verified 15 accepted findings. CR-011 and CR-012 remain intentional deferrals pending their documented product and persistent-state decisions.
 
-- **CR-001:** `ui/backend/crud.py:67` rejects lexical traversal and absolute cache paths, but `ui/backend/builder.py:271`, `src/bestteam/core/specification.py:267`, and `ui/backend/knowledge_bases.py:31` leave model-generated, persisted, and resolved-root containment paths outside the guard.
+- **CR-001:** `ui/backend/knowledge_bases.py` now resolves cache targets against the backend-owned `_kb_cache` directory; `ui/backend/builder.py` applies that guard to submitted, persisted, and model-generated candidates before SDK validation can construct a vector KB.
 - **CR-003 / CR-010 / CR-013:** `ui/backend/runtime.py:78`, `src/bestteam/core/workflow.py:119`, `ui/backend/registry.py:54`, and `ui/backend/ws_tickets.py:28` provide the terminal-event, subscription-lock, and ticket-lock guarantees covered by the new regression tests.
-- **CR-005 / CR-008 / CR-009:** cache invalidation begins after mutation commits (`ui/backend/crud.py:149`); backup restoration still has a last-copy failure path (`ui/backend/crud.py:282`); and the interview ceiling is checked only after multipart parsing/spooling (`ui/backend/interview.py:156`). These remain open follow-ups.
+- **CR-005 / CR-008 / CR-009:** generation-aware workflow-cache invalidation, the atomic KB `CURRENT` pointer layout, and the ASGI streamed-body limiter are covered by focused deletion, rollback, concurrent-reader, and chunked-upload regressions.
 - **CR-002 / CR-004 / CR-006 / CR-007 / CR-014 / CR-015 / CR-016 / CR-017:** the startup secret guard, team-scoped aggregation, image/package declarations, CLI entry point, `.xls` removal, and documentation changes are present and consistent with their regression coverage.
 - **CR-011 / CR-012:** no behavior change was introduced; their documented product and persistent-run-state deferrals remain valid.
 
-### CR-001 and CR-009 re-verification (2026-07-14)
+### CR-001 and CR-009 follow-up verification (2026-07-14)
 
-- **CR-001 — Partially resolved:** `ui/backend/knowledge_bases.py` confines API and legacy-record cache names, and the focused tests cover relative, Windows-rooted, stored, and inline values. `src/bestteam/core/specification.py:267` still builds model-generated candidates before `ui/backend/builder.py` can contain them, while `src/bestteam/core/loader.py:120` resolves the cache path without checking the resolved target against a trusted root.
-- **CR-009 — Partially resolved:** `ui/backend/main.py` middleware rejects requests whose declared `Content-Length` exceeds the interview ceiling before routing. Requests without that header, or with an understated value, still enter Starlette multipart parsing/spooling before `ui/backend/interview.py` applies its capped read. A reverse-proxy body limit remains required for a hard ingress bound.
+- **CR-001 — Verified:** model-generated candidates are pre-validated before `validate_specification()` constructs a KB; API, persisted, and inline configs resolve their cache target under the backend-owned `_kb_cache` directory, rejecting symlink/junction escapes.
+- **CR-009 — Verified:** the ASGI limiter counts every incoming body chunk and emits 413 before the downstream multipart parser receives an over-limit chunk, including when `Content-Length` is absent or understated. A reverse-proxy limit remains useful operational defense in depth.
 
 ## Detailed Codex assessments
 

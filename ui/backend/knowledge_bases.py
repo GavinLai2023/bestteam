@@ -119,6 +119,40 @@ def contain_workflow_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def ensure_contained_cache_path_for_source(config: Dict[str, Any], source: Path) -> None:
+    """Reject a cache path whose resolved target escapes the owned cache dir.
+
+    ``contained_cache_path`` removes lexical traversal, but an existing
+    ``_kb_cache`` directory could itself be a symlink/junction. Resolve both
+    sides before the vector KB creates its cache so backend-managed workflows
+    never turn that into an arbitrary server-file write (CR-001).
+    """
+    cache_path = config.get("cache_path")
+    if not isinstance(cache_path, str):
+        return
+
+    root = source.parent.resolve()
+    cache_root = (root / _KB_CACHE_DIRNAME).resolve()
+    target = (source.parent / cache_path).resolve()
+    try:
+        target.relative_to(cache_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Knowledge base 'cache_path' resolves outside the application-owned cache directory",
+        ) from exc
+
+
+def ensure_workflow_cache_paths_for_source(config: Dict[str, Any], source: Path) -> None:
+    """Apply resolved-target containment to every inline knowledge base."""
+    knowledge_bases = config.get("knowledge_bases")
+    if not isinstance(knowledge_bases, list):
+        return
+    for kb in knowledge_bases:
+        if isinstance(kb, dict):
+            ensure_contained_cache_path_for_source(kb, source)
+
+
 def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
     """Return a name -> tool mapping for only the standalone knowledge bases
     `raw`'s agents actually reference by name in their `tools:` lists.
@@ -140,6 +174,7 @@ def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) ->
     tools: Dict[str, Any] = {}
     for record in records:
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
+        ensure_contained_cache_path_for_source(config, source)
         kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools

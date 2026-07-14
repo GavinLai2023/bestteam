@@ -36,7 +36,11 @@ from .interview import router as interview_router
 from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
-from .knowledge_bases import contain_workflow_config_for_load, load_knowledge_base_tools
+from .knowledge_bases import (
+    contain_workflow_config_for_load,
+    ensure_workflow_cache_paths_for_source,
+    load_knowledge_base_tools,
+)
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 from .ws_tickets import consume_ticket, issue_ticket
@@ -61,35 +65,84 @@ app = FastAPI(title="bestteam monitoring dashboard")
 _GENERAL_MAX_BODY_BYTES = 512 * 1024 * 1024
 
 
-@app.middleware("http")
-async def _enforce_max_request_body(request: Request, call_next):
-    """Reject an over-limit body from its Content-Length before Starlette parses
-    or spools it (CR-009). FastAPI reads request.form() before resolving
-    dependencies, so a dependency cannot gate ingress -- middleware runs first.
-    Content-Length can be absent (chunked) or spoofed, so this is a backstop, not
-    the hard bound; the capped read in the handler bounds memory regardless."""
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
+class _RequestBodyTooLarge(Exception):
+    """Internal signal raised before Starlette can parse or spool a body."""
+
+
+class _RequestBodyLimitMiddleware:
+    """Enforce declared and streamed request-size limits at the ASGI boundary.
+
+    Function-based middleware can reject a truthful ``Content-Length``, but
+    multipart parsing otherwise begins before the endpoint can cap reads. This
+    wrapper also counts every ASGI body chunk, covering chunked and understated
+    requests before Starlette's multipart parser can spool the excess (CR-009).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        limit = interview._MAX_UPLOAD_BYTES if path.endswith("/interview/transcribe") else _GENERAL_MAX_BODY_BYTES
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > limit:
+                await _send_body_too_large(send, limit)
+                return
+
+        received = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _RequestBodyTooLarge
+            return message
+
+        async def tracked_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
         try:
-            size = int(content_length)
-        except ValueError:
-            size = None
-        if size is not None:
-            limit = (
-                interview._MAX_UPLOAD_BYTES
-                if request.url.path.endswith("/interview/transcribe")
-                else _GENERAL_MAX_BODY_BYTES
-            )
-            if size > limit:
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": f"Request body exceeds the {limit // (1024 * 1024)} MB limit."},
-                )
-    return await call_next(request)
+            await self.app(scope, limited_receive, tracked_send)
+        except _RequestBodyTooLarge:
+            if response_started:
+                raise
+            await _send_body_too_large(send, limit)
 
 
-# Added after the body-size middleware so CORS ends up outermost -- a 413 from
-# the size check still gets CORS headers.
+async def _send_body_too_large(send, limit: int) -> None:
+    body = f'{{"detail":"Request body exceeds the {limit // (1024 * 1024)} MB limit."}}'.encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+# Add the body limiter first so CORS is the outermost layer and a 413 from the
+# size check still gets CORS headers.
+app.add_middleware(_RequestBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -205,8 +258,10 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
                 skill_lookup = load_skills(session)
                 kb_tools = load_knowledge_base_tools(session, record.config, source)
         try:
+            config = contain_workflow_config_for_load(record.config)
+            ensure_workflow_cache_paths_for_source(config, source)
             workflow = _build_workflow(
-                contain_workflow_config_for_load(record.config),
+                config,
                 source=source,
                 extra_tools=kb_tools,
                 extra_skills=skill_lookup,
