@@ -3,15 +3,93 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.loader import _build_knowledge_base
 
 from .db.models import KnowledgeBaseRecord
+
+# --- KB path containment (CR-001) -------------------------------------------
+# A KB `cache_path` is a server-file *write* target (the vector KB's
+# `_save_embedding_cache` does `os.replace(tmp, cache_path)`). We keep the SDK
+# loader permissive (CLI/YAML deployments legitimately point cache_path wherever
+# they manage), and instead constrain every *backend* boundary + load path so a
+# caller can never influence the write location beyond a filename: the cache is
+# forced into an application-owned `_kb_cache/` subdirectory that holds no source
+# files, so it can't clobber a workflow YAML or escape the app roots.
+
+_KB_CACHE_DIRNAME = "_kb_cache"
+
+
+def has_traversal(value: str) -> bool:
+    # Check under both path flavors so the guard behaves the same on the Linux
+    # server and a Windows dev box (e.g. "foo/../bar" vs "foo\\..\\bar").
+    return ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts
+
+
+def looks_absolute(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _cache_basename(value: str) -> str:
+    # Strip to the final path component across both separators, so a rooted or
+    # nested value can only ever contribute a filename.
+    base = re.split(r"[\\/]", value)[-1].strip()
+    return base if base not in ("", ".", "..") else "cache.json"
+
+
+def contained_cache_path(value: str) -> str:
+    """Force any cache_path into the app-owned `_kb_cache/` subdir (CR-001)."""
+    return f"{_KB_CACHE_DIRNAME}/{_cache_basename(value)}"
+
+
+def checked_contained_cache_path(value: str) -> str:
+    """Boundary guard: reject absolute/`..` cache_path with a clear 400, then
+    return the contained relative path. Callers store the returned value."""
+    if has_traversal(value):
+        raise HTTPException(status_code=400, detail="Knowledge base 'cache_path' must not contain '..' path segments")
+    if looks_absolute(value):
+        raise HTTPException(
+            status_code=400,
+            detail="Knowledge base 'cache_path' must be a relative path (it is stored under an application-owned directory)",
+        )
+    return contained_cache_path(value)
+
+
+def check_path_traversal(value: str) -> None:
+    """Boundary guard for a KB `path` (absolute local_folder paths stay allowed;
+    only `..` traversal is rejected)."""
+    if has_traversal(value):
+        raise HTTPException(status_code=400, detail="Knowledge base 'path' must not contain '..' path segments")
+
+
+def contain_kb_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of a KB config with cache_path contained. Non-raising, for
+    load time -- so a record persisted before the boundary guards existed still
+    can't write outside `_kb_cache/`."""
+    cache_path = config.get("cache_path")
+    if isinstance(cache_path, str):
+        return {**config, "cache_path": contained_cache_path(cache_path)}
+    return config
+
+
+def contain_workflow_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
+    """As above, for a workflow config's inline `knowledge_bases` list."""
+    kbs = config.get("knowledge_bases")
+    if not isinstance(kbs, list):
+        return config
+    return {
+        **config,
+        "knowledge_bases": [
+            contain_kb_config_for_load(kb) if isinstance(kb, dict) else kb for kb in kbs
+        ],
+    }
 
 
 def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
@@ -34,6 +112,6 @@ def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) ->
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.name.in_(referenced)).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        kb = _build_knowledge_base(record.config, source)
+        kb = _build_knowledge_base(contain_kb_config_for_load(record.config), source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools

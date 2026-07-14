@@ -147,6 +147,41 @@ def test_knowledge_base_put_still_allows_absolute_local_folder_path(client, tmp_
     assert resp.status_code == 200
 
 
+def test_knowledge_base_put_contains_relative_cache_path(client, tmp_path):
+    # CR-001: a clean relative cache_path is accepted but rewritten into the
+    # app-owned _kb_cache/ subdir, so it can only write there (never over a
+    # workflow YAML). Stored via KnowledgeBaseSpec, no build triggered.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    config = {
+        "path": str(docs_dir),
+        "type": "vector",
+        "embedding_model": "fake:8",
+        "cache_path": "sub/dir/embeddings.json",
+    }
+    resp = client.put("/api/config/knowledge_bases/kb", json=config)
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["cache_path"] == "_kb_cache/embeddings.json"
+
+
+def test_knowledge_base_put_contains_windows_rooted_cache_path(client, tmp_path):
+    # CR-001: a Windows rooted-relative value (which slips the lexical absolute
+    # check) is also confined to _kb_cache/ rather than escaping to a drive root.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    config = {
+        "path": str(docs_dir),
+        "type": "vector",
+        "embedding_model": "fake:8",
+        "cache_path": "\\Windows\\Temp\\pwned.json",
+    }
+    resp = client.put("/api/config/knowledge_bases/kb", json=config)
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["cache_path"] == "_kb_cache/pwned.json"
+
+
 def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
     # The inline `knowledge_bases` list in a workflow config is a second API
     # boundary that accepts KB paths (it bypasses KnowledgeBaseSpec). It must
@@ -179,6 +214,28 @@ def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
 def test_unknown_agent_returns_404(client):
     assert client.get("/api/config/agents/does-not-exist").status_code == 404
     assert client.delete("/api/config/agents/does-not-exist").status_code == 404
+
+
+def test_contain_kb_config_for_load_confines_legacy_cache_path():
+    # CR-001: a record persisted before the boundary guards (or any raw config)
+    # is confined at load time -- non-raising -- so it can't write outside
+    # _kb_cache/. The input dict is not mutated.
+    from ui.backend.knowledge_bases import contain_kb_config_for_load
+
+    original = {"path": "/data", "type": "vector", "cache_path": "/etc/cron.d/pwned"}
+    out = contain_kb_config_for_load(original)
+
+    assert out["cache_path"] == "_kb_cache/pwned"
+    assert original["cache_path"] == "/etc/cron.d/pwned"  # copy, not in-place
+
+
+def test_contain_workflow_config_for_load_confines_inline_kb():
+    from ui.backend.knowledge_bases import contain_workflow_config_for_load
+
+    cfg = {"knowledge_bases": [{"name": "k", "path": "/d", "type": "vector", "cache_path": "../../evil.json"}]}
+    out = contain_workflow_config_for_load(cfg)
+
+    assert out["knowledge_bases"][0]["cache_path"] == "_kb_cache/evil.json"
 
 
 def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):

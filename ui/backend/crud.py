@@ -20,7 +20,7 @@ import logging
 import os
 import shutil
 import uuid
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Dict, Type
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
@@ -37,7 +37,7 @@ from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
-from .knowledge_bases import load_knowledge_base_tools
+from .knowledge_bases import check_path_traversal, checked_contained_cache_path, load_knowledge_base_tools
 from .skills import load_skills
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
@@ -75,45 +75,25 @@ def _restore_backup(backup_dir: Path, live_dir: Path, name: str) -> None:
         )
 
 
-def _has_traversal(value: str) -> bool:
-    # Check under both path flavors so the guard behaves the same on the Linux
-    # server and a Windows dev box (e.g. "foo/../bar" vs "foo\\..\\bar").
-    return ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts
-
-
-def _looks_absolute(value: str) -> bool:
-    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
-
-
 def _validate_kb_paths(kb_config: Dict[str, Any]) -> None:
-    """Reject KB filesystem paths that escape application-owned roots (CR-001).
+    """Constrain caller-supplied KB paths to application-owned roots (CR-001).
 
     The `/api/config/knowledge_bases` and inline-`knowledge_bases` API
     boundaries accept caller-supplied `path`/`cache_path` strings. An absolute
-    or `..`-traversing `cache_path` is a server-file *write* primitive: on the
-    next run the vector KB's `_save_embedding_cache()` does
-    `os.replace(tmp, cache_path)`, overwriting any file it names. Reject
-    traversal on both fields and require `cache_path` to be app-relative so it
-    can only resolve under the backend's own workflows directory. Absolute
-    `local_folder` `path`s stay allowed (the documented "point at a folder you
-    manage yourself" feature).
+    or `..`-traversing `cache_path` is a server-file *write* primitive (the
+    vector KB's `_save_embedding_cache()` does `os.replace(tmp, cache_path)`).
+    Reject `..`/absolute with a clear 400, then rewrite `cache_path` in place to
+    an app-owned `_kb_cache/<filename>` -- so even a clean relative or Windows
+    rooted-relative value can only ever write inside that subdir, never over a
+    workflow YAML or outside the app roots. Absolute `local_folder` `path`s stay
+    allowed (the documented "point at a folder you manage yourself" feature).
     """
-    for field in ("path", "cache_path"):
-        value = kb_config.get(field)
-        if not isinstance(value, str):
-            continue  # missing/malformed values are the spec validator's job
-        if _has_traversal(value):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Knowledge base '{field}' must not contain '..' path segments",
-            )
+    path = kb_config.get("path")
+    if isinstance(path, str):
+        check_path_traversal(path)
     cache_path = kb_config.get("cache_path")
-    if isinstance(cache_path, str) and _looks_absolute(cache_path):
-        raise HTTPException(
-            status_code=400,
-            detail="Knowledge base 'cache_path' must be a relative path "
-            "(it is stored under an application-owned directory)",
-        )
+    if isinstance(cache_path, str):
+        kb_config["cache_path"] = checked_contained_cache_path(cache_path)
 
 
 def _invalidate_workflow_cache() -> None:

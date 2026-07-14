@@ -187,6 +187,34 @@ def test_submit_specification_rejects_invalid_payload(client):
     assert "Unknown tool" in resp.json()["detail"]
 
 
+def test_reject_unsafe_kb_paths_contains_relative_cache_path():
+    # CR-001: a spec's relative cache_path is rewritten in place into the
+    # app-owned _kb_cache/ subdir, so the contained value is what gets built,
+    # stored, and deployed. (Covers the model-generation + stored-spec paths.)
+    from bestteam import Specification
+
+    from ui.backend.builder import _reject_unsafe_kb_paths
+
+    spec = Specification.model_validate(
+        {
+            **_VALID_SPEC,
+            "knowledge_bases": [
+                {
+                    "name": "kb",
+                    "path": "/some/dir",
+                    "type": "vector",
+                    "embedding_model": "fake:8",
+                    "cache_path": "deep/nested/embeddings.json",
+                }
+            ],
+        }
+    )
+
+    _reject_unsafe_kb_paths(spec)
+
+    assert spec.knowledge_bases[0].cache_path == "_kb_cache/embeddings.json"
+
+
 def test_submit_specification_rejects_absolute_kb_cache_path(client, tmp_path):
     # CR-001: the builder specification endpoint is a third API boundary that
     # accepts caller-supplied KB paths (via the specification dict). An absolute

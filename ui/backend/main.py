@@ -35,7 +35,7 @@ from .interview import router as interview_router
 from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
-from .knowledge_bases import load_knowledge_base_tools
+from .knowledge_bases import contain_workflow_config_for_load, load_knowledge_base_tools
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 from .ws_tickets import consume_ticket, issue_ticket
@@ -157,7 +157,7 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
                 kb_tools = load_knowledge_base_tools(session, record.config, source)
         try:
             workflow = _build_workflow(
-                record.config,
+                contain_workflow_config_for_load(record.config),
                 source=source,
                 extra_tools=kb_tools,
                 extra_skills=skill_lookup,

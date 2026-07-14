@@ -24,12 +24,16 @@ from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_user
-from .crud import _validate_kb_paths
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .db.models import BuilderSession, KnowledgeBaseRecord, WorkflowRecord
 from .db_session import get_db
-from .knowledge_bases import load_knowledge_base_tools
+from .knowledge_bases import (
+    check_path_traversal,
+    checked_contained_cache_path,
+    contain_kb_config_for_load,
+    load_knowledge_base_tools,
+)
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -148,21 +152,27 @@ def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
     records = db.query(KnowledgeBaseRecord).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        kb = _build_knowledge_base(record.config, source)
+        kb = _build_knowledge_base(contain_kb_config_for_load(record.config), source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
 
 
 def _reject_unsafe_kb_paths(spec: Specification) -> None:
-    """Reject absolute/traversing KB paths on a spec before it is built (CR-001).
+    """Constrain a spec's KB paths in place before it is built or stored (CR-001).
 
     Building a vector KB calls `_save_embedding_cache` at construction time, so
-    this must run before `validate_specification`/`_build_workflow`. Shared by
-    every builder boundary that builds a caller-influenced spec: specification
-    submit, test-run, and deploy. Same guard as the `/api/config` boundaries.
+    this must run before `validate_specification`/`_build_workflow`. Rejects
+    absolute/`..` paths and rewrites each `cache_path` to an app-owned
+    `_kb_cache/<filename>`, mutating the spec's KnowledgeBaseSpec objects so the
+    contained value is what gets built, stored, and later deployed. Shared by
+    every builder boundary that builds or stores a caller-influenced spec:
+    specification submit/refine, test-run, and deploy.
     """
-    for kb_config in spec.to_raw().get("knowledge_bases", []) or []:
-        _validate_kb_paths(kb_config)
+    for kb in spec.knowledge_bases:
+        if isinstance(kb.path, str):
+            check_path_traversal(kb.path)
+        if isinstance(kb.cache_path, str):
+            kb.cache_path = checked_contained_cache_path(kb.cache_path)
 
 
 def _validate_spec_payload(
@@ -284,6 +294,10 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
     if req.feedback:
         append_feedback(db, session_id, {"stage": "specification", "note": req.feedback})
 
+    # Contain KB paths on the stored spec so a model-generated spec (which the
+    # user-dict path already contains in _validate_spec_payload) can't persist an
+    # uncontained cache_path that test-run/deploy would later build (CR-001).
+    _reject_unsafe_kb_paths(spec)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="spec")
     return _session_to_dict(session)
 
@@ -323,6 +337,7 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
     append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    _reject_unsafe_kb_paths(spec)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
     return _session_to_dict(session)
 
