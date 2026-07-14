@@ -46,6 +46,26 @@ def test_access_token_rejects_expired_token():
         auth.decode_access_token(token)
 
 
+def test_dev_default_secret_is_rejected():
+    assert auth.is_insecure_secret_key(auth._DEFAULT_SECRET_KEY)
+
+
+def test_env_example_secret_is_rejected_by_startup_guard():
+    # CR-002: a deployment that copies .env.example unchanged must NOT be able
+    # to boot -- the startup guard must reject the example placeholder value.
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    secret = None
+    for line in (root / ".env.example").read_text(encoding="utf-8").splitlines():
+        if line.startswith("BESTTEAM_SECRET_KEY="):
+            secret = line.split("=", 1)[1].strip()
+            break
+
+    assert secret is not None, "BESTTEAM_SECRET_KEY not found in .env.example"
+    assert auth.is_insecure_secret_key(secret)
+
+
 @pytest.fixture
 def workflows_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
@@ -162,13 +182,15 @@ def test_stream_run_rejects_missing_token(client):
             ws.receive_json()
 
 
-def test_stream_run_rejects_invalid_token(client):
+def test_stream_run_rejects_invalid_ticket(client):
+    # CR-013: the WebSocket authenticates with a single-use ticket, not the
+    # bearer token -- a bogus ticket (or the raw bearer) must be rejected.
     with pytest.raises(Exception):
-        with client.websocket_connect("/api/runs/some-run-id/stream?token=not-a-real-token") as ws:
+        with client.websocket_connect("/api/runs/some-run-id/stream?ticket=not-a-real-ticket") as ws:
             ws.receive_json()
 
 
-def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
+def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
     from tests.test_ui_backend import _write_workflow
 
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
@@ -177,13 +199,14 @@ def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
     client.headers["Authorization"] = f"Bearer {token}"
 
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
 
-    with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+    with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
         event = ws.receive_json()
         assert event["type"] == "run_started"
 
 
-def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
+def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir):
     from tests.test_ui_backend import _write_workflow
     from ui.backend.db.models import User
 
@@ -192,6 +215,7 @@ def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
     token = client.post("/api/auth/register", json={"username": "carol", "password": "hunter2"}).json()["access_token"]
     client.headers["Authorization"] = f"Bearer {token}"
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]  # issued while carol exists
 
     db_gen = backend_main.app.dependency_overrides[get_db]()
     db = next(db_gen)
@@ -202,5 +226,5 @@ def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
         db_gen.close()
 
     with pytest.raises(Exception):
-        with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+        with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
             ws.receive_json()

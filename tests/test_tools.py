@@ -17,6 +17,25 @@ def test_registry_contains_all_tools():
     assert set(REGISTRY) == {"web_search", "parse_file", "http_get", "calculator"}
 
 
+def test_knowledge_base_discovery_excludes_legacy_xls():
+    # CR-016: KB folder discovery must not advertise .xls either (openpyxl
+    # can't read it), so it stays consistent with parse_file's supported set.
+    from bestteam.core.knowledge_base import _SUPPORTED_SUFFIXES
+
+    assert ".xls" not in _SUPPORTED_SUFFIXES
+    assert ".xlsx" in _SUPPORTED_SUFFIXES
+
+
+def test_parse_file_rejects_legacy_xls(tmp_path):
+    # CR-016: .xls (legacy BIFF) is no longer advertised -- openpyxl cannot read
+    # it, so it must be rejected cleanly as an unsupported type, not routed to
+    # the Excel parser where it fails with an opaque backend error.
+    p = tmp_path / "legacy.xls"
+    p.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy-ole2-content")
+    with pytest.raises(ConfigurationError, match="Unsupported file type"):
+        parse_file(str(p))
+
+
 def test_registry_values_are_callables():
     for name, fn in REGISTRY.items():
         assert callable(fn), f"REGISTRY['{name}'] is not callable"

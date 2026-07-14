@@ -17,6 +17,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
+from bestteam.core.trace import TraceEvent
 
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -74,10 +75,13 @@ def run_in_background(
     """
     db = Session(engine) if engine is not None else None
     memory = _make_memory() if user_id else None
+    terminal_seen = False
     try:
         for event in workflow.stream(input, user_id=user_id, memory=memory):
             payload = dataclasses.asdict(event)
             registry.publish(run_id, payload)
+            if event.type in ("run_completed", "run_failed"):
+                terminal_seen = True
             if db is not None and event.type == "agent_completed":
                 for entry in event.usage:
                     record_usage(
@@ -88,6 +92,27 @@ def run_in_background(
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),
                     )
+    except Exception:  # noqa: BLE001 -- any worker failure must still yield a terminal event
+        # Workflow.stream() compiles before its own BestTeamError handler, so a
+        # compile failure (e.g. an unsupported collaboration mode) escapes as an
+        # exception rather than a run_failed event. Without this catch-all the
+        # run would stay "running" forever and subscribers would never see a
+        # terminal event (CR-003). The message is sanitized; the real traceback
+        # is logged server-side only. Only synthesize run_failed if no terminal
+        # event was already published, so a post-completion failure (e.g. usage
+        # recording) can't flip a completed run to failed.
+        _logger.exception("Run %s failed on the worker thread", run_id)
+        if not terminal_seen:
+            registry.publish(
+                run_id,
+                dataclasses.asdict(
+                    TraceEvent(
+                        type="run_failed",
+                        workflow=getattr(workflow, "name", ""),
+                        data="The run failed due to an internal error.",
+                    )
+                ),
+            )
     finally:
         if db is not None:
             db.close()

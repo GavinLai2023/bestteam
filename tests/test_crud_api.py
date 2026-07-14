@@ -1,6 +1,8 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
+from unittest.mock import patch
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -93,9 +95,206 @@ def test_knowledge_base_put_rejects_name_with_spaces(client):
     assert resp.status_code == 400
 
 
+def test_knowledge_base_put_rejects_absolute_cache_path(client):
+    # CR-001: an absolute cache_path is the "server-file replacement" write
+    # primitive -- on the next run the vector KB's _save_embedding_cache would
+    # os.replace() this file. The API boundary must reject it.
+    config = {
+        "path": "./docs",
+        "type": "vector",
+        "embedding_model": "fake:8",
+        "cache_path": "/etc/cron.d/pwned",
+    }
+
+    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
+def test_knowledge_base_put_rejects_traversal_in_cache_path(client):
+    config = {
+        "path": "./docs",
+        "type": "vector",
+        "embedding_model": "fake:8",
+        "cache_path": "../../evil.json",
+    }
+
+    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
+def test_knowledge_base_put_rejects_traversal_in_path(client):
+    config = {"path": "../../../../etc", "type": "local_folder"}
+
+    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+
+    assert resp.status_code == 400
+    assert "path" in resp.json()["detail"]
+
+
+def test_knowledge_base_put_still_allows_absolute_local_folder_path(client, tmp_path):
+    # Option A deliberately keeps the documented "point at a folder you manage
+    # yourself" feature: an absolute local_folder path (no traversal) is fine.
+    docs_dir = tmp_path / "client_docs"
+    docs_dir.mkdir()
+    config = {"path": str(docs_dir), "type": "local_folder"}
+
+    resp = client.put("/api/config/knowledge_bases/ok", json=config)
+
+    assert resp.status_code == 200
+
+
+def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
+    # The inline `knowledge_bases` list in a workflow config is a second API
+    # boundary that accepts KB paths (it bypasses KnowledgeBaseSpec). It must
+    # enforce the same containment as the standalone endpoint.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    workflow_config = {
+        "knowledge_bases": [
+            {
+                "name": "evil_kb",
+                "path": str(docs_dir),
+                "type": "vector",
+                "embedding_model": "fake:8",
+                "cache_path": "/tmp/evil.json",
+            }
+        ],
+        "agents": [
+            {"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["evil_kb"]}
+        ],
+        "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+
+    resp = client.put("/api/config/workflows/evil_wf", json=workflow_config)
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
 def test_unknown_agent_returns_404(client):
     assert client.get("/api/config/agents/does-not-exist").status_code == 404
     assert client.delete("/api/config/agents/does-not-exist").status_code == 404
+
+
+def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):
+    # CR-008: re-uploading must replace the KB's files wholesale -- a file
+    # present before but omitted from the new upload must not linger.
+    uploads = tmp_path / "knowledge_base_uploads"
+    client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[
+            ("files", ("doc1.txt", b"first document content", "text/plain")),
+            ("files", ("doc2.txt", b"second document content", "text/plain")),
+        ],
+    )
+    resp = client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[("files", ("doc3.txt", b"third document content", "text/plain"))],
+    )
+
+    assert resp.status_code == 200
+    live = uploads / "kb"
+    assert sorted(p.name for p in live.iterdir()) == ["doc3.txt"]
+
+
+def test_failed_reupload_preserves_prior_kb(client, tmp_path):
+    # CR-008: a failed re-upload must leave the previously-valid KB directory
+    # AND its DB record intact -- not rmtree the live directory on error.
+    uploads = tmp_path / "knowledge_base_uploads"
+    client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
+    )
+
+    from bestteam.exceptions import ConfigurationError
+
+    with patch.object(backend_crud, "LocalFolderKnowledgeBase", side_effect=ConfigurationError("bad upload")):
+        resp = client.post(
+            "/api/config/knowledge_bases/kb/upload",
+            files=[("files", ("doc2.txt", b"new content that fails validation", "text/plain"))],
+        )
+
+    assert resp.status_code == 400
+    live = uploads / "kb"
+    assert sorted(p.name for p in live.iterdir()) == ["doc1.txt"]  # prior KB preserved
+    assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # DB record preserved
+
+
+def test_deleting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
+    # CR-005: deleting a KB must drop any cached workflow that might embed it --
+    # the global max(updated_at) freshness key does not change on a delete.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.md").write_text("hello", encoding="utf-8")
+    client.put("/api/config/knowledge_bases/kb1", json={"path": str(docs_dir), "type": "local_folder"})
+    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+
+    assert client.delete("/api/config/knowledge_bases/kb1").status_code == 204
+
+    assert backend_main._workflow_cache == {}
+
+
+def test_deleting_skill_invalidates_workflow_cache(client):
+    client.put(
+        "/api/config/skills/research",
+        json={"description": "Research", "instructions": "Search.", "tools": []},
+    )
+    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+
+    assert client.delete("/api/config/skills/research").status_code == 204
+
+    assert backend_main._workflow_cache == {}
+
+
+def test_upserting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.md").write_text("hello", encoding="utf-8")
+    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+
+    client.put("/api/config/knowledge_bases/kb1", json={"path": str(docs_dir), "type": "local_folder"})
+
+    assert backend_main._workflow_cache == {}
+
+
+def test_stale_load_does_not_repopulate_cache_after_invalidation():
+    # CR-005: a load that snapshotted the generation, then had the cache
+    # invalidated mid-build, must not write its now-stale result back.
+    backend_main._workflow_cache.clear()
+    generation = backend_main._workflow_cache_generation
+
+    with backend_main._workflow_cache_lock:  # simulate a concurrent invalidation
+        backend_main._workflow_cache_generation += 1
+
+    backend_main._store_workflow_in_cache("wf", object(), "key", generation)
+
+    assert "wf" not in backend_main._workflow_cache
+
+
+def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
+    # CR-008: if the DB commit fails, the filesystem is rolled back to the prior
+    # KB so the live directory and DB record stay consistent.
+    uploads = tmp_path / "knowledge_base_uploads"
+    client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
+    )
+
+    with patch("sqlalchemy.orm.Session.commit", side_effect=RuntimeError("db down")):
+        with pytest.raises(RuntimeError, match="db down"):
+            client.post(
+                "/api/config/knowledge_bases/kb/upload",
+                files=[("files", ("doc2.txt", b"replacement content", "text/plain"))],
+            )
+
+    live = uploads / "kb"
+    assert sorted(p.name for p in live.iterdir()) == ["doc1.txt"]  # prior files restored
+    assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # record intact
 
 
 def test_upload_creates_queryable_local_folder_kb(client):
@@ -250,6 +449,18 @@ def test_workflow_put_rejects_invalid_config(client):
 
     assert resp.status_code == 400
     assert "unknown agent" in resp.json()["detail"]
+
+
+def test_workflow_put_non_list_knowledge_bases_returns_400(client):
+    # Regression: a malformed non-list `knowledge_bases` value must be rejected
+    # with 400 by the workflow validator, not crash the request with an
+    # uncaught TypeError (500). The CR-001 path-guard iteration must run inside
+    # the error-handling try block, like the baseline _build_workflow did.
+    bad_config = {**_VALID_WORKFLOW_CONFIG, "knowledge_bases": 1}
+
+    resp = client.put("/api/config/workflows/support_workflow", json=bad_config)
+
+    assert resp.status_code == 400
 
 
 def test_workflow_config_is_runnable_via_get_workflow(client):

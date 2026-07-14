@@ -26,8 +26,9 @@ A commercial multi-agent framework that wraps [LangGraph](https://github.com/lan
 
 ```bash
 # 1. Install
-pip install -e ".[tools]"          # core SDK + built-in tools
-pip install -e ".[tools,ui]"       # + monitoring dashboard
+pip install -e ".[tools]"                        # core SDK + built-in tools
+pip install -e ".[tools,ui]"                     # + monitoring dashboard
+pip install -e ".[tools,ui,providers-openai]"    # + real openai: models & interview transcription
 
 # 2. Set environment variables (copy .env.example → .env)
 export TAVILY_API_KEY=tvly-...
@@ -106,7 +107,7 @@ bestteam run code_review.yaml "def divide(a, b): return a / b"
 |---|---|---|
 | `web_search(query)` | Tavily web search, LLM-optimised output | `TAVILY_API_KEY` |
 | `parse_file(path)` | Extract text from PDF, Excel, Word (incl. tables), or plain text | `pip install 'bestteam[tools-files]'` |
-| `http_get(url)` | HTTP GET with optional JSON headers; blocks requests to private/internal addresses | — |
+| `http_get(url)` | HTTP GET with optional JSON headers; blocks requests to private/internal addresses | `pip install 'bestteam[tools-http]'` |
 | `calculator(expr)` | Safe arithmetic via AST — prevents hallucination | — |
 
 `parse_file` reads any local path it's given, with no sandboxing — if you
@@ -162,7 +163,7 @@ ui/
 └── frontend/      React + Vite live dashboard
 
 examples/          Runnable demo scripts
-tests/             pytest suite (42 tests)
+tests/             pytest suite
 ```
 
 ## Environment variables
@@ -172,7 +173,8 @@ See `.env.example` for the full list. Copy it to `.env` — it is git-ignored.
 ## Roadmap
 
 - [x] Local-folder knowledge base (BM25 keyword search)
-- [ ] Semantic/vector knowledge bases (Chroma / FAISS / Pinecone)
+- [x] Semantic/vector knowledge base (in-memory cosine similarity, optional embedding cache)
+- [ ] External vector stores (Chroma / FAISS / Pinecone)
 - [ ] DMS connectors (SharePoint / Confluence / Google Drive)
 - [ ] SQL executor (read-only, SQLAlchemy)
 - [ ] Python code sandbox (subprocess-isolated)

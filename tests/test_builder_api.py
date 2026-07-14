@@ -187,6 +187,95 @@ def test_submit_specification_rejects_invalid_payload(client):
     assert "Unknown tool" in resp.json()["detail"]
 
 
+def test_submit_specification_rejects_absolute_kb_cache_path(client, tmp_path):
+    # CR-001: the builder specification endpoint is a third API boundary that
+    # accepts caller-supplied KB paths (via the specification dict). An absolute
+    # cache_path on a vector KB is the same server-file *write* primitive
+    # guarded at the /api/config boundaries and must be rejected here too --
+    # before the spec is validated/built (and thus before any cache write).
+    docs_dir = tmp_path / "docs"  # empty: build would fail first, so the guard must run before it
+    docs_dir.mkdir()
+    spec_with_evil_kb = {
+        **_VALID_SPEC,
+        "knowledge_bases": [
+            {
+                "name": "evil_kb",
+                "path": str(docs_dir),
+                "type": "vector",
+                "embedding_model": "fake:8",
+                "cache_path": "/tmp/evil.json",
+            }
+        ],
+    }
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/specification",
+        json={"specification": spec_with_evil_kb},
+    )
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
+def _evil_vector_spec(docs_dir):
+    return {
+        **_VALID_SPEC,
+        "knowledge_bases": [
+            {
+                "name": "evil_kb",
+                "path": str(docs_dir),
+                "type": "vector",
+                "embedding_model": "fake:8",
+                "cache_path": "/tmp/evil.json",
+            }
+        ],
+    }
+
+
+def _plant_stored_spec(session_id, spec):
+    # Simulate a spec reaching the session from an origin other than the
+    # guarded user-dict submit (the model-generation path, or a pre-fix
+    # record) by writing it straight to the session via the same in-memory DB.
+    from ui.backend.db.builder_sessions import update_session
+
+    gen = backend_main.app.dependency_overrides[get_db]()
+    db = next(gen)
+    try:
+        update_session(db, session_id, specification_json=spec, status="spec")
+    finally:
+        gen.close()
+
+
+def test_deploy_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path):
+    # CR-001: deploy builds the stored spec via validate_specification, where a
+    # vector KB's _save_embedding_cache write fires at construction. deploy must
+    # reject an absolute cache_path before build. Empty docs dir => the pre-fix
+    # (unguarded) path fails at "no readable documents" with no cache write.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+    _plant_stored_spec(session_id, _evil_vector_spec(docs_dir))
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/deploy")
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
+def test_test_run_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path):
+    # Same as deploy: the sandbox test-run boundary builds the stored spec too.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+    _plant_stored_spec(session_id, _evil_vector_spec(docs_dir))
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/test-runs", json={"input": "hello"})
+
+    assert resp.status_code == 400
+    assert "cache_path" in resp.json()["detail"]
+
+
 def test_solution_feedback_appends_history_and_accepts_revised_spec(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})

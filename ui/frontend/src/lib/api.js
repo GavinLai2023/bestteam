@@ -111,6 +111,9 @@ export const api = {
   createRun: (workflow, input) =>
     request('/api/runs', { method: 'POST', body: JSON.stringify({ workflow, input }) }),
   getRun: (id) => request(`/api/runs/${id}`),
+  // Short-lived, single-use ticket for authenticating the stream WebSocket
+  // (CR-013) -- only the ticket goes in the ws URL, never the bearer token.
+  createWsTicket: () => request('/api/runs/ws-ticket', { method: 'POST' }),
 
   // Model catalog
   modelCatalog: () => request('/api/config/model-catalog'),

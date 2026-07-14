@@ -16,8 +16,10 @@ automatically. A `workflows` entry is a complete, self-contained
 
 from __future__ import annotations
 
+import os
 import shutil
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Type
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
@@ -52,6 +54,67 @@ _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
 
 
+def _has_traversal(value: str) -> bool:
+    # Check under both path flavors so the guard behaves the same on the Linux
+    # server and a Windows dev box (e.g. "foo/../bar" vs "foo\\..\\bar").
+    return ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts
+
+
+def _looks_absolute(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _validate_kb_paths(kb_config: Dict[str, Any]) -> None:
+    """Reject KB filesystem paths that escape application-owned roots (CR-001).
+
+    The `/api/config/knowledge_bases` and inline-`knowledge_bases` API
+    boundaries accept caller-supplied `path`/`cache_path` strings. An absolute
+    or `..`-traversing `cache_path` is a server-file *write* primitive: on the
+    next run the vector KB's `_save_embedding_cache()` does
+    `os.replace(tmp, cache_path)`, overwriting any file it names. Reject
+    traversal on both fields and require `cache_path` to be app-relative so it
+    can only resolve under the backend's own workflows directory. Absolute
+    `local_folder` `path`s stay allowed (the documented "point at a folder you
+    manage yourself" feature).
+    """
+    for field in ("path", "cache_path"):
+        value = kb_config.get(field)
+        if not isinstance(value, str):
+            continue  # missing/malformed values are the spec validator's job
+        if _has_traversal(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Knowledge base '{field}' must not contain '..' path segments",
+            )
+    cache_path = kb_config.get("cache_path")
+    if isinstance(cache_path, str) and _looks_absolute(cache_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Knowledge base 'cache_path' must be a relative path "
+            "(it is stored under an application-owned directory)",
+        )
+
+
+def _invalidate_workflow_cache() -> None:
+    """Drop every cached Workflow after a KB/skill mutation.
+
+    A cached Workflow may embed a knowledge-base tool or skill by value. The
+    global `max(updated_at)` freshness key in `main._get_workflow` misses a
+    *delete* (removing a non-latest record leaves the maximum unchanged), so a
+    cached workflow could keep serving a deleted KB's documents (CR-005).
+    Clearing the cache on every KB/skill create/update/delete is the simple,
+    correct invalidation. Bumping the generation under the cache lock makes a
+    concurrent `_get_workflow` that started before this call skip caching its
+    now-stale result instead of repopulating the cache (CR-005). Imported
+    lazily to avoid a crud<->main import cycle.
+    """
+    from . import main
+
+    with main._workflow_cache_lock:
+        main._workflow_cache.clear()
+        main._workflow_cache_generation += 1
+
+
 def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel]) -> APIRouter:
     sub = APIRouter(prefix=f"/{name}")
 
@@ -69,6 +132,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
 
     @sub.put("/{item_name}")
     def upsert_item(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+        if name == "knowledge_bases":
+            _validate_kb_paths(config)
         try:
             spec = spec_cls.model_validate({**config, "name": item_name})
         except ValidationError as exc:
@@ -82,6 +147,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         else:
             item.config = raw
         db.commit()
+        if name in ("knowledge_bases", "skills"):
+            _invalidate_workflow_cache()
         return {"name": item_name, "config": raw}
 
     @sub.delete("/{item_name}", status_code=204)
@@ -95,6 +162,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 shutil.rmtree(upload_dir, ignore_errors=True)
         db.delete(item)
         db.commit()
+        if name in ("knowledge_bases", "skills"):
+            _invalidate_workflow_cache()
         return Response(status_code=204)
 
     return sub
@@ -153,16 +222,24 @@ def upload_knowledge_base_files(
             )
         contents[filename] = data
 
-    upload_dir = _KB_UPLOADS_DIR / item_name
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    # Stage the new files in a sibling directory and validate them there, then
+    # atomically promote staging to the live directory only after validation
+    # succeeds. This avoids merging new files on top of stale ones and, on any
+    # failure, leaves the previously-valid KB and its DB record untouched --
+    # unlike writing in place and rmtree-ing the live directory on error (CR-008).
+    live_dir = _KB_UPLOADS_DIR / item_name
+    token = uuid.uuid4().hex[:8]
+    staging_dir = _KB_UPLOADS_DIR / f".staging_{item_name}_{token}"
+    backup_dir = _KB_UPLOADS_DIR / f".backup_{item_name}_{token}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
     try:
         for filename, data in contents.items():
-            (upload_dir / filename).write_bytes(data)
+            (staging_dir / filename).write_bytes(data)
 
         try:
             kb = LocalFolderKnowledgeBase(
                 name=item_name,
-                path=upload_dir,
+                path=staging_dir,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 top_k=top_k,
@@ -170,9 +247,22 @@ def upload_knowledge_base_files(
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        # Promote staging -> live. Move the current live dir aside first so the
+        # final rename targets a non-existent path (works on Windows + POSIX);
+        # restore it if the promotion fails.
+        had_live = live_dir.exists()
+        if had_live:
+            os.replace(live_dir, backup_dir)
+        try:
+            os.replace(staging_dir, live_dir)
+        except Exception:
+            if had_live:
+                os.replace(backup_dir, live_dir)
+            raise
+
         spec = KnowledgeBaseSpec(
             name=item_name,
-            path=str(upload_dir),
+            path=str(live_dir),
             type="local_folder",
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -185,7 +275,21 @@ def upload_knowledge_base_files(
             db.add(item)
         else:
             item.config = raw
-        db.commit()
+        # Commit the DB record while the backup still exists, so a commit
+        # failure can roll the filesystem back to the prior KB -- keeping the
+        # live directory and the DB record consistent (CR-008).
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            shutil.rmtree(live_dir, ignore_errors=True)
+            if had_live:
+                os.replace(backup_dir, live_dir)
+            raise
+        # Commit succeeded: the new KB is durable, so the backup can go.
+        if had_live:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        _invalidate_workflow_cache()
 
         return {
             "name": item_name,
@@ -193,9 +297,11 @@ def upload_knowledge_base_files(
             "file_count": len(contents),
             "chunk_count": len(kb._chunks),
         }
-    except Exception:
-        shutil.rmtree(upload_dir, ignore_errors=True)
-        raise
+    finally:
+        # Only staging/backup scratch dirs are ever removed here -- never the
+        # promoted live directory -- so a failure preserves the prior KB.
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 _workflows = APIRouter(prefix="/workflows")
@@ -219,6 +325,9 @@ def get_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Dict[s
 def upsert_workflow_config(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
     raw = {**config, "name": item_name}
     try:
+        for kb_config in raw.get("knowledge_bases", []) or []:
+            if isinstance(kb_config, dict):
+                _validate_kb_paths(kb_config)
         source = _WORKFLOWS_DIR / f"{item_name}.yaml"
         kb_tools = load_knowledge_base_tools(db, raw, source)
         _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db))

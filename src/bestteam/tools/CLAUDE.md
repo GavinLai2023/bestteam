@@ -11,7 +11,7 @@ Four ready-made tools clients can attach directly to any Agent:
 |---|---|---|---|
 | `web_search(query, max_results=5)` | `from bestteam import web_search` | `TAVILY_API_KEY` | `pip install 'bestteam[tools-search]'` |
 | `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word) |
-| `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `httpx` (indirect dep via FastAPI) |
+| `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `pip install 'bestteam[tools-http]'` (httpx) |
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
 
 **Code usage:**

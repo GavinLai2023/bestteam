@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import TeamFlow from '../../components/TeamFlow'
-import { WS_BASE, TOKEN_KEY, api } from '../../lib/api'
+import { WS_BASE, api } from '../../lib/api'
 
 export default function PreviewPage() {
   const { session, loading, sessionId } = useOutletContext()
@@ -65,8 +65,8 @@ export default function PreviewPage() {
     try {
       const { run_id: runId } = await api.createTestRun(sessionId, input.trim())
 
-      const token = localStorage.getItem(TOKEN_KEY)
-      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
+      const { ticket } = await api.createWsTicket()
+      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
       wsRef.current = ws
       ws.onmessage = (message) => {
         const event = JSON.parse(message.data)

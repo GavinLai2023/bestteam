@@ -213,6 +213,45 @@ def test_no_auth_header_returns_401(client):
     assert resp.status_code == 401
 
 
+def test_oversized_upload_returns_413(client, monkeypatch):
+    # CR-009: a body over the hard app-level ceiling is rejected before any
+    # transcription/ffmpeg work, even when ffmpeg is available for splitting.
+    from ui.backend import interview
+
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    with patch("ui.backend.interview._is_ffmpeg_available", return_value=True):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("huge.mp3", b"\x00" * 200, "audio/mpeg")},
+        )
+    assert resp.status_code == 413
+    assert "upload limit" in resp.json()["detail"]
+
+
+def test_is_ffmpeg_available_false_when_binary_missing():
+    # CR-009: a missing ffmpeg binary must read as "unavailable", not raise.
+    from ui.backend import interview
+
+    interview._is_ffmpeg_available.cache_clear()
+    with patch("ui.backend.interview.subprocess.run", side_effect=FileNotFoundError()):
+        assert interview._is_ffmpeg_available() is False
+    interview._is_ffmpeg_available.cache_clear()
+
+
+def test_split_audio_raises_on_ffmpeg_timeout(tmp_path):
+    # CR-009: the split subprocess has a finite timeout; a hang surfaces as a
+    # RuntimeError (-> 502) rather than blocking a worker forever.
+    from ui.backend import interview
+
+    with patch(
+        "ui.backend.interview.subprocess.run",
+        side_effect=interview.subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1),
+    ):
+        with pytest.raises(RuntimeError, match="timed out"):
+            interview._split_audio(b"\x00" * 10, "mp3", str(tmp_path))
+
+
 def test_ffmpeg_failure_returns_502(client):
     large_data = b"\x00" * (25 * 1024 * 1024 + 1)
 

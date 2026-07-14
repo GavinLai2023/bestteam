@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -27,7 +28,6 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
-from .auth import AuthError, decode_access_token
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
@@ -38,12 +38,13 @@ from .db_session import SessionLocal, get_db
 from .knowledge_bases import load_knowledge_base_tools
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
+from .ws_tickets import consume_ticket, issue_ticket
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
-if auth.SECRET_KEY == auth._DEFAULT_SECRET_KEY:
+if auth.is_insecure_secret_key(auth.SECRET_KEY):
     raise RuntimeError(
-        "BESTTEAM_SECRET_KEY is unset (using the insecure dev default). "
+        "BESTTEAM_SECRET_KEY is unset or still a known placeholder value. "
         "Set BESTTEAM_SECRET_KEY to a long random value before starting this service "
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
@@ -77,6 +78,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 _workflow_cache: Dict[str, Tuple[Workflow, Any]] = {}
+# Guards the cache dict and a monotonic generation counter. `_get_workflow`
+# snapshots the generation before it builds and only stores the result if the
+# generation hasn't advanced -- so a concurrent KB/skill invalidation (which
+# bumps the generation, see crud._invalidate_workflow_cache) can't be undone by
+# a load that started before it and finished after (CR-005).
+_workflow_cache_lock = threading.Lock()
+_workflow_cache_generation = 0
+
+
+def _store_workflow_in_cache(name: str, workflow: Workflow, cache_key: Any, generation: int) -> None:
+    with _workflow_cache_lock:
+        if generation == _workflow_cache_generation:
+            _workflow_cache[name] = (workflow, cache_key)
 
 
 class RunRequest(BaseModel):
@@ -114,6 +128,10 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     (including in tests, which override `get_db`); if omitted, a one-off
     session against the module-level engine is used."""
     source = WORKFLOWS_DIR / f"{name}.yaml"
+    # Snapshot the invalidation generation before we read dependencies / build,
+    # so a KB/skill delete that races this load makes us skip caching a stale
+    # result rather than repopulating the cache after the invalidation (CR-005).
+    generation = _workflow_cache_generation
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
@@ -125,28 +143,29 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     if record is not None:
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
         cached = _workflow_cache.get(name)
-        if cached is None or cached[1] != cache_key:
-            # Only load skills and build standalone KB tools (which may
-            # re-chunk files and, for type: vector, call a paid embedding
-            # model) on a cache miss -- not on every request.
-            if db is not None:
-                skill_lookup = load_skills(db)
-                kb_tools = load_knowledge_base_tools(db, record.config, source)
-            else:
-                with SessionLocal() as session:
-                    skill_lookup = load_skills(session)
-                    kb_tools = load_knowledge_base_tools(session, record.config, source)
-            try:
-                workflow = _build_workflow(
-                    record.config,
-                    source=source,
-                    extra_tools=kb_tools,
-                    extra_skills=skill_lookup,
-                )
-            except (KeyError, TypeError, BestTeamError) as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            _workflow_cache[name] = (workflow, cache_key)
-        return _workflow_cache[name][0]
+        if cached is not None and cached[1] == cache_key:
+            return cached[0]
+        # Only load skills and build standalone KB tools (which may re-chunk
+        # files and, for type: vector, call a paid embedding model) on a cache
+        # miss -- not on every request.
+        if db is not None:
+            skill_lookup = load_skills(db)
+            kb_tools = load_knowledge_base_tools(db, record.config, source)
+        else:
+            with SessionLocal() as session:
+                skill_lookup = load_skills(session)
+                kb_tools = load_knowledge_base_tools(session, record.config, source)
+        try:
+            workflow = _build_workflow(
+                record.config,
+                source=source,
+                extra_tools=kb_tools,
+                extra_skills=skill_lookup,
+            )
+        except (KeyError, TypeError, BestTeamError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _store_workflow_in_cache(name, workflow, cache_key, generation)
+        return workflow
 
     path = WORKFLOWS_DIR / f"{name}.yaml"
     if not path.is_file():
@@ -154,12 +173,14 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
 
     cache_key = ("file", path.stat().st_mtime)
     cached = _workflow_cache.get(name)
-    if cached is None or cached[1] != cache_key:
-        try:
-            _workflow_cache[name] = (load_workflow(path), cache_key)
-        except BestTeamError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _workflow_cache[name][0]
+    if cached is not None and cached[1] == cache_key:
+        return cached[0]
+    try:
+        workflow = load_workflow(path)
+    except BestTeamError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _store_workflow_in_cache(name, workflow, cache_key, generation)
+    return workflow
 
 
 @app.get("/api/health")
@@ -201,21 +222,25 @@ def get_run(run_id: str, user: User = Depends(get_current_user)):
     return dataclasses.asdict(run)
 
 
+@app.post("/api/runs/ws-ticket")
+def create_ws_ticket(user: User = Depends(get_current_user)) -> Dict[str, str]:
+    """Exchange the caller's bearer token for a short-lived, single-use ticket
+    to authenticate a WebSocket stream connection (CR-013). Only the ticket --
+    never the long-lived bearer -- goes in the stream URL."""
+    return {"ticket": issue_ticket(user.username)}
+
+
 @app.websocket("/api/runs/{run_id}/stream")
-async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None, db: Session = Depends(get_db)):
+async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = None, db: Session = Depends(get_db)):
     """Replays any events already produced, then relays new ones live until
     the run reaches a terminal state (run_completed / run_failed).
 
-    Requires the same bearer token used for REST routes, passed as a
-    `?token=` query parameter -- browsers can't set custom headers when
-    opening a WebSocket, so this can't reuse the HTTPBearer-based
-    get_current_user dependency directly."""
-    if token is None:
-        await websocket.close(code=4401)
-        return
-    try:
-        username = decode_access_token(token)
-    except AuthError:
+    Authenticated with a short-lived, single-use `?ticket=` minted by
+    `POST /api/runs/ws-ticket` -- browsers can't set custom headers when
+    opening a WebSocket, and putting the long-lived bearer in the URL leaks it
+    to logs/history (CR-013)."""
+    username = consume_ticket(ticket) if ticket else None
+    if username is None:
         await websocket.close(code=4401)
         return
     if get_user_by_username(db, username) is None:

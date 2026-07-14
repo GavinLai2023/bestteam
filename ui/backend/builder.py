@@ -24,6 +24,7 @@ from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_user
+from .crud import _validate_kb_paths
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .db.models import BuilderSession, KnowledgeBaseRecord, WorkflowRecord
@@ -152,11 +153,24 @@ def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
     return tools
 
 
+def _reject_unsafe_kb_paths(spec: Specification) -> None:
+    """Reject absolute/traversing KB paths on a spec before it is built (CR-001).
+
+    Building a vector KB calls `_save_embedding_cache` at construction time, so
+    this must run before `validate_specification`/`_build_workflow`. Shared by
+    every builder boundary that builds a caller-influenced spec: specification
+    submit, test-run, and deploy. Same guard as the `/api/config` boundaries.
+    """
+    for kb_config in spec.to_raw().get("knowledge_bases", []) or []:
+        _validate_kb_paths(kb_config)
+
+
 def _validate_spec_payload(
     db: Session, payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
 ) -> Specification:
     try:
         spec = Specification.model_validate(payload)
+        _reject_unsafe_kb_paths(spec)
         extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
         validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills or {})
     except ValidationError as exc:
@@ -322,6 +336,7 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
         raise HTTPException(status_code=400, detail="Generate a specification before testing")
 
     spec = Specification.model_validate(session.specification_json)
+    _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built
     source = _source_for(session_id)
     extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:
@@ -345,6 +360,7 @@ def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, 
         raise HTTPException(status_code=400, detail="Generate a specification before deploying")
 
     spec = Specification.model_validate(session.specification_json)
+    _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
     source = _source_for(session_id)
     extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
     try:

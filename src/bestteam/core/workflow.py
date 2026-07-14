@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence
 
 from ..exceptions import BestTeamError, ConfigurationError
 from .team import Team
 from .trace import TraceEvent
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..adapters.base import EngineAdapter
@@ -116,7 +119,13 @@ class Workflow:
         yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
 
         if memory:
-            memory.record_run(user_id, input, last_output)
+            # Best-effort: the run has already completed and been reported, so a
+            # memory-recording failure must not turn a completed run into a
+            # failed one (it would otherwise raise here, after run_completed).
+            try:
+                memory.record_run(user_id, input, last_output)
+            except Exception:  # noqa: BLE001 -- memory must never break a run
+                _logger.exception("Memory recording failed after run_completed; run stays completed")
 
     def visualize(self) -> str:
         """Render the compiled graph as Mermaid markup (for the future CLI/UI)."""

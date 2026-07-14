@@ -33,7 +33,13 @@ router = APIRouter(
 
 _WHISPER_FORMATS = {"mp3", "mp4", "m4a", "wav", "webm", "mpeg", "mpga"}
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024  # hard Whisper API limit per chunk
+# Hard application-level ceiling on the whole upload, enforced before any
+# buffering/transcription so a caller can't exhaust memory or ffmpeg/worker
+# capacity by sending an arbitrarily large body -- even when ffmpeg is
+# available to split it (CR-009).
+_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 _SEGMENT_SECONDS = 600               # 10-min chunks; at 32 kbps ≈ 2.4 MB each
+_FFMPEG_TIMEOUT_SECONDS = 300        # finite bound on each ffmpeg subprocess call
 
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a business analyst for bestteam, a multi-agent team-building platform.
@@ -61,10 +67,16 @@ class InterviewExtraction(BaseModel):
 
 @functools.lru_cache(maxsize=1)
 def _is_ffmpeg_available() -> bool:
-    result = subprocess.run(
-        ["ffmpeg", "-version"],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # ffmpeg not installed / not on PATH, or hung -- treat as unavailable
+        # rather than letting the exception escape as a 500.
+        return False
     return result.returncode == 0
 
 
@@ -78,19 +90,23 @@ def _split_audio(data: bytes, ext: str, tmp_dir: str) -> list[str]:
     chunk_pattern = os.path.join(tmp_dir, "chunk_%03d.mp3")
     with open(input_path, "wb") as f:
         f.write(data)
-    result = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vn",                          # drop video track (MP4/webm)
-            "-ar", "16000",                 # 16 kHz — Whisper's native rate
-            "-ac", "1",                     # mono
-            "-b:a", "32k",                  # 32 kbps → ~2.4 MB per 10-min chunk
-            "-f", "segment",
-            "-segment_time", str(_SEGMENT_SECONDS),
-            chunk_pattern,
-        ],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vn",                          # drop video track (MP4/webm)
+                "-ar", "16000",                 # 16 kHz — Whisper's native rate
+                "-ac", "1",                     # mono
+                "-b:a", "32k",                  # 32 kbps → ~2.4 MB per 10-min chunk
+                "-f", "segment",
+                "-segment_time", str(_SEGMENT_SECONDS),
+                chunk_pattern,
+            ],
+            capture_output=True,
+            timeout=_FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ffmpeg timed out while splitting the recording") from exc
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr.decode(errors='replace')[:500]}")
     chunks = sorted(
@@ -135,7 +151,14 @@ def transcribe_interview(
             ),
         )
 
-    data = file.file.read()
+    # Read at most the ceiling (+1 to detect overflow) so an oversized body is
+    # rejected without buffering it all into memory (CR-009).
+    data = file.file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.",
+        )
 
     if len(data) > _MAX_AUDIO_BYTES and not _is_ffmpeg_available():
         raise HTTPException(

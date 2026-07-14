@@ -38,7 +38,8 @@ overlapping chunks.
 - Plain text: `.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.yml`, `.log`
 - `.pdf` — text extraction via `pypdf`
 - `.docx` — paragraphs + tables via `python-docx`
-- `.xlsx` / `.xls` / `.xlsm` — each sheet rendered as CSV-style rows via `openpyxl`
+- `.xlsx` / `.xlsm` — each sheet rendered as CSV-style rows via `openpyxl`
+  (legacy `.xls` is not supported)
 
 Files with an unsupported extension, or that fail to parse, are skipped with
 a `warnings.warn(...)` — the knowledge base still builds from whatever did
