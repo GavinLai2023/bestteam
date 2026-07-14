@@ -76,17 +76,19 @@ def run_in_background(
     """
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
-    if db is not None:
-        # Persist the run up front so usage_records/trace_events foreign keys
-        # reference a real `runs` row rather than a phantom id (CR-012). It is
-        # committed before any usage record is written, so the FK target always
-        # exists; its terminal status/output are updated below.
-        run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input)
-        db.add(run_row)
-        db.commit()
     memory = _make_memory() if user_id else None
     terminal_seen = False
     try:
+        if db is not None:
+            # Persist the run up front so usage_records/trace_events foreign
+            # keys reference a real `runs` row rather than a phantom id
+            # (CR-012). Committed before any usage record so the FK target
+            # always exists; its terminal status/output are updated below. This
+            # sits inside the try so a persistence failure still yields a
+            # terminal event instead of leaving the run stuck "running" (CR-003).
+            run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input)
+            db.add(run_row)
+            db.commit()
         for event in workflow.stream(input, user_id=user_id, memory=memory):
             payload = dataclasses.asdict(event)
             registry.publish(run_id, payload)
@@ -117,19 +119,30 @@ def run_in_background(
         # recording) can't flip a completed run to failed.
         _logger.exception("Run %s failed on the worker thread", run_id)
         if not terminal_seen:
+            message = "The run failed due to an internal error."
             registry.publish(
                 run_id,
                 dataclasses.asdict(
                     TraceEvent(
                         type="run_failed",
                         workflow=getattr(workflow, "name", ""),
-                        data="The run failed due to an internal error.",
+                        data=message,
                     )
                 ),
             )
-            if run_row is not None:
-                run_row.status = "failed"
-                db.commit()
+            # Best-effort: the terminal event above is the hard CR-003
+            # guarantee; recording the failed status must never re-raise (the
+            # up-front persist may itself have failed, leaving the session
+            # needing a rollback), so a DB error here is logged and swallowed.
+            if db is not None and run_row is not None:
+                try:
+                    db.rollback()
+                    run_row.status = "failed"
+                    run_row.output = message
+                    db.add(run_row)
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    _logger.warning("Could not persist failed status for run %s", run_id)
     finally:
         if db is not None:
             db.close()

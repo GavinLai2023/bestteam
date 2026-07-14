@@ -218,3 +218,27 @@ def test_run_in_background_marks_run_failed_on_worker_exception(db_session_facto
 
     assert row is not None
     assert row.status == "failed"
+
+
+def test_run_in_background_still_publishes_terminal_event_if_run_row_commit_fails(db_session_factory):
+    # CR-003 must hold even if the up-front runs-row persistence itself fails:
+    # the worker must still publish a terminal run_failed event rather than
+    # letting the exception escape and leave the run stuck "running" (a CR-012
+    # regression against CR-003). A pre-existing row with the same primary key
+    # makes the initial insert raise an IntegrityError.
+    engine, Session = db_session_factory
+    a = _agent("a", "output from a")
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
+
+    run = registry.create("wf", "do the thing")
+    with Session() as db:
+        db.add(Run(id=run.id, workflow="wf", input="do the thing"))
+        db.commit()
+
+    # Must not raise, and must record a terminal state.
+    run_in_background(run.id, workflow, "do the thing", engine)
+
+    stored = registry.get(run.id)
+    assert stored.status == "failed"
+    terminal = [e["type"] for e in stored.events if e["type"] in ("run_completed", "run_failed")]
+    assert terminal == ["run_failed"]
