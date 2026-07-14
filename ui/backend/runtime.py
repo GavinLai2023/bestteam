@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
+from .db.models import Run
 from .db.usage import record_usage
 from .registry import RunRegistry
 
@@ -74,6 +75,15 @@ def run_in_background(
     thread, so its SQLite connection is thread-local.
     """
     db = Session(engine) if engine is not None else None
+    run_row: Optional[Run] = None
+    if db is not None:
+        # Persist the run up front so usage_records/trace_events foreign keys
+        # reference a real `runs` row rather than a phantom id (CR-012). It is
+        # committed before any usage record is written, so the FK target always
+        # exists; its terminal status/output are updated below.
+        run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input)
+        db.add(run_row)
+        db.commit()
     memory = _make_memory() if user_id else None
     terminal_seen = False
     try:
@@ -82,6 +92,10 @@ def run_in_background(
             registry.publish(run_id, payload)
             if event.type in ("run_completed", "run_failed"):
                 terminal_seen = True
+                if run_row is not None:
+                    run_row.status = "completed" if event.type == "run_completed" else "failed"
+                    run_row.output = event.data
+                    db.commit()
             if db is not None and event.type == "agent_completed":
                 for entry in event.usage:
                     record_usage(
@@ -113,6 +127,9 @@ def run_in_background(
                     )
                 ),
             )
+            if run_row is not None:
+                run_row.status = "failed"
+                db.commit()
     finally:
         if db is not None:
             db.close()

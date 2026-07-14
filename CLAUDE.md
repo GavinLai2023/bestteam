@@ -83,8 +83,11 @@ implemented** — don't assume they exist:
   semantic/procedural records have no auto-dedup, and there's no frontend
   memory-management UI. Disabled by default (`BESTTEAM_MEMORY_DB`) — see
   `core/memory.py` and `src/bestteam/core/CLAUDE.md`.
-- **Persistent run state**: `RunRegistry` is in-memory only, not yet wired
-  to the `runs`/`trace_events` tables — see `ui/backend/db/CLAUDE.md`.
+- **Persistent run state**: `RunRegistry` remains the authoritative in-memory
+  live layer (runs vanish on restart; no history API). A `runs` row is now
+  persisted per run so usage/trace FKs are valid (CR-012), but `trace_events`
+  is still not persisted and the registry isn't rehydrated from the DB — see
+  `ui/backend/db/CLAUDE.md`.
 - **General-purpose cache**: only local per-process caches exist — see
   `ui/backend/CLAUDE.md`.
 - **CrewAI adapter, DEBATE collaboration mode, deployment templates**:

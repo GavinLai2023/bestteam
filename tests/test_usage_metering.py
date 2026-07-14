@@ -74,6 +74,7 @@ pytest.importorskip("sqlalchemy")
 
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.model_catalog import upsert_entry
+from ui.backend.db.models import Run
 from ui.backend.db.usage import list_usage_for_run, record_usage
 from ui.backend.runtime import registry, run_in_background
 
@@ -146,3 +147,74 @@ def test_run_in_background_records_nothing_for_fake_models(db_session_factory):
 
     with Session() as db:
         assert list_usage_for_run(db, run.id) == []
+
+
+# --- CR-012: usage_records/trace_events must reference a persisted Run row ----
+
+
+class _BoomWorkflow:
+    """Stand-in whose .stream() raises before yielding any event."""
+
+    name = "boom_wf"
+
+    def stream(self, *args, **kwargs):
+        raise RuntimeError("internal detail that must not leak")
+
+
+def test_run_in_background_persists_completed_run_row(db_session_factory):
+    engine, Session = db_session_factory
+    a = _agent("a", "output from a")
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
+
+    run = registry.create("wf", "do the thing")
+
+    run_in_background(run.id, workflow, "do the thing", engine)
+
+    with Session() as db:
+        row = db.get(Run, run.id)
+
+    assert row is not None, "usage/trace FKs would reference a phantom run (CR-012)"
+    assert row.workflow == "wf"
+    assert row.input == "do the thing"
+    assert row.status == "completed"
+    assert row.output == "output from a"
+
+
+def test_run_in_background_persists_run_row_before_usage(db_session_factory):
+    # The Run row must exist so usage_records.run_id references a real row.
+    engine, Session = db_session_factory
+    with Session() as db:
+        upsert_entry(
+            db,
+            "FakeMessagesListChatModel",
+            display_name="Test Model",
+            input_price_per_1k=1.0,
+            output_price_per_1k=2.0,
+        )
+
+    model = FakeMessagesListChatModel(
+        responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    run = registry.create("wf", "do the thing")
+    run_in_background(run.id, workflow, "do the thing", engine)
+
+    with Session() as db:
+        run_ids = {r.run_id for r in list_usage_for_run(db, run.id)}
+        assert run_ids == {run.id}
+        assert db.get(Run, run.id) is not None
+
+
+def test_run_in_background_marks_run_failed_on_worker_exception(db_session_factory):
+    engine, Session = db_session_factory
+    run = registry.create("boom_wf", "input")
+
+    run_in_background(run.id, _BoomWorkflow(), "input", engine)
+
+    with Session() as db:
+        row = db.get(Run, run.id)
+
+    assert row is not None
+    assert row.status == "failed"

@@ -6,7 +6,7 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage
 
 from bestteam import Agent, CollaborationMode, Team, Workflow
-from bestteam.adapters.langgraph_adapter import _MAX_TOOL_ITERATIONS
+from bestteam.adapters.langgraph_adapter import _MAX_TOOL_ITERATIONS, _tool_loop_exhausted_notice
 from bestteam.exceptions import ConfigurationError
 
 
@@ -219,7 +219,9 @@ def test_agent_tool_loop_is_bounded():
     result = workflow.run("do the thing")
 
     assert len(calls) == _MAX_TOOL_ITERATIONS
-    assert result.output == ""
+    # Exhausting the loop without a final answer must not look like a silent
+    # empty success -- the truncation is surfaced explicitly (CR-011).
+    assert result.output == _tool_loop_exhausted_notice("a")
 
 
 def test_stream_yields_run_failed_event_on_configuration_error():
