@@ -74,7 +74,13 @@ class Workflow:
         preamble = memory.recall_preamble(user_id, input) if memory else ""
         result = self._adapter.execute(self._compiled, input, memory_preamble=preamble)
         if memory:
-            memory.record_run(user_id, input, result.output)
+            # Best-effort, exactly like stream(): the workflow has already
+            # completed, so a memory-recording failure must not raise here and
+            # make a completed, side-effecting run look failed to the caller.
+            try:
+                memory.record_run(user_id, input, result.output)
+            except Exception:  # noqa: BLE001 -- memory must never break a run
+                _logger.exception("Memory recording failed after run; run stays completed")
         return result
 
     def stream(

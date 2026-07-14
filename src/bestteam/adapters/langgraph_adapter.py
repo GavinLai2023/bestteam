@@ -196,7 +196,12 @@ def _run_agent(
     return response.content if hasattr(response, "content") else str(response)
 
 
-def _make_delegate_tool(agent: Agent, *, usage_sink: Optional[List[Dict[str, Any]]] = None) -> Callable[[str], str]:
+def _make_delegate_tool(
+    agent: Agent,
+    *,
+    usage_sink: Optional[List[Dict[str, Any]]] = None,
+    extra_system_prompt: str = "",
+) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
     Calling the tool runs the subordinate's full tool-calling turn on `task`
@@ -208,12 +213,19 @@ def _make_delegate_tool(agent: Agent, *, usage_sink: Optional[List[Dict[str, Any
     of actually consulting the tool it was delegated to use. `usage_sink`, if
     given, collects this subordinate's usage alongside the manager's own, so
     a hierarchical turn's total usage is reported in one place.
+    `extra_system_prompt` (e.g. recalled user memory) is forwarded to the
+    subordinate's run so delegates get the same memory preamble as
+    sequential/parallel agents.
     """
 
     def delegate(task: str) -> str:
         _logger.info("Manager delegated to '%s': %s", agent.name, task[:200])
         return _run_agent(
-            agent, task, require_tool_use_on_first_call=bool(agent.tools), usage_sink=usage_sink
+            agent,
+            task,
+            extra_system_prompt=extra_system_prompt,
+            require_tool_use_on_first_call=bool(agent.tools),
+            usage_sink=usage_sink,
         )
 
     delegate.__name__ = f"delegate_to_{agent.name}"
@@ -296,8 +308,13 @@ def _hierarchical_node(team: Team):
 
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
-        delegate_tools = [_make_delegate_tool(agent, usage_sink=usage_sink) for agent in team.agents]
         preamble = state.get("memory_preamble", "")
+        # Subordinates get the recalled user memory (like sequential/parallel
+        # agents) but not the manager's delegation guidance, which is manager-only.
+        delegate_tools = [
+            _make_delegate_tool(agent, usage_sink=usage_sink, extra_system_prompt=preamble)
+            for agent in team.agents
+        ]
         extra_system_prompt = f"{preamble}\n\n{delegation_guidance}" if preamble else delegation_guidance
         text = _run_agent(
             manager,

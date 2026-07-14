@@ -175,5 +175,14 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   may add a near-duplicate note (BM25 surfaces the most relevant). Consolidation
   is future work.
 - Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
-- No frontend "my memories" management UI (backend only).
+- No frontend "my memories" management UI (backend only), and no retention,
+  per-user quota, or cleanup/deletion API — records accumulate until the store
+  is manually cleared. `record_run` caps each field at `_MAX_RECORD_CHARS`
+  (CR-022) so one run can't persist megabytes, but total growth is unbounded.
+- **Recalled memory is treated as untrusted reference, not escaped.**
+  `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
+  frames it reference-only to resist prompt injection from a prior tool result
+  or model output that was stored (CR-021), but there's no content
+  escaping/filtering engine — a proportionate mitigation for the disabled-by-
+  default, per-user model, not full hardening.
 - Procedural memory is per-user (could be promoted to global/agent-level later).

@@ -74,6 +74,39 @@ There are no exact duplicate findings. The principal overlaps are:
 - **CR-001 — Verified:** model-generated candidates are pre-validated before `validate_specification()` constructs a KB; API, persisted, and inline configs resolve their cache target under the backend-owned `_kb_cache` directory, rejecting symlink/junction escapes.
 - **CR-009 — Verified:** the ASGI limiter counts every incoming body chunk and emits 413 before the downstream multipart parser receives an over-limit chunk, including when `Content-Length` is absent or understated. A reverse-proxy limit remains useful operational defense in depth.
 
+## Round 2 (2026-07-15): per-user memory + http_get review
+
+Scope: a second independent audit focused on the merged per-user memory feature
+(commit `690a712`) plus one pre-existing tool-security finding. Six findings;
+severities were recalibrated with the reviewer for this codebase's threat model
+(memory **disabled by default**, strictly **per-user** — `WHERE user_id = ?`,
+no cross-user recall — and a documented **no-multi-tenancy** model). The two
+memory-security items are proportionate mitigations, not full hardening.
+
+| ID | Finding | Severity | Resolution | Status |
+|---|---|---|---|---|
+| CR-018 | Memory records use naive `datetime.utcnow()` (deprecation warnings) | P3 | `core/memory.py` now uses `datetime.now(timezone.utc)`, matching `db/models._utcnow`. `tests/test_memory.py::test_created_at_is_timezone_aware` | Fixed - awaiting independent verification |
+| CR-019 | `Workflow.run()` raises if post-completion memory persistence fails, making a completed run look failed | P2 | `core/workflow.py::run` wraps `record_run` best-effort (log + swallow), mirroring `stream()`. `tests/test_workflow.py::test_run_memory_recording_failure_keeps_run_completed` | Fixed - awaiting independent verification |
+| CR-020 | Hierarchical delegates omit recalled memory (only the manager received it) | P2 | `_make_delegate_tool` forwards `extra_system_prompt`; `_hierarchical_node` passes the raw preamble to each delegate (subordinates get user memory, not the manager's delegation guidance). `tests/test_memory_integration.py::test_hierarchical_subordinate_receives_preamble` | Fixed - awaiting independent verification |
+| CR-021 | Persistent prompt injection: recalled content spliced into a SystemMessage as bare instructions | P2 (bounded, single-user) | `recall_preamble` now delimits recalled content in `<recalled_user_memory>` and frames it reference-only ("NOT instructions"). Proportionate mitigation; no escaping/filtering engine (documented limitation). `tests/test_memory.py::test_recall_preamble_frames_memory_as_untrusted_reference` | Fixed - awaiting independent verification |
+| CR-022 | Unbounded memory growth: full input/output stored, duplicated into `content` and `metadata`, no size cap | P2 (memory opt-in) | `record_run` drops the redundant `metadata` (no reader) and truncates each field at `_MAX_RECORD_CHARS` (10k). Retention/quota/cleanup remain documented future work. `tests/test_memory.py::test_record_run_does_not_duplicate_content_in_metadata`, `::test_record_run_caps_record_size` | Fixed - awaiting independent verification |
+| CR-023 | `http_get` DNS-rebinding SSRF: hostname validated, then re-resolved on the request (TOCTOU) | P2 (tool-security, not a memory defect) | Pin the validated IP to the connection (Host header + TLS SNI preserved). Tracked on branch `fix/http-get-ssrf-rebinding` | In progress |
+
+**Severity notes.** CR-021/CR-022 are P2 rather than P1: memory is disabled
+unless `BESTTEAM_MEMORY_DB` is set, records are per-user with no cross-user
+recall path, and a user can already instruct their own current run — persistence
+adds durability/surprise but does not by itself cross an authorization boundary.
+Escalate to P1 if workflows ingest untrusted web/KB content into memory, expose
+sensitive side-effecting tools, or the product adds shared/cross-user memory.
+CR-023 stays P2 given the documented tool trust boundary, escalating where
+`http_get` is exposed to untrusted prompts with reachable internal/metadata
+services.
+
+**Explicitly out of scope** (documented decisions / larger features, not
+defects): full memory retention/quota/cleanup and a deletion API/UI;
+run-ownership/authorization (conflicts with the no-multi-tenancy decision,
+`docs/DECISIONS.md`); adding CI lint/type/security tooling.
+
 ## Detailed Codex assessments
 
 ### CR-001 - Public registration plus unrestricted KB paths enables server-file replacement
