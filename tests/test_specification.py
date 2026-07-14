@@ -246,6 +246,22 @@ def test_generate_specification_returns_first_valid_spec(tmp_path):
     assert spec == valid
 
 
+def test_generate_specification_calls_pre_validation(tmp_path):
+    valid = _basic_spec()
+    model = _FakeArchitectChatModel(responses=[valid])
+    candidates = []
+
+    spec = generate_specification(
+        model,
+        "We need help answering customer questions.",
+        source=tmp_path / "workflow.yaml",
+        pre_validate=candidates.append,
+    )
+
+    assert spec == valid
+    assert candidates == [valid]
+
+
 def test_generate_specification_retries_after_validation_error(tmp_path):
     invalid = _basic_spec(agent_tools=["does_not_exist"])
     valid = _basic_spec()

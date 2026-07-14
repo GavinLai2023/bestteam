@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { API_BASE, WS_BASE, TOKEN_KEY, api } from '../lib/api'
+import { API_BASE, WS_BASE, api } from '../lib/api'
 import './MonitorPage.css'
 
 const EVENT_LABELS = {
@@ -49,8 +49,8 @@ function MonitorPage() {
     try {
       const { run_id: runId } = await api.createRun(selected, input)
 
-      const token = localStorage.getItem(TOKEN_KEY)
-      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?token=${encodeURIComponent(token ?? '')}`)
+      const { ticket } = await api.createWsTicket()
+      const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
       wsRef.current = ws
       ws.onmessage = (message) => {
         const event = JSON.parse(message.data)

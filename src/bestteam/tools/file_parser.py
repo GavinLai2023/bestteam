@@ -10,9 +10,10 @@ _TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"}
 def parse_file(path: str) -> str:
     """Extract text content from a file.
 
-    Supports PDF (text extraction), Excel (.xlsx/.xls, rendered as CSV rows),
+    Supports PDF (text extraction), Excel (.xlsx/.xlsm, rendered as CSV rows),
     Word (.docx, including tables), and common plain-text formats (.txt, .md,
-    .csv, .json, .yaml).
+    .csv, .json, .yaml). Legacy .xls (BIFF) is not supported -- the openpyxl
+    backend reads only the modern Office Open XML formats.
 
     This tool reads whatever local path it is given, with no sandboxing —
     the same trust boundary as `http_get` fetching arbitrary URLs. If this
@@ -33,7 +34,7 @@ def parse_file(path: str) -> str:
 
     if suffix == ".pdf":
         return _parse_pdf(file_path)
-    if suffix in (".xlsx", ".xls", ".xlsm"):
+    if suffix in (".xlsx", ".xlsm"):
         return _parse_excel(file_path)
     if suffix == ".docx":
         return _parse_docx(file_path)
@@ -42,7 +43,7 @@ def parse_file(path: str) -> str:
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
-        f"Supported types: .pdf, .xlsx, .xls, .docx, {', '.join(sorted(_TEXT_SUFFIXES))}"
+        f"Supported types: .pdf, .xlsx, .xlsm, .docx, {', '.join(sorted(_TEXT_SUFFIXES))}"
     )
 
 

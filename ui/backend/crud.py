@@ -16,9 +16,12 @@ automatically. A `workflows` entry is a complete, self-contained
 
 from __future__ import annotations
 
+import os
 import shutil
+import threading
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Type
+from typing import Any, Dict, Optional, Type
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ValidationError
@@ -34,7 +37,12 @@ from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
-from .knowledge_bases import load_knowledge_base_tools
+from .knowledge_bases import (
+    _KB_CURRENT_POINTER,
+    check_path_traversal,
+    checked_contained_cache_path,
+    load_knowledge_base_tools,
+)
 from .skills import load_skills
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
@@ -50,6 +58,98 @@ _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
+
+
+# Per-KB locks serialising the upload promotion/commit/cleanup critical section.
+# Concurrent uploads of the same KB would otherwise interleave the shared CURRENT
+# pointer + version cleanup and could leave CURRENT naming a version the losing
+# uploader then deletes (CR-008). Keyed by KB name; a small guard lock protects
+# the registry itself.
+_kb_upload_locks_guard = threading.Lock()
+_kb_upload_locks: Dict[str, threading.Lock] = {}
+
+
+def _kb_upload_lock(name: str) -> threading.Lock:
+    with _kb_upload_locks_guard:
+        lock = _kb_upload_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _kb_upload_locks[name] = lock
+        return lock
+
+
+def _read_pointer(pointer: Path) -> Optional[str]:
+    try:
+        return pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _write_pointer(pointer: Path, version: str) -> None:
+    """Atomically point CURRENT at `version` (os.replace of a file is atomic on
+    Windows + POSIX), so a concurrent reader always sees a complete version. The
+    temp file is uniquely named so a leftover from a crashed write can't collide
+    with a later one."""
+    tmp = pointer.with_name(f"{pointer.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(version, encoding="utf-8")
+    os.replace(tmp, pointer)
+
+
+def _cleanup_kb_versions(kb_root: Path, keep_versions: set[str]) -> None:
+    """Remove every version dir / stray file in `kb_root` except CURRENT and the
+    kept versions. The immediately-previous version is kept as a grace window so
+    a reader that just resolved to it still finds it (CR-008)."""
+    for child in kb_root.iterdir():
+        if child.name == _KB_CURRENT_POINTER or child.name in keep_versions:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except OSError:
+                pass
+
+
+def _validate_kb_paths(kb_config: Dict[str, Any]) -> None:
+    """Constrain caller-supplied KB paths to application-owned roots (CR-001).
+
+    The `/api/config/knowledge_bases` and inline-`knowledge_bases` API
+    boundaries accept caller-supplied `path`/`cache_path` strings. An absolute
+    or `..`-traversing `cache_path` is a server-file *write* primitive (the
+    vector KB's `_save_embedding_cache()` does `os.replace(tmp, cache_path)`).
+    Reject `..`/absolute with a clear 400, then rewrite `cache_path` in place to
+    an app-owned `_kb_cache/<filename>` -- so even a clean relative or Windows
+    rooted-relative value can only ever write inside that subdir, never over a
+    workflow YAML or outside the app roots. Absolute `local_folder` `path`s stay
+    allowed (the documented "point at a folder you manage yourself" feature).
+    """
+    path = kb_config.get("path")
+    if isinstance(path, str):
+        check_path_traversal(path)
+    cache_path = kb_config.get("cache_path")
+    if isinstance(cache_path, str):
+        kb_config["cache_path"] = checked_contained_cache_path(cache_path)
+
+
+def _invalidate_workflow_cache() -> None:
+    """Drop every cached Workflow after a KB/skill mutation.
+
+    A cached Workflow may embed a knowledge-base tool or skill by value. The
+    global `max(updated_at)` freshness key in `main._get_workflow` misses a
+    *delete* (removing a non-latest record leaves the maximum unchanged), so a
+    cached workflow could keep serving a deleted KB's documents (CR-005).
+    Clearing the cache on every KB/skill create/update/delete is the simple,
+    correct invalidation. Bumping the generation under the cache lock makes a
+    concurrent `_get_workflow` that started before this call skip caching its
+    now-stale result instead of repopulating the cache (CR-005). Imported
+    lazily to avoid a crud<->main import cycle.
+    """
+    from . import main
+
+    with main._workflow_cache_lock:
+        main._workflow_cache.clear()
+        main._workflow_cache_generation += 1
 
 
 def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel]) -> APIRouter:
@@ -69,6 +169,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
 
     @sub.put("/{item_name}")
     def upsert_item(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+        if name == "knowledge_bases":
+            _validate_kb_paths(config)
         try:
             spec = spec_cls.model_validate({**config, "name": item_name})
         except ValidationError as exc:
@@ -82,6 +184,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         else:
             item.config = raw
         db.commit()
+        if name in ("knowledge_bases", "skills"):
+            _invalidate_workflow_cache()
         return {"name": item_name, "config": raw}
 
     @sub.delete("/{item_name}", status_code=204)
@@ -90,11 +194,15 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
         if name == "knowledge_bases":
-            upload_dir = _KB_UPLOADS_DIR / item_name
-            if upload_dir.is_dir():
-                shutil.rmtree(upload_dir, ignore_errors=True)
+            # Same per-KB lock as upload, so a delete can't race a promotion.
+            with _kb_upload_lock(item_name):
+                upload_dir = _KB_UPLOADS_DIR / item_name
+                if upload_dir.is_dir():
+                    shutil.rmtree(upload_dir, ignore_errors=True)
         db.delete(item)
         db.commit()
+        if name in ("knowledge_bases", "skills"):
+            _invalidate_workflow_cache()
         return Response(status_code=204)
 
     return sub
@@ -153,16 +261,25 @@ def upload_knowledge_base_files(
             )
         contents[filename] = data
 
-    upload_dir = _KB_UPLOADS_DIR / item_name
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    # Write the new files into a fresh version subdirectory, validate them
+    # there, then flip the CURRENT pointer atomically. The pointer always names
+    # a complete version, so a concurrent reader never sees the KB directory
+    # without a live version (no rename-swap gap), and the prior version is kept
+    # until the new one commits -- so any failure leaves the previous KB and its
+    # DB record intact (CR-008).
+    kb_root = _KB_UPLOADS_DIR / item_name
+    pointer = kb_root / _KB_CURRENT_POINTER
+    version = f"v_{uuid.uuid4().hex[:12]}"
+    version_dir = kb_root / version
+    version_dir.mkdir(parents=True, exist_ok=True)
     try:
         for filename, data in contents.items():
-            (upload_dir / filename).write_bytes(data)
+            (version_dir / filename).write_bytes(data)
 
         try:
             kb = LocalFolderKnowledgeBase(
                 name=item_name,
-                path=upload_dir,
+                path=version_dir,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 top_k=top_k,
@@ -170,22 +287,46 @@ def upload_knowledge_base_files(
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        spec = KnowledgeBaseSpec(
-            name=item_name,
-            path=str(upload_dir),
-            type="local_folder",
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            top_k=top_k,
-        )
-        raw = spec.to_raw()
-        item = db.query(KnowledgeBaseRecord).filter_by(name=item_name).one_or_none()
-        if item is None:
-            item = KnowledgeBaseRecord(name=item_name, config=raw)
-            db.add(item)
-        else:
-            item.config = raw
-        db.commit()
+        # Serialise the pointer flip + commit + cleanup per KB so concurrent
+        # uploads of the same KB can't interleave and leave CURRENT dangling.
+        # (The file writes + validation above run outside the lock -- each
+        # uploader owns a unique version dir, so they don't conflict.)
+        with _kb_upload_lock(item_name):
+            previous_version = _read_pointer(pointer)
+            _write_pointer(pointer, version)  # atomic promotion
+
+            spec = KnowledgeBaseSpec(
+                name=item_name,
+                path=str(kb_root),
+                type="local_folder",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                top_k=top_k,
+            )
+            raw = spec.to_raw()
+            item = db.query(KnowledgeBaseRecord).filter_by(name=item_name).one_or_none()
+            if item is None:
+                item = KnowledgeBaseRecord(name=item_name, config=raw)
+                db.add(item)
+            else:
+                item.config = raw
+            try:
+                db.commit()
+            except Exception:
+                # Point CURRENT back at the prior version (still on disk); the
+                # failed new version is removed by the outer handler. Keeps FS
+                # and DB consistent, with no destructive delete of the prior KB.
+                db.rollback()
+                if previous_version is not None:
+                    _write_pointer(pointer, previous_version)
+                else:
+                    pointer.unlink(missing_ok=True)
+                raise
+
+            _invalidate_workflow_cache()
+            # Durable now: drop older versions but keep the immediately-previous
+            # one as a grace window for readers that just resolved to it.
+            _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
 
         return {
             "name": item_name,
@@ -194,7 +335,9 @@ def upload_knowledge_base_files(
             "chunk_count": len(kb._chunks),
         }
     except Exception:
-        shutil.rmtree(upload_dir, ignore_errors=True)
+        # CURRENT still names the prior version (or is absent on a first upload),
+        # so removing only the uncommitted new version preserves the prior KB.
+        shutil.rmtree(version_dir, ignore_errors=True)
         raise
 
 
@@ -219,6 +362,9 @@ def get_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Dict[s
 def upsert_workflow_config(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
     raw = {**config, "name": item_name}
     try:
+        for kb_config in raw.get("knowledge_bases", []) or []:
+            if isinstance(kb_config, dict):
+                _validate_kb_paths(kb_config)
         source = _WORKFLOWS_DIR / f"{item_name}.yaml"
         kb_tools = load_knowledge_base_tools(db, raw, source)
         _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db))

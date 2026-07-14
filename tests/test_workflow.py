@@ -58,6 +58,52 @@ def test_parallel_workflow_aggregates_contributions():
     assert "beta" in result.output
 
 
+def test_parallel_team_output_is_not_contaminated_by_prior_team():
+    # CR-004: a parallel team's aggregated output must contain only its own
+    # agents' contributions -- not an earlier team's, even though contributions
+    # accumulate in a run-global dict.
+    first = _agent("first", "PRIOR-TEAM-OUTPUT")
+    beta = _agent("beta", "beta-text")
+    gamma = _agent("gamma", "gamma-text")
+
+    workflow = Workflow(
+        name="wf",
+        steps=[
+            Team(name="team1", agents=[first], mode=CollaborationMode.SEQUENTIAL),
+            Team(name="team2", agents=[beta, gamma], mode=CollaborationMode.PARALLEL),
+        ],
+    )
+    result = workflow.run("do the thing")
+
+    assert "beta-text" in result.output
+    assert "gamma-text" in result.output
+    assert "PRIOR-TEAM-OUTPUT" not in result.output
+    assert "[first]" not in result.output
+
+
+def test_memory_recording_failure_keeps_run_completed():
+    # CR-003: memory recording happens after run_completed is yielded; if it
+    # fails it must not turn the completed run into a failed one.
+    class _FailingMemory:
+        def recall_preamble(self, user_id, query):
+            return ""
+
+        def record_run(self, user_id, input, output):
+            raise RuntimeError("memory backend down")
+
+    a = _agent("a", "done")
+    workflow = Workflow(
+        name="wf",
+        steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)],
+    )
+
+    events = list(workflow.stream("hi", user_id="u", memory=_FailingMemory()))
+
+    types = [e.type for e in events]
+    assert types[-1] == "run_completed"
+    assert "run_failed" not in types
+
+
 def test_unimplemented_collaboration_mode_raises_clear_error():
     a = _agent("a", "x")
     workflow = Workflow(

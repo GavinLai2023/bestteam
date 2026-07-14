@@ -312,11 +312,26 @@ def _passthrough_node(_state: _TeamState) -> Dict[str, Any]:
     return {}
 
 
-def _aggregate_node(state: _TeamState) -> Dict[str, Any]:
-    """Combine a parallel team's per-agent contributions into one team output."""
-    contributions = state.get("contributions", {})
-    merged = "\n\n".join(f"[{name}]\n{text}" for name, text in contributions.items())
-    return {"output": merged, "context": merged}
+def _aggregate_node(team: Team) -> Callable[[_TeamState], Dict[str, Any]]:
+    """Build a parallel team's aggregation node.
+
+    `contributions` is a run-global dict, so by the time this runs it also holds
+    earlier teams' entries. Aggregating only *this* team's agents (in declared
+    order) keeps a later parallel team's output from being contaminated by
+    unrelated prior steps (CR-004). The global contributions dict -- and thus
+    the run's full step history in `execute()` -- is left as-is, per the
+    deferred history redesign.
+    """
+    agent_names = [agent.name for agent in team.agents]
+
+    def node(state: _TeamState) -> Dict[str, Any]:
+        contributions = state.get("contributions", {})
+        merged = "\n\n".join(
+            f"[{name}]\n{contributions[name]}" for name in agent_names if name in contributions
+        )
+        return {"output": merged, "context": merged}
+
+    return node
 
 
 class LangGraphAdapter(EngineAdapter):
@@ -369,7 +384,7 @@ class LangGraphAdapter(EngineAdapter):
         exit_name = f"{team.name}.__aggregate__"
 
         graph.add_node(entry_name, _passthrough_node)
-        graph.add_node(exit_name, _aggregate_node)
+        graph.add_node(exit_name, _aggregate_node(team))
 
         for agent in team.agents:
             node_name = f"{team.name}.{agent.name}"

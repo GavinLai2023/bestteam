@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -243,6 +243,7 @@ def generate_specification(
     source: Path,
     extra_tools: Optional[Dict[str, Any]] = None,
     extra_skills: Optional[Dict[str, Any]] = None,
+    pre_validate: Optional[Callable[[Specification], None]] = None,
     max_attempts: int = 3,
 ) -> Specification:
     """Generate a Specification from Requirements, self-correcting on validation errors.
@@ -264,6 +265,8 @@ def generate_specification(
         result = structured_model.invoke(messages)
         spec = result if isinstance(result, Specification) else Specification.model_validate(result)
         try:
+            if pre_validate is not None:
+                pre_validate(spec)
             validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills)
             return spec
         except ConfigurationError as exc:

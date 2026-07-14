@@ -31,9 +31,30 @@ def test_access_token_round_trip():
     assert auth.decode_access_token(token) == "alice"
 
 
+def _flip_char(segment: str, index: int) -> str:
+    """Change one base64url char to a definitely-different one."""
+    replacement = "A" if segment[index] != "A" else "B"
+    return segment[:index] + replacement + segment[index + 1:]
+
+
 def test_access_token_rejects_tampered_signature():
     token = auth.create_access_token("alice")
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+    # Flip the FIRST signature char, not the last: the last base64url char of a
+    # 32-byte HMAC encodes only padding bits, so flipping it can decode to the
+    # same bytes and spuriously verify (the earlier last-char version flaked).
+    tampered = f"{header}.{payload}.{_flip_char(signature, 0)}"
+
+    with pytest.raises(auth.AuthError):
+        auth.decode_access_token(tampered)
+
+
+def test_access_token_rejects_tampered_payload():
+    token = auth.create_access_token("alice")
+    header, payload, signature = token.split(".")
+    # Altering the payload changes the signing input, so the original signature
+    # no longer matches -- deterministic regardless of base64 bit alignment.
+    tampered = f"{header}.{_flip_char(payload, 0)}.{signature}"
 
     with pytest.raises(auth.AuthError):
         auth.decode_access_token(tampered)
@@ -44,6 +65,26 @@ def test_access_token_rejects_expired_token():
 
     with pytest.raises(auth.AuthError, match="expired"):
         auth.decode_access_token(token)
+
+
+def test_dev_default_secret_is_rejected():
+    assert auth.is_insecure_secret_key(auth._DEFAULT_SECRET_KEY)
+
+
+def test_env_example_secret_is_rejected_by_startup_guard():
+    # CR-002: a deployment that copies .env.example unchanged must NOT be able
+    # to boot -- the startup guard must reject the example placeholder value.
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    secret = None
+    for line in (root / ".env.example").read_text(encoding="utf-8").splitlines():
+        if line.startswith("BESTTEAM_SECRET_KEY="):
+            secret = line.split("=", 1)[1].strip()
+            break
+
+    assert secret is not None, "BESTTEAM_SECRET_KEY not found in .env.example"
+    assert auth.is_insecure_secret_key(secret)
 
 
 @pytest.fixture
@@ -162,13 +203,15 @@ def test_stream_run_rejects_missing_token(client):
             ws.receive_json()
 
 
-def test_stream_run_rejects_invalid_token(client):
+def test_stream_run_rejects_invalid_ticket(client):
+    # CR-013: the WebSocket authenticates with a single-use ticket, not the
+    # bearer token -- a bogus ticket (or the raw bearer) must be rejected.
     with pytest.raises(Exception):
-        with client.websocket_connect("/api/runs/some-run-id/stream?token=not-a-real-token") as ws:
+        with client.websocket_connect("/api/runs/some-run-id/stream?ticket=not-a-real-ticket") as ws:
             ws.receive_json()
 
 
-def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
+def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
     from tests.test_ui_backend import _write_workflow
 
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
@@ -177,13 +220,14 @@ def test_stream_run_accepts_valid_token_for_known_run(client, workflows_dir):
     client.headers["Authorization"] = f"Bearer {token}"
 
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
 
-    with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+    with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
         event = ws.receive_json()
         assert event["type"] == "run_started"
 
 
-def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
+def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir):
     from tests.test_ui_backend import _write_workflow
     from ui.backend.db.models import User
 
@@ -192,6 +236,7 @@ def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
     token = client.post("/api/auth/register", json={"username": "carol", "password": "hunter2"}).json()["access_token"]
     client.headers["Authorization"] = f"Bearer {token}"
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]  # issued while carol exists
 
     db_gen = backend_main.app.dependency_overrides[get_db]()
     db = next(db_gen)
@@ -202,5 +247,5 @@ def test_stream_run_rejects_token_for_deleted_user(client, workflows_dir):
         db_gen.close()
 
     with pytest.raises(Exception):
-        with client.websocket_connect(f"/api/runs/{run_id}/stream?token={token}") as ws:
+        with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
             ws.receive_json()

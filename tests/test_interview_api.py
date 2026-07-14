@@ -1,5 +1,7 @@
 """Tests for the interview transcription API (ui/backend/interview.py)."""
 
+import asyncio
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -211,6 +213,98 @@ def test_no_auth_header_returns_401(client):
         headers={"Authorization": ""},
     )
     assert resp.status_code == 401
+
+
+def test_oversized_upload_returns_413(client, monkeypatch):
+    # CR-009: a body over the hard app-level ceiling is rejected before any
+    # transcription/ffmpeg work, even when ffmpeg is available for splitting.
+    from ui.backend import interview
+
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    with patch("ui.backend.interview._is_ffmpeg_available", return_value=True):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("huge.mp3", b"\x00" * 200, "audio/mpeg")},
+        )
+    assert resp.status_code == 413
+    assert "limit" in resp.json()["detail"]
+
+
+def test_oversized_content_length_rejected_before_body_is_parsed(client, monkeypatch):
+    # CR-009: an over-ceiling upload is rejected by the body-size middleware --
+    # which runs before FastAPI parses/spools the multipart body (request.form()
+    # is called before dependency resolution). Proof it is pre-parse: OPENAI_API_KEY
+    # is unset, yet we get 413 (the middleware) rather than the handler's 503.
+    from ui.backend import interview
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    resp = client.post(
+        "/api/builder/interview/transcribe",
+        data={"model": "fake:hello"},
+        files={"file": ("huge.mp3", b"\x00" * 500, "audio/mpeg")},
+    )
+    assert resp.status_code == 413
+    assert "limit" in resp.json()["detail"]
+
+
+def test_chunked_oversized_body_is_rejected_before_the_downstream_app(monkeypatch):
+    # CR-009: no Content-Length (or an understated one) must not let multipart
+    # parsing/spooling consume an unbounded body. Exercise the ASGI receive
+    # wrapper directly with two streamed chunks, as normal HTTP clients fill in
+    # Content-Length automatically.
+    from ui.backend import interview
+    from ui.backend.main import _RequestBodyLimitMiddleware
+
+    monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
+    chunks = iter(
+        [
+            {"type": "http.request", "body": b"a" * 30, "more_body": True},
+            {"type": "http.request", "body": b"b" * 30, "more_body": False},
+        ]
+    )
+    sent = []
+
+    async def receive():
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    async def downstream(scope, receive, send):
+        while True:
+            message = await receive()
+            if not message.get("more_body", False):
+                return
+
+    scope = {"type": "http", "path": "/api/builder/interview/transcribe", "headers": []}
+    asyncio.run(_RequestBodyLimitMiddleware(downstream)(scope, receive, send))
+
+    assert sent[0]["status"] == 413
+
+
+def test_is_ffmpeg_available_false_when_binary_missing():
+    # CR-009: a missing ffmpeg binary must read as "unavailable", not raise.
+    from ui.backend import interview
+
+    interview._is_ffmpeg_available.cache_clear()
+    with patch("ui.backend.interview.subprocess.run", side_effect=FileNotFoundError()):
+        assert interview._is_ffmpeg_available() is False
+    interview._is_ffmpeg_available.cache_clear()
+
+
+def test_split_audio_raises_on_ffmpeg_timeout(tmp_path):
+    # CR-009: the split subprocess has a finite timeout; a hang surfaces as a
+    # RuntimeError (-> 502) rather than blocking a worker forever.
+    from ui.backend import interview
+
+    with patch(
+        "ui.backend.interview.subprocess.run",
+        side_effect=interview.subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1),
+    ):
+        with pytest.raises(RuntimeError, match="timed out"):
+            interview._split_audio(b"\x00" * 10, "mp3", str(tmp_path))
 
 
 def test_ffmpeg_failure_returns_502(client):

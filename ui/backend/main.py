@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -27,7 +28,7 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
-from .auth import AuthError, decode_access_token
+from . import interview
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
@@ -35,15 +36,20 @@ from .interview import router as interview_router
 from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
-from .knowledge_bases import load_knowledge_base_tools
+from .knowledge_bases import (
+    contain_workflow_config_for_load,
+    ensure_workflow_cache_paths_for_source,
+    load_knowledge_base_tools,
+)
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
+from .ws_tickets import consume_ticket, issue_ticket
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
-if auth.SECRET_KEY == auth._DEFAULT_SECRET_KEY:
+if auth.is_insecure_secret_key(auth.SECRET_KEY):
     raise RuntimeError(
-        "BESTTEAM_SECRET_KEY is unset (using the insecure dev default). "
+        "BESTTEAM_SECRET_KEY is unset or still a known placeholder value. "
         "Set BESTTEAM_SECRET_KEY to a long random value before starting this service "
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
@@ -52,6 +58,91 @@ _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
 
 app = FastAPI(title="bestteam monitoring dashboard")
+
+# Generous ceiling on any request body; the interview endpoint keeps its own
+# tighter limit. Reverse-proxy client_max_body_size remains the authoritative
+# hard bound -- this is the application-level backstop.
+_GENERAL_MAX_BODY_BYTES = 512 * 1024 * 1024
+
+
+class _RequestBodyTooLarge(Exception):
+    """Internal signal raised before Starlette can parse or spool a body."""
+
+
+class _RequestBodyLimitMiddleware:
+    """Enforce declared and streamed request-size limits at the ASGI boundary.
+
+    Function-based middleware can reject a truthful ``Content-Length``, but
+    multipart parsing otherwise begins before the endpoint can cap reads. This
+    wrapper also counts every ASGI body chunk, covering chunked and understated
+    requests before Starlette's multipart parser can spool the excess (CR-009).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        limit = interview._MAX_UPLOAD_BYTES if path.endswith("/interview/transcribe") else _GENERAL_MAX_BODY_BYTES
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > limit:
+                await _send_body_too_large(send, limit)
+                return
+
+        received = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _RequestBodyTooLarge
+            return message
+
+        async def tracked_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracked_send)
+        except _RequestBodyTooLarge:
+            if response_started:
+                raise
+            await _send_body_too_large(send, limit)
+
+
+async def _send_body_too_large(send, limit: int) -> None:
+    body = f'{{"detail":"Request body exceeds the {limit // (1024 * 1024)} MB limit."}}'.encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+# Add the body limiter first so CORS is the outermost layer and a 413 from the
+# size check still gets CORS headers.
+app.add_middleware(_RequestBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -77,6 +168,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 _workflow_cache: Dict[str, Tuple[Workflow, Any]] = {}
+# Guards the cache dict and a monotonic generation counter. `_get_workflow`
+# snapshots the generation before it builds and only stores the result if the
+# generation hasn't advanced -- so a concurrent KB/skill invalidation (which
+# bumps the generation, see crud._invalidate_workflow_cache) can't be undone by
+# a load that started before it and finished after (CR-005).
+_workflow_cache_lock = threading.Lock()
+_workflow_cache_generation = 0
+
+
+def _store_workflow_in_cache(name: str, workflow: Workflow, cache_key: Any, generation: int) -> None:
+    with _workflow_cache_lock:
+        if generation == _workflow_cache_generation:
+            _workflow_cache[name] = (workflow, cache_key)
 
 
 class RunRequest(BaseModel):
@@ -84,18 +188,30 @@ class RunRequest(BaseModel):
     input: str
 
 
-def _dependency_freshness(db: Session) -> Tuple[Optional[Any], Optional[Any]]:
-    """Max `updated_at` across all SkillRecords and all KnowledgeBaseRecords,
-    folded into a cached Workflow's cache key so editing either invalidates
-    any already-cached workflow that might depend on them.
+def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
+    """Fingerprint of all SkillRecords and KnowledgeBaseRecords, folded into a
+    cached Workflow's cache key so any change to either invalidates a cached
+    workflow that might depend on them.
+
+    Includes the row COUNT as well as max(updated_at): a *deletion* doesn't
+    change the maximum, so a max-only fingerprint would keep serving a deleted
+    dependency until the explicit cache clear -- and miss it entirely in the
+    window between the mutation's commit and that clear. Counting makes the
+    fingerprint reflect deletes from the reader's own committed DB view, so a
+    stale cache entry is a natural miss regardless of invalidation timing
+    (CR-005). (Adds/updates already bump `updated_at` to now, moving the max.)
 
     Deliberately global rather than scoped to only the names a given
     workflow references -- see
     docs/superpowers/specs/2026-06-22-code-review-fixes-design.md, "Design
     > A" for why."""
-    skills_max = db.query(func.max(SkillRecord.updated_at)).scalar()
-    kb_max = db.query(func.max(KnowledgeBaseRecord.updated_at)).scalar()
-    return (skills_max, kb_max)
+    skills_count, skills_max = db.query(
+        func.count(SkillRecord.id), func.max(SkillRecord.updated_at)
+    ).one()
+    kb_count, kb_max = db.query(
+        func.count(KnowledgeBaseRecord.id), func.max(KnowledgeBaseRecord.updated_at)
+    ).one()
+    return (skills_count, skills_max, kb_count, kb_max)
 
 
 def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
@@ -114,6 +230,10 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     (including in tests, which override `get_db`); if omitted, a one-off
     session against the module-level engine is used."""
     source = WORKFLOWS_DIR / f"{name}.yaml"
+    # Snapshot the invalidation generation before we read dependencies / build,
+    # so a KB/skill delete that races this load makes us skip caching a stale
+    # result rather than repopulating the cache after the invalidation (CR-005).
+    generation = _workflow_cache_generation
     if db is not None:
         record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
@@ -125,28 +245,31 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     if record is not None:
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
         cached = _workflow_cache.get(name)
-        if cached is None or cached[1] != cache_key:
-            # Only load skills and build standalone KB tools (which may
-            # re-chunk files and, for type: vector, call a paid embedding
-            # model) on a cache miss -- not on every request.
-            if db is not None:
-                skill_lookup = load_skills(db)
-                kb_tools = load_knowledge_base_tools(db, record.config, source)
-            else:
-                with SessionLocal() as session:
-                    skill_lookup = load_skills(session)
-                    kb_tools = load_knowledge_base_tools(session, record.config, source)
-            try:
-                workflow = _build_workflow(
-                    record.config,
-                    source=source,
-                    extra_tools=kb_tools,
-                    extra_skills=skill_lookup,
-                )
-            except (KeyError, TypeError, BestTeamError) as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            _workflow_cache[name] = (workflow, cache_key)
-        return _workflow_cache[name][0]
+        if cached is not None and cached[1] == cache_key:
+            return cached[0]
+        # Only load skills and build standalone KB tools (which may re-chunk
+        # files and, for type: vector, call a paid embedding model) on a cache
+        # miss -- not on every request.
+        if db is not None:
+            skill_lookup = load_skills(db)
+            kb_tools = load_knowledge_base_tools(db, record.config, source)
+        else:
+            with SessionLocal() as session:
+                skill_lookup = load_skills(session)
+                kb_tools = load_knowledge_base_tools(session, record.config, source)
+        try:
+            config = contain_workflow_config_for_load(record.config)
+            ensure_workflow_cache_paths_for_source(config, source)
+            workflow = _build_workflow(
+                config,
+                source=source,
+                extra_tools=kb_tools,
+                extra_skills=skill_lookup,
+            )
+        except (KeyError, TypeError, BestTeamError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _store_workflow_in_cache(name, workflow, cache_key, generation)
+        return workflow
 
     path = WORKFLOWS_DIR / f"{name}.yaml"
     if not path.is_file():
@@ -154,12 +277,14 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
 
     cache_key = ("file", path.stat().st_mtime)
     cached = _workflow_cache.get(name)
-    if cached is None or cached[1] != cache_key:
-        try:
-            _workflow_cache[name] = (load_workflow(path), cache_key)
-        except BestTeamError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _workflow_cache[name][0]
+    if cached is not None and cached[1] == cache_key:
+        return cached[0]
+    try:
+        workflow = load_workflow(path)
+    except BestTeamError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _store_workflow_in_cache(name, workflow, cache_key, generation)
+    return workflow
 
 
 @app.get("/api/health")
@@ -201,21 +326,25 @@ def get_run(run_id: str, user: User = Depends(get_current_user)):
     return dataclasses.asdict(run)
 
 
+@app.post("/api/runs/ws-ticket")
+def create_ws_ticket(user: User = Depends(get_current_user)) -> Dict[str, str]:
+    """Exchange the caller's bearer token for a short-lived, single-use ticket
+    to authenticate a WebSocket stream connection (CR-013). Only the ticket --
+    never the long-lived bearer -- goes in the stream URL."""
+    return {"ticket": issue_ticket(user.username)}
+
+
 @app.websocket("/api/runs/{run_id}/stream")
-async def stream_run(websocket: WebSocket, run_id: str, token: Optional[str] = None, db: Session = Depends(get_db)):
+async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = None, db: Session = Depends(get_db)):
     """Replays any events already produced, then relays new ones live until
     the run reaches a terminal state (run_completed / run_failed).
 
-    Requires the same bearer token used for REST routes, passed as a
-    `?token=` query parameter -- browsers can't set custom headers when
-    opening a WebSocket, so this can't reuse the HTTPBearer-based
-    get_current_user dependency directly."""
-    if token is None:
-        await websocket.close(code=4401)
-        return
-    try:
-        username = decode_access_token(token)
-    except AuthError:
+    Authenticated with a short-lived, single-use `?ticket=` minted by
+    `POST /api/runs/ws-ticket` -- browsers can't set custom headers when
+    opening a WebSocket, and putting the long-lived bearer in the URL leaks it
+    to logs/history (CR-013)."""
+    username = consume_ticket(ticket) if ticket else None
+    if username is None:
         await websocket.close(code=4401)
         return
     if get_user_by_username(db, username) is None:

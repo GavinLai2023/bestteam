@@ -20,7 +20,16 @@ import time
 from typing import Optional
 
 _DEFAULT_SECRET_KEY = "bestteam-dev-secret-change-me"
+# Known-insecure placeholder values the service must refuse to boot with. This
+# includes the dev default AND the `.env.example` placeholder, so a deployment
+# that copies the example unchanged cannot start (CR-002).
+_INSECURE_SECRET_KEYS = frozenset({_DEFAULT_SECRET_KEY, "change-me-to-a-long-random-value"})
 SECRET_KEY = os.environ.get("BESTTEAM_SECRET_KEY", _DEFAULT_SECRET_KEY)
+
+
+def is_insecure_secret_key(key: str) -> bool:
+    """True if `key` is a known placeholder the backend must refuse to start with."""
+    return key in _INSECURE_SECRET_KEYS
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("BESTTEAM_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 _PBKDF2_ALGORITHM = "sha256"

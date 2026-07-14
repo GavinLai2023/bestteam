@@ -11,7 +11,7 @@ from .text_tokenize import significant_terms, tokenize
 
 _SUPPORTED_SUFFIXES = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
-    ".pdf", ".xlsx", ".xls", ".xlsm", ".docx",
+    ".pdf", ".xlsx", ".xlsm", ".docx",
 }
 
 
