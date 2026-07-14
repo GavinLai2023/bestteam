@@ -319,6 +319,33 @@ def test_upserting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
     assert backend_main._workflow_cache == {}
 
 
+def test_dependency_freshness_changes_when_non_latest_kb_deleted():
+    # CR-005 root cause: deleting a KB whose updated_at is NOT the maximum must
+    # still change the dependency fingerprint, so a cached workflow can't keep
+    # serving the deleted KB even in the pre-invalidation window. A
+    # max(updated_at)-only fingerprint (the old behavior) missed this.
+    from datetime import datetime
+
+    from ui.backend.db.models import KnowledgeBaseRecord
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    TestSessionLocal = session_factory(engine)
+    with TestSessionLocal() as db:
+        db.add_all([
+            KnowledgeBaseRecord(name="older", config={}, updated_at=datetime(2020, 1, 1)),
+            KnowledgeBaseRecord(name="newer", config={}, updated_at=datetime(2020, 1, 2)),
+        ])
+        db.commit()
+
+        before = backend_main._dependency_freshness(db)
+        db.delete(db.query(KnowledgeBaseRecord).filter_by(name="older").one())
+        db.commit()  # deletes the non-maximum record -> max(updated_at) unchanged
+        after = backend_main._dependency_freshness(db)
+
+    assert before != after
+
+
 def test_stale_load_does_not_repopulate_cache_after_invalidation():
     # CR-005: a load that snapshotted the generation, then had the cache
     # invalidated mid-build, must not write its now-stale result back.

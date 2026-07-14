@@ -135,18 +135,30 @@ class RunRequest(BaseModel):
     input: str
 
 
-def _dependency_freshness(db: Session) -> Tuple[Optional[Any], Optional[Any]]:
-    """Max `updated_at` across all SkillRecords and all KnowledgeBaseRecords,
-    folded into a cached Workflow's cache key so editing either invalidates
-    any already-cached workflow that might depend on them.
+def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
+    """Fingerprint of all SkillRecords and KnowledgeBaseRecords, folded into a
+    cached Workflow's cache key so any change to either invalidates a cached
+    workflow that might depend on them.
+
+    Includes the row COUNT as well as max(updated_at): a *deletion* doesn't
+    change the maximum, so a max-only fingerprint would keep serving a deleted
+    dependency until the explicit cache clear -- and miss it entirely in the
+    window between the mutation's commit and that clear. Counting makes the
+    fingerprint reflect deletes from the reader's own committed DB view, so a
+    stale cache entry is a natural miss regardless of invalidation timing
+    (CR-005). (Adds/updates already bump `updated_at` to now, moving the max.)
 
     Deliberately global rather than scoped to only the names a given
     workflow references -- see
     docs/superpowers/specs/2026-06-22-code-review-fixes-design.md, "Design
     > A" for why."""
-    skills_max = db.query(func.max(SkillRecord.updated_at)).scalar()
-    kb_max = db.query(func.max(KnowledgeBaseRecord.updated_at)).scalar()
-    return (skills_max, kb_max)
+    skills_count, skills_max = db.query(
+        func.count(SkillRecord.id), func.max(SkillRecord.updated_at)
+    ).one()
+    kb_count, kb_max = db.query(
+        func.count(KnowledgeBaseRecord.id), func.max(KnowledgeBaseRecord.updated_at)
+    ).one()
+    return (skills_count, skills_max, kb_count, kb_max)
 
 
 def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
