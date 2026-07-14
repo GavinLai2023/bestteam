@@ -30,6 +30,18 @@ def test_add_persists_metadata():
     assert record.metadata == {"input": "x", "output": "y"}
 
 
+def test_created_at_is_timezone_aware():
+    # CR-018: records must use timezone-aware UTC (matches db/models._utcnow),
+    # not the deprecated naive datetime.utcnow().
+    from datetime import datetime
+
+    store = _store()
+    record = store.add("alice", EPISODIC, "hi")
+
+    parsed = datetime.fromisoformat(record.created_at)
+    assert parsed.tzinfo is not None
+
+
 def test_search_ranks_by_relevance_and_isolates_users():
     store = _store()
     store.add("alice", EPISODIC, "user asked about the refund policy")
@@ -128,6 +140,20 @@ def test_recall_preamble_formats_hits():
     assert "previous sessions" in preamble
 
 
+def test_recall_preamble_frames_memory_as_untrusted_reference():
+    # CR-021: recalled content is untrusted data (a prior tool result or model
+    # output could carry injected instructions), so the preamble must delimit it
+    # and mark it reference-only rather than splicing it in as bare instructions.
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise answers")
+    preamble = MemoryManager(store).recall_preamble("alice", "concise answers")
+
+    assert "<recalled_user_memory>" in preamble
+    assert "</recalled_user_memory>" in preamble
+    lowered = preamble.lower()
+    assert "not" in lowered and "instruction" in lowered
+
+
 def test_record_run_writes_only_episodic_without_model():
     store = _store()
     manager = MemoryManager(store)
@@ -138,6 +164,31 @@ def test_record_run_writes_only_episodic_without_model():
     assert len(records) == 1
     assert records[0].type == EPISODIC
     assert "how do refunds work?" in records[0].content
+
+
+def test_record_run_does_not_duplicate_content_in_metadata():
+    # CR-022: the episodic record already carries input/output in `content`;
+    # duplicating them into `metadata` doubles storage for no reader.
+    store = _store()
+    MemoryManager(store).record_run("alice", "how do refunds work?", "30 days")
+
+    (record,) = store.all("alice")
+    assert record.metadata == {}
+
+
+def test_record_run_caps_record_size():
+    # CR-022: an unbounded input (RunRequest.input has no length limit) must not
+    # be persisted whole — each field is truncated before storage.
+    from bestteam.core.memory import _MAX_RECORD_CHARS
+
+    store = _store()
+    big = "x" * (_MAX_RECORD_CHARS * 3)
+    MemoryManager(store).record_run("alice", big, big)
+
+    (record,) = store.all("alice")
+    # both fields capped + a little framing; nowhere near the 6*cap raw input.
+    assert len(record.content) <= 2 * _MAX_RECORD_CHARS + 100
+    assert "truncated" in record.content
 
 
 def test_record_run_noop_without_user():

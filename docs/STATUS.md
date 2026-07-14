@@ -49,6 +49,14 @@
   corrections, single-use WS tickets, oversized-upload middleware, tool-loop
   exhaustion notice, and up-front `runs`-row persistence. No deferrals remain.
   See `docs/CODE_REVIEW_TRIAGE.md`.
+- Code-review round 2 (per-user memory + `http_get`): CR-018…CR-022 fixed on
+  `fix/memory-code-review` — timezone-aware timestamps, `Workflow.run()`
+  best-effort memory recording, recalled memory reaching hierarchical delegates,
+  injection-resistant recall framing, and bounded episodic records (no
+  content/metadata duplication + per-field size cap). CR-023 (`http_get`
+  DNS-rebinding SSRF) in progress on `fix/http-get-ssrf-rebinding`. Severities
+  recalibrated to P2/P3 for this codebase's disabled-by-default, per-user,
+  no-multi-tenancy model. See `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
 ## In Progress
 

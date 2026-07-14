@@ -97,6 +97,31 @@ def test_hierarchical_manager_receives_preamble():
     assert "delegate_to_researcher" in (manager_model.captured_system or "")
 
 
+def test_hierarchical_subordinate_receives_preamble():
+    # CR-020: recalled memory must reach delegated subordinates too, not just
+    # the manager — consistent with sequential/parallel and the documented
+    # "each agent" contract.
+    store, manager = _seeded_manager()
+    sub_model = _RecordingChatModel(responses=[AIMessage(content="findings")])
+    subordinate = Agent(name="researcher", role="Researcher", goal="research", model=sub_model)
+    manager_model = _RecordingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "delegate_to_researcher", "args": {"task": "look into refunds"}, "id": "c1"}],
+            ),
+            AIMessage(content="Final answer about refunds"),
+        ]
+    )
+    boss = Agent(name="boss", role="Manager", goal="coordinate", model=manager_model)
+    team = Team(name="t", agents=[subordinate], manager=boss, mode=CollaborationMode.HIERARCHICAL)
+    workflow = Workflow(name="wf", steps=[team])
+
+    list(workflow.stream("handle the refund policy question", user_id="u", memory=manager))
+
+    assert "refund policy" in (sub_model.captured_system or "")
+
+
 def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])

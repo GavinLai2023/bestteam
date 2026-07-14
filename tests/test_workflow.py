@@ -104,6 +104,28 @@ def test_memory_recording_failure_keeps_run_completed():
     assert "run_failed" not in types
 
 
+def test_run_memory_recording_failure_keeps_run_completed():
+    # CR-019: run() records memory after the workflow completes; a recording
+    # failure must not raise (which would make a completed, side-effecting run
+    # look failed to the caller), mirroring stream()'s best-effort behavior.
+    class _FailingMemory:
+        def recall_preamble(self, user_id, query):
+            return ""
+
+        def record_run(self, user_id, input, output):
+            raise RuntimeError("memory backend down")
+
+    a = _agent("a", "done")
+    workflow = Workflow(
+        name="wf",
+        steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)],
+    )
+
+    result = workflow.run("hi", user_id="u", memory=_FailingMemory())
+
+    assert result.output == "done"
+
+
 def test_unimplemented_collaboration_mode_raises_clear_error():
     a = _agent("a", "x")
     workflow = Workflow(
