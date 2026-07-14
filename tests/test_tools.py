@@ -233,6 +233,33 @@ def test_http_get_follows_safe_redirect(monkeypatch):
     assert "final body" in result
 
 
+def test_http_get_pins_connection_to_validated_ip(monkeypatch):
+    # CR-023: after validating the resolved address, the request must connect to
+    # THAT ip rather than the hostname (which httpx would re-resolve, opening a
+    # DNS-rebinding window). The hostname is preserved for the Host header and
+    # TLS SNI so virtual hosts and cert verification still work.
+    _patch_getaddrinfo(monkeypatch, {"example.com": "93.184.216.34"})
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.text = "ok"
+    ok_response.is_redirect = False
+
+    mock_httpx, mock_client_instance = _make_mock_httpx([ok_response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        result = http_get("https://example.com/path?q=1")
+
+    args, kwargs = mock_client_instance.get.call_args
+    connect_url = args[0]
+    assert "93.184.216.34" in connect_url  # connects to the validated ip
+    assert "example.com" not in connect_url  # not the hostname (no re-resolution)
+    assert "/path?q=1" in connect_url  # path/query preserved
+    assert kwargs["headers"]["Host"] == "example.com"  # vhost preserved
+    assert kwargs["extensions"]["sni_hostname"] == "example.com"  # TLS SNI/cert
+    # The displayed/returned URL stays the hostname URL, not the ip.
+    assert "example.com/path" in result
+
+
 # ---------------------------------------------------------------------------
 # parse_file
 # ---------------------------------------------------------------------------

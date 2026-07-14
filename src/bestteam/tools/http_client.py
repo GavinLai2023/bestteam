@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ..exceptions import ConfigurationError
 from ._retry import with_retry
@@ -21,13 +21,19 @@ _BLOCKED_IP_PREDICATES = (
 )
 
 
-def _check_host_allowed(url: str) -> None:
-    """Raise ConfigurationError if `url`'s host resolves to a private/internal address.
+def _check_host_allowed(url: str) -> str:
+    """Validate `url`'s host and return the IP the request must connect to.
 
     Guards against SSRF (e.g. an agent fetching cloud metadata endpoints or
     internal services) by resolving the hostname and rejecting any address
     that's private, loopback, link-local (incl. 169.254.169.254), reserved,
     multicast, or unspecified.
+
+    Returns the first resolved address as a string so the caller can pin the
+    connection to it. Pinning closes the DNS-rebinding TOCTOU (CR-023): without
+    it, `httpx` would independently re-resolve the hostname when connecting, so
+    an attacker-controlled name could pass this check as a public address and
+    then resolve to a private one for the actual request.
     """
     hostname = urlsplit(url).hostname
     if not hostname:
@@ -38,6 +44,7 @@ def _check_host_allowed(url: str) -> None:
     except OSError as exc:
         raise ConfigurationError(f"Could not resolve host '{hostname}': {exc}") from exc
 
+    validated_ip: str = ""
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if any(getattr(ip, predicate) for predicate in _BLOCKED_IP_PREDICATES):
@@ -45,6 +52,33 @@ def _check_host_allowed(url: str) -> None:
                 f"Refusing to fetch '{url}': host '{hostname}' resolves to a "
                 f"private/internal address ({ip})"
             )
+        if not validated_ip:
+            validated_ip = str(ip)
+
+    if not validated_ip:
+        raise ConfigurationError(f"Could not resolve host '{hostname}'")
+    return validated_ip
+
+
+def _pin_to_ip(url: str, ip: str) -> tuple[str, str, str]:
+    """Rewrite `url` to connect to `ip`, keeping the hostname for Host/SNI.
+
+    Returns `(connect_url, host_header, sni_hostname)`: `connect_url` targets the
+    validated `ip` (so httpx never re-resolves), `host_header` carries the
+    original host[:port] so virtual hosts still work, and `sni_hostname` is the
+    hostname for https TLS SNI + cert verification (empty for http).
+    """
+    parts = urlsplit(url)
+    host_header = parts.hostname or ""
+    if parts.port is not None:
+        host_header = f"{host_header}:{parts.port}"
+
+    bracket_ip = f"[{ip}]" if ipaddress.ip_address(ip).version == 6 else ip
+    netloc = f"{bracket_ip}:{parts.port}" if parts.port is not None else bracket_ip
+    connect_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
+
+    sni_hostname = parts.hostname if parts.scheme == "https" else ""
+    return connect_url, host_header, sni_hostname
 
 
 def http_get(url: str, headers_json: str = "{}") -> str:
@@ -91,10 +125,12 @@ def http_get(url: str, headers_json: str = "{}") -> str:
         def __init__(self, response):
             self.response = response
 
-    def _do_request(target_url):
+    def _do_request(connect_url, host_header, sni_hostname):
+        request_headers = {**headers, "Host": host_header}
+        extensions = {"sni_hostname": sni_hostname} if sni_hostname else {}
         try:
             with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
-                response = client.get(target_url, headers=headers)
+                response = client.get(connect_url, headers=request_headers, extensions=extensions)
         except httpx.RequestError as exc:
             raise ConfigurationError(f"HTTP request failed: {exc}") from exc
         if response.status_code >= 500:
@@ -103,10 +139,13 @@ def http_get(url: str, headers_json: str = "{}") -> str:
 
     current_url = url
     for _ in range(_MAX_REDIRECTS + 1):
-        _check_host_allowed(current_url)
+        # Validate + pin per hop: the connection targets the just-validated IP,
+        # closing the DNS-rebinding window (CR-023).
+        validated_ip = _check_host_allowed(current_url)
+        connect_url, host_header, sni_hostname = _pin_to_ip(current_url, validated_ip)
         try:
             response = with_retry(
-                lambda: _do_request(current_url),
+                lambda: _do_request(connect_url, host_header, sni_hostname),
                 retriable_exc=(_ServerError, ConfigurationError),
             )
         except _ServerError as exc:
