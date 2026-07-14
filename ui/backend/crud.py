@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
@@ -59,6 +60,24 @@ _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
 
 
+# Per-KB locks serialising the upload promotion/commit/cleanup critical section.
+# Concurrent uploads of the same KB would otherwise interleave the shared CURRENT
+# pointer + version cleanup and could leave CURRENT naming a version the losing
+# uploader then deletes (CR-008). Keyed by KB name; a small guard lock protects
+# the registry itself.
+_kb_upload_locks_guard = threading.Lock()
+_kb_upload_locks: Dict[str, threading.Lock] = {}
+
+
+def _kb_upload_lock(name: str) -> threading.Lock:
+    with _kb_upload_locks_guard:
+        lock = _kb_upload_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _kb_upload_locks[name] = lock
+        return lock
+
+
 def _read_pointer(pointer: Path) -> Optional[str]:
     try:
         return pointer.read_text(encoding="utf-8").strip()
@@ -68,8 +87,10 @@ def _read_pointer(pointer: Path) -> Optional[str]:
 
 def _write_pointer(pointer: Path, version: str) -> None:
     """Atomically point CURRENT at `version` (os.replace of a file is atomic on
-    Windows + POSIX), so a concurrent reader always sees a complete version."""
-    tmp = pointer.with_name(pointer.name + ".tmp")
+    Windows + POSIX), so a concurrent reader always sees a complete version. The
+    temp file is uniquely named so a leftover from a crashed write can't collide
+    with a later one."""
+    tmp = pointer.with_name(f"{pointer.name}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(version, encoding="utf-8")
     os.replace(tmp, pointer)
 
@@ -173,9 +194,11 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
         if name == "knowledge_bases":
-            upload_dir = _KB_UPLOADS_DIR / item_name
-            if upload_dir.is_dir():
-                shutil.rmtree(upload_dir, ignore_errors=True)
+            # Same per-KB lock as upload, so a delete can't race a promotion.
+            with _kb_upload_lock(item_name):
+                upload_dir = _KB_UPLOADS_DIR / item_name
+                if upload_dir.is_dir():
+                    shutil.rmtree(upload_dir, ignore_errors=True)
         db.delete(item)
         db.commit()
         if name in ("knowledge_bases", "skills"):
@@ -264,41 +287,46 @@ def upload_knowledge_base_files(
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        previous_version = _read_pointer(pointer)
-        _write_pointer(pointer, version)  # atomic promotion
+        # Serialise the pointer flip + commit + cleanup per KB so concurrent
+        # uploads of the same KB can't interleave and leave CURRENT dangling.
+        # (The file writes + validation above run outside the lock -- each
+        # uploader owns a unique version dir, so they don't conflict.)
+        with _kb_upload_lock(item_name):
+            previous_version = _read_pointer(pointer)
+            _write_pointer(pointer, version)  # atomic promotion
 
-        spec = KnowledgeBaseSpec(
-            name=item_name,
-            path=str(kb_root),
-            type="local_folder",
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            top_k=top_k,
-        )
-        raw = spec.to_raw()
-        item = db.query(KnowledgeBaseRecord).filter_by(name=item_name).one_or_none()
-        if item is None:
-            item = KnowledgeBaseRecord(name=item_name, config=raw)
-            db.add(item)
-        else:
-            item.config = raw
-        try:
-            db.commit()
-        except Exception:
-            # Point CURRENT back at the prior version (still on disk); the failed
-            # new version is removed by the outer handler. Keeps FS and DB
-            # consistent, with no destructive delete of the previous KB.
-            db.rollback()
-            if previous_version is not None:
-                _write_pointer(pointer, previous_version)
+            spec = KnowledgeBaseSpec(
+                name=item_name,
+                path=str(kb_root),
+                type="local_folder",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                top_k=top_k,
+            )
+            raw = spec.to_raw()
+            item = db.query(KnowledgeBaseRecord).filter_by(name=item_name).one_or_none()
+            if item is None:
+                item = KnowledgeBaseRecord(name=item_name, config=raw)
+                db.add(item)
             else:
-                pointer.unlink(missing_ok=True)
-            raise
+                item.config = raw
+            try:
+                db.commit()
+            except Exception:
+                # Point CURRENT back at the prior version (still on disk); the
+                # failed new version is removed by the outer handler. Keeps FS
+                # and DB consistent, with no destructive delete of the prior KB.
+                db.rollback()
+                if previous_version is not None:
+                    _write_pointer(pointer, previous_version)
+                else:
+                    pointer.unlink(missing_ok=True)
+                raise
 
-        _invalidate_workflow_cache()
-        # Durable now: drop older versions but keep the immediately-previous one
-        # as a grace window for readers that just resolved to it.
-        _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
+            _invalidate_workflow_cache()
+            # Durable now: drop older versions but keep the immediately-previous
+            # one as a grace window for readers that just resolved to it.
+            _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
 
         return {
             "name": item_name,

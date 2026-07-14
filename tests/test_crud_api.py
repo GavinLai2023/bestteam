@@ -433,6 +433,47 @@ def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
     assert not v1.is_dir()
 
 
+def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
+    # CR-008: concurrent uploads of the same KB must not interleave the CURRENT
+    # pointer flip + version cleanup. The promotion critical section is guarded
+    # by a per-KB lock; holding it must block a second upload's promotion until
+    # released, after which the KB ends in a consistent state.
+    import threading
+    import time
+
+    uploads = tmp_path / "knowledge_base_uploads"
+    client.post(
+        "/api/config/knowledge_bases/kb/upload",
+        files=[("files", ("first.txt", b"first content", "text/plain"))],
+    )
+
+    lock = backend_crud._kb_upload_lock("kb")
+    lock.acquire()
+    done = []
+
+    def _upload():
+        resp = client.post(
+            "/api/config/knowledge_bases/kb/upload",
+            files=[("files", ("second.txt", b"second content", "text/plain"))],
+        )
+        done.append(resp.status_code)
+
+    worker = threading.Thread(target=_upload)
+    worker.start()
+    try:
+        time.sleep(0.5)
+        assert done == [], "the second upload must block on the per-KB lock during promotion"
+    finally:
+        lock.release()
+
+    worker.join(timeout=5)
+    assert done == [200]
+    # CURRENT resolves to a real version dir holding the last writer's file.
+    active = _active_kb_dir(uploads, "kb")
+    assert active.is_dir()
+    assert sorted(p.name for p in active.iterdir()) == ["second.txt"]
+
+
 def test_resolve_kb_upload_path_falls_back_for_flat_layout(tmp_path):
     # A manual-config / legacy KB with no CURRENT pointer is scanned as-is.
     from ui.backend.knowledge_bases import resolve_kb_upload_path
