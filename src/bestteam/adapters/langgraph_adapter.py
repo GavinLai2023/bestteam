@@ -23,6 +23,18 @@ _logger = logging.getLogger(__name__)
 _MAX_TOOL_ITERATIONS = 5
 
 
+def _tool_loop_exhausted_notice(agent_name: str) -> str:
+    """Output returned when an agent uses up `_MAX_TOOL_ITERATIONS` without ever
+    settling on a text answer. The final tool-calling response's `content` is an
+    empty string, so returning it would make an exhausted run look like a silent
+    empty success (CR-011). This explicit notice surfaces the truncation in the
+    agent's output and the resulting `agent_completed` trace event instead."""
+    return (
+        f"[Agent '{agent_name}' stopped after {_MAX_TOOL_ITERATIONS} tool "
+        "iterations without producing a final answer.]"
+    )
+
+
 class _TeamState(TypedDict):
     input: str
     context: str
@@ -177,6 +189,10 @@ def _run_agent(
         response = model.invoke(messages)
         _record_usage(agent, response, usage_sink)
 
+    if getattr(response, "tool_calls", None):
+        # The loop ran out while the model was still asking for tools, so it
+        # never produced a text answer -- `response.content` is empty here.
+        return _tool_loop_exhausted_notice(agent.name)
     return response.content if hasattr(response, "content") else str(response)
 
 

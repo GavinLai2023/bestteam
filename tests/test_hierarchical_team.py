@@ -2,6 +2,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, SystemMessage
 
 from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
 
 
 class _FakeToolCallingChatModel(FakeMessagesListChatModel):
@@ -216,4 +217,6 @@ def test_manager_delegate_loop_is_bounded():
     workflow = Workflow(name="wf", steps=[team])
     result = workflow.run("do the thing")
 
-    assert result.output == ""
+    # The manager exhausting its delegate loop must surface explicitly rather
+    # than as a silent empty success (CR-011).
+    assert result.output == _tool_loop_exhausted_notice("manager")

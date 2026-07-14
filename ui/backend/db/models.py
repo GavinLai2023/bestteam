@@ -126,8 +126,10 @@ class BuilderSession(Base):
 
 
 class Run(Base):
-    """A workflow execution. Persisted replacement for `RunRegistry`'s
-    in-memory `Run` dataclass (ui/backend/registry.py), wired up in Phase 5."""
+    """A workflow execution. `ui/backend/runtime.py::run_in_background` persists
+    one row per run (status/output updated at the terminal event) so usage/trace
+    foreign keys reference a real run (CR-012); `RunRegistry` remains the live
+    in-memory layer and full restart-survival is deferred to Phase 5."""
 
     __tablename__ = "runs"
 

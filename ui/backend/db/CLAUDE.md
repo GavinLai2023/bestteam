@@ -47,7 +47,11 @@ lives in `ui/backend/crud.py` (Phase 2, see `ui/backend/CLAUDE.md`).
 
 ## Known limitation: persistent run state
 
-`ui/backend/registry.py`'s `RunRegistry` is still in-process memory only —
-runs vanish on restart. The SQLite schema to replace it (`runs`/
-`trace_events`, above) exists but isn't wired into `RunRegistry` or
-`main.py` yet (Phase 5).
+`ui/backend/registry.py`'s `RunRegistry` is still the authoritative in-process
+live layer — runs vanish on restart and there's no run-history API. As of
+CR-012, `ui/backend/runtime.py::run_in_background` does persist one `runs` row
+per run (committed before any usage record and updated to its terminal
+status/output), so `usage_records`/`trace_events` foreign keys reference a real
+row rather than a phantom id. Still deferred to Phase 5: persisting
+`trace_events`, rehydrating `RunRegistry` from the DB across restarts, a
+history API, and enabling SQLite foreign-key enforcement.
