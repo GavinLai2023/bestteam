@@ -1,6 +1,7 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,14 @@ from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db_session import get_db
+
+
+def _active_kb_dir(uploads: Path, name: str) -> Path:
+    """Resolve an uploaded KB's active version dir via its CURRENT pointer."""
+    from ui.backend.knowledge_bases import resolve_kb_upload_path
+
+    resolved = resolve_kb_upload_path({"path": str(uploads / name)})
+    return Path(resolved["path"])
 
 
 @pytest.fixture
@@ -255,13 +264,13 @@ def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):
     )
 
     assert resp.status_code == 200
-    live = uploads / "kb"
-    assert sorted(p.name for p in live.iterdir()) == ["doc3.txt"]
+    # The active version resolves to only the new file; omitted ones are gone.
+    assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc3.txt"]
 
 
 def test_failed_reupload_preserves_prior_kb(client, tmp_path):
-    # CR-008: a failed re-upload must leave the previously-valid KB directory
-    # AND its DB record intact -- not rmtree the live directory on error.
+    # CR-008: a failed re-upload must leave the previously-valid KB (the active
+    # version) AND its DB record intact -- the CURRENT pointer never moves.
     uploads = tmp_path / "knowledge_base_uploads"
     client.post(
         "/api/config/knowledge_bases/kb/upload",
@@ -277,8 +286,7 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
         )
 
     assert resp.status_code == 400
-    live = uploads / "kb"
-    assert sorted(p.name for p in live.iterdir()) == ["doc1.txt"]  # prior KB preserved
+    assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc1.txt"]
     assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # DB record preserved
 
 
@@ -376,38 +384,39 @@ def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
                 files=[("files", ("doc2.txt", b"replacement content", "text/plain"))],
             )
 
-    live = uploads / "kb"
-    assert sorted(p.name for p in live.iterdir()) == ["doc1.txt"]  # prior files restored
+    # CURRENT was pointed back at the prior version; the active KB is doc1.
+    assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc1.txt"]
     assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # record intact
 
 
-def test_backup_is_preserved_when_restore_fails(client, tmp_path):
-    # CR-008: if rollback can't restore the prior KB, the backup dir (the last
-    # valid copy) must be preserved for manual recovery, not silently deleted.
+def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
+    # CR-008 (pointer layout): CURRENT always resolves to a complete version --
+    # there is no rename-swap window where the KB dir has no live version. The
+    # immediately-previous version is retained as a grace window for readers
+    # that just resolved to it; older versions are cleaned up.
     uploads = tmp_path / "knowledge_base_uploads"
-    client.post(
-        "/api/config/knowledge_bases/kb/upload",
-        files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
-    )
+    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v1.txt", b"one", "text/plain"))])
+    v1 = _active_kb_dir(uploads, "kb")
+    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v2.txt", b"two", "text/plain"))])
+    v2 = _active_kb_dir(uploads, "kb")
 
-    real_replace = backend_crud.os.replace
+    assert v1 != v2
+    assert sorted(p.name for p in v2.iterdir()) == ["v2.txt"]  # active version
+    assert v1.is_dir()  # previous version kept as a grace window
 
-    def flaky_replace(src, dst):
-        if ".backup_" in str(src):  # fail specifically on the restore step
-            raise OSError("cannot restore backup")
-        return real_replace(src, dst)
+    # A third upload cleans the now-two-generations-old version.
+    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v3.txt", b"three", "text/plain"))])
+    assert not v1.is_dir()
 
-    with patch.object(backend_crud.os, "replace", flaky_replace), \
-         patch("sqlalchemy.orm.Session.commit", side_effect=RuntimeError("db down")):
-        with pytest.raises(RuntimeError, match="db down"):
-            client.post(
-                "/api/config/knowledge_bases/kb/upload",
-                files=[("files", ("doc2.txt", b"replacement content", "text/plain"))],
-            )
 
-    backups = list(uploads.glob(".backup_kb_*"))
-    assert backups, "backup holding the last valid copy must be preserved"
-    assert (backups[0] / "doc1.txt").exists()
+def test_resolve_kb_upload_path_falls_back_for_flat_layout(tmp_path):
+    # A manual-config / legacy KB with no CURRENT pointer is scanned as-is.
+    from ui.backend.knowledge_bases import resolve_kb_upload_path
+
+    flat = tmp_path / "manual_kb"
+    flat.mkdir()
+    config = {"path": str(flat), "type": "local_folder"}
+    assert resolve_kb_upload_path(config)["path"] == str(flat)
 
 
 def test_upload_creates_queryable_local_folder_kb(client):
@@ -459,8 +468,8 @@ def test_upload_sanitizes_path_traversal_filename(client):
     resp = client.post("/api/config/knowledge_bases/traversal_kb/upload", files=files)
 
     assert resp.status_code == 200
-    upload_dir = _KB_UPLOADS_DIR / "traversal_kb"
-    assert (upload_dir / "evil.txt").is_file()
+    active = _active_kb_dir(_KB_UPLOADS_DIR, "traversal_kb")
+    assert (active / "evil.txt").is_file()
     assert not (_KB_UPLOADS_DIR.parent / "evil.txt").exists()
 
 

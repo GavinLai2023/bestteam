@@ -33,6 +33,7 @@ from .knowledge_bases import (
     checked_contained_cache_path,
     contain_kb_config_for_load,
     load_knowledge_base_tools,
+    resolve_kb_upload_path,
 )
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
@@ -152,7 +153,8 @@ def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
     records = db.query(KnowledgeBaseRecord).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        kb = _build_knowledge_base(contain_kb_config_for_load(record.config), source)
+        config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
+        kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
 

@@ -16,12 +16,11 @@ automatically. A `workflows` entry is a complete, self-contained
 
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Type
+from typing import Any, Dict, Optional, Type
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ValidationError
@@ -37,7 +36,12 @@ from .auth_api import get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
-from .knowledge_bases import check_path_traversal, checked_contained_cache_path, load_knowledge_base_tools
+from .knowledge_bases import (
+    _KB_CURRENT_POINTER,
+    check_path_traversal,
+    checked_contained_cache_path,
+    load_knowledge_base_tools,
+)
 from .skills import load_skills
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
@@ -52,27 +56,38 @@ _MAX_FILES_PER_UPLOAD = 30
 _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
 
 
-def _restore_backup(backup_dir: Path, live_dir: Path, name: str) -> None:
-    """Best-effort restore of the prior KB after an aborted upload.
-
-    If the restore itself fails, the backup directory is deliberately left in
-    place -- it holds the last valid copy of the KB -- and the failure is logged
-    loudly rather than silently discarded by later cleanup (CR-008)."""
+def _read_pointer(pointer: Path) -> Optional[str]:
     try:
-        os.replace(backup_dir, live_dir)
+        return pointer.read_text(encoding="utf-8").strip()
     except OSError:
-        logger.critical(
-            "Knowledge base '%s': could not restore the previous version after an "
-            "aborted upload. The last valid copy is preserved at %s -- restore it "
-            "manually.",
-            name,
-            backup_dir,
-        )
+        return None
+
+
+def _write_pointer(pointer: Path, version: str) -> None:
+    """Atomically point CURRENT at `version` (os.replace of a file is atomic on
+    Windows + POSIX), so a concurrent reader always sees a complete version."""
+    tmp = pointer.with_name(pointer.name + ".tmp")
+    tmp.write_text(version, encoding="utf-8")
+    os.replace(tmp, pointer)
+
+
+def _cleanup_kb_versions(kb_root: Path, keep_versions: set[str]) -> None:
+    """Remove every version dir / stray file in `kb_root` except CURRENT and the
+    kept versions. The immediately-previous version is kept as a grace window so
+    a reader that just resolved to it still finds it (CR-008)."""
+    for child in kb_root.iterdir():
+        if child.name == _KB_CURRENT_POINTER or child.name in keep_versions:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except OSError:
+                pass
 
 
 def _validate_kb_paths(kb_config: Dict[str, Any]) -> None:
@@ -223,24 +238,25 @@ def upload_knowledge_base_files(
             )
         contents[filename] = data
 
-    # Stage the new files in a sibling directory and validate them there, then
-    # atomically promote staging to the live directory only after validation
-    # succeeds. This avoids merging new files on top of stale ones and, on any
-    # failure, leaves the previously-valid KB and its DB record untouched --
-    # unlike writing in place and rmtree-ing the live directory on error (CR-008).
-    live_dir = _KB_UPLOADS_DIR / item_name
-    token = uuid.uuid4().hex[:8]
-    staging_dir = _KB_UPLOADS_DIR / f".staging_{item_name}_{token}"
-    backup_dir = _KB_UPLOADS_DIR / f".backup_{item_name}_{token}"
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    # Write the new files into a fresh version subdirectory, validate them
+    # there, then flip the CURRENT pointer atomically. The pointer always names
+    # a complete version, so a concurrent reader never sees the KB directory
+    # without a live version (no rename-swap gap), and the prior version is kept
+    # until the new one commits -- so any failure leaves the previous KB and its
+    # DB record intact (CR-008).
+    kb_root = _KB_UPLOADS_DIR / item_name
+    pointer = kb_root / _KB_CURRENT_POINTER
+    version = f"v_{uuid.uuid4().hex[:12]}"
+    version_dir = kb_root / version
+    version_dir.mkdir(parents=True, exist_ok=True)
     try:
         for filename, data in contents.items():
-            (staging_dir / filename).write_bytes(data)
+            (version_dir / filename).write_bytes(data)
 
         try:
             kb = LocalFolderKnowledgeBase(
                 name=item_name,
-                path=staging_dir,
+                path=version_dir,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 top_k=top_k,
@@ -248,22 +264,12 @@ def upload_knowledge_base_files(
         except BestTeamError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        # Promote staging -> live. Move the current live dir aside first so the
-        # final rename targets a non-existent path (works on Windows + POSIX);
-        # restore it if the promotion fails.
-        had_live = live_dir.exists()
-        if had_live:
-            os.replace(live_dir, backup_dir)
-        try:
-            os.replace(staging_dir, live_dir)
-        except Exception:
-            if had_live:
-                _restore_backup(backup_dir, live_dir, item_name)
-            raise
+        previous_version = _read_pointer(pointer)
+        _write_pointer(pointer, version)  # atomic promotion
 
         spec = KnowledgeBaseSpec(
             name=item_name,
-            path=str(live_dir),
+            path=str(kb_root),
             type="local_folder",
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -276,21 +282,23 @@ def upload_knowledge_base_files(
             db.add(item)
         else:
             item.config = raw
-        # Commit the DB record while the backup still exists, so a commit
-        # failure can roll the filesystem back to the prior KB -- keeping the
-        # live directory and the DB record consistent (CR-008).
         try:
             db.commit()
         except Exception:
+            # Point CURRENT back at the prior version (still on disk); the failed
+            # new version is removed by the outer handler. Keeps FS and DB
+            # consistent, with no destructive delete of the previous KB.
             db.rollback()
-            shutil.rmtree(live_dir, ignore_errors=True)
-            if had_live:
-                _restore_backup(backup_dir, live_dir, item_name)
+            if previous_version is not None:
+                _write_pointer(pointer, previous_version)
+            else:
+                pointer.unlink(missing_ok=True)
             raise
-        # Commit succeeded: the new KB is durable, so the backup can go.
-        if had_live:
-            shutil.rmtree(backup_dir, ignore_errors=True)
+
         _invalidate_workflow_cache()
+        # Durable now: drop older versions but keep the immediately-previous one
+        # as a grace window for readers that just resolved to it.
+        _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
 
         return {
             "name": item_name,
@@ -298,13 +306,11 @@ def upload_knowledge_base_files(
             "file_count": len(contents),
             "chunk_count": len(kb._chunks),
         }
-    finally:
-        # Only the staging scratch dir is unconditionally safe to remove. The
-        # backup is handled explicitly: dropped on success, restored on a
-        # recoverable failure, and deliberately preserved if a restore failed
-        # (it is then the last valid copy) -- so it must NOT be blindly removed
-        # here (CR-008).
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    except Exception:
+        # CURRENT still names the prior version (or is absent on a first upload),
+        # so removing only the uncommitted new version preserves the prior KB.
+        shutil.rmtree(version_dir, ignore_errors=True)
+        raise
 
 
 _workflows = APIRouter(prefix="/workflows")

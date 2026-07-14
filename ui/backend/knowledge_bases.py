@@ -26,6 +26,33 @@ from .db.models import KnowledgeBaseRecord
 
 _KB_CACHE_DIRNAME = "_kb_cache"
 
+# Uploaded KBs are stored as versioned subdirectories with an atomically-swapped
+# `CURRENT` pointer file naming the active version, so a replacement never leaves
+# the KB directory without a live version for a concurrent reader (CR-008).
+_KB_CURRENT_POINTER = "CURRENT"
+
+
+def resolve_kb_upload_path(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve an upload-managed KB path to its active version directory.
+
+    If the KB's `path` contains a `CURRENT` pointer file, return a copy with
+    `path` pointing at the named version subdir. Manual-config KBs and legacy
+    flat upload dirs (no pointer) are returned unchanged, so they scan their
+    path directly. The pointer always names a complete version, so a reader
+    never observes the brief no-live-dir window a rename-based swap would create
+    (CR-008)."""
+    path = config.get("path")
+    if not isinstance(path, str):
+        return config
+    try:
+        version = (Path(path) / _KB_CURRENT_POINTER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return config  # no pointer -> flat/manual layout, scan path as-is
+    version_dir = Path(path) / version
+    if not version_dir.is_dir():
+        return config
+    return {**config, "path": str(version_dir)}
+
 
 def has_traversal(value: str) -> bool:
     # Check under both path flavors so the guard behaves the same on the Linux
@@ -112,6 +139,7 @@ def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) ->
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.name.in_(referenced)).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        kb = _build_knowledge_base(contain_kb_config_for_load(record.config), source)
+        config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
+        kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
