@@ -226,14 +226,17 @@ def test_oversized_upload_returns_413(client, monkeypatch):
             files={"file": ("huge.mp3", b"\x00" * 200, "audio/mpeg")},
         )
     assert resp.status_code == 413
-    assert "upload limit" in resp.json()["detail"]
+    assert "limit" in resp.json()["detail"]
 
 
-def test_oversized_content_length_rejected_early(client, monkeypatch):
-    # CR-009: an upload whose declared Content-Length exceeds the ceiling is
-    # rejected up front, before the multipart body is parsed/spooled.
+def test_oversized_content_length_rejected_before_body_is_parsed(client, monkeypatch):
+    # CR-009: an over-ceiling upload is rejected by the body-size middleware --
+    # which runs before FastAPI parses/spools the multipart body (request.form()
+    # is called before dependency resolution). Proof it is pre-parse: OPENAI_API_KEY
+    # is unset, yet we get 413 (the middleware) rather than the handler's 503.
     from ui.backend import interview
 
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(interview, "_MAX_UPLOAD_BYTES", 50)
     resp = client.post(
         "/api/builder/interview/transcribe",
@@ -241,7 +244,7 @@ def test_oversized_content_length_rejected_early(client, monkeypatch):
         files={"file": ("huge.mp3", b"\x00" * 500, "audio/mpeg")},
     )
     assert resp.status_code == 413
-    assert "upload limit" in resp.json()["detail"]
+    assert "limit" in resp.json()["detail"]
 
 
 def test_is_ffmpeg_available_false_when_binary_missing():

@@ -28,6 +28,7 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
+from . import interview
 from .auth_api import get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
@@ -53,6 +54,42 @@ _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
 
 app = FastAPI(title="bestteam monitoring dashboard")
+
+# Generous ceiling on any request body; the interview endpoint keeps its own
+# tighter limit. Reverse-proxy client_max_body_size remains the authoritative
+# hard bound -- this is the application-level backstop.
+_GENERAL_MAX_BODY_BYTES = 512 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _enforce_max_request_body(request: Request, call_next):
+    """Reject an over-limit body from its Content-Length before Starlette parses
+    or spools it (CR-009). FastAPI reads request.form() before resolving
+    dependencies, so a dependency cannot gate ingress -- middleware runs first.
+    Content-Length can be absent (chunked) or spoofed, so this is a backstop, not
+    the hard bound; the capped read in the handler bounds memory regardless."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            size = int(content_length)
+        except ValueError:
+            size = None
+        if size is not None:
+            limit = (
+                interview._MAX_UPLOAD_BYTES
+                if request.url.path.endswith("/interview/transcribe")
+                else _GENERAL_MAX_BODY_BYTES
+            )
+            if size > limit:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"Request body exceeds the {limit // (1024 * 1024)} MB limit."},
+                )
+    return await call_next(request)
+
+
+# Added after the body-size middleware so CORS ends up outermost -- a 413 from
+# the size check still gets CORS headers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
