@@ -61,19 +61,43 @@
   disabled-by-default, per-user, no-multi-tenancy model. See
   `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
-- Admin role + per-user memory management UI: `is_admin` column (Alembic
-  migration), granted only via the `ui.backend.admin` operator CLI (no env/
-  username auto-promotion), `get_current_admin` guard now gating **both** the
-  Advanced config page and a new **Memory** page. Admins can list users with
-  per-type record counts (SQL-aggregated), browse/search a user's
-  episodic/semantic/procedural records (bounded response), delete individual
-  records, and clear a user's whole memory (`ui/backend/memory_api.py`,
-  `/api/memory`; frontend `MemoryPage.jsx` + `RequireAdmin`/`useMe`). No manual
-  add/edit; memory stays opt-in (`BESTTEAM_MEMORY_DB`).
+- Admin role + per-user memory management UI (merged to `main`, PR #12
+  `7fd9209`): `is_admin` column (Alembic migration), granted only via the
+  `ui.backend.admin` operator CLI (no env/username auto-promotion),
+  `get_current_admin` guard now gating **both** the Advanced config page and a
+  new **Memory** page. Admins can list users with per-type record counts
+  (SQL-aggregated), browse/search a user's episodic/semantic/procedural records
+  (bounded response *and* bounded search scan — `search(max_candidates=)`),
+  delete individual records, and clear a user's whole memory
+  (`ui/backend/memory_api.py`, `/api/memory`; frontend `MemoryPage.jsx` +
+  `RequireAdmin`/`useMe`). No manual add/edit; memory stays opt-in
+  (`BESTTEAM_MEMORY_DB`).
+- Code-review round 3 (admin role + memory-management UI): CR-024…CR-028
+  verified and merged via PR #12 — public-registration admin takeover closed
+  (operator-CLI-only promotion), pre-migration startup crash removed, fresh-
+  install admin path (CLI + docs), `Memory` ABC compatibility preserved
+  (management methods concrete-only), and unbounded admin reads bounded (capped
+  browse + `max_candidates`-bounded search). CR-029 (unpaginated
+  `GET /api/memory/users`) explicitly rejected as YAGNI/out-of-scope (P3) —
+  human-scale user count on a no-multi-tenancy tool. Verified via per-finding
+  TDD regressions, full suite (356 passed), and frontend build/lint. See
+  `docs/CODE_REVIEW_TRIAGE.md` (Round 3).
 
 ## In Progress
 
-Nothing currently in flight.
+- Email toolkit (branch `feat/email-toolkit`): three draft-only built-in
+  tools — `email_find` / `email_read` / `email_draft_reply` — over one
+  env-configured mailbox, with MS Graph (M365/Exchange Online, app-only
+  OAuth, `createReply`) and generic IMAP (stdlib, `BODY.PEEK`, threaded
+  MIME draft APPENDed to Drafts) backends behind one seam
+  (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
+  verb / no SMTP by design — drafts are reviewed and sent by a human from
+  their own mail client. Ships with a seeded `email_triage_reply` built-in
+  Skill (`ui/backend/skills.py::seed_default_skills`, per-row
+  seed-if-absent) so Team Builder customers just pick the skill. Deferred:
+  real sending, ambient run-on-new-mail, per-user OAuth/secrets store,
+  attachments. Spec:
+  `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
 
 ## Known issues / tech debt
 
@@ -97,6 +121,17 @@ Nothing currently in flight.
 
 ## Next steps / roadmap
 
+- **OPEN DECISION — deployment model (raised 2026-07-15):** the business now
+  anticipates one **shared hosted platform** serving several customer
+  organisations (one account per customer), which would reverse the Accepted
+  "per-customer instance, no multi-tenancy" decision in `DECISIONS.md`. A
+  shared instance today has **no cross-customer isolation** (any user can see
+  all workflows/runs/KBs/usage), so this is a multi-tenancy program, not a
+  feature: (1) org model + row-level isolation, (2) encrypted per-org secrets
+  store, (3) per-org email/LLM credential settings (email tools' env-based
+  `_get_backend()` would swap its credential source; the toolkit itself is
+  unaffected). Alternative still on the table: keep per-customer instances
+  and skip the build. Revisit `DECISIONS.md` formally before starting.
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the
   current engine).

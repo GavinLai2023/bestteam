@@ -1,0 +1,31 @@
+# Manual end-to-end smoke test for the email toolkit (PR #13).
+#
+# The agent uses the seeded "email_triage_reply" Skill from the platform's
+# skill library, which folds in the triage playbook + the three draft-only
+# email tools (email_find / email_read / email_draft_reply). Nothing is ever
+# sent: reply drafts land in the mailbox's Drafts folder for human review.
+#
+# Requires in the backend's environment:
+#   OPENAI_API_KEY            - real model (fake: models never call tools)
+#   BESTTEAM_EMAIL_BACKEND    - "imap" or "graph"
+#   BESTTEAM_IMAP_* / BESTTEAM_GRAPH_*  - the mailbox credentials
+#
+# Run it with an input like: "Triage my unread emails and draft replies."
+
+name: email_triage_demo_live
+
+agents:
+  - name: mailbox_triager
+    role: Support Mailbox Triager
+    goal: Triage unread emails in the shared mailbox and prepare reply drafts
+    backstory: Works through the inbox methodically and reports what was done
+    model: "openai:gpt-4o-mini"
+    skills: [email_triage_reply]
+
+teams:
+  - name: triage_team
+    agents: [mailbox_triager]
+    mode: sequential
+
+workflow:
+  steps: [triage_team]

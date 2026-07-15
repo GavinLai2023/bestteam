@@ -5,7 +5,7 @@ See the root `CLAUDE.md` for project overview, architecture, and commands.
 
 ## Built-in tools
 
-Four ready-made tools clients can attach directly to any Agent:
+Seven ready-made tools clients can attach directly to any Agent:
 
 | Tool | Import | Env var required | Extra dep |
 |---|---|---|---|
@@ -13,6 +13,26 @@ Four ready-made tools clients can attach directly to any Agent:
 | `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word) |
 | `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `pip install 'bestteam[tools-http]'` (httpx) |
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
+| `email_find(query="")` | `from bestteam import email_find` | `BESTTEAM_EMAIL_BACKEND` + backend creds | `graph`: `pip install 'bestteam[tools-email]'` (httpx); `imap`: none |
+| `email_read(message_id)` | `from bestteam import email_read` | (same) | (same) |
+| `email_draft_reply(message_id, body)` | `from bestteam import email_draft_reply` | (same) | (same) |
+
+### Email tools (`email_client.py`) — draft-only by design
+
+One configured mailbox per deployment (`BESTTEAM_EMAIL_BACKEND=graph|imap`
+plus `BESTTEAM_GRAPH_*` / `BESTTEAM_IMAP_*` — see `.env.example`). Two
+backends behind one seam: Microsoft Graph (M365/Exchange Online, app-only
+client-credentials OAuth, `createReply` for correctly threaded drafts) and
+generic IMAP (stdlib `imaplib`, `BODY.PEEK`/readonly so reading never marks
+messages seen, MIME reply built with `In-Reply-To`/`References`, APPENDed to
+the Drafts folder resolved via `BESTTEAM_IMAP_DRAFTS` → SPECIAL-USE →
+`"Drafts"`). **There is no send verb and no SMTP anywhere** — the worst
+outcome is a bad draft a human reviews in their own mail client. Design:
+`docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
+
+The built-in `email_triage_reply` Skill (seeded into the Skills library on
+backend bootstrap, `ui/backend/skills.py::seed_default_skills`) packages the
+triage playbook + these three tools for Team Builder customers.
 
 **Code usage:**
 ```python
@@ -44,7 +64,17 @@ them to an LLM agent remain responsible for constraining which paths/URLs the
 agent can be prompted to access, and for network-layer egress controls where
 internal services are reachable.
 
-Tier 2 tools (SQL executor, Python sandbox) and email integration are planned but not yet implemented.
+**Email trust boundaries**: email bodies are attacker-controlled input to
+the LLM (prompt injection). Mitigations: no send capability exists (bounded
+blast radius — drafts are human-reviewed), the seeded skill instructs the
+agent to treat message content as data rather than instructions, and
+`email_read` caps body size. For the Graph backend, use least privilege:
+`Mail.ReadWrite` **application** permission restricted to the single mailbox
+with an Exchange Application Access Policy. Credentials live in env vars
+(one mailbox per deployment); there is no per-user OAuth or secrets store.
+
+Tier 2 tools (SQL executor, Python sandbox), real email *sending*, and
+ambient run-on-new-mail triggering are planned but not yet implemented.
 
 ## Connecting to external systems (ERP / order databases)
 

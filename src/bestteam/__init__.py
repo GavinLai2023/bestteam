@@ -19,7 +19,15 @@ from .core.trace import TraceEvent
 from .core.vector_knowledge_base import VectorKnowledgeBase
 from .core.workflow import Workflow, WorkflowResult
 from .exceptions import BestTeamError, ConfigurationError, EngineError
-from .tools import calculator, http_get, parse_file, web_search
+from .tools import (
+    calculator,
+    email_draft_reply,
+    email_find,
+    email_read,
+    http_get,
+    parse_file,
+    web_search,
+)
 
 __version__ = "0.1.0"
 
@@ -56,4 +64,7 @@ __all__ = [
     "parse_file",
     "http_get",
     "calculator",
+    "email_find",
+    "email_read",
+    "email_draft_reply",
 ]
