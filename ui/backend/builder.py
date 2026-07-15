@@ -23,10 +23,10 @@ from bestteam.core.loader import _build_knowledge_base
 from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
-from .auth_api import get_current_user
+from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
-from .db.models import BuilderSession, KnowledgeBaseRecord, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, WorkflowRecord
 from .db_session import get_db
 from .knowledge_bases import (
     check_path_traversal,
@@ -109,10 +109,11 @@ def _with_model_catalog(db: Session, text: str) -> str:
     return f"{text}\n\n{catalog_text}" if catalog_text else text
 
 
-def _with_skill_catalog(db: Session, text: str) -> str:
-    """Append available skills (if any) so the Solution Architect can assign
-    them to agents by name, parallel to `_with_model_catalog`."""
-    skills = load_skills(db)
+def _with_skill_catalog(db: Session, text: str, org_id: Optional[int] = None) -> str:
+    """Append the skills visible to `org_id` (its own + platform built-ins)
+    so the Solution Architect can assign them to agents by name, parallel to
+    `_with_model_catalog`."""
+    skills = load_skills(db, org_id)
     if not skills:
         return text
     lines = ["", "", "Available skills (from the platform's skill library):"]
@@ -125,7 +126,7 @@ def _with_skill_catalog(db: Session, text: str) -> str:
     return text + "\n".join(lines)
 
 
-def _with_knowledge_base_catalog(db: Session, text: str) -> str:
+def _with_knowledge_base_catalog(db: Session, text: str, org_id: Optional[int] = None) -> str:
     """Append available standalone knowledge bases (if any) so the Solution
     Architect can reference them by name, parallel to `_with_skill_catalog`.
 
@@ -134,7 +135,7 @@ def _with_knowledge_base_catalog(db: Session, text: str) -> str:
     from -- combined with `_ARCHITECT_SYSTEM_PROMPT`'s instruction not to
     invent one, this is what stops it from fabricating a `path`.
     """
-    records = db.query(KnowledgeBaseRecord).all()
+    records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
     if not records:
         return text
     lines = ["", "", "Available knowledge bases (reference by name in an agent's tools, do not redeclare):"]
@@ -144,15 +145,15 @@ def _with_knowledge_base_catalog(db: Session, text: str) -> str:
     return text + "\n".join(lines)
 
 
-def _all_knowledge_base_tools(db: Session, source: Path) -> Dict[str, Any]:
-    """Build a tool for every standalone knowledge base in the database.
+def _all_knowledge_base_tools(db: Session, source: Path, org_id: Optional[int] = None) -> Dict[str, Any]:
+    """Build a tool for every one of `org_id`'s standalone knowledge bases.
 
     Used before a Specification exists yet (at generation time), when we
     don't yet know which knowledge bases the architect's agents will
     reference -- unlike `load_knowledge_base_tools`, which filters to a
     known `raw` config's referenced names.
     """
-    records = db.query(KnowledgeBaseRecord).all()
+    records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
     tools: Dict[str, Any] = {}
     for record in records:
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
@@ -193,13 +194,17 @@ def _prepare_generated_specification(spec: Specification, source: Path) -> None:
 
 
 def _validate_spec_payload(
-    db: Session, payload: Dict[str, Any], source: Path, extra_skills: Optional[Dict[str, Any]] = None
+    db: Session,
+    payload: Dict[str, Any],
+    source: Path,
+    extra_skills: Optional[Dict[str, Any]] = None,
+    org_id: Optional[int] = None,
 ) -> Specification:
     try:
         spec = Specification.model_validate(payload)
         _reject_unsafe_kb_paths(spec)
         ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-        extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
+        extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org_id)
         validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills or {})
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -282,29 +287,36 @@ def submit_requirements(session_id: str, req: RequirementsRequest, db: Session =
 
 
 @router.post("/{session_id}/specification")
-def submit_specification(session_id: str, req: SpecificationRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def submit_specification(
+    session_id: str,
+    req: SpecificationRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
     """Stage 3 (Specification): generate (via `model`) or accept (via `specification`)
     a team design, validated through `_build_workflow` before it's stored."""
     session = _get_session_or_404(db, session_id)
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(db, req.specification, source, extra_skills=load_skills(db))
+        spec = _validate_spec_payload(
+            db, req.specification, source, extra_skills=load_skills(db, org.id), org_id=org.id
+        )
     elif req.model is not None:
         requirements_text = _requirements_text(session)
         if req.feedback:
             requirements_text += f"\n\nCustomer feedback on the previous design:\n{req.feedback}"
         requirements_text = _with_model_catalog(db, requirements_text)
-        requirements_text = _with_skill_catalog(db, requirements_text)
-        requirements_text = _with_knowledge_base_catalog(db, requirements_text)
+        requirements_text = _with_skill_catalog(db, requirements_text, org.id)
+        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
         chat_model = _call_model(_resolve_model, req.model)
         spec = _call_model(
             generate_specification,
             chat_model,
             requirements_text,
             source=source,
-            extra_tools=_all_knowledge_base_tools(db, source),
-            extra_skills=load_skills(db),
+            extra_tools=_all_knowledge_base_tools(db, source, org.id),
+            extra_skills=load_skills(db, org.id),
             pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
     else:
@@ -322,7 +334,12 @@ def submit_specification(session_id: str, req: SpecificationRequest, db: Session
 
 
 @router.post("/{session_id}/solution")
-def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def submit_solution_feedback(
+    session_id: str,
+    req: SolutionRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
     """Stage 4 (Solution): refine the Specification with customer feedback,
     either by re-running the Solution Architect (`model`) or accepting a
     manually-edited Specification (`specification`)."""
@@ -330,7 +347,9 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
     source = _source_for(session_id)
 
     if req.specification is not None:
-        spec = _validate_spec_payload(db, req.specification, source, extra_skills=load_skills(db))
+        spec = _validate_spec_payload(
+            db, req.specification, source, extra_skills=load_skills(db, org.id), org_id=org.id
+        )
     elif req.model is not None:
         if session.specification_json is None:
             raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
@@ -341,16 +360,16 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
             f"Customer feedback on this design:\n{req.feedback}"
         )
         requirements_text = _with_model_catalog(db, requirements_text)
-        requirements_text = _with_skill_catalog(db, requirements_text)
-        requirements_text = _with_knowledge_base_catalog(db, requirements_text)
+        requirements_text = _with_skill_catalog(db, requirements_text, org.id)
+        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
         chat_model = _call_model(_resolve_model, req.model)
         spec = _call_model(
             generate_specification,
             chat_model,
             requirements_text,
             source=source,
-            extra_tools=_all_knowledge_base_tools(db, source),
-            extra_skills=load_skills(db),
+            extra_tools=_all_knowledge_base_tools(db, source, org.id),
+            extra_skills=load_skills(db, org.id),
             pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
     else:
@@ -363,7 +382,12 @@ def submit_solution_feedback(session_id: str, req: SolutionRequest, db: Session 
 
 
 @router.post("/{session_id}/test-runs")
-async def create_test_run(session_id: str, req: TestRunRequest, db: Session = Depends(get_db)) -> Dict[str, str]:
+async def create_test_run(
+    session_id: str,
+    req: TestRunRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, str]:
     """Stage 5 (Testing): run the validated Specification in the sandbox via
     the same `Workflow.stream()`/`RunRegistry` machinery as `/api/runs`."""
     session = _get_session_or_404(db, session_id)
@@ -374,9 +398,11 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
+    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id)
     try:
-        workflow = validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))
+        workflow = validate_specification(
+            spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
+        )
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -388,7 +414,11 @@ async def create_test_run(session_id: str, req: TestRunRequest, db: Session = De
 
 
 @router.post("/{session_id}/deploy")
-def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def deploy_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
     """Stage 6 (Deployment): persist the validated Specification as a
     `WorkflowRecord` (`status=deployed`) so `_get_workflow()` picks it up."""
     session = _get_session_or_404(db, session_id)
@@ -399,16 +429,18 @@ def deploy_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, 
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source)
+    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id)
     try:
-        validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db))
+        validate_specification(
+            spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
+        )
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     raw = spec.to_raw()
-    record = db.query(WorkflowRecord).filter_by(name=spec.name).one_or_none()
+    record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
     if record is None:
-        record = WorkflowRecord(name=spec.name, config=raw, status="deployed")
+        record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
         db.add(record)
     else:
         record.config = raw

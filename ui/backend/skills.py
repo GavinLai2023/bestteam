@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -11,11 +11,26 @@ from bestteam import SkillSpec
 from .db.models import SkillRecord
 
 
-def load_skills(db: Session) -> Dict[str, SkillSpec]:
-    """Return all SkillRecords as a name→SkillSpec mapping for use as `extra_skills`."""
+def load_skills(db: Session, org_id: Optional[int] = None) -> Dict[str, SkillSpec]:
+    """Return the skills visible to `org_id` as a name→SkillSpec mapping.
+
+    Platform built-ins (org_id IS NULL) are visible to everyone; an org
+    additionally sees its own skills, and an org skill shadows a same-named
+    built-in (built-ins are folded in first). org_id=None returns the
+    built-in tier only.
+    """
+    query = db.query(SkillRecord)
+    if org_id is None:
+        records = query.filter(SkillRecord.org_id.is_(None)).all()
+    else:
+        records = query.filter(
+            (SkillRecord.org_id.is_(None)) | (SkillRecord.org_id == org_id)
+        ).all()
+        # Built-ins first so the org's own rows overwrite on a name clash.
+        records.sort(key=lambda r: r.org_id is not None)
     return {
         r.name: SkillSpec.model_validate({**r.config, "name": r.name})
-        for r in db.query(SkillRecord).all()
+        for r in records
     }
 
 

@@ -368,7 +368,7 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     workflows = client.get("/api/workflows").json()["workflows"]
     assert "support_workflow" in workflows
 
-    config = client.get("/api/config/workflows/support_workflow").json()
+    config = client.get("/api/config/workflows/support_workflow?org=default").json()
     assert config["status"] == "deployed"
     assert config["config"]["name"] == "support_workflow"
 
@@ -389,7 +389,7 @@ def test_specification_can_reference_existing_knowledge_base_by_name(client, tmp
     (kb_dir / "policy.txt").write_text("Refunds accepted within 7 days.", encoding="utf-8")
 
     resp = client.put(
-        "/api/config/knowledge_bases/product_info_kb",
+        "/api/config/knowledge_bases/product_info_kb?org=default",
         json={"path": str(kb_dir), "type": "local_folder"},
     )
     assert resp.status_code == 200

@@ -162,8 +162,9 @@ def test_me_returns_current_user(client):
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
-    # New users are non-admin by default; /me reports the role for UI gating.
-    assert resp.json() == {"username": "alice", "is_admin": False}
+    # New users are non-admin by default; /me reports the role for UI gating
+    # and the user's org (None for platform operators).
+    assert resp.json() == {"username": "alice", "is_admin": False, "org": "default"}
 
 
 def test_me_reports_is_admin_for_admin_user(client):
@@ -171,7 +172,7 @@ def test_me_reports_is_admin_for_admin_user(client):
 
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "alice", "is_admin": True}
+    assert resp.json() == {"username": "alice", "is_admin": True, "org": "default"}
 
 
 def test_provisioned_user_named_admin_is_not_admin(client):
@@ -180,7 +181,7 @@ def test_provisioned_user_named_admin_is_not_admin(client):
     token = create_user_and_login(client, username="admin", password="pw")
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "admin", "is_admin": False}
+    assert resp.json() == {"username": "admin", "is_admin": False, "org": "default"}
 
 
 def test_set_admin_status_promotes_and_demotes():

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import AuthError, create_access_token, decode_access_token
-from .db.models import User
+from .db.models import Organization, User
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
 
@@ -76,6 +76,32 @@ def get_current_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def get_current_org(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Organization:
+    """Resolve the requesting user's organization for org-scoped surfaces.
+
+    Platform operators (org_id NULL) get 403: they act through the admin
+    `/api/config` surface with explicit `?org=` targeting, not through the
+    org-user surfaces this dependency guards.
+    """
+    if user.org_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Platform operators do not belong to an organization; "
+            "use the admin /api/config surface (or create an org user)",
+        )
+    org = db.get(Organization, user.org_id)
+    if org is None:
+        raise HTTPException(status_code=403, detail="User's organization no longer exists")
+    return org
+
+
 @router.get("/me")
-def me(user: User = Depends(get_current_user)) -> dict:
-    return {"username": user.username, "is_admin": user.is_admin}
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    org = db.get(Organization, user.org_id) if user.org_id is not None else None
+    return {
+        "username": user.username,
+        "is_admin": user.is_admin,
+        "org": org.name if org is not None else None,
+    }

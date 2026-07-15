@@ -251,14 +251,18 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
             return cached[0]
         # Only load skills and build standalone KB tools (which may re-chunk
         # files and, for type: vector, call a paid embedding model) on a cache
-        # miss -- not on every request.
+        # miss -- not on every request. Dependencies resolve within the
+        # workflow record's own org (+ platform built-in skills), so one org's
+        # workflow can never pull in another org's KB or skill by name.
         if db is not None:
-            skill_lookup = load_skills(db)
-            kb_tools = load_knowledge_base_tools(db, record.config, source)
+            skill_lookup = load_skills(db, record.org_id)
+            kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
         else:
             with SessionLocal() as session:
-                skill_lookup = load_skills(session)
-                kb_tools = load_knowledge_base_tools(session, record.config, source)
+                skill_lookup = load_skills(session, record.org_id)
+                kb_tools = load_knowledge_base_tools(
+                    session, record.config, source, org_id=record.org_id
+                )
         try:
             config = contain_workflow_config_for_load(record.config)
             ensure_workflow_cache_paths_for_source(config, source)
@@ -282,7 +286,17 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     if cached is not None and cached[1] == cache_key:
         return cached[0]
     try:
-        workflow = load_workflow(path)
+        # YAML demo workflows are global (visible to every org), so they may
+        # reference platform built-in skills (org NULL) only -- never an
+        # org's own skills or knowledge bases. Without this, a YAML workflow
+        # referencing a seeded skill (e.g. email_triage_demo_live ->
+        # email_triage_reply) fails to load with "Unknown skill".
+        if db is not None:
+            builtin_skills = load_skills(db, None)
+        else:
+            with SessionLocal() as session:
+                builtin_skills = load_skills(session, None)
+        workflow = load_workflow(path, skills=list(builtin_skills.values()))
     except BestTeamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _store_workflow_in_cache(name, workflow, cache_key, generation)

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -153,7 +153,9 @@ def ensure_workflow_cache_paths_for_source(config: Dict[str, Any], source: Path)
             ensure_contained_cache_path_for_source(kb, source)
 
 
-def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
+def load_knowledge_base_tools(
+    db: Session, raw: Dict[str, Any], source: Path, *, org_id: Optional[int] = None
+) -> Dict[str, Any]:
     """Return a name -> tool mapping for only the standalone knowledge bases
     `raw`'s agents actually reference by name in their `tools:` lists.
 
@@ -161,6 +163,10 @@ def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) ->
     (and, for type: vector, calling an embedding model) -- this only pays
     that cost for knowledge bases the workflow being loaded actually uses,
     not every standalone knowledge base in the database.
+
+    Name resolution is org-scoped: only `org_id`'s knowledge bases resolve
+    (KBs have no platform tier), so one org can never reference another
+    org's KB by name.
     """
     referenced = {
         tool_name
@@ -170,7 +176,14 @@ def load_knowledge_base_tools(db: Session, raw: Dict[str, Any], source: Path) ->
     if not referenced:
         return {}
 
-    records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.name.in_(referenced)).all()
+    records = (
+        db.query(KnowledgeBaseRecord)
+        .filter(
+            KnowledgeBaseRecord.name.in_(referenced),
+            KnowledgeBaseRecord.org_id == org_id,
+        )
+        .all()
+    )
     tools: Dict[str, Any] = {}
     for record in records:
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
