@@ -923,10 +923,12 @@ def test_cached_workflow_picks_up_skill_update(client):
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        wf1 = _get_workflow("skill_wf", db)
+        wf1 = _get_workflow("skill_wf", db, get_org_id())
         assert "Say hello warmly." in wf1.steps[0].agents[0].backstory
 
         client.put(
@@ -934,7 +936,7 @@ def test_cached_workflow_picks_up_skill_update(client):
             json={"description": "How to greet", "instructions": "Say hello formally.", "tools": []},
         )
 
-        wf2 = _get_workflow("skill_wf", db)
+        wf2 = _get_workflow("skill_wf", db, get_org_id())
         assert "Say hello formally." in wf2.steps[0].agents[0].backstory
         assert wf2 is not wf1
     finally:
@@ -961,11 +963,13 @@ def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        _get_workflow("cached_wf", db)
-        _get_workflow("cached_wf", db)
+        _get_workflow("cached_wf", db, get_org_id())
+        _get_workflow("cached_wf", db, get_org_id())
     finally:
         db_gen.close()
 
@@ -1002,10 +1006,12 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        workflow = _get_workflow("priority_wf", db)
+        workflow = _get_workflow("priority_wf", db, get_org_id())
     finally:
         db_gen.close()
 
@@ -1013,6 +1019,40 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     agent = team.agents[0]
     tool = next(t for t in agent.tools if t.__name__ == "shared_name")
     assert "INLINE" in tool("policy")
+
+
+def test_same_named_workflow_in_two_orgs_resolves_independently(client):
+    # The workflow cache is keyed by (org_id, name): two orgs' same-named
+    # workflows must build and cache as separate entries.
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db_session import get_db as real_get_db
+    from ui.backend.main import _get_workflow
+
+    with open_test_db() as db:
+        get_or_create_org(db, "other")
+
+    def workflow_config(reply):
+        return {
+            "agents": [{"name": "a", "role": "r", "goal": "g", "model": f"fake:{reply}"}],
+            "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+            "workflow": {"steps": ["team"]},
+        }
+
+    assert client.put("/api/config/workflows/wf?org=default", json=workflow_config("AAA")).status_code == 200
+    assert client.put("/api/config/workflows/wf?org=other", json=workflow_config("BBB")).status_code == 200
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db = next(db_gen)
+    try:
+        wf_default = _get_workflow("wf", db, get_org_id("default"))
+        wf_other = _get_workflow("wf", db, get_org_id("other"))
+    finally:
+        db_gen.close()
+
+    assert wf_default is not wf_other
+    assert wf_default.steps[0].agents[0].model == "fake:AAA"
+    assert wf_other.steps[0].agents[0].model == "fake:BBB"
 
 
 def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):

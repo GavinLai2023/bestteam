@@ -4,16 +4,24 @@ import asyncio
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
 class Run:
-    """Tracks one workflow execution: its inputs, replayable event log, and status."""
+    """Tracks one workflow execution: its inputs, replayable event log, and status.
+
+    `org_id` is the owning organization -- run reads (GET + the WebSocket
+    stream) are refused across orgs. `username` records who started it
+    (informational; ownership is org-level). None values (e.g. builder
+    sandbox runs pre-org, or legacy runs) are visible to platform admins only.
+    """
 
     id: str
     workflow: str
     input: str
+    org_id: Optional[int] = None
+    username: Optional[str] = None
     status: str = "running"  # running | completed | failed
     events: List[dict] = field(default_factory=list)
 
@@ -36,8 +44,15 @@ class RunRegistry:
         # subscribe -- so this must be a real cross-thread lock.
         self._lock = threading.Lock()
 
-    def create(self, workflow: str, input: str) -> Run:
-        run = Run(id=uuid.uuid4().hex, workflow=workflow, input=input)
+    def create(
+        self,
+        workflow: str,
+        input: str,
+        *,
+        org_id: Optional[int] = None,
+        username: Optional[str] = None,
+    ) -> Run:
+        run = Run(id=uuid.uuid4().hex, workflow=workflow, input=input, org_id=org_id, username=username)
         with self._lock:
             self._runs[run.id] = run
             self._subscribers[run.id] = []

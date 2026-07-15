@@ -59,6 +59,7 @@ def run_in_background(
     input: str,
     engine: Optional[Engine] = None,
     user_id: Optional[str] = None,
+    org_id: Optional[int] = None,
 ) -> None:
     """Drain `Workflow.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
@@ -86,7 +87,7 @@ def run_in_background(
             # always exists; its terminal status/output are updated below. This
             # sits inside the try so a persistence failure still yields a
             # terminal event instead of leaving the run stuck "running" (CR-003).
-            run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input)
+            run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input, org_id=org_id)
             db.add(run_row)
             db.commit()
         for event in workflow.stream(input, user_id=user_id, memory=memory):
@@ -107,6 +108,7 @@ def run_in_background(
                         model=entry.get("model"),
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),
+                        org_id=org_id,
                     )
     except Exception:  # noqa: BLE001 -- any worker failure must still yield a terminal event
         # Workflow.stream() compiles before its own BestTeamError handler, so a

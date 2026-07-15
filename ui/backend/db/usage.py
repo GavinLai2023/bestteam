@@ -24,6 +24,7 @@ def record_usage(
     model: Optional[str],
     input_tokens: int = 0,
     output_tokens: int = 0,
+    org_id: Optional[int] = None,
 ) -> UsageRecord:
     cost_estimate = None
     if model:
@@ -40,6 +41,8 @@ def record_usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_estimate=cost_estimate,
+        # Denormalized from the run's org for per-customer aggregation.
+        org_id=org_id,
     )
     db.add(record)
     db.commit()
