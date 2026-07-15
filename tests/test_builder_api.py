@@ -7,6 +7,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
@@ -84,14 +85,9 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
         # Some builder tests reach the admin-only /api/config surface (KB/model
-        # catalog/workflow reads); promote the fixture user.
-        from ui.backend.db.models import User
-
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="test").update({"is_admin": True})
-            db.commit()
+        # catalog/workflow reads); provision the fixture user as an admin.
+        token = create_user_and_login(test_client, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:

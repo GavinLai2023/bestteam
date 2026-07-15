@@ -11,6 +11,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login
 from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -45,15 +46,10 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
-        # The Advanced/config API is admin-only; promote the fixture user so the
-        # existing CRUD tests exercise the endpoints. A non-admin 403 is covered
-        # separately by test_config_forbidden_for_non_admin.
-        from ui.backend.db.models import User
-
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="test").update({"is_admin": True})
-            db.commit()
+        # The Advanced/config API is admin-only; provision the fixture user as
+        # an admin so the existing CRUD tests exercise the endpoints. A
+        # non-admin 403 is covered separately by test_config_forbidden_for_non_admin.
+        token = create_user_and_login(test_client, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:
@@ -62,7 +58,7 @@ def client(tmp_path, monkeypatch):
 
 def test_config_forbidden_for_non_admin(client):
     # Advanced config is admin-only: an authenticated non-admin user gets 403.
-    token = client.post("/api/auth/register", json={"username": "regular", "password": "pw"}).json()["access_token"]
+    token = create_user_and_login(client, username="regular", password="pw")
     headers = {"Authorization": f"Bearer {token}"}
 
     assert client.get("/api/config/agents", headers=headers).status_code == 403

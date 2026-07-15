@@ -8,6 +8,7 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from helpers import create_user_and_login
 from ui.backend import main as backend_main
 from ui.backend import runtime, ws_tickets
 from ui.backend.db import init_db, make_engine, session_factory
@@ -33,7 +34,7 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
+        token = create_user_and_login(test_client)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:
