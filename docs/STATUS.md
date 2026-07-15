@@ -121,6 +121,17 @@
 
 ## Next steps / roadmap
 
+- **OPEN DECISION — deployment model (raised 2026-07-15):** the business now
+  anticipates one **shared hosted platform** serving several customer
+  organisations (one account per customer), which would reverse the Accepted
+  "per-customer instance, no multi-tenancy" decision in `DECISIONS.md`. A
+  shared instance today has **no cross-customer isolation** (any user can see
+  all workflows/runs/KBs/usage), so this is a multi-tenancy program, not a
+  feature: (1) org model + row-level isolation, (2) encrypted per-org secrets
+  store, (3) per-org email/LLM credential settings (email tools' env-based
+  `_get_backend()` would swap its credential source; the toolkit itself is
+  unaffected). Alternative still on the table: keep per-customer instances
+  and skip the build. Revisit `DECISIONS.md` formally before starting.
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the
   current engine).
