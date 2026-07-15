@@ -58,7 +58,8 @@ relevant file below the first time it reads a file in that directory:
   outputs for the Team Builder, and the `local_folder`/`vector` knowledge
   base implementations.
 - `src/bestteam/tools/CLAUDE.md` — built-in tools (`web_search`, `parse_file`,
-  `http_get`, `calculator`) and their trust boundaries.
+  `http_get`, `calculator`, and the draft-only `email_find`/`email_read`/
+  `email_draft_reply` toolkit) and their trust boundaries.
 - `ui/backend/CLAUDE.md` — FastAPI backend: builder/config APIs, auth, model
   catalog, usage metering, sync-to-async streaming bridge.
 - `ui/backend/db/CLAUDE.md` — SQLAlchemy persistence schema.

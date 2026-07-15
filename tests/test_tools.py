@@ -14,7 +14,10 @@ from bestteam.tools import REGISTRY, calculator, http_get, parse_file, web_searc
 # ---------------------------------------------------------------------------
 
 def test_registry_contains_all_tools():
-    assert set(REGISTRY) == {"web_search", "parse_file", "http_get", "calculator"}
+    assert set(REGISTRY) == {
+        "web_search", "parse_file", "http_get", "calculator",
+        "email_find", "email_read", "email_draft_reply",
+    }
 
 
 def test_knowledge_base_discovery_excludes_legacy_xls():

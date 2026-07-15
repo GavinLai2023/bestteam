@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .db import init_db, make_engine, session_factory
 from .db.model_catalog import seed_default_catalog
+from .skills import seed_default_skills
 
 DB_PATH = Path(os.environ.get("BESTTEAM_DB_PATH", str(Path(__file__).parent / "data" / "bestteam.db")))
 if str(DB_PATH) != ":memory:":
@@ -31,6 +32,7 @@ SessionLocal = session_factory(engine)
 # head` before serving requests).
 with SessionLocal() as _session:
     seed_default_catalog(_session)
+    seed_default_skills(_session)
 
 
 def get_db() -> Iterator[Session]:

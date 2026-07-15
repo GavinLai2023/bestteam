@@ -85,7 +85,19 @@
 
 ## In Progress
 
-Nothing currently in flight.
+- Email toolkit (branch `feat/email-toolkit`): three draft-only built-in
+  tools — `email_find` / `email_read` / `email_draft_reply` — over one
+  env-configured mailbox, with MS Graph (M365/Exchange Online, app-only
+  OAuth, `createReply`) and generic IMAP (stdlib, `BODY.PEEK`, threaded
+  MIME draft APPENDed to Drafts) backends behind one seam
+  (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
+  verb / no SMTP by design — drafts are reviewed and sent by a human from
+  their own mail client. Ships with a seeded `email_triage_reply` built-in
+  Skill (`ui/backend/skills.py::seed_default_skills`, per-row
+  seed-if-absent) so Team Builder customers just pick the skill. Deferred:
+  real sending, ambient run-on-new-mail, per-user OAuth/secrets store,
+  attachments. Spec:
+  `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
 
 ## Known issues / tech debt
 
