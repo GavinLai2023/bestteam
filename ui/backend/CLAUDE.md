@@ -142,8 +142,10 @@ threads the JWT `user.username` through as `user_id` (the wizard's
 
 **Admin memory management** (`ui/backend/memory_api.py`, `/api/memory`,
 `get_current_admin`-guarded): `GET /users` (users with per-type record counts),
-`GET /users/{user_id}/records?query=&type=` (browse via `all()`, search via
-`search()`), `DELETE /records/{memory_id}`, `DELETE /users/{user_id}` (clear a
+`GET /users/{user_id}/records?query=&type=&limit=` (browse via `all(limit=)`,
+search via `search(top_k=limit, max_candidates=_MAX_SEARCH_SCAN)` so both the
+response and the scan work are bounded over a large store),
+`DELETE /records/{memory_id}`, `DELETE /users/{user_id}` (clear a
 user — `store.delete_user`). A `get_memory_store` dependency opens a per-request
 `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread and closes
 it after (`store.close()`); when memory is disabled the read endpoints return

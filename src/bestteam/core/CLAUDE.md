@@ -156,6 +156,11 @@ knowledge base — both now import `tokenize`/`significant_terms` from
   `ConfigurationError` otherwise (mirrors the KB). Adds management helpers used
   by the admin API: `user_ids()`, `user_summaries()` (per-type counts via one
   `GROUP BY`), `all(..., limit=)`, `delete_user()`, and `close()`.
+  `search(..., max_candidates=N)` caps how many most-recent records get
+  tokenized/BM25-indexed, so an admin search over a large store does bounded
+  work (the admin API sets it). `max_candidates=None` (the default) keeps the
+  full-store scan that per-run **recall** uses by design — the documented
+  single-stage BM25 tradeoff, unchanged.
 - **`MemoryManager`** — the execution-path glue. `recall_preamble(user_id,
   query)` formats the top search hits into a system-prompt block (`""` if none);
   `record_run(user_id, input, output)` always writes one **episodic** record

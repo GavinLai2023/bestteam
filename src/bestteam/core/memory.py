@@ -207,13 +207,22 @@ class SqliteBM25Memory(Memory):
         return self._rows_to_records(rows)
 
     def search(
-        self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
+        self,
+        user_id: str,
+        query: str,
+        types: Optional[Sequence[str]] = None,
+        top_k: int = 5,
+        max_candidates: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
         from .text_tokenize import significant_terms, tokenize
 
-        candidates = self.all(user_id, types)
+        # BM25 must score every candidate to rank, so `max_candidates` caps the
+        # scan to the most-recent N records -- a bound on the DB/CPU/memory work
+        # for callers over a possibly-large store (the admin API sets it). None
+        # keeps the full-store scan used by per-run recall.
+        candidates = self.all(user_id, types, limit=max_candidates)
         if not candidates:
             return []
 

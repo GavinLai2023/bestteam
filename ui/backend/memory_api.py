@@ -58,6 +58,11 @@ def _require_store(store: Optional[SqliteBM25Memory]) -> SqliteBM25Memory:
 # the list/search endpoints cap their response rather than dumping a whole store.
 _MAX_RECORDS = 1000
 _DEFAULT_RECORDS = 200
+# Cap on how many (most-recent) records a search tokenizes/BM25-indexes, so an
+# admin search over a bloated user store does bounded DB/CPU/memory work (the
+# response is further capped by `limit`). Larger than _MAX_RECORDS so ranking has
+# headroom above the response cap.
+_MAX_SEARCH_SCAN = 2000
 
 
 @router.get("/users")
@@ -80,7 +85,7 @@ def get_user_records(
         return {"enabled": False, "records": []}
     types = [type] if type else None
     if query:
-        records = store.search(user_id, query, types=types, top_k=limit)
+        records = store.search(user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN)
     else:
         records = store.all(user_id, types=types, limit=limit)
     return {"enabled": True, "records": [dataclasses.asdict(r) for r in records]}

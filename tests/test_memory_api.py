@@ -76,6 +76,25 @@ def test_get_records_all_and_search(admin_client, memory_db):
     assert "refunds" in hits["records"][0]["content"]
 
 
+def test_search_endpoint_bounds_scan(admin_client, memory_db, monkeypatch):
+    # The admin search endpoint must bound the scan work, not just the response
+    # size, so it passes a finite max_candidates into the store's search.
+    from bestteam.core.memory import SqliteBM25Memory
+
+    captured = {}
+    real = SqliteBM25Memory.search
+
+    def spy(self, user_id, query, types=None, top_k=5, max_candidates=None):
+        captured["max_candidates"] = max_candidates
+        return real(self, user_id, query, types=types, top_k=top_k, max_candidates=max_candidates)
+
+    monkeypatch.setattr(SqliteBM25Memory, "search", spy)
+    resp = admin_client.get("/api/memory/users/alice/records", params={"query": "refunds", "limit": 1})
+
+    assert resp.status_code == 200
+    assert captured["max_candidates"] is not None and captured["max_candidates"] >= 1
+
+
 def test_get_records_type_filter(admin_client, memory_db):
     only_semantic = admin_client.get(
         "/api/memory/users/alice/records", params={"type": SEMANTIC}
