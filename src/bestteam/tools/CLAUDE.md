@@ -32,11 +32,17 @@ agents:
 
 **Trust boundaries**: `parse_file` reads any local path it's given (no
 sandboxing) and `http_get` fetches any URL whose host doesn't resolve to a
-private/internal address (see `_check_host_allowed` in `http_client.py`).
-Both are intentional — the tools' purpose is to read files / fetch URLs the
-agent is told to — but callers exposing these tools to an LLM agent are
-responsible for constraining which paths/URLs the agent can be prompted to
-access.
+private/internal address (see `_check_host_allowed` in `http_client.py`). The
+SSRF check resolves the host, rejects private/internal addresses, and returns
+the validated IP; `http_get` then **pins the connection to that IP** (keeping
+the hostname for the `Host` header and TLS SNI/cert), so `httpx` never
+re-resolves and a DNS-rebinding TOCTOU can't slip a private address past the
+check (CR-023). Pinning uses the first resolved address, trading happy-eyeballs
+failover for that guarantee. Both tools are still intentionally broad — their
+purpose is to read files / fetch URLs the agent is told to — so callers exposing
+them to an LLM agent remain responsible for constraining which paths/URLs the
+agent can be prompted to access, and for network-layer egress controls where
+internal services are reachable.
 
 Tier 2 tools (SQL executor, Python sandbox) and email integration are planned but not yet implemented.
 

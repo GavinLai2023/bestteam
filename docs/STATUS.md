@@ -54,9 +54,10 @@
   best-effort memory recording, recalled memory reaching hierarchical delegates,
   injection-resistant recall framing, and bounded episodic records (no
   content/metadata duplication + per-field size cap). CR-023 (`http_get`
-  DNS-rebinding SSRF) in progress on `fix/http-get-ssrf-rebinding`. Severities
-  recalibrated to P2/P3 for this codebase's disabled-by-default, per-user,
-  no-multi-tenancy model. See `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
+  DNS-rebinding SSRF) fixed on `fix/http-get-ssrf-rebinding` — the connection is
+  pinned to the validated IP (Host/SNI preserved) so httpx can't re-resolve.
+  Severities recalibrated to P2/P3 for this codebase's disabled-by-default,
+  per-user, no-multi-tenancy model. See `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
 ## In Progress
 
