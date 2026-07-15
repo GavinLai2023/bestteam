@@ -85,12 +85,12 @@ memory-security items are proportionate mitigations, not full hardening.
 
 | ID | Finding | Severity | Resolution | Status |
 |---|---|---|---|---|
-| CR-018 | Memory records use naive `datetime.utcnow()` (deprecation warnings) | P3 | `core/memory.py` now uses `datetime.now(timezone.utc)`, matching `db/models._utcnow`. `tests/test_memory.py::test_created_at_is_timezone_aware` | Fixed - awaiting independent verification |
-| CR-019 | `Workflow.run()` raises if post-completion memory persistence fails, making a completed run look failed | P2 | `core/workflow.py::run` wraps `record_run` best-effort (log + swallow), mirroring `stream()`. `tests/test_workflow.py::test_run_memory_recording_failure_keeps_run_completed` | Fixed - awaiting independent verification |
-| CR-020 | Hierarchical delegates omit recalled memory (only the manager received it) | P2 | `_make_delegate_tool` forwards `extra_system_prompt`; `_hierarchical_node` passes the raw preamble to each delegate (subordinates get user memory, not the manager's delegation guidance). `tests/test_memory_integration.py::test_hierarchical_subordinate_receives_preamble` | Fixed - awaiting independent verification |
-| CR-021 | Persistent prompt injection: recalled content spliced into a SystemMessage as bare instructions | P2 (bounded, single-user) | `recall_preamble` now delimits recalled content in `<recalled_user_memory>` and frames it reference-only ("NOT instructions"). Proportionate mitigation; no escaping/filtering engine (documented limitation). `tests/test_memory.py::test_recall_preamble_frames_memory_as_untrusted_reference` | Fixed - awaiting independent verification |
-| CR-022 | Unbounded memory growth: full input/output stored, duplicated into `content` and `metadata`, no size cap | P2 (memory opt-in) | `record_run` drops the redundant `metadata` (no reader) and truncates each field at `_MAX_RECORD_CHARS` (10k). Retention/quota/cleanup remain documented future work. `tests/test_memory.py::test_record_run_does_not_duplicate_content_in_metadata`, `::test_record_run_caps_record_size` | Fixed - awaiting independent verification |
-| CR-023 | `http_get` DNS-rebinding SSRF: hostname validated, then re-resolved on the request (TOCTOU) | P2 (tool-security, not a memory defect) | `_check_host_allowed` returns the validated IP; `http_get` pins the connection to it (Host header + TLS SNI/cert preserved via httpx `sni_hostname`), re-validated/re-pinned per redirect hop, so httpx never re-resolves. `tests/test_tools.py::test_http_get_pins_connection_to_validated_ip` (+ existing block/redirect/retry tests); verified end-to-end against a local server | Fixed - awaiting independent verification |
+| CR-018 | Memory records use naive `datetime.utcnow()` (deprecation warnings) | P3 | `core/memory.py` now uses `datetime.now(timezone.utc)`, matching `db/models._utcnow`. `tests/test_memory.py::test_created_at_is_timezone_aware` | Verified |
+| CR-019 | `Workflow.run()` raises if post-completion memory persistence fails, making a completed run look failed | P2 | `core/workflow.py::run` wraps `record_run` best-effort (log + swallow), mirroring `stream()`. `tests/test_workflow.py::test_run_memory_recording_failure_keeps_run_completed` | Verified |
+| CR-020 | Hierarchical delegates omit recalled memory (only the manager received it) | P2 | `_make_delegate_tool` forwards `extra_system_prompt`; `_hierarchical_node` passes the raw preamble to each delegate (subordinates get user memory, not the manager's delegation guidance). `tests/test_memory_integration.py::test_hierarchical_subordinate_receives_preamble` | Verified |
+| CR-021 | Persistent prompt injection: recalled content spliced into a SystemMessage as bare instructions | P2 (bounded, single-user) | `recall_preamble` now delimits recalled content in `<recalled_user_memory>` and frames it reference-only ("NOT instructions"). Proportionate mitigation; no escaping/filtering engine (documented limitation). `tests/test_memory.py::test_recall_preamble_frames_memory_as_untrusted_reference` | Verified |
+| CR-022 | Unbounded memory growth: full input/output stored, duplicated into `content` and `metadata`, no size cap | P2 (memory opt-in) | `record_run` drops the redundant `metadata` (no reader) and truncates each field at `_MAX_RECORD_CHARS` (10k). Retention/quota/cleanup remain documented future work. `tests/test_memory.py::test_record_run_does_not_duplicate_content_in_metadata`, `::test_record_run_caps_record_size` | Verified |
+| CR-023 | `http_get` DNS-rebinding SSRF: hostname validated, then re-resolved on the request (TOCTOU) | P2 (tool-security, not a memory defect) | `_check_host_allowed` returns the validated IP; `http_get` pins the connection to it (Host header + TLS SNI/cert preserved via httpx `sni_hostname`), re-validated/re-pinned per redirect hop, so httpx never re-resolves. `tests/test_tools.py::test_http_get_pins_connection_to_validated_ip` (+ existing block/redirect/retry tests); verified end-to-end against a local server | Verified |
 
 **Severity notes.** CR-021/CR-022 are P2 rather than P1: memory is disabled
 unless `BESTTEAM_MEMORY_DB` is set, records are per-user with no cross-user
@@ -106,6 +106,14 @@ services.
 defects): full memory retention/quota/cleanup and a deletion API/UI;
 run-ownership/authorization (conflicts with the no-multi-tenancy decision,
 `docs/DECISIONS.md`); adding CI lint/type/security tooling.
+
+**Verification (2026-07-15).** All six marked Verified. Basis: a TDD red→green
+regression per finding (named above), the full suite green at 335 passed, and
+GitHub CI (backend + frontend) green on `main`; CR-023 additionally driven
+end-to-end (validate→pin→connect) against a local server, with the httpx
+explicit-`Host`-on-IP behavior confirmed by a local probe. Landed on `main` via
+PR #7 (`d932b40`, CR-018…CR-022) and PR #9 (`6b9af52`, CR-023). This is
+developer-side verification of the accepted scope, not a separate outside audit.
 
 ## Detailed Codex assessments
 

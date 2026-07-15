@@ -49,15 +49,17 @@
   corrections, single-use WS tickets, oversized-upload middleware, tool-loop
   exhaustion notice, and up-front `runs`-row persistence. No deferrals remain.
   See `docs/CODE_REVIEW_TRIAGE.md`.
-- Code-review round 2 (per-user memory + `http_get`): CR-018…CR-022 fixed on
-  `fix/memory-code-review` — timezone-aware timestamps, `Workflow.run()`
-  best-effort memory recording, recalled memory reaching hierarchical delegates,
-  injection-resistant recall framing, and bounded episodic records (no
-  content/metadata duplication + per-field size cap). CR-023 (`http_get`
-  DNS-rebinding SSRF) fixed on `fix/http-get-ssrf-rebinding` — the connection is
-  pinned to the validated IP (Host/SNI preserved) so httpx can't re-resolve.
-  Severities recalibrated to P2/P3 for this codebase's disabled-by-default,
-  per-user, no-multi-tenancy model. See `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
+- Code-review round 2 (per-user memory + `http_get`): CR-018…CR-023 verified
+  and merged to `main` (PR #7 `d932b40` for CR-018…CR-022, PR #9 `6b9af52` for
+  CR-023) — timezone-aware timestamps, `Workflow.run()` best-effort memory
+  recording, recalled memory reaching hierarchical delegates, injection-resistant
+  recall framing, bounded episodic records (no content/metadata duplication +
+  per-field size cap), and `http_get` pinning the connection to the validated IP
+  (Host/SNI preserved) so httpx can't re-resolve (DNS-rebinding TOCTOU closed).
+  Verified via per-finding TDD regressions, the full suite (335 passed), and
+  green CI on `main`. Severities recalibrated to P2/P3 for this codebase's
+  disabled-by-default, per-user, no-multi-tenancy model. See
+  `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
 ## In Progress
 
