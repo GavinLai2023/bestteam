@@ -33,7 +33,7 @@ from bestteam.core.loader import _build_workflow
 from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError
 
-from .auth_api import get_current_user
+from .auth_api import get_current_admin
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
 from .db_session import get_db
@@ -57,7 +57,7 @@ _MAX_FILES_PER_UPLOAD = 30
 _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
-router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_admin)])
 
 
 # Per-KB locks serialising the upload promotion/commit/cleanup critical section.

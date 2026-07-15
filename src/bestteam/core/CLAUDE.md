@@ -146,11 +146,21 @@ knowledge base — both now import `tokenize`/`significant_terms` from
 - **`Memory` ABC** — `add`/`search`/`all`/`delete` over `MemoryRecord`
   (`id, user_id, type, content, metadata, created_at`). The old
   `remember`/`recall` key-value stub and `InMemoryStore` were removed (unused).
+  The admin/management operations (`user_ids`, `user_summaries`, `delete_user`,
+  `close`) are **not** on the ABC — they're concrete on `SqliteBM25Memory` only,
+  so a third-party store implementing just the four core methods still works.
 - **`SqliteBM25Memory`** — the default store: stdlib `sqlite3` persistence
   (own connection + DB file, no SQLAlchemy) + `rank-bm25` keyword search over
   `content`, using the same overlap-then-score ranking as
   `LocalFolderKnowledgeBase.query`. Requires `bestteam[tools-rag]`; raises
-  `ConfigurationError` otherwise (mirrors the KB).
+  `ConfigurationError` otherwise (mirrors the KB). Adds management helpers used
+  by the admin API: `user_ids()`, `user_summaries()` (per-type counts via one
+  `GROUP BY`), `all(..., limit=)`, `delete_user()`, and `close()`.
+  `search(..., max_candidates=N)` caps how many most-recent records get
+  tokenized/BM25-indexed, so an admin search over a large store does bounded
+  work (the admin API sets it). `max_candidates=None` (the default) keeps the
+  full-store scan that per-run **recall** uses by design — the documented
+  single-stage BM25 tradeoff, unchanged.
 - **`MemoryManager`** — the execution-path glue. `recall_preamble(user_id,
   query)` formats the top search hits into a system-prompt block (`""` if none);
   `record_run(user_id, input, output)` always writes one **episodic** record
@@ -175,10 +185,12 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   may add a near-duplicate note (BM25 surfaces the most relevant). Consolidation
   is future work.
 - Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
-- No frontend "my memories" management UI (backend only), and no retention,
-  per-user quota, or cleanup/deletion API — records accumulate until the store
-  is manually cleared. `record_run` caps each field at `_MAX_RECORD_CHARS`
-  (CR-022) so one run can't persist megabytes, but total growth is unbounded.
+- An **admin-only** Memory management page (`ui/backend/memory_api.py`,
+  `/api/memory`) lets admins view/search/delete a user's records and clear a
+  user's whole memory, but there's no manual add/edit and no retention,
+  per-user quota, or automated cleanup — records accumulate until an admin
+  clears them. `record_run` caps each field at `_MAX_RECORD_CHARS` (CR-022) so
+  one run can't persist megabytes, but total growth is unbounded.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

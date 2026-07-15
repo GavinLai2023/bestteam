@@ -32,3 +32,19 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     if user is None or not verify_password(password, user.password_hash):
         return None
     return user
+
+
+def set_admin_status(db: Session, username: str, is_admin: bool) -> User:
+    """Promote/demote a single existing user. Raises `ValueError` if unknown.
+
+    This is the only way to grant admin -- there's no auto-promotion from an env
+    list or public registration (which would let an attacker pre-claim a
+    configured username). Invoked by the `ui.backend.admin` operator CLI so the
+    first admin is provisioned deliberately, out-of-band.
+    """
+    user = get_user_by_username(db, username)
+    if user is None:
+        raise ValueError(f"No such user: {username!r}")
+    user.is_admin = is_admin
+    db.commit()
+    return user

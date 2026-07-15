@@ -83,13 +83,19 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   (defaults: a dev-only secret, 1440 minutes).
 - **`ui/backend/auth_api.py`** (`/api/auth`) — `POST /register`,
   `POST /login` (both return `{access_token, token_type}`), `GET /me`
-  (requires `Authorization: Bearer <token>`). Exports `get_current_user`, a
-  FastAPI dependency resolving the bearer token to a `User` row, applied via
-  router-level `dependencies=[Depends(get_current_user)]` to
-  `/api/builder/sessions` (`builder.py`) and `/api/config/*` (`crud.py`), and
-  per-endpoint to `/api/workflows`, `/api/workflows/{name}/graph`,
-  `/api/runs` (POST), and `/api/runs/{id}` (GET) in `main.py`. `/api/health`
-  and `/api/auth/*` stay public;
+  (requires `Authorization: Bearer <token>`; returns `{username, is_admin}`).
+  Exports `get_current_user`, a FastAPI dependency resolving the bearer token to
+  a `User` row, applied per-endpoint to `/api/workflows`,
+  `/api/workflows/{name}/graph`, `/api/runs` (POST), and `/api/runs/{id}` (GET)
+  in `main.py` and router-level to `/api/builder/sessions` (`builder.py`). Also
+  exports `get_current_admin` (same, but 403s a non-admin `User`), which
+  router-level guards the **admin-only** surfaces: `/api/config/*` (`crud.py`)
+  and `/api/memory/*` (`memory_api.py`). Registration always creates a non-admin
+  user; admin is granted **only** via the operator CLI
+  (`python -m ui.backend.admin promote <username>`,
+  `db/users.py::set_admin_status`) — never from an unauthenticated username
+  match, and never read at import (so an existing DB predating the `is_admin`
+  migration still boots). `/api/health` and `/api/auth/*` stay public;
   `/api/runs/{run_id}/stream` requires the same bearer token passed as a
   `?token=` query parameter (browsers can't set custom headers when opening a
   WebSocket), validated with the same `decode_access_token`/
@@ -133,6 +139,18 @@ passes it plus `user_id` into `workflow.stream(...)`; `main.py::create_run`
 threads the JWT `user.username` through as `user_id` (the wizard's
 `builder.py` test-runs omit it, so sandbox runs never touch memory). See
 `src/bestteam/core/CLAUDE.md` for the SDK-side design.
+
+**Admin memory management** (`ui/backend/memory_api.py`, `/api/memory`,
+`get_current_admin`-guarded): `GET /users` (users with per-type record counts),
+`GET /users/{user_id}/records?query=&type=&limit=` (browse via `all(limit=)`,
+search via `search(top_k=limit, max_candidates=_MAX_SEARCH_SCAN)` so both the
+response and the scan work are bounded over a large store),
+`DELETE /records/{memory_id}`, `DELETE /users/{user_id}` (clear a
+user — `store.delete_user`). A `get_memory_store` dependency opens a per-request
+`SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread and closes
+it after (`store.close()`); when memory is disabled the read endpoints return
+`enabled:false` and mutations return 409. The new SDK store primitives
+`user_ids()`/`delete_user()`/`close()` back these endpoints.
 
 ## Known limitation: general-purpose cache
 

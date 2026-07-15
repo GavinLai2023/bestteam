@@ -32,7 +32,10 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   computed from `model_catalog` pricing where the model's spec matches an
   entry (Phase 3, `db/usage.py::record_usage`).
 - `users` — simple per-deployment login (Phase 3, `db/users.py` +
-  `ui/backend/auth.py`/`auth_api.py`).
+  `ui/backend/auth.py`/`auth_api.py`). `is_admin` (added by the
+  `a1b2c3d4e5f6` migration) gates the Advanced config and Memory pages;
+  it's granted only via the `ui.backend.admin` operator CLI
+  (`db/users.py::set_admin_status`), never from registration.
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry

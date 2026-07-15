@@ -115,6 +115,46 @@ explicit-`Host`-on-IP behavior confirmed by a local probe. Landed on `main` via
 PR #7 (`d932b40`, CR-018…CR-022) and PR #9 (`6b9af52`, CR-023). This is
 developer-side verification of the accepted scope, not a separate outside audit.
 
+## Round 3 (2026-07-15): admin role + per-user memory management UI
+
+Scope: an independent audit of the `feat/admin-memory-management` branch — a new
+`is_admin` role gating the Advanced config page and a new admin-only Memory
+management page (`/api/memory`). Delivered over three review passes (initial
+5-finding report → partial-fix re-review → final re-review). Landed via **PR #12**
+(commits `0e86334` feature, `bacd6ec` + `e8f0018` remediation); not yet merged to
+`main`.
+
+The security spine of this feature: admin is granted **only** via the operator
+CLI (`python -m ui.backend.admin promote <username>`) — never from an
+unauthenticated username match or from public registration — and the backend
+enforces `get_current_admin` on every `/api/config` and `/api/memory` call
+(frontend gating is cosmetic).
+
+| ID | Finding | Severity | Resolution | Status |
+|---|---|---|---|---|
+| CR-024 | Public-registration admin takeover: username-match auto-promotion (initially at register, latently at startup) meant whoever held a listed username got admin | P1 | Removed all username-match promotion. Registration always creates a non-admin; admin is granted only via `ui/backend/admin.py` (`set_admin_status`). `tests/test_auth.py::test_register_never_grants_admin`, `::test_set_admin_status_promotes_and_demotes` | Verified |
+| CR-025 | Startup crash before migration: import-time reconcile read `users.is_admin`, so a DB predating the column crashed on boot | P1 | Removed the import-time reconcile from `db_session.py`; `is_admin` is never read at import. Reviewer imported against a pre-migration DB successfully | Verified |
+| CR-026 | Fresh install had no admin path once auto-promotion was removed | P1 | Operator CLI (`python -m ui.backend.admin promote <username>`) + documented post-migration step in `docs/deployment.md`. `tests/test_admin_cli.py` | Verified |
+| CR-027 | `Memory` ABC compatibility break: management methods added as abstract would break a legacy four-method `Memory` implementation | P2 | `user_ids`/`user_summaries`/`delete_user`/`close` are concrete on `SqliteBM25Memory` only, not on the ABC, so a four-method store still instantiates. `tests/test_memory.py` management-method coverage | Verified |
+| CR-028 | Unbounded admin reads: browse dumped a whole store; search scanned every record (built a full BM25 index) regardless of `limit` | P2 | Browse capped (`_MAX_RECORDS`/`_DEFAULT_RECORDS`); user counts via one `GROUP BY` (`user_summaries()`); `search(max_candidates=)` bounds the candidate scan (admin API passes `_MAX_SEARCH_SCAN`), so both response and work are bounded. Per-run recall's full-store scan is unchanged by default (`max_candidates=None`). `tests/test_memory.py::test_search_bounds_candidate_scan`, `tests/test_memory_api.py::test_search_endpoint_bounds_scan` | Verified |
+| CR-029 | Admin user-list (`GET /api/memory/users`) has no pagination/cursor: aggregates all rows, builds every summary in Python | P3 | **Rejected (out of scope / YAGNI).** The user *list* is human-scale on a no-multi-tenancy single-deployment tool (one row per distinct human who ran a workflow; `user_summaries` lists only users who already have memory, and seeding memory costs a workflow run per account). A bare `LIMIT` would hide users from the admin — strictly worse for a management tool — and cursor pagination is disproportionate scope for a simple admin UI. The machine-amplified *per-user record* dimension is the one that needed bounding (CR-028) and got it | Rejected |
+
+**Severity notes.** CR-024–026 are P1 because they concern the admin
+authorization boundary itself (who becomes admin, and whether the app boots to
+enforce it). CR-027/CR-028 are P2: an SDK-contract regression and a
+resource-amplification vector on an admin-only, opt-in surface. CR-029 is P3 and
+rejected on the scaling-profile distinction above — escalate only if the product
+adds multi-tenancy or an unbounded-registration surface that can inflate the
+distinct-user count without per-account compute cost.
+
+**Verification (2026-07-15).** CR-024–028 marked Verified: the independent
+reviewer confirmed CR-024–027 fixed and CR-028's record browse/search bounded
+across the three passes, backed by a TDD regression per finding (named above)
+and the full suite green at **356 passed** (one pre-existing Starlette
+deprecation warning). This is developer-side verification plus the reviewer's
+read-only confirmation; final independent verification on `main` follows the
+**PR #12** merge. CR-029 is a documented scope decision, recorded in the PR body.
+
 ## Detailed Codex assessments
 
 ### CR-001 - Public registration plus unrestricted KB paths enables server-file replacement

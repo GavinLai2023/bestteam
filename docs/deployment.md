@@ -66,6 +66,20 @@ curl -X POST http://localhost:8000/api/auth/register \
 This returns an `access_token`. Subsequent users (if needed) can be created
 the same way.
 
+## 4b. Grant the first admin
+
+New accounts are always non-admin. The **Advanced** config page and the
+per-user **Memory** management page require an admin, granted only with the
+operator CLI (never from an env list or by username match — that would let
+anyone pre-claim `admin` through the open registration endpoint). Make sure the
+migration in step 3 has run (it adds the `users.is_admin` column), then:
+
+```bash
+docker compose exec backend python -m ui.backend.admin promote admin
+# list current admins:  ... python -m ui.backend.admin list
+# revoke:               ... python -m ui.backend.admin demote <username>
+```
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,

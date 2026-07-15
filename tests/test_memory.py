@@ -91,6 +91,81 @@ def test_delete_removes_record():
     assert store.all("alice") == []
 
 
+def test_user_ids_lists_distinct_users_with_memory():
+    store = _store()
+    store.add("alice", EPISODIC, "a1")
+    store.add("alice", SEMANTIC, "a2")
+    store.add("bob", EPISODIC, "b1")
+
+    assert set(store.user_ids()) == {"alice", "bob"}
+    # No memory -> empty.
+    assert _store().user_ids() == []
+
+
+def test_delete_user_removes_all_records_for_that_user_only():
+    store = _store()
+    store.add("alice", EPISODIC, "a1")
+    store.add("alice", SEMANTIC, "a2")
+    store.add("bob", EPISODIC, "b1")
+
+    removed = store.delete_user("alice")
+
+    assert removed == 2
+    assert store.all("alice") == []
+    assert {r.content for r in store.all("bob")} == {"b1"}
+    # Deleting a user with no records is a no-op returning 0.
+    assert store.delete_user("nobody") == 0
+
+
+def test_user_summaries_counts_by_type():
+    store = _store()
+    store.add("alice", EPISODIC, "e1")
+    store.add("alice", EPISODIC, "e2")
+    store.add("alice", SEMANTIC, "s1")
+    store.add("bob", PROCEDURAL, "p1")
+
+    summaries = {s["user_id"]: s for s in store.user_summaries()}
+    assert summaries["alice"] == {
+        "user_id": "alice",
+        "episodic": 2,
+        "semantic": 1,
+        "procedural": 0,
+        "total": 3,
+    }
+    assert summaries["bob"]["procedural"] == 1
+    assert summaries["bob"]["total"] == 1
+
+
+def test_all_respects_limit():
+    store = _store()
+    for i in range(5):
+        store.add("alice", EPISODIC, f"rec {i}")
+
+    assert len(store.all("alice")) == 5
+    assert len(store.all("alice", limit=2)) == 2
+
+
+def test_search_bounds_candidate_scan(monkeypatch):
+    # `max_candidates` must bound the WORK (records loaded + tokenized + indexed),
+    # not just the returned slice, so a search over a bloated store is bounded.
+    store = _store()
+    for i in range(6):
+        store.add("alice", EPISODIC, f"refund note {i}")
+
+    captured = {}
+    real_all = store.all
+
+    def spy_all(user_id, types=None, limit=None):
+        captured["limit"] = limit
+        return real_all(user_id, types, limit)
+
+    monkeypatch.setattr(store, "all", spy_all)
+    hits = store.search("alice", "refund", top_k=2, max_candidates=3)
+
+    assert captured["limit"] == 3  # loaded at most 3 rows, not all 6
+    assert len(hits) <= 2
+
+
 def test_all_orders_newest_first_and_filters_type():
     store = _store()
     store.add("alice", EPISODIC, "first")

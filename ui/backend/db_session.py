@@ -25,6 +25,10 @@ engine = make_engine(DB_PATH)
 init_db(engine)
 SessionLocal = session_factory(engine)
 
+# Admins are provisioned deliberately via the `ui.backend.admin` CLI, not
+# bootstrapped from env at import -- so startup never reads `users.is_admin`
+# (an existing DB predating the migration still boots; run `alembic upgrade
+# head` before serving requests).
 with SessionLocal() as _session:
     seed_default_catalog(_session)
 

@@ -61,6 +61,16 @@
   disabled-by-default, per-user, no-multi-tenancy model. See
   `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
+- Admin role + per-user memory management UI: `is_admin` column (Alembic
+  migration), granted only via the `ui.backend.admin` operator CLI (no env/
+  username auto-promotion), `get_current_admin` guard now gating **both** the
+  Advanced config page and a new **Memory** page. Admins can list users with
+  per-type record counts (SQL-aggregated), browse/search a user's
+  episodic/semantic/procedural records (bounded response), delete individual
+  records, and clear a user's whole memory (`ui/backend/memory_api.py`,
+  `/api/memory`; frontend `MemoryPage.jsx` + `RequireAdmin`/`useMe`). No manual
+  add/edit; memory stays opt-in (`BESTTEAM_MEMORY_DB`).
+
 ## In Progress
 
 Nothing currently in flight.
@@ -71,8 +81,9 @@ Nothing currently in flight.
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors. See `src/bestteam/core/CLAUDE.md`.
 - **Per-user memory recall is single-stage BM25** — no rerank/expansion;
-  semantic/procedural records have no auto-dedup; no frontend
-  memory-management UI. See `core/memory.py`.
+  semantic/procedural records have no auto-dedup. Admin view/search/delete UI
+  exists (`/api/memory`), but there's no manual add/edit and no retention/quota
+  policy. See `core/memory.py`.
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain

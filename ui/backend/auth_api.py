@@ -48,6 +48,8 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)) -> TokenRespon
         create_user(db, req.username, req.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # New users are always non-admin. Admin is granted only via the operator CLI
+    # (`ui.backend.admin`), never from an unauthenticated username match.
     return TokenResponse(access_token=create_access_token(req.username))
 
 
@@ -80,6 +82,17 @@ def get_current_user(
     return user
 
 
+def get_current_admin(user: User = Depends(get_current_user)) -> User:
+    """Like `get_current_user`, but requires the user to be an admin.
+
+    A FastAPI dependency for admin-only surfaces (the Advanced config router and
+    the memory-management API). Returns 403 for an authenticated non-admin.
+    """
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return user
+
+
 @router.get("/me")
 def me(user: User = Depends(get_current_user)) -> dict:
-    return {"username": user.username}
+    return {"username": user.username, "is_admin": user.is_admin}

@@ -66,6 +66,15 @@ attaches `Authorization: Bearer <token>` to every request, and on a `401`
 and redirects to `/login`. `pages/LoginPage.jsx` is the username/password
 form; `App.jsx`'s `RequireAuth` route guard redirects to `/login` when no
 token is present, and `components/Layout.jsx` has a "Log out" button.
+
+**Admin pages.** `/advanced` and `/memory` sit behind a `RequireAdmin` wrapper
+(`App.jsx`) that reads `lib/useMe.js` (one `GET /api/auth/me` → `{username,
+is_admin}`) and redirects non-admins to `/`; `Layout.jsx` shows the **Advanced**
+and **Memory** nav links only when `isAdmin`. `pages/MemoryPage.jsx` is the
+admin per-user memory manager (user list with counts + search/type-filter +
+per-record delete + clear-all, and a "memory not enabled" state). This gating is
+cosmetic — the backend enforces admin on every `/api/config` and `/api/memory`
+call, so a tampered client still gets 403.
 `API_BASE`/`WS_BASE` are configurable via `VITE_API_BASE`/`VITE_WS_BASE`
 (see `ui/frontend/.env.example`), falling back to the `127.0.0.1:8000`
 defaults above for local dev.

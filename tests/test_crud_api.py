@@ -46,10 +46,31 @@ def client(tmp_path, monkeypatch):
     try:
         test_client = TestClient(backend_main.app)
         token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
+        # The Advanced/config API is admin-only; promote the fixture user so the
+        # existing CRUD tests exercise the endpoints. A non-admin 403 is covered
+        # separately by test_config_forbidden_for_non_admin.
+        from ui.backend.db.models import User
+
+        with TestSessionLocal() as db:
+            db.query(User).filter_by(username="test").update({"is_admin": True})
+            db.commit()
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
+
+
+def test_config_forbidden_for_non_admin(client):
+    # Advanced config is admin-only: an authenticated non-admin user gets 403.
+    token = client.post("/api/auth/register", json={"username": "regular", "password": "pw"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert client.get("/api/config/agents", headers=headers).status_code == 403
+    assert client.put(
+        "/api/config/agents/x",
+        json={"role": "R", "goal": "G", "model": "fake:hi", "tools": []},
+        headers=headers,
+    ).status_code == 403
 
 
 def test_agent_crud_round_trip(client):
