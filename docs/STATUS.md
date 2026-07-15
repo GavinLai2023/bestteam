@@ -61,15 +61,27 @@
   disabled-by-default, per-user, no-multi-tenancy model. See
   `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
-- Admin role + per-user memory management UI: `is_admin` column (Alembic
-  migration), granted only via the `ui.backend.admin` operator CLI (no env/
-  username auto-promotion), `get_current_admin` guard now gating **both** the
-  Advanced config page and a new **Memory** page. Admins can list users with
-  per-type record counts (SQL-aggregated), browse/search a user's
-  episodic/semantic/procedural records (bounded response), delete individual
-  records, and clear a user's whole memory (`ui/backend/memory_api.py`,
-  `/api/memory`; frontend `MemoryPage.jsx` + `RequireAdmin`/`useMe`). No manual
-  add/edit; memory stays opt-in (`BESTTEAM_MEMORY_DB`).
+- Admin role + per-user memory management UI (merged to `main`, PR #12
+  `7fd9209`): `is_admin` column (Alembic migration), granted only via the
+  `ui.backend.admin` operator CLI (no env/username auto-promotion),
+  `get_current_admin` guard now gating **both** the Advanced config page and a
+  new **Memory** page. Admins can list users with per-type record counts
+  (SQL-aggregated), browse/search a user's episodic/semantic/procedural records
+  (bounded response *and* bounded search scan — `search(max_candidates=)`),
+  delete individual records, and clear a user's whole memory
+  (`ui/backend/memory_api.py`, `/api/memory`; frontend `MemoryPage.jsx` +
+  `RequireAdmin`/`useMe`). No manual add/edit; memory stays opt-in
+  (`BESTTEAM_MEMORY_DB`).
+- Code-review round 3 (admin role + memory-management UI): CR-024…CR-028
+  verified and merged via PR #12 — public-registration admin takeover closed
+  (operator-CLI-only promotion), pre-migration startup crash removed, fresh-
+  install admin path (CLI + docs), `Memory` ABC compatibility preserved
+  (management methods concrete-only), and unbounded admin reads bounded (capped
+  browse + `max_candidates`-bounded search). CR-029 (unpaginated
+  `GET /api/memory/users`) explicitly rejected as YAGNI/out-of-scope (P3) —
+  human-scale user count on a no-multi-tenancy tool. Verified via per-finding
+  TDD regressions, full suite (356 passed), and frontend build/lint. See
+  `docs/CODE_REVIEW_TRIAGE.md` (Round 3).
 
 ## In Progress
 
