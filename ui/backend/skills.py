@@ -56,8 +56,16 @@ DEFAULT_SKILLS: List[SkillSpec] = [
 
 
 def seed_default_skills(db: Session) -> None:
-    """Insert any missing built-in skills. Never overwrites existing rows."""
-    existing = {name for (name,) in db.query(SkillRecord.name).all()}
+    """Insert any missing built-in skills. Never overwrites existing rows.
+
+    Built-ins live in the platform tier (org_id IS NULL); the existence check
+    looks only at that tier so an org's same-named skill can't suppress
+    seeding of the built-in.
+    """
+    existing = {
+        name
+        for (name,) in db.query(SkillRecord.name).filter(SkillRecord.org_id.is_(None)).all()
+    }
     changed = False
     for spec in DEFAULT_SKILLS:
         if spec.name in existing:

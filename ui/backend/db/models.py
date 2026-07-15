@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, ForeignKey
+from sqlalchemy import JSON, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -24,18 +24,40 @@ class Base(DeclarativeBase):
     pass
 
 
+class Organization(Base):
+    """A customer organisation on a shared multi-org deployment.
+
+    Org-owned resources carry an `org_id`; users belong to exactly one org
+    except platform operators (`users.org_id IS NULL`). A single-customer
+    deployment simply has one org (the migration backfills `default`) -- the
+    same code serves both deployment models. See
+    docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md.
+    """
+
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(unique=True)
+    display_name: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class User(Base):
-    """A simple per-deployment login (Phase 3)."""
+    """A login. Belongs to an organization, or is a platform operator (org NULL)."""
 
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Usernames stay globally unique across orgs: the JWT `sub` claim and
+    # per-user memory both key on the bare username.
     username: Mapped[str] = mapped_column(unique=True)
     password_hash: Mapped[str]
     # Admins can reach the Advanced config page and the memory-management UI
     # (see auth_api.get_current_admin). Granted only via the `ui.backend.admin`
     # operator CLI -- never from registration or an env username match.
     is_admin: Mapped[bool] = mapped_column(default=False)
+    # NULL = platform operator (not part of any customer org).
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
@@ -43,9 +65,11 @@ class AgentRecord(Base):
     """An Agent's `raw` config (the technical fields from `AgentSpec.to_raw()`)."""
 
     __tablename__ = "agents"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_agents_org_id_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
@@ -55,9 +79,11 @@ class TeamRecord(Base):
     """A Team's `raw` config (the technical fields from `TeamSpec.to_raw()`)."""
 
     __tablename__ = "teams"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_teams_org_id_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
@@ -67,9 +93,11 @@ class KnowledgeBaseRecord(Base):
     """A KnowledgeBase's `raw` config (the technical fields from `KnowledgeBaseSpec.to_raw()`)."""
 
     __tablename__ = "knowledge_bases"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_knowledge_bases_org_id_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
@@ -79,9 +107,14 @@ class SkillRecord(Base):
     """A Skill's `raw` config (the technical fields from `SkillSpec.to_raw()`)."""
 
     __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_skills_org_id_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
+    # NULL = platform built-in skill, visible to every org (e.g. the seeded
+    # email_triage_reply); non-null = that org's own skill, which shadows a
+    # same-named built-in for that org.
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
@@ -92,9 +125,11 @@ class WorkflowRecord(Base):
     i.e. `Specification.to_raw()`) plus its lifecycle status."""
 
     __tablename__ = "workflows"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_workflows_org_id_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     # draft | ready_for_testing | deployed -- mirrors the Solution/Testing/
     # Deployment stages of docs/team_builder_methodology.md.
@@ -124,6 +159,7 @@ class BuilderSession(Base):
     specification_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     # intent | requirements | spec | solution | testing | deployed
     status: Mapped[str] = mapped_column(default="intent")
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     feedback_history: Mapped[list[Any]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
@@ -146,6 +182,7 @@ class Run(Base):
     builder_session_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("builder_sessions.id"), nullable=True
     )
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
@@ -175,6 +212,8 @@ class UsageRecord(Base):
     input_tokens: Mapped[int] = mapped_column(default=0)
     output_tokens: Mapped[int] = mapped_column(default=0)
     cost_estimate: Mapped[Optional[float]] = mapped_column(nullable=True)
+    # Denormalized from the run's org for per-customer aggregation.
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 

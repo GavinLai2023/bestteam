@@ -6,6 +6,7 @@ pytest.importorskip("sqlalchemy")
 
 from ui.backend import admin as admin_cli
 from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.orgs import create_org, get_org_by_name
 from ui.backend.db.users import create_user, get_user_by_username
 
 
@@ -50,3 +51,73 @@ def test_promote_unknown_user_errors(session_local):
     # argparse.error() exits with SystemExit(2).
     with pytest.raises(SystemExit):
         admin_cli.main(["promote", "ghost"])
+
+
+# ---------------------------------------------------------------------------
+# Org provisioning (create-org / list-orgs / create-user)
+# ---------------------------------------------------------------------------
+
+def _patch_password(monkeypatch, password="pw"):
+    monkeypatch.setattr(admin_cli.getpass, "getpass", lambda prompt="": password)
+
+
+def test_create_org_and_list_orgs(session_local, capsys):
+    assert admin_cli.main(["create-org", "acme", "--display-name", "Acme Corp"]) == 0
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        assert org is not None
+        assert org.display_name == "Acme Corp"
+
+    capsys.readouterr()
+    admin_cli.main(["list-orgs"])
+    out = capsys.readouterr().out
+    assert "acme (Acme Corp)" in out
+
+
+def test_create_duplicate_org_errors(session_local):
+    admin_cli.main(["create-org", "acme"])
+    with pytest.raises(SystemExit):
+        admin_cli.main(["create-org", "acme"])
+
+
+def test_create_user_in_org(session_local, monkeypatch):
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+
+    assert admin_cli.main(["create-user", "alice", "--org", "acme"]) == 0
+    with session_local() as db:
+        user = get_user_by_username(db, "alice")
+        assert user is not None
+        assert user.org_id == get_org_by_name(db, "acme").id
+        assert user.is_admin is False
+
+
+def test_create_user_defaults_to_default_org(session_local, monkeypatch):
+    with session_local() as db:
+        create_org(db, "default")
+    _patch_password(monkeypatch)
+
+    admin_cli.main(["create-user", "bob"])
+    with session_local() as db:
+        assert get_user_by_username(db, "bob").org_id == get_org_by_name(db, "default").id
+
+
+def test_create_platform_user_has_no_org(session_local, monkeypatch):
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+    with session_local() as db:
+        assert get_user_by_username(db, "op").org_id is None
+
+
+def test_create_user_unknown_org_errors(session_local, monkeypatch):
+    _patch_password(monkeypatch)
+    with pytest.raises(SystemExit):
+        admin_cli.main(["create-user", "alice", "--org", "ghost"])
+
+
+def test_create_user_password_mismatch_errors(session_local, monkeypatch):
+    admin_cli.main(["create-org", "acme"])
+    answers = iter(["pw1", "pw2"])
+    monkeypatch.setattr(admin_cli.getpass, "getpass", lambda prompt="": next(answers))
+    with pytest.raises(SystemExit):
+        admin_cli.main(["create-user", "alice", "--org", "acme"])

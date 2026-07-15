@@ -35,6 +35,7 @@ def test_init_db_creates_all_tables():
 
     tables = set(inspect(engine).get_table_names())
     assert tables == {
+        "organizations",
         "users",
         "agents",
         "teams",
@@ -61,6 +62,36 @@ def test_workflow_and_agent_records_round_trip_json_config(db_session):
     assert fetched_agent.config == {"role": "Support", "goal": "Help", "model": "fake:hi"}
     assert fetched_workflow.status == "draft"
     assert fetched_workflow.config["workflow"] == {"steps": []}
+
+
+def test_same_name_allowed_in_two_orgs_but_not_within_one(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    from ui.backend.db.orgs import create_org
+
+    org_a = create_org(db_session, "org_a")
+    org_b = create_org(db_session, "org_b")
+
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_b.id))
+    db_session.commit()  # same name in two orgs: fine
+
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
+    with pytest.raises(IntegrityError):
+        db_session.commit()  # duplicate within one org: rejected
+    db_session.rollback()
+
+
+def test_organization_round_trip(db_session):
+    from ui.backend.db.orgs import create_org, get_org_by_name, seed_default_org
+
+    create_org(db_session, "acme", display_name="Acme Corp")
+    fetched = get_org_by_name(db_session, "acme")
+    assert fetched.display_name == "Acme Corp"
+
+    seed_default_org(db_session)
+    seed_default_org(db_session)  # idempotent
+    assert get_org_by_name(db_session, "default") is not None
 
 
 def test_create_session_starts_in_intent_stage(db_session):
