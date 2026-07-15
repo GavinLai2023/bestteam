@@ -175,10 +175,12 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   may add a near-duplicate note (BM25 surfaces the most relevant). Consolidation
   is future work.
 - Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
-- No frontend "my memories" management UI (backend only), and no retention,
-  per-user quota, or cleanup/deletion API — records accumulate until the store
-  is manually cleared. `record_run` caps each field at `_MAX_RECORD_CHARS`
-  (CR-022) so one run can't persist megabytes, but total growth is unbounded.
+- An **admin-only** Memory management page (`ui/backend/memory_api.py`,
+  `/api/memory`) lets admins view/search/delete a user's records and clear a
+  user's whole memory, but there's no manual add/edit and no retention,
+  per-user quota, or automated cleanup — records accumulate until an admin
+  clears them. `record_run` caps each field at `_MAX_RECORD_CHARS` (CR-022) so
+  one run can't persist megabytes, but total growth is unbounded.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

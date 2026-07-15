@@ -150,7 +150,60 @@ def test_me_returns_current_user(client):
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"username": "alice"}
+    # New users are non-admin by default; /me reports the role for UI gating.
+    assert resp.json() == {"username": "alice", "is_admin": False}
+
+
+def _make_admin(client, username):
+    from ui.backend.db.models import User
+
+    db_gen = backend_main.app.dependency_overrides[get_db]()
+    db = next(db_gen)
+    try:
+        db.query(User).filter_by(username=username).update({"is_admin": True})
+        db.commit()
+    finally:
+        db_gen.close()
+
+
+def test_me_reports_is_admin_for_admin_user(client):
+    token = client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"}).json()["access_token"]
+    _make_admin(client, "alice")
+
+    resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.json() == {"username": "alice", "is_admin": True}
+
+
+def test_register_honors_admin_env_without_restart(client, monkeypatch):
+    # A user listed in BESTTEAM_ADMIN_USERS who registers after startup becomes
+    # an admin immediately (register reconciles), not only after a restart.
+    monkeypatch.setenv("BESTTEAM_ADMIN_USERS", "boss, other")
+
+    token = client.post("/api/auth/register", json={"username": "boss", "password": "pw"}).json()["access_token"]
+    resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.json() == {"username": "boss", "is_admin": True}
+
+
+def test_reconcile_admins_makes_env_list_source_of_truth():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.users import create_user, get_user_by_username, reconcile_admins
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        create_user(db, "alice", "pw")
+        create_user(db, "bob", "pw")
+
+        reconcile_admins(db, {"alice"})
+        assert get_user_by_username(db, "alice").is_admin is True
+        assert get_user_by_username(db, "bob").is_admin is False
+
+        # Env list is the source of truth: dropping alice demotes her.
+        reconcile_admins(db, set())
+        assert get_user_by_username(db, "alice").is_admin is False
 
 
 def test_me_rejects_invalid_token(client):

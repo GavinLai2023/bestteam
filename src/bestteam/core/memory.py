@@ -96,6 +96,14 @@ class Memory(ABC):
     def delete(self, memory_id: str) -> None:
         """Delete the record with `memory_id` (no-op if absent)."""
 
+    @abstractmethod
+    def user_ids(self) -> List[str]:
+        """Return the distinct `user_id`s that have at least one record."""
+
+    @abstractmethod
+    def delete_user(self, user_id: str) -> int:
+        """Delete all of `user_id`'s records; return how many were removed."""
+
 
 class SqliteBM25Memory(Memory):
     """Default memory store: stdlib SQLite persistence + BM25 keyword search.
@@ -230,6 +238,26 @@ class SqliteBM25Memory(Memory):
     def delete(self, memory_id: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self._conn.commit()
+
+    def user_ids(self) -> List[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT user_id FROM memories ORDER BY user_id"
+        ).fetchall()
+        return [row["user_id"] for row in rows]
+
+    def delete_user(self, user_id: str) -> int:
+        cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        self._conn.commit()
+        return cursor.rowcount
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection.
+
+        The run path keeps one long-lived store per worker thread, but callers
+        that open a store per request (e.g. the admin memory API) should close
+        it to avoid leaking connections.
+        """
+        self._conn.close()
 
 
 # Instructs the extraction model to summarize a run into durable facts. Kept

@@ -104,6 +104,19 @@ export const api = {
   // Auth
   login: (username, password) =>
     request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  me: () => request('/api/auth/me'),
+
+  // Admin: per-user memory management
+  memoryUsers: () => request('/api/memory/users'),
+  memoryRecords: (userId, { query, type } = {}) => {
+    const params = new URLSearchParams()
+    if (query) params.set('query', query)
+    if (type) params.set('type', type)
+    const qs = params.toString()
+    return request(`/api/memory/users/${encodeURIComponent(userId)}/records${qs ? `?${qs}` : ''}`)
+  },
+  deleteMemoryRecord: (id) => request(`/api/memory/records/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  clearUserMemory: (userId) => request(`/api/memory/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
 
   // Monitoring
   listWorkflows: () => request('/api/workflows'),

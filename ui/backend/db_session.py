@@ -16,6 +16,14 @@ from sqlalchemy.orm import Session
 
 from .db import init_db, make_engine, session_factory
 from .db.model_catalog import seed_default_catalog
+from .db.users import reconcile_admins
+
+
+def admin_usernames_from_env() -> list[str]:
+    """Parse `BESTTEAM_ADMIN_USERS` (comma-separated usernames), ignoring blanks."""
+    raw = os.environ.get("BESTTEAM_ADMIN_USERS", "")
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
 
 DB_PATH = Path(os.environ.get("BESTTEAM_DB_PATH", str(Path(__file__).parent / "data" / "bestteam.db")))
 if str(DB_PATH) != ":memory:":
@@ -27,6 +35,8 @@ SessionLocal = session_factory(engine)
 
 with SessionLocal() as _session:
     seed_default_catalog(_session)
+    # Bootstrap admins from the env list (source of truth; idempotent).
+    reconcile_admins(_session, admin_usernames_from_env())
 
 
 def get_db() -> Iterator[Session]:

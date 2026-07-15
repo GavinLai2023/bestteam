@@ -80,8 +80,9 @@ implemented** — don't assume they exist:
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors) — see `src/bestteam/core/AGENTS.md`.
 - **Per-user memory recall is single-stage BM25** (no rerank/expansion),
-  semantic/procedural records have no auto-dedup, and there's no frontend
-  memory-management UI. Disabled by default (`BESTTEAM_MEMORY_DB`) — see
+  semantic/procedural records have no auto-dedup. Admins can view/search/delete
+  a user's memory via the admin-only Memory page (`/api/memory`); no manual
+  add/edit or retention policy. Disabled by default (`BESTTEAM_MEMORY_DB`) — see
   `core/memory.py` and `src/bestteam/core/AGENTS.md`.
 - **Persistent run state**: `RunRegistry` is in-memory only, not yet wired
   to the `runs`/`trace_events` tables — see `ui/backend/db/AGENTS.md`.

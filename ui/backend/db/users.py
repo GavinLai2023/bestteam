@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -32,3 +32,22 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     if user is None or not verify_password(password, user.password_hash):
         return None
     return user
+
+
+def reconcile_admins(db: Session, admin_usernames: Iterable[str]) -> None:
+    """Make `admin_usernames` the source of truth for the `is_admin` flag.
+
+    Every user whose username is in the set becomes an admin; everyone else is
+    demoted. Idempotent -- safe to run on every startup. This is how admins are
+    bootstrapped from `BESTTEAM_ADMIN_USERS` since there's no admin-management
+    UI (see `db_session.py`).
+    """
+    admin_set = set(admin_usernames)
+    changed = False
+    for user in db.query(User).all():
+        should_be_admin = user.username in admin_set
+        if user.is_admin != should_be_admin:
+            user.is_admin = should_be_admin
+            changed = True
+    if changed:
+        db.commit()

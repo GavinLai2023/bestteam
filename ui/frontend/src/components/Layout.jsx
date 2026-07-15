@@ -1,8 +1,10 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useMe } from '../lib/useMe'
 import './Layout.css'
 
 export default function Layout() {
   const navigate = useNavigate()
+  const { isAdmin } = useMe()
 
   const logOut = () => {
     localStorage.removeItem('bestteam_token')
@@ -23,9 +25,16 @@ export default function Layout() {
           <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
             Talk to your team
           </NavLink>
-          <NavLink to="/advanced" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Advanced
-          </NavLink>
+          {isAdmin && (
+            <>
+              <NavLink to="/advanced" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Advanced
+              </NavLink>
+              <NavLink to="/memory" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Memory
+              </NavLink>
+            </>
+          )}
           <button type="button" className="logout-button" onClick={logOut}>
             Log out
           </button>

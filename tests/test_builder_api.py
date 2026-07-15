@@ -85,6 +85,13 @@ def client(tmp_path, monkeypatch):
     try:
         test_client = TestClient(backend_main.app)
         token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
+        # Some builder tests reach the admin-only /api/config surface (KB/model
+        # catalog/workflow reads); promote the fixture user.
+        from ui.backend.db.models import User
+
+        with TestSessionLocal() as db:
+            db.query(User).filter_by(username="test").update({"is_admin": True})
+            db.commit()
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:

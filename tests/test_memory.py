@@ -91,6 +91,32 @@ def test_delete_removes_record():
     assert store.all("alice") == []
 
 
+def test_user_ids_lists_distinct_users_with_memory():
+    store = _store()
+    store.add("alice", EPISODIC, "a1")
+    store.add("alice", SEMANTIC, "a2")
+    store.add("bob", EPISODIC, "b1")
+
+    assert set(store.user_ids()) == {"alice", "bob"}
+    # No memory -> empty.
+    assert _store().user_ids() == []
+
+
+def test_delete_user_removes_all_records_for_that_user_only():
+    store = _store()
+    store.add("alice", EPISODIC, "a1")
+    store.add("alice", SEMANTIC, "a2")
+    store.add("bob", EPISODIC, "b1")
+
+    removed = store.delete_user("alice")
+
+    assert removed == 2
+    assert store.all("alice") == []
+    assert {r.content for r in store.all("bob")} == {"b1"}
+    # Deleting a user with no records is a no-op returning 0.
+    assert store.delete_user("nobody") == 0
+
+
 def test_all_orders_newest_first_and_filters_type():
     store = _store()
     store.add("alice", EPISODIC, "first")
