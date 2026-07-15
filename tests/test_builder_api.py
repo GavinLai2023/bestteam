@@ -125,6 +125,47 @@ _VALID_SPEC = {
 _INVALID_SPEC = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "tools": ["does_not_exist"]}]}
 
 
+def test_builder_sessions_are_org_scoped(client):
+    # Fixes the pre-existing hole where any authenticated user could read any
+    # session by id: sessions belong to the creator's org; cross-org access
+    # is a 404 (existence is not revealed) and lists are scoped.
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "Org A's bot"}
+    ).json()["id"]
+
+    bob_token = create_user_and_login(client, username="bob", org="orgb")
+    bob = {"Authorization": f"Bearer {bob_token}"}
+
+    assert client.get("/api/builder/sessions", headers=bob).json()["sessions"] == []
+    assert client.get(f"/api/builder/sessions/{session_id}", headers=bob).status_code == 404
+    assert (
+        client.post(
+            f"/api/builder/sessions/{session_id}/requirements",
+            json={"requirements": {}},
+            headers=bob,
+        ).status_code
+        == 404
+    )
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy", headers=bob).status_code == 404
+
+    # The owning org still sees and lists it.
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+    assert [s["id"] for s in client.get("/api/builder/sessions").json()["sessions"]] == [session_id]
+
+
+def test_deploy_stamps_workflow_with_session_org(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="support_workflow").one()
+        assert record.org_id == get_org_id()
+
+
 def test_create_session_starts_in_intent_stage(client):
     resp = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot", "as_is_text": "Email today"})
     assert resp.status_code == 200

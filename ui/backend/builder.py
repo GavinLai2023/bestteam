@@ -77,9 +77,13 @@ def _session_to_dict(session: BuilderSession) -> Dict[str, Any]:
     }
 
 
-def _get_session_or_404(db: Session, session_id: str) -> BuilderSession:
+def _get_session_or_404(db: Session, session_id: str, org_id: Optional[int] = None) -> BuilderSession:
+    """Fetch a session, org-scoped: another org's session is a 404 (existence
+    is not revealed). Every subresource route flows through this, so the
+    ownership check covers requirements/specification/solution/test-runs/
+    deploy in one place."""
     session = get_session(db, session_id)
-    if session is None:
+    if session is None or session.org_id != org_id:
         raise HTTPException(status_code=404, detail=f"Unknown builder session '{session_id}'")
     return session
 
@@ -241,30 +245,45 @@ class TestRunRequest(BaseModel):
 
 
 @router.post("")
-def create_builder_session(req: CreateSessionRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def create_builder_session(
+    req: CreateSessionRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
     """Stage 1 (Intent): start a session with the customer's free-text intent/as-is."""
-    session = create_session(db, intent_text=req.intent_text, as_is_text=req.as_is_text)
+    session = create_session(db, intent_text=req.intent_text, as_is_text=req.as_is_text, org_id=org.id)
     return _session_to_dict(session)
 
 
 @router.get("")
-def list_builder_sessions(db: Session = Depends(get_db)) -> Dict[str, Any]:
-    """List builder sessions (most recent first), for an "AI teams I've
-    built" list page. A session with status 'deployed' has a live
+def list_builder_sessions(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """List the org's builder sessions (most recent first), for an "AI teams
+    I've built" list page. A session with status 'deployed' has a live
     WorkflowRecord matching specification_json['name']."""
-    return {"sessions": [_session_to_dict(s) for s in list_sessions(db)]}
+    return {"sessions": [_session_to_dict(s) for s in list_sessions(db, org_id=org.id)]}
 
 
 @router.get("/{session_id}")
-def get_builder_session(session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return _session_to_dict(_get_session_or_404(db, session_id))
+def get_builder_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    return _session_to_dict(_get_session_or_404(db, session_id, org.id))
 
 
 @router.post("/{session_id}/requirements")
-def submit_requirements(session_id: str, req: RequirementsRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def submit_requirements(
+    session_id: str,
+    req: RequirementsRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
     """Stage 2 (Requirements): generate (via `model`) or confirm (via `requirements`)
     a structured requirements summary."""
-    session = _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id, org.id)
 
     if req.requirements is not None:
         try:
@@ -295,7 +314,7 @@ def submit_specification(
 ) -> Dict[str, Any]:
     """Stage 3 (Specification): generate (via `model`) or accept (via `specification`)
     a team design, validated through `_build_workflow` before it's stored."""
-    session = _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id, org.id)
     source = _source_for(session_id)
 
     if req.specification is not None:
@@ -343,7 +362,7 @@ def submit_solution_feedback(
     """Stage 4 (Solution): refine the Specification with customer feedback,
     either by re-running the Solution Architect (`model`) or accepting a
     manually-edited Specification (`specification`)."""
-    session = _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id, org.id)
     source = _source_for(session_id)
 
     if req.specification is not None:
@@ -390,7 +409,7 @@ async def create_test_run(
 ) -> Dict[str, str]:
     """Stage 5 (Testing): run the validated Specification in the sandbox via
     the same `Workflow.stream()`/`RunRegistry` machinery as `/api/runs`."""
-    session = _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
         raise HTTPException(status_code=400, detail="Generate a specification before testing")
 
@@ -408,8 +427,10 @@ async def create_test_run(
 
     update_session(db, session_id, status="testing")
 
-    run = registry.create(spec.name, req.input)
-    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind())
+    # Sandbox runs carry the org (so their streams are org-guarded like real
+    # runs) but no user_id -- test runs never touch per-user memory.
+    run = registry.create(spec.name, req.input, org_id=org.id)
+    _executor.submit(run_in_background, run.id, workflow, req.input, engine=db.get_bind(), org_id=org.id)
     return {"run_id": run.id}
 
 
@@ -421,7 +442,7 @@ def deploy_session(
 ) -> Dict[str, Any]:
     """Stage 6 (Deployment): persist the validated Specification as a
     `WorkflowRecord` (`status=deployed`) so `_get_workflow()` picks it up."""
-    session = _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
         raise HTTPException(status_code=400, detail="Generate a specification before deploying")
 
