@@ -96,13 +96,11 @@ class Memory(ABC):
     def delete(self, memory_id: str) -> None:
         """Delete the record with `memory_id` (no-op if absent)."""
 
-    @abstractmethod
-    def user_ids(self) -> List[str]:
-        """Return the distinct `user_id`s that have at least one record."""
-
-    @abstractmethod
-    def delete_user(self, user_id: str) -> int:
-        """Delete all of `user_id`'s records; return how many were removed."""
+    # NOTE: `user_ids`/`delete_user`/`user_summaries`/`close` are admin/management
+    # operations used only by the backend's memory API. They're intentionally
+    # NOT abstract here so existing third-party `Memory` implementations (which
+    # only implement add/search/all/delete) keep working; the admin API depends
+    # on the concrete `SqliteBM25Memory`, not this ABC.
 
 
 class SqliteBM25Memory(Memory):
@@ -192,7 +190,9 @@ class SqliteBM25Memory(Memory):
             )
         return records
 
-    def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
+    def all(
+        self, user_id: str, types: Optional[Sequence[str]] = None, limit: Optional[int] = None
+    ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
         if types:
@@ -200,6 +200,9 @@ class SqliteBM25Memory(Memory):
             sql += f" AND type IN ({placeholders})"
             params.extend(types)
         sql += " ORDER BY created_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return self._rows_to_records(rows)
 
@@ -244,6 +247,27 @@ class SqliteBM25Memory(Memory):
             "SELECT DISTINCT user_id FROM memories ORDER BY user_id"
         ).fetchall()
         return [row["user_id"] for row in rows]
+
+    def user_summaries(self) -> List[Dict[str, Any]]:
+        """Per-user record counts by type, via one aggregate query.
+
+        Returns ``[{"user_id", "episodic", "semantic", "procedural", "total"}]``
+        without loading record content -- lets the admin API list users cheaply
+        instead of scanning every record per user.
+        """
+        rows = self._conn.execute(
+            "SELECT user_id, type, COUNT(*) AS n FROM memories GROUP BY user_id, type"
+        ).fetchall()
+        summaries: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            entry = summaries.setdefault(
+                row["user_id"],
+                {"user_id": row["user_id"], EPISODIC: 0, SEMANTIC: 0, PROCEDURAL: 0, "total": 0},
+            )
+            if row["type"] in (EPISODIC, SEMANTIC, PROCEDURAL):
+                entry[row["type"]] = row["n"]
+            entry["total"] += row["n"]
+        return [summaries[uid] for uid in sorted(summaries)]
 
     def delete_user(self, user_id: str) -> int:
         cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))

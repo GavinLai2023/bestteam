@@ -90,11 +90,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   in `main.py` and router-level to `/api/builder/sessions` (`builder.py`). Also
   exports `get_current_admin` (same, but 403s a non-admin `User`), which
   router-level guards the **admin-only** surfaces: `/api/config/*` (`crud.py`)
-  and `/api/memory/*` (`memory_api.py`). Admins are bootstrapped from
-  `BESTTEAM_ADMIN_USERS` (comma-separated usernames) reconciled onto the
-  `users.is_admin` column at engine first-use (`db_session.py`;
-  `db/users.py::reconcile_admins`, env is source-of-truth). `/api/health`
-  and `/api/auth/*` stay public;
+  and `/api/memory/*` (`memory_api.py`). Registration always creates a non-admin
+  user; admin is granted **only** via the operator CLI
+  (`python -m ui.backend.admin promote <username>`,
+  `db/users.py::set_admin_status`) — never from an unauthenticated username
+  match, and never read at import (so an existing DB predating the `is_admin`
+  migration still boots). `/api/health` and `/api/auth/*` stay public;
   `/api/runs/{run_id}/stream` requires the same bearer token passed as a
   `?token=` query parameter (browsers can't set custom headers when opening a
   WebSocket), validated with the same `decode_access_token`/

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -34,20 +34,17 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     return user
 
 
-def reconcile_admins(db: Session, admin_usernames: Iterable[str]) -> None:
-    """Make `admin_usernames` the source of truth for the `is_admin` flag.
+def set_admin_status(db: Session, username: str, is_admin: bool) -> User:
+    """Promote/demote a single existing user. Raises `ValueError` if unknown.
 
-    Every user whose username is in the set becomes an admin; everyone else is
-    demoted. Idempotent -- safe to run on every startup. This is how admins are
-    bootstrapped from `BESTTEAM_ADMIN_USERS` since there's no admin-management
-    UI (see `db_session.py`).
+    This is the only way to grant admin -- there's no auto-promotion from an env
+    list or public registration (which would let an attacker pre-claim a
+    configured username). Invoked by the `ui.backend.admin` operator CLI so the
+    first admin is provisioned deliberately, out-of-band.
     """
-    admin_set = set(admin_usernames)
-    changed = False
-    for user in db.query(User).all():
-        should_be_admin = user.username in admin_set
-        if user.is_admin != should_be_admin:
-            user.is_admin = should_be_admin
-            changed = True
-    if changed:
-        db.commit()
+    user = get_user_by_username(db, username)
+    if user is None:
+        raise ValueError(f"No such user: {username!r}")
+    user.is_admin = is_admin
+    db.commit()
+    return user

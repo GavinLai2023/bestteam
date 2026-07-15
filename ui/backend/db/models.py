@@ -33,7 +33,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(unique=True)
     password_hash: Mapped[str]
     # Admins can reach the Advanced config page and the memory-management UI
-    # (see auth_api.get_current_admin). Bootstrapped from BESTTEAM_ADMIN_USERS.
+    # (see auth_api.get_current_admin). Granted only via the `ui.backend.admin`
+    # operator CLI -- never from registration or an env username match.
     is_admin: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 

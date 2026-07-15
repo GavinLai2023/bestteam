@@ -20,7 +20,6 @@ from typing import Iterator, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from bestteam import SqliteBM25Memory
-from bestteam.core.memory import EPISODIC, PROCEDURAL, SEMANTIC
 
 from .auth_api import get_current_admin
 
@@ -55,27 +54,18 @@ def _require_store(store: Optional[SqliteBM25Memory]) -> SqliteBM25Memory:
     return store
 
 
+# Upper bound on records returned per request. Memory retention is unbounded, so
+# the list/search endpoints cap their response rather than dumping a whole store.
+_MAX_RECORDS = 1000
+_DEFAULT_RECORDS = 200
+
+
 @router.get("/users")
 def list_users(store: Optional[SqliteBM25Memory] = Depends(get_memory_store)) -> dict:
     if store is None:
         return {"enabled": False, "users": []}
-    users = []
-    for user_id in store.user_ids():
-        records = store.all(user_id)
-        counts = {EPISODIC: 0, SEMANTIC: 0, PROCEDURAL: 0}
-        for record in records:
-            if record.type in counts:
-                counts[record.type] += 1
-        users.append(
-            {
-                "user_id": user_id,
-                "episodic": counts[EPISODIC],
-                "semantic": counts[SEMANTIC],
-                "procedural": counts[PROCEDURAL],
-                "total": len(records),
-            }
-        )
-    return {"enabled": True, "users": users}
+    # One aggregate query (GROUP BY) instead of scanning every record per user.
+    return {"enabled": True, "users": store.user_summaries()}
 
 
 @router.get("/users/{user_id}/records")
@@ -83,15 +73,16 @@ def get_user_records(
     user_id: str,
     query: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
+    limit: int = Query(_DEFAULT_RECORDS, ge=1, le=_MAX_RECORDS),
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
     if store is None:
         return {"enabled": False, "records": []}
     types = [type] if type else None
     if query:
-        records = store.search(user_id, query, types=types)
+        records = store.search(user_id, query, types=types, top_k=limit)
     else:
-        records = store.all(user_id, types=types)
+        records = store.all(user_id, types=types, limit=limit)
     return {"enabled": True, "records": [dataclasses.asdict(r) for r in records]}
 
 

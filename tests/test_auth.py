@@ -175,35 +175,42 @@ def test_me_reports_is_admin_for_admin_user(client):
     assert resp.json() == {"username": "alice", "is_admin": True}
 
 
-def test_register_honors_admin_env_without_restart(client, monkeypatch):
-    # A user listed in BESTTEAM_ADMIN_USERS who registers after startup becomes
-    # an admin immediately (register reconciles), not only after a restart.
-    monkeypatch.setenv("BESTTEAM_ADMIN_USERS", "boss, other")
-
-    token = client.post("/api/auth/register", json={"username": "boss", "password": "pw"}).json()["access_token"]
+def test_register_never_grants_admin(client):
+    # Registration is public; a new account must always be non-admin regardless
+    # of its username. Admin is granted only out-of-band via the operator CLI.
+    token = client.post("/api/auth/register", json={"username": "admin", "password": "pw"}).json()["access_token"]
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "boss", "is_admin": True}
+    assert resp.json() == {"username": "admin", "is_admin": False}
 
 
-def test_reconcile_admins_makes_env_list_source_of_truth():
+def test_set_admin_status_promotes_and_demotes():
     from ui.backend.db import init_db, make_engine, session_factory
-    from ui.backend.db.users import create_user, get_user_by_username, reconcile_admins
+    from ui.backend.db.users import create_user, get_user_by_username, set_admin_status
 
     engine = make_engine(":memory:")
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
         create_user(db, "alice", "pw")
-        create_user(db, "bob", "pw")
 
-        reconcile_admins(db, {"alice"})
+        set_admin_status(db, "alice", True)
         assert get_user_by_username(db, "alice").is_admin is True
-        assert get_user_by_username(db, "bob").is_admin is False
 
-        # Env list is the source of truth: dropping alice demotes her.
-        reconcile_admins(db, set())
+        set_admin_status(db, "alice", False)
         assert get_user_by_username(db, "alice").is_admin is False
+
+
+def test_set_admin_status_rejects_unknown_user():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.users import set_admin_status
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        with pytest.raises(ValueError, match="No such user"):
+            set_admin_status(db, "ghost", True)
 
 
 def test_me_rejects_invalid_token(client):

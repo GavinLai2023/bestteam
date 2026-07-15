@@ -146,11 +146,16 @@ knowledge base — both now import `tokenize`/`significant_terms` from
 - **`Memory` ABC** — `add`/`search`/`all`/`delete` over `MemoryRecord`
   (`id, user_id, type, content, metadata, created_at`). The old
   `remember`/`recall` key-value stub and `InMemoryStore` were removed (unused).
+  The admin/management operations (`user_ids`, `user_summaries`, `delete_user`,
+  `close`) are **not** on the ABC — they're concrete on `SqliteBM25Memory` only,
+  so a third-party store implementing just the four core methods still works.
 - **`SqliteBM25Memory`** — the default store: stdlib `sqlite3` persistence
   (own connection + DB file, no SQLAlchemy) + `rank-bm25` keyword search over
   `content`, using the same overlap-then-score ranking as
   `LocalFolderKnowledgeBase.query`. Requires `bestteam[tools-rag]`; raises
-  `ConfigurationError` otherwise (mirrors the KB).
+  `ConfigurationError` otherwise (mirrors the KB). Adds management helpers used
+  by the admin API: `user_ids()`, `user_summaries()` (per-type counts via one
+  `GROUP BY`), `all(..., limit=)`, `delete_user()`, and `close()`.
 - **`MemoryManager`** — the execution-path glue. `recall_preamble(user_id,
   query)` formats the top search hits into a system-prompt block (`""` if none);
   `record_run(user_id, input, output)` always writes one **episodic** record

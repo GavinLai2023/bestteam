@@ -117,6 +117,34 @@ def test_delete_user_removes_all_records_for_that_user_only():
     assert store.delete_user("nobody") == 0
 
 
+def test_user_summaries_counts_by_type():
+    store = _store()
+    store.add("alice", EPISODIC, "e1")
+    store.add("alice", EPISODIC, "e2")
+    store.add("alice", SEMANTIC, "s1")
+    store.add("bob", PROCEDURAL, "p1")
+
+    summaries = {s["user_id"]: s for s in store.user_summaries()}
+    assert summaries["alice"] == {
+        "user_id": "alice",
+        "episodic": 2,
+        "semantic": 1,
+        "procedural": 0,
+        "total": 3,
+    }
+    assert summaries["bob"]["procedural"] == 1
+    assert summaries["bob"]["total"] == 1
+
+
+def test_all_respects_limit():
+    store = _store()
+    for i in range(5):
+        store.add("alice", EPISODIC, f"rec {i}")
+
+    assert len(store.all("alice")) == 5
+    assert len(store.all("alice", limit=2)) == 2
+
+
 def test_all_orders_newest_first_and_filters_type():
     store = _store()
     store.add("alice", EPISODIC, "first")

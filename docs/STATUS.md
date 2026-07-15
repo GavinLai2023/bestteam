@@ -62,13 +62,14 @@
   `docs/CODE_REVIEW_TRIAGE.md` (Round 2).
 
 - Admin role + per-user memory management UI: `is_admin` column (Alembic
-  migration + `BESTTEAM_ADMIN_USERS` bootstrap), `get_current_admin` guard now
-  gating **both** the Advanced config page and a new **Memory** page. Admins can
-  list users with per-type record counts, browse/search a user's
-  episodic/semantic/procedural records, delete individual records, and clear a
-  user's whole memory (`ui/backend/memory_api.py`, `/api/memory`; frontend
-  `MemoryPage.jsx` + `RequireAdmin`/`useMe`). No manual add/edit; memory stays
-  opt-in (`BESTTEAM_MEMORY_DB`).
+  migration), granted only via the `ui.backend.admin` operator CLI (no env/
+  username auto-promotion), `get_current_admin` guard now gating **both** the
+  Advanced config page and a new **Memory** page. Admins can list users with
+  per-type record counts (SQL-aggregated), browse/search a user's
+  episodic/semantic/procedural records (bounded response), delete individual
+  records, and clear a user's whole memory (`ui/backend/memory_api.py`,
+  `/api/memory`; frontend `MemoryPage.jsx` + `RequireAdmin`/`useMe`). No manual
+  add/edit; memory stays opt-in (`BESTTEAM_MEMORY_DB`).
 
 ## In Progress
 
