@@ -43,7 +43,9 @@ def create_user_and_login(
     """Provision an org + user directly in the DB, then log in for a token.
 
     org=None creates a platform user (org_id NULL). admin=True promotes the
-    user (mirrors `python -m ui.backend.admin promote`).
+    user (mirrors `python -m ui.backend.admin promote`) -- admins must be
+    platform users (pass org=None), since org members can't be promoted
+    (CR-030: admin is platform-wide).
     """
     with open_test_db() as db:
         org_id = None if org is None else get_or_create_org(db, org).id

@@ -155,6 +155,33 @@ deprecation warning). This is developer-side verification plus the reviewer's
 read-only confirmation; final independent verification on `main` follows the
 **PR #12** merge. CR-029 is a documented scope decision, recorded in the PR body.
 
+## Round 4 (2026-07-16): org multi-tenancy
+
+Scope: an independent, read-only review of the `feat/org-multi-tenancy` branch
+(`912d5b9` vs `main` `704797b`) — the `organizations` model, row-level org
+isolation, operator-only provisioning, and run/builder ownership (**PR #14**).
+The reviewer independently exercised the Alembic upgrade on fresh and simulated
+pre-tenancy databases (backfills confirmed correct) and found no P0 defects.
+Three findings, all confirmed against the code and fixed on the branch.
+
+| ID | Finding | Severity | Resolution | Status |
+|---|---|---|---|---|
+| CR-030 | Org-member promotion granted cross-org platform administration: `promote alice` on an org member set `is_admin=True` while keeping `org_id`, and `get_current_admin` checked only the flag — an org-bound admin could target every org via `/api/config?org=` and `/api/memory` | P1 | Enforced at three layers: `set_admin_status` refuses to promote org members (`ValueError`; the operator creates an org-less account via `create-user --platform` instead); `get_current_admin` requires `is_admin AND org_id IS NULL` (defense in depth for hand-edited/pre-fix rows); the run GET/WS admin passthrough requires the same. Test fixtures split into platform-admin + org-user tokens. `tests/test_auth.py::test_promote_org_member_is_rejected`, `::test_org_bound_admin_flag_does_not_grant_admin_api`, `tests/test_admin_cli.py::test_promote_org_member_errors`, `tests/test_ws_stream.py::test_org_bound_admin_flag_gets_no_cross_org_run_passthrough` | Fixed |
+| CR-031 | Global email capability could expose one customer's mailbox to every tenant: `email_triage_reply` is a NULL-org built-in visible to all orgs, and `BESTTEAM_EMAIL_*` credentials are process-wide — a second org's users could triage the first customer's mailbox. Previously documentation-only (`.env.example` warning) | P1 | `ensure_email_single_org(db, creating=0)` (`db/orgs.py`): hard `RuntimeError` when `BESTTEAM_EMAIL_BACKEND` is set and org count would exceed 1. Wired at backend startup (`db_session.py` bootstrap — refuses to boot) and in the `create-org` CLI (refuses the second org). Interim guard until the per-org secrets store (sub-project 2) exists. `tests/test_db.py::test_email_guard_*`, `tests/test_admin_cli.py::test_create_second_org_errors_when_email_configured` | Fixed |
+| CR-032 | Persisted runs lost the initiating user: the `runs` row carried `org_id` but no initiator column (the in-memory `Run.username` dies on restart), and builder test runs omitted the username even from the registry | P2 | Nullable `runs.username` column (migration `c9d0e1f2a3b4`, guarded add-column; verified on a copy of the real dev DB); `run_in_background(username=)` stamps it — deliberately separate from `user_id` so builder sandbox runs record the initiator without touching per-user memory; `main.create_run` and builder `create_test_run` both pass it. `tests/test_usage_metering.py::test_run_in_background_stamps_usage_and_run_row_with_org`, `tests/test_builder_api.py::test_test_run_executes_validated_specification` | Fixed |
+
+**CR-029 escalation trigger re-checked.** Round 3 rejected pagination on
+`GET /api/memory/users` with "escalate only if the product adds multi-tenancy or
+an unbounded-registration surface". Multi-tenancy has now landed, but public
+registration was *removed* in the same change — every account is
+operator-provisioned, so the distinct-user count stays human-scale. The
+rejection stands.
+
+**Severity notes.** CR-030/CR-031 are P1: both are tenant-isolation boundary
+violations (privilege scope and mailbox confidentiality respectively) on the
+feature whose whole purpose is tenant isolation. CR-032 is P2: an audit/ops gap
+with no confidentiality impact (ownership checks were already org-level).
+
 ## Detailed Codex assessments
 
 ### CR-001 - Public registration plus unrestricted KB paths enables server-file replacement

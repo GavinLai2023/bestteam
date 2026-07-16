@@ -53,6 +53,20 @@ def test_promote_unknown_user_errors(session_local):
         admin_cli.main(["promote", "ghost"])
 
 
+def test_promote_org_member_errors(session_local, monkeypatch):
+    # CR-030: admin is platform-wide, so org members can't be promoted --
+    # the operator creates a separate org-less account (create-user --platform).
+    admin_cli.main(["create-org", "acme"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        create_user(db, "alice", "pw", org_id=org.id)
+
+    with pytest.raises(SystemExit):
+        admin_cli.main(["promote", "alice"])
+    with session_local() as db:
+        assert get_user_by_username(db, "alice").is_admin is False
+
+
 # ---------------------------------------------------------------------------
 # Org provisioning (create-org / list-orgs / create-user)
 # ---------------------------------------------------------------------------
@@ -78,6 +92,18 @@ def test_create_duplicate_org_errors(session_local):
     admin_cli.main(["create-org", "acme"])
     with pytest.raises(SystemExit):
         admin_cli.main(["create-org", "acme"])
+
+
+def test_create_second_org_errors_when_email_configured(session_local, monkeypatch):
+    # CR-031: process-wide email credentials + more than one org would expose
+    # the configured mailbox to every tenant, so create-org refuses.
+    admin_cli.main(["create-org", "acme"])
+    monkeypatch.setenv("BESTTEAM_EMAIL_BACKEND", "imap")
+
+    with pytest.raises(SystemExit):
+        admin_cli.main(["create-org", "globex"])
+    with session_local() as db:
+        assert get_org_by_name(db, "globex") is None
 
 
 def test_create_user_in_org(session_local, monkeypatch):

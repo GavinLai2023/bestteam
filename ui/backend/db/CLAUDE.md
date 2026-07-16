@@ -33,7 +33,9 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   agents' structured outputs; `feedback_history` is an append-only JSON list
   recording each round of customer feedback.
 - `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
-  in-memory state (wired up in Phase 5).
+  in-memory state (wired up in Phase 5). `runs.username` (migration
+  `c9d0e1f2a3b4`) records who started the run (CR-032, audit-only —
+  ownership is org-level via `org_id`).
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
@@ -48,6 +50,9 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   Memory pages; `org_id` (migration `b7c8d9e0f1a2`, NULL = platform
   operator) scopes everything else. Both are granted/assigned only via the
   `ui.backend.admin` operator CLI — there is no public registration.
+  `is_admin` and a non-NULL `org_id` are mutually exclusive (CR-030):
+  `set_admin_status` refuses to promote org members, and the API guards
+  ignore the flag on org-bound rows anyway.
   Usernames stay globally unique across orgs (JWT `sub` + memory keying).
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a

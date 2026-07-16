@@ -94,6 +94,44 @@ def test_organization_round_trip(db_session):
     assert get_org_by_name(db_session, "default") is not None
 
 
+def test_email_guard_rejects_multi_org_with_email_configured(db_session, monkeypatch):
+    # CR-031: BESTTEAM_EMAIL_* configures ONE process-wide mailbox and the
+    # built-in email skill is visible to every org, so a second org would let
+    # another customer read the configured mailbox. Until per-org credentials
+    # exist, that combination must refuse to run.
+    from ui.backend.db.orgs import create_org, ensure_email_single_org, seed_default_org
+
+    seed_default_org(db_session)
+    monkeypatch.setenv("BESTTEAM_EMAIL_BACKEND", "imap")
+
+    ensure_email_single_org(db_session)  # one org: fine
+
+    create_org(db_session, "acme")
+    with pytest.raises(RuntimeError, match="BESTTEAM_EMAIL_BACKEND"):
+        ensure_email_single_org(db_session)
+
+
+def test_email_guard_allows_multi_org_without_email(db_session, monkeypatch):
+    from ui.backend.db.orgs import create_org, ensure_email_single_org, seed_default_org
+
+    monkeypatch.delenv("BESTTEAM_EMAIL_BACKEND", raising=False)
+    seed_default_org(db_session)
+    create_org(db_session, "acme")
+
+    ensure_email_single_org(db_session)  # no email config: multi-org is fine
+
+
+def test_email_guard_counts_an_org_about_to_be_created(db_session, monkeypatch):
+    # The create-org CLI checks BEFORE inserting, passing creating=1.
+    from ui.backend.db.orgs import ensure_email_single_org, seed_default_org
+
+    seed_default_org(db_session)
+    monkeypatch.setenv("BESTTEAM_EMAIL_BACKEND", "graph")
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_EMAIL_BACKEND"):
+        ensure_email_single_org(db_session, creating=1)
+
+
 def test_create_session_starts_in_intent_stage(db_session):
     session = create_session(db_session, intent_text="We need a support bot", as_is_text="Email-based today")
 

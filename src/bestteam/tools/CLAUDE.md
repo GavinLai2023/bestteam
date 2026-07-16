@@ -72,6 +72,9 @@ agent to treat message content as data rather than instructions, and
 `Mail.ReadWrite` **application** permission restricted to the single mailbox
 with an Exchange Application Access Policy. Credentials live in env vars
 (one mailbox per deployment); there is no per-user OAuth or secrets store.
+The UI backend enforces this single-mailbox model against multi-tenancy:
+with `BESTTEAM_EMAIL_BACKEND` set and more than one organization it refuses
+to start (`ui/backend/db/orgs.py::ensure_email_single_org`, CR-031).
 
 Tier 2 tools (SQL executor, Python sandbox), real email *sending*, and
 ambient run-on-new-mail triggering are planned but not yet implemented.

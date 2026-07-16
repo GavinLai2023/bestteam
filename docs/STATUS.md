@@ -108,6 +108,12 @@
   ownership checks. Same code serves per-customer instances (one org) and
   the shared platform (many). DECISIONS.md superseded accordingly. Spec:
   `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
+  Code-review round 4 (CR-030…CR-032, all fixed on the branch): platform
+  admins must be org-less accounts (promotion of org members refused,
+  enforced in `get_current_admin` + run passthrough); multi-org +
+  `BESTTEAM_EMAIL_*` now refuses startup / `create-org` (interim guard until
+  the secrets store); `runs.username` persisted (migration `c9d0e1f2a3b4`).
+  See `docs/CODE_REVIEW_TRIAGE.md` (Round 4).
   Remaining sub-projects: encrypted per-org secrets store (2), per-org
   email/LLM credentials (3), infra hardening/Postgres when scale demands (4).
 

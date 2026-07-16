@@ -118,8 +118,9 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        # /api/config/model-catalog is admin-only; provision an admin user.
-        token = create_user_and_login(test_client, admin=True)
+        # /api/config/model-catalog is admin-only; provision a platform admin
+        # (org=None -- org members can't be admins, CR-030).
+        token = create_user_and_login(test_client, org=None, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:

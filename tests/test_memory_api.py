@@ -43,7 +43,7 @@ def admin_client(monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         c = TestClient(backend_main.app)
-        token = create_user_and_login(c, username="admin", password="pw", admin=True)
+        token = create_user_and_login(c, username="admin", password="pw", org=None, admin=True)
         c.headers["Authorization"] = f"Bearer {token}"
         yield c
     finally:

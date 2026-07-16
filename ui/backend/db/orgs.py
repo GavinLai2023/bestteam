@@ -7,6 +7,7 @@ a fresh single-customer deployment has its one org from the start.
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,31 @@ from sqlalchemy.orm import Session
 from .models import Organization
 
 DEFAULT_ORG_NAME = "default"
+
+
+def ensure_email_single_org(db: Session, creating: int = 0) -> None:
+    """Refuse process-wide email credentials on a multi-org deployment (CR-031).
+
+    `BESTTEAM_EMAIL_*` configures exactly one mailbox for the whole process,
+    and the built-in `email_triage_reply` skill is visible to every org -- so
+    with more than one organization, any tenant's agents could read the
+    configured customer's mailbox. Until the per-org secrets store exists,
+    this combination is a hard error. `creating` counts orgs about to be
+    inserted (the create-org CLI checks before it commits).
+
+    Called at backend startup and from `create-org`; a no-op when
+    `BESTTEAM_EMAIL_BACKEND` is unset.
+    """
+    if not os.environ.get("BESTTEAM_EMAIL_BACKEND", "").strip():
+        return
+    if db.query(Organization).count() + creating > 1:
+        raise RuntimeError(
+            "BESTTEAM_EMAIL_BACKEND is set but this deployment has more than one "
+            "organization. Email credentials are process-wide (one mailbox shared "
+            "by every org), so a multi-org deployment must not configure them -- "
+            "unset the BESTTEAM_EMAIL_* variables, or keep a single organization. "
+            "Per-org email credentials are a planned sub-project (see docs/STATUS.md)."
+        )
 
 
 def create_org(db: Session, name: str, display_name: str = "") -> Organization:

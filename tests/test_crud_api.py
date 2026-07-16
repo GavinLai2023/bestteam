@@ -11,7 +11,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, get_org_id
 from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -51,13 +51,26 @@ def client(tmp_path, monkeypatch):
     try:
         test_client = TestClient(backend_main.app)
         # The Advanced/config API is admin-only; provision the fixture user as
-        # an admin so the existing CRUD tests exercise the endpoints. A
-        # non-admin 403 is covered separately by test_config_forbidden_for_non_admin.
-        token = create_user_and_login(test_client, admin=True)
+        # a platform admin (org=None -- org members can't be admins, CR-030)
+        # so the existing CRUD tests exercise the endpoints. A non-admin 403
+        # is covered separately by test_config_forbidden_for_non_admin.
+        token = create_user_and_login(test_client, org=None, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
+        # Production bootstrap seeds the 'default' org; the org-less admin
+        # fixture user no longer creates it as a side effect, so seed it here
+        # for all the ?org=default requests below.
+        get_org_id("default")
         yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
+
+
+def _org_user_headers(client, username="runner"):
+    # The fixture user is an org-less platform admin, which get_current_org
+    # 403s on org-user surfaces (POST /api/runs) -- run as a 'default' org
+    # member instead.
+    token = create_user_and_login(client, username=username)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_config_forbidden_for_non_admin(client):
@@ -649,7 +662,11 @@ def test_uploaded_kb_is_queryable_by_a_workflow(client):
     put_resp = client.put("/api/config/workflows/policy_test_wf?org=default", json=workflow_config)
     assert put_resp.status_code == 200
 
-    run_resp = client.post("/api/runs", json={"workflow": "policy_test_wf", "input": "How long do refunds take?"})
+    run_resp = client.post(
+        "/api/runs",
+        json={"workflow": "policy_test_wf", "input": "How long do refunds take?"},
+        headers=_org_user_headers(client),
+    )
     assert run_resp.status_code == 200
 
 
@@ -723,7 +740,11 @@ def test_workflow_put_non_list_knowledge_bases_returns_400(client):
 def test_workflow_config_is_runnable_via_get_workflow(client):
     client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
 
-    resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
+    resp = client.post(
+        "/api/runs",
+        json={"workflow": "support_workflow", "input": "hi"},
+        headers=_org_user_headers(client),
+    )
 
     assert resp.status_code == 200
 
@@ -877,7 +898,11 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     # Defensive only: the `client` fixture already clears the cache at setup,
     # and the workflow PUT route never populates `_workflow_cache` itself.
     backend_main._workflow_cache.clear()
-    run_resp = client.post("/api/runs", json={"workflow": "policy_wf", "input": "How long do refunds take?"})
+    run_resp = client.post(
+        "/api/runs",
+        json={"workflow": "policy_wf", "input": "How long do refunds take?"},
+        headers=_org_user_headers(client),
+    )
     assert run_resp.status_code == 200
 
 

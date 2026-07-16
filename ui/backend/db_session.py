@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .db import init_db, make_engine, session_factory
 from .db.model_catalog import seed_default_catalog
-from .db.orgs import seed_default_org
+from .db.orgs import ensure_email_single_org, seed_default_org
 from .skills import seed_default_skills
 
 DB_PATH = Path(os.environ.get("BESTTEAM_DB_PATH", str(Path(__file__).parent / "data" / "bestteam.db")))
@@ -40,6 +40,10 @@ with SessionLocal() as _session:
         seed_default_org(_session)
         seed_default_catalog(_session)
         seed_default_skills(_session)
+        # Multi-org + process-wide email creds would expose one customer's
+        # mailbox to every tenant -- refuse to boot (CR-031). The RuntimeError
+        # deliberately escapes the OperationalError catch below.
+        ensure_email_single_org(_session)
     except OperationalError as _exc:
         warnings.warn(
             "Skipping default-data seeding: the database schema predates the "

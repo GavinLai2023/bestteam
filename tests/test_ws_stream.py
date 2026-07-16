@@ -111,6 +111,30 @@ def test_ws_stream_allows_platform_admin_passthrough(client):
     assert event["type"] == "run_completed"
 
 
+def test_org_bound_admin_flag_gets_no_cross_org_run_passthrough(client):
+    # CR-030 defense in depth: the admin passthrough is for org-less platform
+    # operators only. A User row carrying both is_admin=True and an org_id
+    # (hand-edited DB, pre-fix data) must be treated as a plain org user.
+    from helpers import open_test_db
+    from ui.backend.db.users import get_user_by_username
+
+    run = _completed_run()  # owned by the fixture user's 'default' org
+    bob_token = create_user_and_login(client, username="bob", org="orgb")
+    with open_test_db() as db:
+        user = get_user_by_username(db, "bob")
+        user.is_admin = True  # bypasses the set_admin_status guard on purpose
+        db.commit()
+
+    bob_headers = {"Authorization": f"Bearer {bob_token}"}
+    assert client.get(f"/api/runs/{run.id}", headers=bob_headers).status_code == 404
+
+    ticket = ws_tickets.issue_ticket("bob")
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
+            ws.receive_json()
+    assert exc_info.value.code == 4404
+
+
 def test_get_run_is_org_scoped(client):
     # Fixes the pre-existing hole where any authenticated user could read any
     # run by id: cross-org access is now a 404; platform admins pass through.

@@ -353,6 +353,7 @@ async def create_run(
         engine=db.get_bind(),
         user_id=user.username,
         org_id=org.id,
+        username=user.username,
     )
 
     return {"run_id": run.id}
@@ -362,9 +363,11 @@ async def create_run(
 def get_run(run_id: str, user: User = Depends(get_current_user)):
     run = registry.get(run_id)
     # Cross-org access is a 404, not a 403 -- existence is not revealed.
-    # Platform admins pass (operator debugging); runs with org_id=None (e.g.
+    # Org-less platform admins pass (operator debugging; an org-bound
+    # is_admin flag does NOT qualify, CR-030); runs with org_id=None (e.g.
     # builder sandbox runs) are visible to admins and org-less callers only.
-    if run is None or (run.org_id != user.org_id and not user.is_admin):
+    is_platform_admin = user.is_admin and user.org_id is None
+    if run is None or (run.org_id != user.org_id and not is_platform_admin):
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
     return dataclasses.asdict(run)
 
@@ -398,9 +401,11 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
 
     run = registry.get(run_id)
     # Same close code for "unknown run" and "another org's run" so a probing
-    # client can't distinguish existence (no cross-org oracle). Platform
-    # admins pass through for operator debugging.
-    if run is None or (run.org_id != ws_user.org_id and not ws_user.is_admin):
+    # client can't distinguish existence (no cross-org oracle). Org-less
+    # platform admins pass through for operator debugging (an org-bound
+    # is_admin flag does NOT qualify, CR-030).
+    is_platform_admin = ws_user.is_admin and ws_user.org_id is None
+    if run is None or (run.org_id != ws_user.org_id and not is_platform_admin):
         db.close()
         await websocket.close(code=4404)
         return

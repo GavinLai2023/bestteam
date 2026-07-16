@@ -26,7 +26,7 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db_session import get_db
 from .knowledge_bases import (
     check_path_traversal,
@@ -406,6 +406,7 @@ async def create_test_run(
     req: TestRunRequest,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, str]:
     """Stage 5 (Testing): run the validated Specification in the sandbox via
     the same `Workflow.stream()`/`RunRegistry` machinery as `/api/runs`."""
@@ -428,9 +429,18 @@ async def create_test_run(
     update_session(db, session_id, status="testing")
 
     # Sandbox runs carry the org (so their streams are org-guarded like real
-    # runs) but no user_id -- test runs never touch per-user memory.
-    run = registry.create(spec.name, req.input, org_id=org.id)
-    _executor.submit(run_in_background, run.id, workflow, req.input, engine=db.get_bind(), org_id=org.id)
+    # runs) and record who started them (CR-032), but no user_id -- test runs
+    # never touch per-user memory.
+    run = registry.create(spec.name, req.input, org_id=org.id, username=user.username)
+    _executor.submit(
+        run_in_background,
+        run.id,
+        workflow,
+        req.input,
+        engine=db.get_bind(),
+        org_id=org.id,
+        username=user.username,
+    )
     return {"run_id": run.id}
 
 

@@ -27,12 +27,22 @@ every endpoint follows:
 - Admin surfaces (`/api/config`, `/api/memory`) are platform-wide: lists
   label each item's org and take an optional `?org=` filter; item routes
   require explicit `?org=<name>` (skills may omit it = built-in tier).
+  **Platform admins are org-less accounts** (CR-030): `set_admin_status`
+  refuses to promote org members, and `get_current_admin` + the run
+  GET/stream passthrough require `is_admin AND org_id IS NULL` — an
+  org-bound `is_admin` flag is never honored.
 - Runs and usage_records carry `org_id` (denormalized — the future
   per-customer billing dimension); run GET/stream check org ownership with
-  platform-admin read passthrough. Builder sessions are org-scoped.
-- **Do not set process-wide integration env vars (`BESTTEAM_EMAIL_*`) on a
-  multi-org deployment** — per-org credentials are a future sub-project
-  (encrypted secrets store).
+  platform-admin read passthrough. Builder sessions are org-scoped. Runs
+  also persist `username` — who started them (CR-032, audit-only; ownership
+  stays org-level, and builder sandbox runs record it without a memory
+  `user_id`).
+- Process-wide email env vars (`BESTTEAM_EMAIL_*`) on a multi-org deployment
+  are **refused, not just discouraged** (CR-031):
+  `db/orgs.py::ensure_email_single_org` raises at backend startup and in the
+  `create-org` CLI when `BESTTEAM_EMAIL_BACKEND` is set with more than one
+  org. Per-org credentials are a future sub-project (encrypted secrets
+  store).
 - Memory stays keyed by globally-unique username (no org dimension needed).
 - The isolation test net: `tests/test_org_isolation.py` plus per-surface
   tests in test_crud_api/test_ws_stream/test_builder_api.

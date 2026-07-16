@@ -60,6 +60,7 @@ def run_in_background(
     engine: Optional[Engine] = None,
     user_id: Optional[str] = None,
     org_id: Optional[int] = None,
+    username: Optional[str] = None,
 ) -> None:
     """Drain `Workflow.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
@@ -74,6 +75,10 @@ def run_in_background(
     run recalls that user's memory into every agent's prompt and records the
     run afterward (see `core/memory.py`). Memory is built here, on the worker
     thread, so its SQLite connection is thread-local.
+
+    `username` records who started the run on the persisted row (CR-032,
+    audit); it is separate from `user_id` so builder sandbox runs can keep
+    the initiator without touching per-user memory.
     """
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
@@ -87,7 +92,13 @@ def run_in_background(
             # always exists; its terminal status/output are updated below. This
             # sits inside the try so a persistence failure still yields a
             # terminal event instead of leaving the run stuck "running" (CR-003).
-            run_row = Run(id=run_id, workflow=getattr(workflow, "name", ""), input=input, org_id=org_id)
+            run_row = Run(
+                id=run_id,
+                workflow=getattr(workflow, "name", ""),
+                input=input,
+                org_id=org_id,
+                username=username,
+            )
             db.add(run_row)
             db.commit()
         for event in workflow.stream(input, user_id=user_id, memory=memory):

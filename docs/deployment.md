@@ -9,8 +9,9 @@ FastAPI backend (with its own SQLite database) and the React frontend
 behind Docker Compose.
 
 > **Shared-platform caveat:** the email-tool environment variables
-> (`BESTTEAM_EMAIL_*`) configure ONE mailbox for the whole process — do not
-> set them on a multi-org deployment (per-org credentials are a future
+> (`BESTTEAM_EMAIL_*`) configure ONE mailbox for the whole process — the
+> backend refuses to start (and `create-org` refuses a second org) when they
+> are set on a multi-org deployment (per-org credentials are a future
 > sub-project). The same applies to any other process-wide integration env.
 
 ## 1. Configure environment
@@ -92,6 +93,10 @@ docker compose exec backend python -m ui.backend.admin promote op
 # list current admins:  ... python -m ui.backend.admin list
 # revoke:               ... python -m ui.backend.admin demote <username>
 ```
+
+Only platform accounts (`create-user --platform`, no org) can be promoted:
+admin reaches every org's config, so `promote` refuses org members — create
+a separate org-less account for the person instead.
 
 Admin surfaces (`/api/config`, `/api/memory`) work across orgs — mutations
 target one explicitly via `?org=<name>`. Org-user surfaces (the wizard,

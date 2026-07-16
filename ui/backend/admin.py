@@ -25,7 +25,13 @@ import getpass
 from typing import Optional, Sequence
 
 from .db.models import User
-from .db.orgs import DEFAULT_ORG_NAME, create_org, get_org_by_name, list_orgs
+from .db.orgs import (
+    DEFAULT_ORG_NAME,
+    create_org,
+    ensure_email_single_org,
+    get_org_by_name,
+    list_orgs,
+)
 from .db.users import create_user, set_admin_status
 from .db_session import SessionLocal
 
@@ -80,8 +86,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if args.command == "create-org":
             try:
+                # A second org + process-wide email creds would expose the
+                # configured mailbox to every tenant (CR-031).
+                ensure_email_single_org(db, creating=1)
                 org = create_org(db, args.name, args.display_name)
-            except ValueError as exc:
+            except (RuntimeError, ValueError) as exc:
                 parser.error(str(exc))
             print(f"Created organization '{org.name}'.")
             return 0

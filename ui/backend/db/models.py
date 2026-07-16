@@ -183,6 +183,9 @@ class Run(Base):
         ForeignKey("builder_sessions.id"), nullable=True
     )
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
+    # Who started the run (CR-032) -- informational for audit; ownership is
+    # org-level via org_id. NULL for legacy/pre-fix runs.
+    username: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 

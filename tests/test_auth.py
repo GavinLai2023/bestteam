@@ -168,11 +168,50 @@ def test_me_returns_current_user(client):
 
 
 def test_me_reports_is_admin_for_admin_user(client):
-    token = create_user_and_login(client, username="alice", password="hunter2", admin=True)
+    # Platform admins are org-less accounts: promotion of org members is
+    # rejected (CR-030), so an admin's /me always reports org: None.
+    token = create_user_and_login(client, username="alice", password="hunter2", org=None, admin=True)
 
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "alice", "is_admin": True, "org": "default"}
+    assert resp.json() == {"username": "alice", "is_admin": True, "org": None}
+
+
+def test_promote_org_member_is_rejected():
+    # CR-030: is_admin grants platform-wide admin (all orgs via ?org=), so an
+    # org member must never carry it -- the operator creates a separate
+    # platform account (create-user --platform) instead.
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.users import create_user, get_user_by_username, set_admin_status
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        create_user(db, "alice", "pw", org_id=org.id)
+
+        with pytest.raises(ValueError, match="platform"):
+            set_admin_status(db, "alice", True)
+        assert get_user_by_username(db, "alice").is_admin is False
+
+
+def test_org_bound_admin_flag_does_not_grant_admin_api(client):
+    # CR-030 defense in depth: even if a User row somehow carries both
+    # is_admin=True and an org_id (hand-edited DB, pre-fix data),
+    # get_current_admin must refuse it -- the admin surface reaches every
+    # org's config, so only org-less accounts qualify.
+    from helpers import open_test_db
+    from ui.backend.db.users import get_user_by_username
+
+    token = create_user_and_login(client, username="alice", password="pw", org="acme")
+    with open_test_db() as db:
+        user = get_user_by_username(db, "alice")
+        user.is_admin = True  # bypasses the set_admin_status guard on purpose
+        db.commit()
+
+    resp = client.get("/api/config/agents", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
 
 
 def test_provisioned_user_named_admin_is_not_admin(client):

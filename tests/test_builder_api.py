@@ -85,13 +85,21 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        # Some builder tests reach the admin-only /api/config surface (KB/model
-        # catalog/workflow reads); provision the fixture user as an admin.
-        token = create_user_and_login(test_client, admin=True)
+        # Builder endpoints are org-user surfaces (get_current_org), and org
+        # members can't be admins (CR-030) -- the fixture user is a plain
+        # 'default' org member; the few /api/config touches use a separate
+        # platform-admin token via _admin_headers().
+        token = create_user_and_login(test_client)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
+
+
+def _admin_headers(client):
+    # The admin-only /api/config surface needs an org-less platform admin.
+    token = create_user_and_login(client, username="op", org=None, admin=True)
+    return {"Authorization": f"Bearer {token}"}
 
 
 _VALID_SPEC = {
@@ -386,6 +394,28 @@ def test_test_run_executes_validated_specification(client):
 
     run = client.get(f"/api/runs/{run_id}").json()
     assert run["workflow"] == "support_workflow"
+    # Sandbox runs record who started them (CR-032) -- user_id stays None
+    # (test runs never touch per-user memory), but the initiator is kept.
+    assert run["username"] == "test"
+
+    # ...and the initiator is persisted on the runs row, so it survives a
+    # registry/process loss. The worker thread writes the row shortly after
+    # the POST returns; poll briefly.
+    import time
+
+    from helpers import open_test_db
+    from ui.backend.db.models import Run as RunRow
+
+    deadline = time.time() + 10
+    persisted = None
+    while time.time() < deadline:
+        with open_test_db() as db:
+            row = db.get(RunRow, run_id)
+            persisted = row.username if row is not None else None
+        if persisted is not None:
+            break
+        time.sleep(0.05)
+    assert persisted == "test"
 
 
 def test_deploy_requires_specification(client):
@@ -409,7 +439,9 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     workflows = client.get("/api/workflows").json()["workflows"]
     assert "support_workflow" in workflows
 
-    config = client.get("/api/config/workflows/support_workflow?org=default").json()
+    config = client.get(
+        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+    ).json()
     assert config["status"] == "deployed"
     assert config["config"]["name"] == "support_workflow"
 
@@ -432,6 +464,7 @@ def test_specification_can_reference_existing_knowledge_base_by_name(client, tmp
     resp = client.put(
         "/api/config/knowledge_bases/product_info_kb?org=default",
         json={"path": str(kb_dir), "type": "local_folder"},
+        headers=_admin_headers(client),
     )
     assert resp.status_code == 200
 

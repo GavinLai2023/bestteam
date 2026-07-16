@@ -66,12 +66,15 @@ def get_current_user(
 
 
 def get_current_admin(user: User = Depends(get_current_user)) -> User:
-    """Like `get_current_user`, but requires the user to be an admin.
+    """Like `get_current_user`, but requires a platform admin.
 
     A FastAPI dependency for admin-only surfaces (the Advanced config router and
     the memory-management API). Returns 403 for an authenticated non-admin.
+    Admin surfaces reach every org's data (`?org=` targeting), so only org-less
+    accounts qualify: an org-bound `is_admin` flag (hand-edited DB, pre-CR-030
+    data -- `set_admin_status` refuses to create one) is NOT honored.
     """
-    if not user.is_admin:
+    if not user.is_admin or user.org_id is not None:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return user
 
