@@ -1,9 +1,17 @@
-# Deploying a per-customer instance
+# Deploying bestteam
 
-bestteam is deployed as **one independent instance per customer** (not a
-multi-tenant SaaS) — see `docs/team_builder_methodology.md`. Each instance
-runs the FastAPI backend (with its own SQLite database) and the React
-frontend behind Docker Compose.
+bestteam runs as either a **per-customer instance** or a **shared multi-org
+platform** — the same code serves both (see `docs/DECISIONS.md`,
+"org-scoped multi-tenancy"). A per-customer instance is simply a deployment
+with one organization; a shared platform has one org per customer, each
+provisioned with the operator CLI (step 4). Each deployment runs the
+FastAPI backend (with its own SQLite database) and the React frontend
+behind Docker Compose.
+
+> **Shared-platform caveat:** the email-tool environment variables
+> (`BESTTEAM_EMAIL_*`) configure ONE mailbox for the whole process — do not
+> set them on a multi-org deployment (per-org credentials are a future
+> sub-project). The same applies to any other process-wide integration env.
 
 ## 1. Configure environment
 
@@ -53,32 +61,42 @@ is the canonical way the database schema is created/updated going forward
 (replacing a bare `Base.metadata.create_all()`, which still runs
 automatically as a harmless no-op safety net on a brand-new database).
 
-## 4. Create the first user
+## 4. Provision orgs and users (operator CLI)
 
-There is no public registration UI — create the first login via the API:
+There is **no public registration** — neither a UI nor an API endpoint.
+Organisations and accounts are created deliberately with the operator CLI
+(make sure the migrations in step 3 have run first):
 
 ```bash
-curl -X POST http://localhost:8000/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "<choose-a-strong-password>"}'
-```
+# One org per customer. A single-customer instance can just use the
+# auto-seeded "default" org and skip create-org.
+docker compose exec backend python -m ui.backend.admin create-org acme --display-name "Acme Corp"
 
-This returns an `access_token`. Subsequent users (if needed) can be created
-the same way.
+# Org members (prompts for a password; --org defaults to "default"):
+docker compose exec backend python -m ui.backend.admin create-user alice --org acme
+
+# Yourself, as a platform operator (belongs to no org):
+docker compose exec backend python -m ui.backend.admin create-user op --platform
+
+# list orgs:  ... python -m ui.backend.admin list-orgs
+```
 
 ## 4b. Grant the first admin
 
 New accounts are always non-admin. The **Advanced** config page and the
 per-user **Memory** management page require an admin, granted only with the
-operator CLI (never from an env list or by username match — that would let
-anyone pre-claim `admin` through the open registration endpoint). Make sure the
-migration in step 3 has run (it adds the `users.is_admin` column), then:
+operator CLI (never from an env list or by username match):
 
 ```bash
-docker compose exec backend python -m ui.backend.admin promote admin
+docker compose exec backend python -m ui.backend.admin promote op
 # list current admins:  ... python -m ui.backend.admin list
 # revoke:               ... python -m ui.backend.admin demote <username>
 ```
+
+Admin surfaces (`/api/config`, `/api/memory`) work across orgs — mutations
+target one explicitly via `?org=<name>`. Org-user surfaces (the wizard,
+running workflows) require an org account; a platform operator who wants to
+run workflows creates themselves an org user too.
 
 ## 5. Verify
 

@@ -126,8 +126,11 @@ platform redesign — but it is a real code change, not just configuration.
 - Use a read-only DB role or read-only API token for the connection the tool
   function uses internally.
 - Tenant/customer isolation is the tool function's responsibility — the
-  platform has no multi-tenancy concept (see root `docs/DECISIONS.md`), so
-  never let one deployment's tool function read another customer's data.
+  platform's org scoping (see root `docs/DECISIONS.md`) governs its own DB
+  rows, not what a custom tool's internal connection can reach, so never
+  let one org's tool function read another customer's data. On a shared
+  multi-org deployment, don't wire a custom tool to one customer's backend
+  at all until per-org credentials (secrets store sub-project) exist.
 - A normal "not found" result should be a returned string, not a raised
   exception: `_run_agent`'s tool-calling loop (`adapters/langgraph_adapter.py`)
   catches exceptions and turns them into generic error text fed back to the
