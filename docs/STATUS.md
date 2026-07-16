@@ -125,7 +125,10 @@
 - **Per-user memory recall is single-stage BM25** — no rerank/expansion;
   semantic/procedural records have no auto-dedup. Admin view/search/delete UI
   exists (`/api/memory`), but there's no manual add/edit and no retention/quota
-  policy. See `core/memory.py`.
+  policy. `GET /api/memory/users` is unpaginated (CR-029, deferred P3): fine
+  today (admin-only, opt-in, operator-provisioned accounts), but the
+  shared-platform ceiling is the sum of memory-enabled users across all orgs
+  — add a limit/cursor if a customer reaches ~hundreds. See `core/memory.py`.
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain

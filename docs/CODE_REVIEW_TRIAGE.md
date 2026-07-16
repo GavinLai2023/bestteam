@@ -137,15 +137,16 @@ enforces `get_current_admin` on every `/api/config` and `/api/memory` call
 | CR-026 | Fresh install had no admin path once auto-promotion was removed | P1 | Operator CLI (`python -m ui.backend.admin promote <username>`) + documented post-migration step in `docs/deployment.md`. `tests/test_admin_cli.py` | Verified |
 | CR-027 | `Memory` ABC compatibility break: management methods added as abstract would break a legacy four-method `Memory` implementation | P2 | `user_ids`/`user_summaries`/`delete_user`/`close` are concrete on `SqliteBM25Memory` only, not on the ABC, so a four-method store still instantiates. `tests/test_memory.py` management-method coverage | Verified |
 | CR-028 | Unbounded admin reads: browse dumped a whole store; search scanned every record (built a full BM25 index) regardless of `limit` | P2 | Browse capped (`_MAX_RECORDS`/`_DEFAULT_RECORDS`); user counts via one `GROUP BY` (`user_summaries()`); `search(max_candidates=)` bounds the candidate scan (admin API passes `_MAX_SEARCH_SCAN`), so both response and work are bounded. Per-run recall's full-store scan is unchanged by default (`max_candidates=None`). `tests/test_memory.py::test_search_bounds_candidate_scan`, `tests/test_memory_api.py::test_search_endpoint_bounds_scan` | Verified |
-| CR-029 | Admin user-list (`GET /api/memory/users`) has no pagination/cursor: aggregates all rows, builds every summary in Python | P3 | **Rejected (out of scope / YAGNI).** The user *list* is human-scale on a no-multi-tenancy single-deployment tool (one row per distinct human who ran a workflow; `user_summaries` lists only users who already have memory, and seeding memory costs a workflow run per account). A bare `LIMIT` would hide users from the admin — strictly worse for a management tool — and cursor pagination is disproportionate scope for a simple admin UI. The machine-amplified *per-user record* dimension is the one that needed bounding (CR-028) and got it | Rejected |
+| CR-029 | Admin user-list (`GET /api/memory/users`) has no pagination/cursor: aggregates all rows, builds every summary in Python | P3 | **Deferred (out of scope for now).** Not exploitable today: admin-only endpoint, opt-in store (disabled by default), and the DB work is already bounded by the `GROUP BY` in `user_summaries` (CR-028) — the only unbounded part is building N summary dicts into one response. Every account is operator-provisioned (public registration was removed in Round 4), and `user_summaries` lists only users who already have memory (a workflow run per account), so there is no cheap/unbounded way to inflate the list. A bare `LIMIT` would hide users from the admin (strictly worse for a management tool) and cursor pagination is disproportionate scope for a simple admin UI. **Reclassified from Rejected → Deferred in Round 4** (see the re-check note below): the shared-platform ceiling raised the response size, so this is now a tracked scalability watch-item rather than a permanent no | Deferred |
 
 **Severity notes.** CR-024–026 are P1 because they concern the admin
 authorization boundary itself (who becomes admin, and whether the app boots to
 enforce it). CR-027/CR-028 are P2: an SDK-contract regression and a
-resource-amplification vector on an admin-only, opt-in surface. CR-029 is P3 and
-rejected on the scaling-profile distinction above — escalate only if the product
-adds multi-tenancy or an unbounded-registration surface that can inflate the
-distinct-user count without per-account compute cost.
+resource-amplification vector on an admin-only, opt-in surface. CR-029 is P3;
+originally rejected on the scaling-profile distinction above, and reclassified to
+**Deferred** in Round 4 once multi-tenancy raised the response-size ceiling (see
+the Round-4 re-check note) — escalate only if a customer reaches roughly hundreds
+of memory-enabled users or a self-service provisioning surface is added.
 
 **Verification (2026-07-15).** CR-024–028 marked Verified: the independent
 reviewer confirmed CR-024–027 fixed and CR-028's record browse/search bounded
@@ -170,12 +171,22 @@ Three findings, all confirmed against the code and fixed on the branch.
 | CR-031 | Global email capability could expose one customer's mailbox to every tenant: `email_triage_reply` is a NULL-org built-in visible to all orgs, and `BESTTEAM_EMAIL_*` credentials are process-wide — a second org's users could triage the first customer's mailbox. Previously documentation-only (`.env.example` warning) | P1 | `ensure_email_single_org(db, creating=0)` (`db/orgs.py`): hard `RuntimeError` when `BESTTEAM_EMAIL_BACKEND` is set and org count would exceed 1. Wired at backend startup (`db_session.py` bootstrap — refuses to boot) and in the `create-org` CLI (refuses the second org). Interim guard until the per-org secrets store (sub-project 2) exists. `tests/test_db.py::test_email_guard_*`, `tests/test_admin_cli.py::test_create_second_org_errors_when_email_configured` | Fixed |
 | CR-032 | Persisted runs lost the initiating user: the `runs` row carried `org_id` but no initiator column (the in-memory `Run.username` dies on restart), and builder test runs omitted the username even from the registry | P2 | Nullable `runs.username` column (migration `c9d0e1f2a3b4`, guarded add-column; verified on a copy of the real dev DB); `run_in_background(username=)` stamps it — deliberately separate from `user_id` so builder sandbox runs record the initiator without touching per-user memory; `main.create_run` and builder `create_test_run` both pass it. `tests/test_usage_metering.py::test_run_in_background_stamps_usage_and_run_row_with_org`, `tests/test_builder_api.py::test_test_run_executes_validated_specification` | Fixed |
 
-**CR-029 escalation trigger re-checked.** Round 3 rejected pagination on
-`GET /api/memory/users` with "escalate only if the product adds multi-tenancy or
-an unbounded-registration surface". Multi-tenancy has now landed, but public
-registration was *removed* in the same change — every account is
-operator-provisioned, so the distinct-user count stays human-scale. The
-rejection stands.
+**CR-029 escalation trigger re-checked — reclassified Rejected → Deferred (P3).**
+Round 3's trigger was "escalate only if the product adds multi-tenancy **or an
+unbounded-registration surface that can inflate the distinct-user count without
+per-account compute cost**". Both halves matter, and the half that would make
+the count grow cheaply and without bound — public registration — was *removed*
+in this same change. Every account is now operator-provisioned and memory is
+opt-in, so there is no cheap unbounded growth path, and the DB work is already
+bounded by CR-028's `GROUP BY`. That is why it is **not** a release blocker and
+why pagination is **not** being built now. What *did* change: multi-tenancy
+raised the ceiling — on a shared platform the list is the sum of memory-enabled
+users across all customer orgs, not one org's headcount — so a flat "Rejected"
+is now slightly too strong. Reclassified to **Deferred**: revisit (add a `LIMIT`
++ cursor, or an operational cap) if a customer reaches roughly hundreds of
+memory-enabled users, or if any self-service account-provisioning surface is
+ever added. This adjustment came out of the Round-4 release review; no code
+change accompanies it.
 
 **Severity notes.** CR-030/CR-031 are P1: both are tenant-isolation boundary
 violations (privilege scope and mailbox confidentiality respectively) on the
