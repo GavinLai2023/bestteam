@@ -1,4 +1,4 @@
-"""CRUD for `User` -- the per-deployment login (Phase 3, no multi-tenancy)."""
+"""CRUD for `User` -- logins on a (possibly multi-org) deployment."""
 
 from __future__ import annotations
 
@@ -10,12 +10,16 @@ from ..auth import hash_password, verify_password
 from .models import User
 
 
-def create_user(db: Session, username: str, password: str) -> User:
-    """Create a new user. Raises `ValueError` if `username` is already taken."""
+def create_user(db: Session, username: str, password: str, org_id: Optional[int] = None) -> User:
+    """Create a new user (org member, or platform operator when org_id is None).
+
+    Raises `ValueError` if `username` is already taken (usernames are globally
+    unique across orgs -- JWT `sub` and per-user memory key on them).
+    """
     if get_user_by_username(db, username) is not None:
         raise ValueError(f"Username '{username}' is already taken")
 
-    user = User(username=username, password_hash=hash_password(password))
+    user = User(username=username, password_hash=hash_password(password), org_id=org_id)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -41,10 +45,19 @@ def set_admin_status(db: Session, username: str, is_admin: bool) -> User:
     list or public registration (which would let an attacker pre-claim a
     configured username). Invoked by the `ui.backend.admin` operator CLI so the
     first admin is provisioned deliberately, out-of-band.
+
+    Admin is platform-wide (every org's config via `?org=`), so org members
+    can't be promoted (CR-030) -- the operator creates a separate org-less
+    account (`create-user --platform`) instead. Demotion is always allowed.
     """
     user = get_user_by_username(db, username)
     if user is None:
         raise ValueError(f"No such user: {username!r}")
+    if is_admin and user.org_id is not None:
+        raise ValueError(
+            f"User {username!r} belongs to an organization; admin is platform-wide, "
+            "so create a separate platform account (create-user --platform) instead"
+        )
     user.is_admin = is_admin
     db.commit()
     return user

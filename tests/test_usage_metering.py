@@ -136,6 +136,36 @@ def test_run_in_background_persists_usage_records(db_session_factory):
     assert records[0].cost_estimate == pytest.approx(10 / 1000 * 1.0 + 5 / 1000 * 2.0)
 
 
+def test_run_in_background_stamps_usage_and_run_row_with_org(db_session_factory):
+    # org_id is denormalized onto both the runs row and each usage_records row
+    # (the future per-customer billing dimension); username records who
+    # started the run so the initiator survives a restart/audit (CR-032).
+    engine, Session = db_session_factory
+    from ui.backend.db.models import Run as RunRow
+    from ui.backend.db.orgs import create_org
+
+    with Session() as db:
+        org = create_org(db, "acme")
+        org_id = org.id
+
+    model = FakeMessagesListChatModel(
+        responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    run = registry.create("wf", "go", org_id=org_id, username="alice")
+
+    run_in_background(run.id, workflow, "go", engine, org_id=org_id, username="alice")
+
+    with Session() as db:
+        run_row = db.get(RunRow, run.id)
+        assert run_row.org_id == org_id
+        assert run_row.username == "alice"
+        records = list_usage_for_run(db, run.id)
+    assert len(records) == 1
+    assert records[0].org_id == org_id
+
+
 def test_run_in_background_records_nothing_for_fake_models(db_session_factory):
     engine, Session = db_session_factory
     a = _agent("a", "output from a")

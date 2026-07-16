@@ -9,13 +9,16 @@ database instead of touching this module-level engine -- see
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Iterator
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .db import init_db, make_engine, session_factory
 from .db.model_catalog import seed_default_catalog
+from .db.orgs import ensure_email_single_org, seed_default_org
 from .skills import seed_default_skills
 
 DB_PATH = Path(os.environ.get("BESTTEAM_DB_PATH", str(Path(__file__).parent / "data" / "bestteam.db")))
@@ -27,12 +30,28 @@ init_db(engine)
 SessionLocal = session_factory(engine)
 
 # Admins are provisioned deliberately via the `ui.backend.admin` CLI, not
-# bootstrapped from env at import -- so startup never reads `users.is_admin`
-# (an existing DB predating the migration still boots; run `alembic upgrade
-# head` before serving requests).
+# bootstrapped from env at import -- so startup never reads `users.is_admin`.
+# Seeding queries columns added by migrations (e.g. `skills.org_id`), so on a
+# database predating the latest migration it is skipped with a warning rather
+# than crashing the import -- the process must still boot far enough to run
+# `alembic upgrade head` / the operator CLI (same property as CR-025).
 with SessionLocal() as _session:
-    seed_default_catalog(_session)
-    seed_default_skills(_session)
+    try:
+        seed_default_org(_session)
+        seed_default_catalog(_session)
+        seed_default_skills(_session)
+        # Multi-org + process-wide email creds would expose one customer's
+        # mailbox to every tenant -- refuse to boot (CR-031). The RuntimeError
+        # deliberately escapes the OperationalError catch below.
+        ensure_email_single_org(_session)
+    except OperationalError as _exc:
+        warnings.warn(
+            "Skipping default-data seeding: the database schema predates the "
+            f"latest migration ({_exc.orig}). Run `alembic upgrade head`, then "
+            "restart the backend.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
 
 
 def get_db() -> Iterator[Session]:

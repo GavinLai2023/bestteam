@@ -94,6 +94,7 @@ fastapi = pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login
 from ui.backend import main as backend_main
 from ui.backend.db_session import get_db
 
@@ -117,13 +118,9 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
-        # /api/config/model-catalog is admin-only; promote the fixture user.
-        from ui.backend.db.models import User
-
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="test").update({"is_admin": True})
-            db.commit()
+        # /api/config/model-catalog is admin-only; provision a platform admin
+        # (org=None -- org members can't be admins, CR-030).
+        token = create_user_and_login(test_client, org=None, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:

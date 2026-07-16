@@ -7,6 +7,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
@@ -84,18 +85,21 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
-        # Some builder tests reach the admin-only /api/config surface (KB/model
-        # catalog/workflow reads); promote the fixture user.
-        from ui.backend.db.models import User
-
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="test").update({"is_admin": True})
-            db.commit()
+        # Builder endpoints are org-user surfaces (get_current_org), and org
+        # members can't be admins (CR-030) -- the fixture user is a plain
+        # 'default' org member; the few /api/config touches use a separate
+        # platform-admin token via _admin_headers().
+        token = create_user_and_login(test_client)
         test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
+
+
+def _admin_headers(client):
+    # The admin-only /api/config surface needs an org-less platform admin.
+    token = create_user_and_login(client, username="op", org=None, admin=True)
+    return {"Authorization": f"Bearer {token}"}
 
 
 _VALID_SPEC = {
@@ -127,6 +131,47 @@ _VALID_SPEC = {
 }
 
 _INVALID_SPEC = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "tools": ["does_not_exist"]}]}
+
+
+def test_builder_sessions_are_org_scoped(client):
+    # Fixes the pre-existing hole where any authenticated user could read any
+    # session by id: sessions belong to the creator's org; cross-org access
+    # is a 404 (existence is not revealed) and lists are scoped.
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "Org A's bot"}
+    ).json()["id"]
+
+    bob_token = create_user_and_login(client, username="bob", org="orgb")
+    bob = {"Authorization": f"Bearer {bob_token}"}
+
+    assert client.get("/api/builder/sessions", headers=bob).json()["sessions"] == []
+    assert client.get(f"/api/builder/sessions/{session_id}", headers=bob).status_code == 404
+    assert (
+        client.post(
+            f"/api/builder/sessions/{session_id}/requirements",
+            json={"requirements": {}},
+            headers=bob,
+        ).status_code
+        == 404
+    )
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy", headers=bob).status_code == 404
+
+    # The owning org still sees and lists it.
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+    assert [s["id"] for s in client.get("/api/builder/sessions").json()["sessions"]] == [session_id]
+
+
+def test_deploy_stamps_workflow_with_session_org(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="support_workflow").one()
+        assert record.org_id == get_org_id()
 
 
 def test_create_session_starts_in_intent_stage(client):
@@ -349,6 +394,28 @@ def test_test_run_executes_validated_specification(client):
 
     run = client.get(f"/api/runs/{run_id}").json()
     assert run["workflow"] == "support_workflow"
+    # Sandbox runs record who started them (CR-032) -- user_id stays None
+    # (test runs never touch per-user memory), but the initiator is kept.
+    assert run["username"] == "test"
+
+    # ...and the initiator is persisted on the runs row, so it survives a
+    # registry/process loss. The worker thread writes the row shortly after
+    # the POST returns; poll briefly.
+    import time
+
+    from helpers import open_test_db
+    from ui.backend.db.models import Run as RunRow
+
+    deadline = time.time() + 10
+    persisted = None
+    while time.time() < deadline:
+        with open_test_db() as db:
+            row = db.get(RunRow, run_id)
+            persisted = row.username if row is not None else None
+        if persisted is not None:
+            break
+        time.sleep(0.05)
+    assert persisted == "test"
 
 
 def test_deploy_requires_specification(client):
@@ -372,7 +439,9 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     workflows = client.get("/api/workflows").json()["workflows"]
     assert "support_workflow" in workflows
 
-    config = client.get("/api/config/workflows/support_workflow").json()
+    config = client.get(
+        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+    ).json()
     assert config["status"] == "deployed"
     assert config["config"]["name"] == "support_workflow"
 
@@ -393,8 +462,9 @@ def test_specification_can_reference_existing_knowledge_base_by_name(client, tmp
     (kb_dir / "policy.txt").write_text("Refunds accepted within 7 days.", encoding="utf-8")
 
     resp = client.put(
-        "/api/config/knowledge_bases/product_info_kb",
+        "/api/config/knowledge_bases/product_info_kb?org=default",
         json={"path": str(kb_dir), "type": "local_folder"},
+        headers=_admin_headers(client),
     )
     assert resp.status_code == 200
 

@@ -1,11 +1,12 @@
-"""Login API (Phase 3): a simple per-deployment user table + bearer tokens.
+"""Login API: bearer tokens for operator-provisioned accounts.
 
-No multi-tenancy / cross-customer isolation -- one deployment, optionally a
-handful of users sharing it. `get_current_user` is a FastAPI dependency other
-routers can use to require a logged-in user; it is applied at the
-router level (`dependencies=[Depends(get_current_user)]`) to
-`/api/builder/sessions` (`builder.py`) and `/api/config` (`crud.py`), and is
-exported here for that purpose.
+There is deliberately NO public registration endpoint: orgs and user
+accounts are provisioned by the platform operator via the `ui.backend.admin`
+CLI (`create-org` / `create-user`), so an unauthenticated visitor can only
+log in, never create an account. `get_current_user` is a FastAPI dependency
+other routers use to require a logged-in user (router-level on
+`/api/builder/sessions` and, via `get_current_admin`, on `/api/config` and
+`/api/memory`).
 """
 
 from __future__ import annotations
@@ -16,18 +17,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import AuthError, create_access_token, decode_access_token
-from .db.models import User
-from .db.users import authenticate_user, create_user, get_user_by_username
+from .db.models import Organization, User
+from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 _bearer_scheme = HTTPBearer(auto_error=False)
-
-
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
 
 
 class LoginRequest(BaseModel):
@@ -38,19 +34,6 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-
-
-@router.post("/register", response_model=TokenResponse)
-def register(req: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    if not req.username or not req.password:
-        raise HTTPException(status_code=400, detail="username and password are required")
-    try:
-        create_user(db, req.username, req.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # New users are always non-admin. Admin is granted only via the operator CLI
-    # (`ui.backend.admin`), never from an unauthenticated username match.
-    return TokenResponse(access_token=create_access_token(req.username))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -83,16 +66,45 @@ def get_current_user(
 
 
 def get_current_admin(user: User = Depends(get_current_user)) -> User:
-    """Like `get_current_user`, but requires the user to be an admin.
+    """Like `get_current_user`, but requires a platform admin.
 
     A FastAPI dependency for admin-only surfaces (the Advanced config router and
     the memory-management API). Returns 403 for an authenticated non-admin.
+    Admin surfaces reach every org's data (`?org=` targeting), so only org-less
+    accounts qualify: an org-bound `is_admin` flag (hand-edited DB, pre-CR-030
+    data -- `set_admin_status` refuses to create one) is NOT honored.
     """
-    if not user.is_admin:
+    if not user.is_admin or user.org_id is not None:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return user
 
 
+def get_current_org(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Organization:
+    """Resolve the requesting user's organization for org-scoped surfaces.
+
+    Platform operators (org_id NULL) get 403: they act through the admin
+    `/api/config` surface with explicit `?org=` targeting, not through the
+    org-user surfaces this dependency guards.
+    """
+    if user.org_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Platform operators do not belong to an organization; "
+            "use the admin /api/config surface (or create an org user)",
+        )
+    org = db.get(Organization, user.org_id)
+    if org is None:
+        raise HTTPException(status_code=403, detail="User's organization no longer exists")
+    return org
+
+
 @router.get("/me")
-def me(user: User = Depends(get_current_user)) -> dict:
-    return {"username": user.username, "is_admin": user.is_admin}
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    org = db.get(Organization, user.org_id) if user.org_id is not None else None
+    return {
+        "username": user.username,
+        "is_admin": user.is_admin,
+        "org": org.name if org is not None else None,
+    }

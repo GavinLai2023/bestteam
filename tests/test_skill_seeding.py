@@ -49,6 +49,39 @@ def test_default_skill_tools_resolve_against_registry():
             assert tool_name in REGISTRY, f"skill '{spec.name}' references unknown tool '{tool_name}'"
 
 
+def test_yaml_workflow_referencing_builtin_skill_loads(db_session, tmp_path, monkeypatch):
+    # Regression: the YAML branch of main._get_workflow must pass the platform
+    # built-in skills (org NULL) into load_workflow -- without that, a demo
+    # YAML referencing a seeded skill (email_triage_demo_live ->
+    # email_triage_reply) fails to load with "Unknown skill".
+    from ui.backend import main as backend_main
+
+    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    backend_main._workflow_cache.clear()
+    seed_default_skills(db_session)
+
+    (tmp_path / "demo.yaml").write_text(
+        "name: demo\n"
+        "agents:\n"
+        "  - name: triager\n"
+        "    role: Triager\n"
+        "    goal: Triage the mailbox\n"
+        '    model: "fake:done"\n'
+        "    skills: [email_triage_reply]\n"
+        "teams:\n"
+        "  - name: t\n"
+        "    agents: [triager]\n"
+        "    mode: sequential\n"
+        "workflow:\n"
+        "  steps: [t]\n",
+        encoding="utf-8",
+    )
+
+    workflow = backend_main._get_workflow("demo", db_session)
+    tool_names = {t.__name__ for t in workflow.steps[0].agents[0].tools}
+    assert {"email_find", "email_read", "email_draft_reply"} <= tool_names
+
+
 def test_seeded_skill_builds_into_workflow(db_session, tmp_path):
     # End-to-end: the seeded record loads back as a SkillSpec and a workflow
     # whose agent references it resolves the three email tools + playbook.

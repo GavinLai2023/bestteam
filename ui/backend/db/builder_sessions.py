@@ -31,13 +31,16 @@ _UPDATABLE_FIELDS = frozenset(
 )
 
 
-def create_session(db: Session, *, intent_text: str = "", as_is_text: str = "") -> BuilderSession:
-    """Start a new wizard session in the 'intent' stage."""
+def create_session(
+    db: Session, *, intent_text: str = "", as_is_text: str = "", org_id: Optional[int] = None
+) -> BuilderSession:
+    """Start a new wizard session in the 'intent' stage, owned by `org_id`."""
     session = BuilderSession(
         id=uuid.uuid4().hex[:12],
         intent_text=intent_text,
         as_is_text=as_is_text,
         status="intent",
+        org_id=org_id,
         feedback_history=[],
     )
     db.add(session)
@@ -50,11 +53,17 @@ def get_session(db: Session, session_id: str) -> Optional[BuilderSession]:
     return db.get(BuilderSession, session_id)
 
 
-def list_sessions(db: Session, *, limit: int = 50) -> list[BuilderSession]:
-    """All builder sessions, most-recently-updated first, for an "AI teams
-    I've built" list. No pagination -- per-deployment scale is small (see
+def list_sessions(db: Session, *, org_id: Optional[int] = None, limit: int = 50) -> list[BuilderSession]:
+    """One org's builder sessions, most-recently-updated first, for an "AI
+    teams I've built" list. No pagination -- per-org scale is small (see
     ui/backend/CLAUDE.md's auth section)."""
-    return db.query(BuilderSession).order_by(BuilderSession.updated_at.desc()).limit(limit).all()
+    return (
+        db.query(BuilderSession)
+        .filter(BuilderSession.org_id == org_id)
+        .order_by(BuilderSession.updated_at.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 def update_session(db: Session, session_id: str, **fields: Any) -> BuilderSession:

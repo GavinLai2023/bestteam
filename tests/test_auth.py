@@ -8,6 +8,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login
 from ui.backend import auth
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -114,26 +115,37 @@ def client(workflows_dir, monkeypatch):
         backend_main.app.dependency_overrides.pop(get_db, None)
 
 
-def test_register_then_login(client):
-    register = client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"})
-    assert register.status_code == 200
-    assert register.json()["token_type"] == "bearer"
+def test_register_endpoint_is_removed(client):
+    # Accounts are operator-provisioned (ui.backend.admin create-user);
+    # public registration must not exist on a shared multi-org platform.
+    resp = client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"})
+    assert resp.status_code in (404, 405)
+
+
+def test_provisioned_user_can_login(client):
+    create_user_and_login(client, username="alice", password="hunter2")
 
     login = client.post("/api/auth/login", json={"username": "alice", "password": "hunter2"})
     assert login.status_code == 200
     assert login.json()["access_token"]
+    assert login.json()["token_type"] == "bearer"
 
 
-def test_register_rejects_duplicate_username(client):
-    client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"})
+def test_create_user_rejects_duplicate_username():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.users import create_user
 
-    resp = client.post("/api/auth/register", json={"username": "alice", "password": "different"})
-
-    assert resp.status_code == 400
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        create_user(db, "alice", "hunter2")
+        with pytest.raises(ValueError, match="already taken"):
+            create_user(db, "alice", "different")
 
 
 def test_login_rejects_wrong_password(client):
-    client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"})
+    create_user_and_login(client, username="alice", password="hunter2")
 
     resp = client.post("/api/auth/login", json={"username": "alice", "password": "wrong"})
 
@@ -145,43 +157,70 @@ def test_me_requires_bearer_token(client):
 
 
 def test_me_returns_current_user(client):
-    token = client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"}).json()["access_token"]
+    token = create_user_and_login(client, username="alice", password="hunter2")
 
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
-    # New users are non-admin by default; /me reports the role for UI gating.
-    assert resp.json() == {"username": "alice", "is_admin": False}
-
-
-def _make_admin(client, username):
-    from ui.backend.db.models import User
-
-    db_gen = backend_main.app.dependency_overrides[get_db]()
-    db = next(db_gen)
-    try:
-        db.query(User).filter_by(username=username).update({"is_admin": True})
-        db.commit()
-    finally:
-        db_gen.close()
+    # New users are non-admin by default; /me reports the role for UI gating
+    # and the user's org (None for platform operators).
+    assert resp.json() == {"username": "alice", "is_admin": False, "org": "default"}
 
 
 def test_me_reports_is_admin_for_admin_user(client):
-    token = client.post("/api/auth/register", json={"username": "alice", "password": "hunter2"}).json()["access_token"]
-    _make_admin(client, "alice")
+    # Platform admins are org-less accounts: promotion of org members is
+    # rejected (CR-030), so an admin's /me always reports org: None.
+    token = create_user_and_login(client, username="alice", password="hunter2", org=None, admin=True)
 
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "alice", "is_admin": True}
+    assert resp.json() == {"username": "alice", "is_admin": True, "org": None}
 
 
-def test_register_never_grants_admin(client):
-    # Registration is public; a new account must always be non-admin regardless
-    # of its username. Admin is granted only out-of-band via the operator CLI.
-    token = client.post("/api/auth/register", json={"username": "admin", "password": "pw"}).json()["access_token"]
+def test_promote_org_member_is_rejected():
+    # CR-030: is_admin grants platform-wide admin (all orgs via ?org=), so an
+    # org member must never carry it -- the operator creates a separate
+    # platform account (create-user --platform) instead.
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.users import create_user, get_user_by_username, set_admin_status
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        create_user(db, "alice", "pw", org_id=org.id)
+
+        with pytest.raises(ValueError, match="platform"):
+            set_admin_status(db, "alice", True)
+        assert get_user_by_username(db, "alice").is_admin is False
+
+
+def test_org_bound_admin_flag_does_not_grant_admin_api(client):
+    # CR-030 defense in depth: even if a User row somehow carries both
+    # is_admin=True and an org_id (hand-edited DB, pre-fix data),
+    # get_current_admin must refuse it -- the admin surface reaches every
+    # org's config, so only org-less accounts qualify.
+    from helpers import open_test_db
+    from ui.backend.db.users import get_user_by_username
+
+    token = create_user_and_login(client, username="alice", password="pw", org="acme")
+    with open_test_db() as db:
+        user = get_user_by_username(db, "alice")
+        user.is_admin = True  # bypasses the set_admin_status guard on purpose
+        db.commit()
+
+    resp = client.get("/api/config/agents", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
+
+
+def test_provisioned_user_named_admin_is_not_admin(client):
+    # A username of "admin" must not confer the role: admin is granted only
+    # out-of-band via the operator CLI (promote), never from a name match.
+    token = create_user_and_login(client, username="admin", password="pw")
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.json() == {"username": "admin", "is_admin": False}
+    assert resp.json() == {"username": "admin", "is_admin": False, "org": "default"}
 
 
 def test_set_admin_status_promotes_and_demotes():
@@ -276,7 +315,7 @@ def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
 
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
-    token = client.post("/api/auth/register", json={"username": "bob", "password": "hunter2"}).json()["access_token"]
+    token = create_user_and_login(client, username="bob", password="hunter2")
     client.headers["Authorization"] = f"Bearer {token}"
 
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
@@ -293,7 +332,7 @@ def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir):
 
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
-    token = client.post("/api/auth/register", json={"username": "carol", "password": "hunter2"}).json()["access_token"]
+    token = create_user_and_login(client, username="carol", password="hunter2")
     client.headers["Authorization"] = f"Bearer {token}"
     run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
     ticket = client.post("/api/runs/ws-ticket").json()["ticket"]  # issued while carol exists

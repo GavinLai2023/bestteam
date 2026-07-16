@@ -11,6 +11,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from helpers import create_user_and_login, get_org_id
 from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -18,10 +19,14 @@ from ui.backend.db_session import get_db
 
 
 def _active_kb_dir(uploads: Path, name: str) -> Path:
-    """Resolve an uploaded KB's active version dir via its CURRENT pointer."""
+    """Resolve an uploaded KB's active version dir via its CURRENT pointer.
+
+    Uploads are org-scoped on disk (`<uploads>/<org_id>/<name>`); the fixture
+    user's 'default' org is the first org created in each test DB, so id 1.
+    """
     from ui.backend.knowledge_bases import resolve_kb_upload_path
 
-    resolved = resolve_kb_upload_path({"path": str(uploads / name)})
+    resolved = resolve_kb_upload_path({"path": str(uploads / "1" / name)})
     return Path(resolved["path"])
 
 
@@ -45,24 +50,32 @@ def client(tmp_path, monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         test_client = TestClient(backend_main.app)
-        token = test_client.post("/api/auth/register", json={"username": "test", "password": "test"}).json()["access_token"]
-        # The Advanced/config API is admin-only; promote the fixture user so the
-        # existing CRUD tests exercise the endpoints. A non-admin 403 is covered
-        # separately by test_config_forbidden_for_non_admin.
-        from ui.backend.db.models import User
-
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="test").update({"is_admin": True})
-            db.commit()
+        # The Advanced/config API is admin-only; provision the fixture user as
+        # a platform admin (org=None -- org members can't be admins, CR-030)
+        # so the existing CRUD tests exercise the endpoints. A non-admin 403
+        # is covered separately by test_config_forbidden_for_non_admin.
+        token = create_user_and_login(test_client, org=None, admin=True)
         test_client.headers["Authorization"] = f"Bearer {token}"
+        # Production bootstrap seeds the 'default' org; the org-less admin
+        # fixture user no longer creates it as a side effect, so seed it here
+        # for all the ?org=default requests below.
+        get_org_id("default")
         yield test_client
     finally:
         backend_main.app.dependency_overrides.pop(get_db, None)
 
 
+def _org_user_headers(client, username="runner"):
+    # The fixture user is an org-less platform admin, which get_current_org
+    # 403s on org-user surfaces (POST /api/runs) -- run as a 'default' org
+    # member instead.
+    token = create_user_and_login(client, username=username)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_config_forbidden_for_non_admin(client):
     # Advanced config is admin-only: an authenticated non-admin user gets 403.
-    token = client.post("/api/auth/register", json={"username": "regular", "password": "pw"}).json()["access_token"]
+    token = create_user_and_login(client, username="regular", password="pw")
     headers = {"Authorization": f"Bearer {token}"}
 
     assert client.get("/api/config/agents", headers=headers).status_code == 403
@@ -73,45 +86,94 @@ def test_config_forbidden_for_non_admin(client):
     ).status_code == 403
 
 
+def test_cross_org_config_access_is_404(client):
+    # Explicit org targeting: an item created in org A is invisible through
+    # org B's lens (404, not 403 -- existence is not revealed), and the same
+    # name can exist in both orgs.
+    from helpers import open_test_db
+    from ui.backend.db.orgs import get_or_create_org
+
+    with open_test_db() as db:
+        get_or_create_org(db, "other")
+
+    config = {"role": "Support", "goal": "Help", "model": "fake:hi", "tools": []}
+    assert client.put("/api/config/agents/dup?org=default", json=config).status_code == 200
+    assert client.get("/api/config/agents/dup?org=other").status_code == 404
+    assert client.delete("/api/config/agents/dup?org=other").status_code == 404
+    assert client.put("/api/config/agents/dup?org=other", json=config).status_code == 200
+
+    listed = client.get("/api/config/agents").json()
+    assert sorted((item["name"], item["org"]) for item in listed) == [
+        ("dup", "default"),
+        ("dup", "other"),
+    ]
+    filtered = client.get("/api/config/agents?org=other").json()
+    assert [(item["name"], item["org"]) for item in filtered] == [("dup", "other")]
+
+
+def test_config_mutations_require_org_param(client):
+    config = {"role": "R", "goal": "G", "model": "fake:hi", "tools": []}
+    assert client.put("/api/config/agents/x", json=config).status_code == 422
+    assert client.get("/api/config/agents/x").status_code == 422
+    assert client.delete("/api/config/agents/x").status_code == 422
+    assert client.put("/api/config/agents/x?org=ghost", json=config).status_code == 404
+
+
+def test_skills_without_org_hit_platform_tier(client):
+    # Omitted ?org= on skills targets the built-in tier (org NULL); an org's
+    # same-named skill lives alongside it without collision.
+    skill = {"instructions": "Platform-wide playbook.", "tools": []}
+    assert client.put("/api/config/skills/shared", json=skill).status_code == 200
+    org_skill = {"instructions": "Org-specific playbook.", "tools": []}
+    assert client.put("/api/config/skills/shared?org=default", json=org_skill).status_code == 200
+
+    platform = client.get("/api/config/skills/shared").json()
+    assert platform["org"] is None
+    assert platform["config"]["instructions"] == "Platform-wide playbook."
+    org_view = client.get("/api/config/skills/shared?org=default").json()
+    assert org_view["org"] == "default"
+    assert org_view["config"]["instructions"] == "Org-specific playbook."
+
+
 def test_agent_crud_round_trip(client):
     config = {"role": "Support", "goal": "Help customers", "model": "fake:hi", "tools": []}
 
-    create = client.put("/api/config/agents/support_agent", json=config)
+    create = client.put("/api/config/agents/support_agent?org=default", json=config)
     assert create.status_code == 200
     assert create.json()["config"]["role"] == "Support"
 
     listed = client.get("/api/config/agents")
     assert [item["name"] for item in listed.json()] == ["support_agent"]
 
-    fetched = client.get("/api/config/agents/support_agent")
+    fetched = client.get("/api/config/agents/support_agent?org=default")
     assert fetched.status_code == 200
     assert fetched.json()["config"]["goal"] == "Help customers"
 
-    deleted = client.delete("/api/config/agents/support_agent")
+    deleted = client.delete("/api/config/agents/support_agent?org=default")
     assert deleted.status_code == 204
-    assert client.get("/api/config/agents/support_agent").status_code == 404
+    assert client.get("/api/config/agents/support_agent?org=default").status_code == 404
 
 
 def test_agent_put_rejects_invalid_shape(client):
-    resp = client.put("/api/config/agents/support_agent", json={"role": "Support"})
+    resp = client.put("/api/config/agents/support_agent?org=default", json={"role": "Support"})
     assert resp.status_code == 400
 
 
 def test_team_crud_round_trip(client):
     config = {"agents": ["support_agent"], "mode": "sequential"}
 
-    create = client.put("/api/config/teams/support_team", json=config)
+    create = client.put("/api/config/teams/support_team?org=default", json=config)
     assert create.status_code == 200
     assert create.json()["config"]["agents"] == ["support_agent"]
 
-    assert client.get("/api/config/teams/support_team").status_code == 200
-    assert client.delete("/api/config/teams/support_team").status_code == 204
+    assert client.get("/api/config/teams/support_team?org=default").status_code == 200
+    assert client.delete("/api/config/teams/support_team?org=default").status_code == 204
 
 
 def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
     config = {"path": "./docs", "type": "local_folder", "embedding_model": "fake:8"}
 
-    resp = client.put("/api/config/knowledge_bases/docs", json=config)
+    resp = client.put("/api/config/knowledge_bases/docs?org=default", json=config)
 
     assert resp.status_code == 200
     assert "embedding_model" not in resp.json()["config"]
@@ -120,7 +182,7 @@ def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
 def test_knowledge_base_put_rejects_name_with_spaces(client):
     config = {"path": "./docs", "type": "local_folder"}
 
-    resp = client.put("/api/config/knowledge_bases/bad name", json=config)
+    resp = client.put("/api/config/knowledge_bases/bad name?org=default", json=config)
 
     assert resp.status_code == 400
 
@@ -136,7 +198,7 @@ def test_knowledge_base_put_rejects_absolute_cache_path(client):
         "cache_path": "/etc/cron.d/pwned",
     }
 
-    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+    resp = client.put("/api/config/knowledge_bases/evil?org=default", json=config)
 
     assert resp.status_code == 400
     assert "cache_path" in resp.json()["detail"]
@@ -150,7 +212,7 @@ def test_knowledge_base_put_rejects_traversal_in_cache_path(client):
         "cache_path": "../../evil.json",
     }
 
-    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+    resp = client.put("/api/config/knowledge_bases/evil?org=default", json=config)
 
     assert resp.status_code == 400
     assert "cache_path" in resp.json()["detail"]
@@ -159,7 +221,7 @@ def test_knowledge_base_put_rejects_traversal_in_cache_path(client):
 def test_knowledge_base_put_rejects_traversal_in_path(client):
     config = {"path": "../../../../etc", "type": "local_folder"}
 
-    resp = client.put("/api/config/knowledge_bases/evil", json=config)
+    resp = client.put("/api/config/knowledge_bases/evil?org=default", json=config)
 
     assert resp.status_code == 400
     assert "path" in resp.json()["detail"]
@@ -172,7 +234,7 @@ def test_knowledge_base_put_still_allows_absolute_local_folder_path(client, tmp_
     docs_dir.mkdir()
     config = {"path": str(docs_dir), "type": "local_folder"}
 
-    resp = client.put("/api/config/knowledge_bases/ok", json=config)
+    resp = client.put("/api/config/knowledge_bases/ok?org=default", json=config)
 
     assert resp.status_code == 200
 
@@ -189,7 +251,7 @@ def test_knowledge_base_put_contains_relative_cache_path(client, tmp_path):
         "embedding_model": "fake:8",
         "cache_path": "sub/dir/embeddings.json",
     }
-    resp = client.put("/api/config/knowledge_bases/kb", json=config)
+    resp = client.put("/api/config/knowledge_bases/kb?org=default", json=config)
 
     assert resp.status_code == 200
     assert resp.json()["config"]["cache_path"] == "_kb_cache/embeddings.json"
@@ -206,7 +268,7 @@ def test_knowledge_base_put_contains_windows_rooted_cache_path(client, tmp_path)
         "embedding_model": "fake:8",
         "cache_path": "\\Windows\\Temp\\pwned.json",
     }
-    resp = client.put("/api/config/knowledge_bases/kb", json=config)
+    resp = client.put("/api/config/knowledge_bases/kb?org=default", json=config)
 
     assert resp.status_code == 200
     assert resp.json()["config"]["cache_path"] == "_kb_cache/pwned.json"
@@ -235,15 +297,15 @@ def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
         "workflow": {"steps": ["team"]},
     }
 
-    resp = client.put("/api/config/workflows/evil_wf", json=workflow_config)
+    resp = client.put("/api/config/workflows/evil_wf?org=default", json=workflow_config)
 
     assert resp.status_code == 400
     assert "cache_path" in resp.json()["detail"]
 
 
 def test_unknown_agent_returns_404(client):
-    assert client.get("/api/config/agents/does-not-exist").status_code == 404
-    assert client.delete("/api/config/agents/does-not-exist").status_code == 404
+    assert client.get("/api/config/agents/does-not-exist?org=default").status_code == 404
+    assert client.delete("/api/config/agents/does-not-exist?org=default").status_code == 404
 
 
 def test_contain_kb_config_for_load_confines_legacy_cache_path():
@@ -297,14 +359,14 @@ def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):
     # present before but omitted from the new upload must not linger.
     uploads = tmp_path / "knowledge_base_uploads"
     client.post(
-        "/api/config/knowledge_bases/kb/upload",
+        "/api/config/knowledge_bases/kb/upload?org=default",
         files=[
             ("files", ("doc1.txt", b"first document content", "text/plain")),
             ("files", ("doc2.txt", b"second document content", "text/plain")),
         ],
     )
     resp = client.post(
-        "/api/config/knowledge_bases/kb/upload",
+        "/api/config/knowledge_bases/kb/upload?org=default",
         files=[("files", ("doc3.txt", b"third document content", "text/plain"))],
     )
 
@@ -318,7 +380,7 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
     # version) AND its DB record intact -- the CURRENT pointer never moves.
     uploads = tmp_path / "knowledge_base_uploads"
     client.post(
-        "/api/config/knowledge_bases/kb/upload",
+        "/api/config/knowledge_bases/kb/upload?org=default",
         files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
     )
 
@@ -326,13 +388,13 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
 
     with patch.object(backend_crud, "LocalFolderKnowledgeBase", side_effect=ConfigurationError("bad upload")):
         resp = client.post(
-            "/api/config/knowledge_bases/kb/upload",
+            "/api/config/knowledge_bases/kb/upload?org=default",
             files=[("files", ("doc2.txt", b"new content that fails validation", "text/plain"))],
         )
 
     assert resp.status_code == 400
     assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc1.txt"]
-    assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # DB record preserved
+    assert client.get("/api/config/knowledge_bases/kb?org=default").status_code == 200  # DB record preserved
 
 
 def test_deleting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
@@ -341,10 +403,10 @@ def test_deleting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "a.md").write_text("hello", encoding="utf-8")
-    client.put("/api/config/knowledge_bases/kb1", json={"path": str(docs_dir), "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/kb1?org=default", json={"path": str(docs_dir), "type": "local_folder"})
     backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
 
-    assert client.delete("/api/config/knowledge_bases/kb1").status_code == 204
+    assert client.delete("/api/config/knowledge_bases/kb1?org=default").status_code == 204
 
     assert backend_main._workflow_cache == {}
 
@@ -367,7 +429,7 @@ def test_upserting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
     (docs_dir / "a.md").write_text("hello", encoding="utf-8")
     backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
 
-    client.put("/api/config/knowledge_bases/kb1", json={"path": str(docs_dir), "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/kb1?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
     assert backend_main._workflow_cache == {}
 
@@ -418,20 +480,20 @@ def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
     # KB so the live directory and DB record stay consistent.
     uploads = tmp_path / "knowledge_base_uploads"
     client.post(
-        "/api/config/knowledge_bases/kb/upload",
+        "/api/config/knowledge_bases/kb/upload?org=default",
         files=[("files", ("doc1.txt", b"good original content", "text/plain"))],
     )
 
     with patch("sqlalchemy.orm.Session.commit", side_effect=RuntimeError("db down")):
         with pytest.raises(RuntimeError, match="db down"):
             client.post(
-                "/api/config/knowledge_bases/kb/upload",
+                "/api/config/knowledge_bases/kb/upload?org=default",
                 files=[("files", ("doc2.txt", b"replacement content", "text/plain"))],
             )
 
     # CURRENT was pointed back at the prior version; the active KB is doc1.
     assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc1.txt"]
-    assert client.get("/api/config/knowledge_bases/kb").status_code == 200  # record intact
+    assert client.get("/api/config/knowledge_bases/kb?org=default").status_code == 200  # record intact
 
 
 def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
@@ -440,9 +502,9 @@ def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
     # immediately-previous version is retained as a grace window for readers
     # that just resolved to it; older versions are cleaned up.
     uploads = tmp_path / "knowledge_base_uploads"
-    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v1.txt", b"one", "text/plain"))])
+    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v1.txt", b"one", "text/plain"))])
     v1 = _active_kb_dir(uploads, "kb")
-    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v2.txt", b"two", "text/plain"))])
+    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v2.txt", b"two", "text/plain"))])
     v2 = _active_kb_dir(uploads, "kb")
 
     assert v1 != v2
@@ -450,7 +512,7 @@ def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
     assert v1.is_dir()  # previous version kept as a grace window
 
     # A third upload cleans the now-two-generations-old version.
-    client.post("/api/config/knowledge_bases/kb/upload", files=[("files", ("v3.txt", b"three", "text/plain"))])
+    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v3.txt", b"three", "text/plain"))])
     assert not v1.is_dir()
 
 
@@ -464,17 +526,17 @@ def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
 
     uploads = tmp_path / "knowledge_base_uploads"
     client.post(
-        "/api/config/knowledge_bases/kb/upload",
+        "/api/config/knowledge_bases/kb/upload?org=default",
         files=[("files", ("first.txt", b"first content", "text/plain"))],
     )
 
-    lock = backend_crud._kb_upload_lock("kb")
+    lock = backend_crud._kb_upload_lock("1/kb")  # keyed by <org_id>/<name>
     lock.acquire()
     done = []
 
     def _upload():
         resp = client.post(
-            "/api/config/knowledge_bases/kb/upload",
+            "/api/config/knowledge_bases/kb/upload?org=default",
             files=[("files", ("second.txt", b"second content", "text/plain"))],
         )
         done.append(resp.status_code)
@@ -510,7 +572,7 @@ def test_upload_creates_queryable_local_folder_kb(client):
         ("files", ("doc1.txt", b"The refund policy allows returns within 30 days.", "text/plain")),
         ("files", ("doc2.md", b"# Shipping\nStandard shipping takes 5-7 business days.", "text/markdown")),
     ]
-    resp = client.post("/api/config/knowledge_bases/support_docs/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -520,7 +582,7 @@ def test_upload_creates_queryable_local_folder_kb(client):
     assert body["config"]["type"] == "local_folder"
     assert "knowledge_base_uploads" in body["config"]["path"]
 
-    get_resp = client.get("/api/config/knowledge_bases/support_docs")
+    get_resp = client.get("/api/config/knowledge_bases/support_docs?org=default")
     assert get_resp.status_code == 200
 
 
@@ -528,7 +590,7 @@ def test_upload_rejects_name_with_spaces_before_writing_files(client):
     from ui.backend.crud import _KB_UPLOADS_DIR
 
     files = [("files", ("doc1.txt", b"some content here for parsing", "text/plain"))]
-    resp = client.post("/api/config/knowledge_bases/bad name/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/bad name/upload?org=default", files=files)
 
     assert resp.status_code == 400
     assert not (_KB_UPLOADS_DIR / "bad name").exists()
@@ -536,14 +598,14 @@ def test_upload_rejects_name_with_spaces_before_writing_files(client):
 
 def test_upload_rejects_too_many_files(client):
     files = [("files", (f"doc{i}.txt", b"x", "text/plain")) for i in range(31)]
-    resp = client.post("/api/config/knowledge_bases/too_many/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/too_many/upload?org=default", files=files)
     assert resp.status_code == 413
 
 
 def test_upload_rejects_oversized_file(client):
     big = b"x" * (30 * 1024 * 1024 + 1)
     files = [("files", ("big.txt", big, "text/plain"))]
-    resp = client.post("/api/config/knowledge_bases/too_big/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/too_big/upload?org=default", files=files)
     assert resp.status_code == 413
 
 
@@ -551,7 +613,7 @@ def test_upload_sanitizes_path_traversal_filename(client):
     from ui.backend.crud import _KB_UPLOADS_DIR
 
     files = [("files", ("../../evil.txt", b"some content here for parsing", "text/plain"))]
-    resp = client.post("/api/config/knowledge_bases/traversal_kb/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/traversal_kb/upload?org=default", files=files)
 
     assert resp.status_code == 200
     active = _active_kb_dir(_KB_UPLOADS_DIR, "traversal_kb")
@@ -561,21 +623,21 @@ def test_upload_sanitizes_path_traversal_filename(client):
 
 def test_upload_rejects_filename_with_no_basename(client):
     files = [("files", ("..", b"some content here for parsing", "text/plain"))]
-    resp = client.post("/api/config/knowledge_bases/dotdot_kb/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/dotdot_kb/upload?org=default", files=files)
     assert resp.status_code == 400
 
 
 def test_upload_rejects_unparseable_file_and_cleans_up(client):
     files = [("files", ("bad.exe", b"\x00\x01\x02", "application/octet-stream"))]
-    resp = client.post("/api/config/knowledge_bases/bad_kb/upload", files=files)
+    resp = client.post("/api/config/knowledge_bases/bad_kb/upload?org=default", files=files)
     assert resp.status_code == 400
-    get_resp = client.get("/api/config/knowledge_bases/bad_kb")
+    get_resp = client.get("/api/config/knowledge_bases/bad_kb?org=default")
     assert get_resp.status_code == 404
 
 
 def test_uploaded_kb_is_queryable_by_a_workflow(client):
     files = [("files", ("policy.txt", b"Refunds are processed within 5 business days of approval.", "text/plain"))]
-    upload_resp = client.post("/api/config/knowledge_bases/policy_kb/upload", files=files)
+    upload_resp = client.post("/api/config/knowledge_bases/policy_kb/upload?org=default", files=files)
     assert upload_resp.status_code == 200
     uploaded_path = upload_resp.json()["config"]["path"]
 
@@ -597,23 +659,27 @@ def test_uploaded_kb_is_queryable_by_a_workflow(client):
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    put_resp = client.put("/api/config/workflows/policy_test_wf", json=workflow_config)
+    put_resp = client.put("/api/config/workflows/policy_test_wf?org=default", json=workflow_config)
     assert put_resp.status_code == 200
 
-    run_resp = client.post("/api/runs", json={"workflow": "policy_test_wf", "input": "How long do refunds take?"})
+    run_resp = client.post(
+        "/api/runs",
+        json={"workflow": "policy_test_wf", "input": "How long do refunds take?"},
+        headers=_org_user_headers(client),
+    )
     assert run_resp.status_code == 200
 
 
 def test_delete_knowledge_base_removes_uploaded_files(client):
     files = [("files", ("doc.txt", b"some content here", "text/plain"))]
-    client.post("/api/config/knowledge_bases/to_delete/upload", files=files)
+    client.post("/api/config/knowledge_bases/to_delete/upload?org=default", files=files)
 
     from ui.backend.crud import _KB_UPLOADS_DIR
 
-    upload_dir = _KB_UPLOADS_DIR / "to_delete"
+    upload_dir = _KB_UPLOADS_DIR / "1" / "to_delete"  # org-scoped: <org_id>/<name>
     assert upload_dir.is_dir()
 
-    resp = client.delete("/api/config/knowledge_bases/to_delete")
+    resp = client.delete("/api/config/knowledge_bases/to_delete?org=default")
     assert resp.status_code == 204
     assert not upload_dir.exists()
 
@@ -634,7 +700,7 @@ _VALID_WORKFLOW_CONFIG = {
 
 
 def test_workflow_crud_round_trip_and_validation(client):
-    create = client.put("/api/config/workflows/support_workflow", json=_VALID_WORKFLOW_CONFIG)
+    create = client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
     assert create.status_code == 200
     body = create.json()
     assert body["status"] == "draft"
@@ -643,17 +709,17 @@ def test_workflow_crud_round_trip_and_validation(client):
     listed = client.get("/api/config/workflows")
     assert [item["name"] for item in listed.json()] == ["support_workflow"]
 
-    fetched = client.get("/api/config/workflows/support_workflow")
+    fetched = client.get("/api/config/workflows/support_workflow?org=default")
     assert fetched.status_code == 200
 
-    assert client.delete("/api/config/workflows/support_workflow").status_code == 204
-    assert client.get("/api/config/workflows/support_workflow").status_code == 404
+    assert client.delete("/api/config/workflows/support_workflow?org=default").status_code == 204
+    assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
 
 
 def test_workflow_put_rejects_invalid_config(client):
     bad_config = {**_VALID_WORKFLOW_CONFIG, "teams": [{"name": "support_team", "agents": ["does_not_exist"], "mode": "sequential"}]}
 
-    resp = client.put("/api/config/workflows/support_workflow", json=bad_config)
+    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
 
     assert resp.status_code == 400
     assert "unknown agent" in resp.json()["detail"]
@@ -666,15 +732,19 @@ def test_workflow_put_non_list_knowledge_bases_returns_400(client):
     # the error-handling try block, like the baseline _build_workflow did.
     bad_config = {**_VALID_WORKFLOW_CONFIG, "knowledge_bases": 1}
 
-    resp = client.put("/api/config/workflows/support_workflow", json=bad_config)
+    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
 
     assert resp.status_code == 400
 
 
 def test_workflow_config_is_runnable_via_get_workflow(client):
-    client.put("/api/config/workflows/support_workflow", json=_VALID_WORKFLOW_CONFIG)
+    client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
 
-    resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
+    resp = client.post(
+        "/api/runs",
+        json={"workflow": "support_workflow", "input": "hi"},
+        headers=_org_user_headers(client),
+    )
 
     assert resp.status_code == 200
 
@@ -721,7 +791,7 @@ def test_workflow_put_accepts_skill_reference_when_skill_exists(client):
         "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
         "workflow": {"steps": ["team1"]},
     }
-    resp = client.put("/api/config/workflows/my_workflow", json=config)
+    resp = client.put("/api/config/workflows/my_workflow?org=default", json=config)
     assert resp.status_code == 200
 
 
@@ -739,7 +809,7 @@ def test_workflow_put_rejects_unknown_skill_reference(client):
         "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
         "workflow": {"steps": ["team1"]},
     }
-    resp = client.put("/api/config/workflows/my_workflow", json=config)
+    resp = client.put("/api/config/workflows/my_workflow?org=default", json=config)
     assert resp.status_code == 400
     assert "Unknown skill" in resp.json()["detail"]
 
@@ -754,22 +824,24 @@ def test_load_knowledge_base_tools_builds_only_referenced_kbs(client, tmp_path):
     (docs_dir / "policy.txt").write_text("Refund processing is completed within 5 business days.")
 
     client.put(
-        "/api/config/knowledge_bases/policy_kb",
+        "/api/config/knowledge_bases/policy_kb?org=default",
         json={"path": str(docs_dir), "type": "local_folder"},
     )
     client.put(
-        "/api/config/knowledge_bases/unused_kb",
+        "/api/config/knowledge_bases/unused_kb?org=default",
         json={"path": "./does/not/exist", "type": "local_folder"},
     )
 
     # Use the same DB the test client's overridden get_db uses.
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db: Session = next(db_gen)
     try:
         raw = {"agents": [{"name": "a", "tools": ["policy_kb", "calculator"]}]}
-        tools = load_knowledge_base_tools(db, raw, tmp_path / "wf.yaml")
+        tools = load_knowledge_base_tools(db, raw, tmp_path / "wf.yaml", org_id=get_org_id())
     finally:
         db_gen.close()
 
@@ -781,7 +853,7 @@ def test_workflow_put_resolves_standalone_knowledge_base_by_name(client, tmp_pat
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
-    client.put("/api/config/knowledge_bases/policy_kb", json={"path": str(docs_dir), "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/policy_kb?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
     workflow_config = {
         "agents": [
@@ -796,7 +868,7 @@ def test_workflow_put_resolves_standalone_knowledge_base_by_name(client, tmp_pat
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
+    resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
 
     assert resp.status_code == 200
 
@@ -805,7 +877,7 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
-    client.put("/api/config/knowledge_bases/policy_kb", json={"path": str(docs_dir), "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/policy_kb?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
     workflow_config = {
         "agents": [
@@ -820,13 +892,17 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    put_resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
+    put_resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
     assert put_resp.status_code == 200
 
     # Defensive only: the `client` fixture already clears the cache at setup,
     # and the workflow PUT route never populates `_workflow_cache` itself.
     backend_main._workflow_cache.clear()
-    run_resp = client.post("/api/runs", json={"workflow": "policy_wf", "input": "How long do refunds take?"})
+    run_resp = client.post(
+        "/api/runs",
+        json={"workflow": "policy_wf", "input": "How long do refunds take?"},
+        headers=_org_user_headers(client),
+    )
     assert run_resp.status_code == 200
 
 
@@ -835,7 +911,7 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
     docs_dir.mkdir()
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
     client.put(
-        "/api/config/knowledge_bases/policy_kb",
+        "/api/config/knowledge_bases/policy_kb?org=default",
         json={"path": str(docs_dir), "type": "vector", "embedding_model": "fake:8"},
     )
 
@@ -852,7 +928,7 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/policy_wf", json=workflow_config)
+    resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
 
     assert resp.status_code == 200
 
@@ -867,15 +943,17 @@ def test_cached_workflow_picks_up_skill_update(client):
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    client.put("/api/config/workflows/skill_wf", json=workflow_config)
+    client.put("/api/config/workflows/skill_wf?org=default", json=workflow_config)
 
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        wf1 = _get_workflow("skill_wf", db)
+        wf1 = _get_workflow("skill_wf", db, get_org_id())
         assert "Say hello warmly." in wf1.steps[0].agents[0].backstory
 
         client.put(
@@ -883,7 +961,7 @@ def test_cached_workflow_picks_up_skill_update(client):
             json={"description": "How to greet", "instructions": "Say hello formally.", "tools": []},
         )
 
-        wf2 = _get_workflow("skill_wf", db)
+        wf2 = _get_workflow("skill_wf", db, get_org_id())
         assert "Say hello formally." in wf2.steps[0].agents[0].backstory
         assert wf2 is not wf1
     finally:
@@ -896,25 +974,27 @@ def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    client.put("/api/config/workflows/cached_wf", json=workflow_config)
+    client.put("/api/config/workflows/cached_wf?org=default", json=workflow_config)
 
     calls = []
     original = backend_main.load_skills
 
-    def counting_load_skills(db):
+    def counting_load_skills(db, org_id=None):
         calls.append(1)
-        return original(db)
+        return original(db, org_id)
 
     monkeypatch.setattr(backend_main, "load_skills", counting_load_skills)
 
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        _get_workflow("cached_wf", db)
-        _get_workflow("cached_wf", db)
+        _get_workflow("cached_wf", db, get_org_id())
+        _get_workflow("cached_wf", db, get_org_id())
     finally:
         db_gen.close()
 
@@ -925,7 +1005,7 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     standalone_dir = tmp_path / "standalone_docs"
     standalone_dir.mkdir()
     (standalone_dir / "doc.txt").write_text("STANDALONE: days")
-    client.put("/api/config/knowledge_bases/shared_name", json={"path": str(standalone_dir), "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/shared_name?org=default", json={"path": str(standalone_dir), "type": "local_folder"})
 
     inline_dir = tmp_path / "inline_docs"
     inline_dir.mkdir()
@@ -945,16 +1025,18 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/priority_wf", json=workflow_config)
+    resp = client.put("/api/config/workflows/priority_wf?org=default", json=workflow_config)
     assert resp.status_code == 200
 
     from ui.backend.main import _get_workflow
     from ui.backend.db_session import get_db as real_get_db
 
+    from helpers import get_org_id
+
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        workflow = _get_workflow("priority_wf", db)
+        workflow = _get_workflow("priority_wf", db, get_org_id())
     finally:
         db_gen.close()
 
@@ -964,15 +1046,49 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     assert "INLINE" in tool("policy")
 
 
+def test_same_named_workflow_in_two_orgs_resolves_independently(client):
+    # The workflow cache is keyed by (org_id, name): two orgs' same-named
+    # workflows must build and cache as separate entries.
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db_session import get_db as real_get_db
+    from ui.backend.main import _get_workflow
+
+    with open_test_db() as db:
+        get_or_create_org(db, "other")
+
+    def workflow_config(reply):
+        return {
+            "agents": [{"name": "a", "role": "r", "goal": "g", "model": f"fake:{reply}"}],
+            "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+            "workflow": {"steps": ["team"]},
+        }
+
+    assert client.put("/api/config/workflows/wf?org=default", json=workflow_config("AAA")).status_code == 200
+    assert client.put("/api/config/workflows/wf?org=other", json=workflow_config("BBB")).status_code == 200
+
+    db_gen = backend_main.app.dependency_overrides[real_get_db]()
+    db = next(db_gen)
+    try:
+        wf_default = _get_workflow("wf", db, get_org_id("default"))
+        wf_other = _get_workflow("wf", db, get_org_id("other"))
+    finally:
+        db_gen.close()
+
+    assert wf_default is not wf_other
+    assert wf_default.steps[0].agents[0].model == "fake:AAA"
+    assert wf_other.steps[0].agents[0].model == "fake:BBB"
+
+
 def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
-    client.put("/api/config/knowledge_bases/broken_kb", json={"path": "/no/such/path", "type": "local_folder"})
+    client.put("/api/config/knowledge_bases/broken_kb?org=default", json={"path": "/no/such/path", "type": "local_folder"})
 
     broken_workflow = {
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["broken_kb"]}],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/broken_wf", json=broken_workflow)
+    resp = client.put("/api/config/workflows/broken_wf?org=default", json=broken_workflow)
     assert resp.status_code == 400
     assert "broken_kb" in resp.json()["detail"]
 
@@ -981,5 +1097,5 @@ def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
         "workflow": {"steps": ["team"]},
     }
-    resp2 = client.put("/api/config/workflows/unrelated_wf", json=unrelated_workflow)
+    resp2 = client.put("/api/config/workflows/unrelated_wf?org=default", json=unrelated_workflow)
     assert resp2.status_code == 200

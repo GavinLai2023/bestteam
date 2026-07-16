@@ -7,9 +7,21 @@ Directory-scoped notes for the SQLAlchemy persistence layer. See the root
 ## Persistence layer
 
 Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
-'bestteam[ui]'`). `db/models.py` defines the full Phase 1 schema from
-`docs/team_builder_methodology.md`:
+'bestteam[ui]'`). `db/models.py` defines the schema:
 
+- `organizations` — customer orgs for the multi-tenancy model
+  (`db/orgs.py`: `create_org`/`get_or_create_org`/`seed_default_org`; the
+  `default` org is seeded at bootstrap so a single-customer deployment just
+  has one org). Org-owned tables carry a nullable `org_id` FK; users with
+  `org_id IS NULL` are platform operators; skills with `org_id IS NULL` are
+  platform built-ins visible to every org. The five named component tables
+  swap their global `unique(name)` for named composite
+  `UniqueConstraint("org_id", "name", name="uq_<table>_org_id_name")`
+  (the repo's first `__table_args__`). Migration `b7c8d9e0f1a2` guards every
+  op by inspection (because `db_session` runs `create_all` at import, the
+  `organizations` table may already exist when it runs) and backfills only
+  NULL `org_id`s: non-admin users and all org-owned rows → `default`;
+  admins and built-in skills stay NULL.
 - `agents` / `teams` / `knowledge_bases` / `skills` / `workflows` — each row's `config`
   is a JSON `raw` dict (the technical fields from `AgentSpec`/`TeamSpec`/
   `KnowledgeBaseSpec`/`SkillSpec`/`Specification.to_raw()`, see `core/specification.py`);
@@ -21,7 +33,9 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   agents' structured outputs; `feedback_history` is an append-only JSON list
   recording each round of customer feedback.
 - `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
-  in-memory state (wired up in Phase 5).
+  in-memory state (wired up in Phase 5). `runs.username` (migration
+  `c9d0e1f2a3b4`) records who started the run (CR-032, audit-only —
+  ownership is org-level via `org_id`).
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
@@ -31,11 +45,15 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 - `usage_records` — per-agent token usage per run, plus a `cost_estimate`
   computed from `model_catalog` pricing where the model's spec matches an
   entry (Phase 3, `db/usage.py::record_usage`).
-- `users` — simple per-deployment login (Phase 3, `db/users.py` +
-  `ui/backend/auth.py`/`auth_api.py`). `is_admin` (added by the
-  `a1b2c3d4e5f6` migration) gates the Advanced config and Memory pages;
-  it's granted only via the `ui.backend.admin` operator CLI
-  (`db/users.py::set_admin_status`), never from registration.
+- `users` — logins (`db/users.py` + `ui/backend/auth.py`/`auth_api.py`).
+  `is_admin` (migration `a1b2c3d4e5f6`) gates the Advanced config and
+  Memory pages; `org_id` (migration `b7c8d9e0f1a2`, NULL = platform
+  operator) scopes everything else. Both are granted/assigned only via the
+  `ui.backend.admin` operator CLI — there is no public registration.
+  `is_admin` and a non-NULL `org_id` are mutually exclusive (CR-030):
+  `set_admin_status` refuses to promote org members, and the API guards
+  ignore the flag on org-bound rows anyway.
+  Usernames stay globally unique across orgs (JWT `sub` + memory keying).
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry

@@ -5,6 +5,48 @@ Directory-scoped notes for the FastAPI + WebSocket backend. See the root
 `ui/backend/db/CLAUDE.md` for the persistence schema and
 `ui/frontend/CLAUDE.md` for the React frontend this API serves.
 
+## Org multi-tenancy (row-level isolation)
+
+One deployment can serve several customer **organizations** (see
+`docs/DECISIONS.md`, "org-scoped multi-tenancy"; spec:
+`docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`). The rules
+every endpoint follows:
+
+- Org-owned rows carry `org_id`; org users only ever see their own org's
+  data plus platform built-ins (`skills.org_id IS NULL`) and the global
+  YAML demo workflows. **Cross-org access is a 404** (and the WS stream
+  closes 4404 == unknown-run) — existence is never revealed.
+- Scoping is centralized: `get_current_org` (auth_api),
+  `load_skills(db, org_id)` (org's own shadows a same-named built-in),
+  `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in
+  crud/builder/main. The workflow cache is keyed `(org_id, name)`; YAML
+  demos cache under `(None, name)`.
+- Component names are unique per `(org_id, name)`. KB upload dirs are
+  `data/knowledge_base_uploads/<org_id>/<name>` (legacy un-prefixed dirs
+  keep working — KB configs embed absolute paths).
+- Admin surfaces (`/api/config`, `/api/memory`) are platform-wide: lists
+  label each item's org and take an optional `?org=` filter; item routes
+  require explicit `?org=<name>` (skills may omit it = built-in tier).
+  **Platform admins are org-less accounts** (CR-030): `set_admin_status`
+  refuses to promote org members, and `get_current_admin` + the run
+  GET/stream passthrough require `is_admin AND org_id IS NULL` — an
+  org-bound `is_admin` flag is never honored.
+- Runs and usage_records carry `org_id` (denormalized — the future
+  per-customer billing dimension); run GET/stream check org ownership with
+  platform-admin read passthrough. Builder sessions are org-scoped. Runs
+  also persist `username` — who started them (CR-032, audit-only; ownership
+  stays org-level, and builder sandbox runs record it without a memory
+  `user_id`).
+- Process-wide email env vars (`BESTTEAM_EMAIL_*`) on a multi-org deployment
+  are **refused, not just discouraged** (CR-031):
+  `db/orgs.py::ensure_email_single_org` raises at backend startup and in the
+  `create-org` CLI when `BESTTEAM_EMAIL_BACKEND` is set with more than one
+  org. Per-org credentials are a future sub-project (encrypted secrets
+  store).
+- Memory stays keyed by globally-unique username (no org dimension needed).
+- The isolation test net: `tests/test_org_isolation.py` plus per-surface
+  tests in test_crud_api/test_ws_stream/test_builder_api.
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The
@@ -81,25 +123,22 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   `SECRET_KEY` and `ACCESS_TOKEN_EXPIRE_MINUTES` come from
   `BESTTEAM_SECRET_KEY` / `BESTTEAM_ACCESS_TOKEN_EXPIRE_MINUTES` env vars
   (defaults: a dev-only secret, 1440 minutes).
-- **`ui/backend/auth_api.py`** (`/api/auth`) — `POST /register`,
-  `POST /login` (both return `{access_token, token_type}`), `GET /me`
-  (requires `Authorization: Bearer <token>`; returns `{username, is_admin}`).
-  Exports `get_current_user`, a FastAPI dependency resolving the bearer token to
-  a `User` row, applied per-endpoint to `/api/workflows`,
-  `/api/workflows/{name}/graph`, `/api/runs` (POST), and `/api/runs/{id}` (GET)
-  in `main.py` and router-level to `/api/builder/sessions` (`builder.py`). Also
-  exports `get_current_admin` (same, but 403s a non-admin `User`), which
-  router-level guards the **admin-only** surfaces: `/api/config/*` (`crud.py`)
-  and `/api/memory/*` (`memory_api.py`). Registration always creates a non-admin
-  user; admin is granted **only** via the operator CLI
-  (`python -m ui.backend.admin promote <username>`,
-  `db/users.py::set_admin_status`) — never from an unauthenticated username
-  match, and never read at import (so an existing DB predating the `is_admin`
-  migration still boots). `/api/health` and `/api/auth/*` stay public;
-  `/api/runs/{run_id}/stream` requires the same bearer token passed as a
-  `?token=` query parameter (browsers can't set custom headers when opening a
-  WebSocket), validated with the same `decode_access_token`/
-  `get_user_by_username` logic as `get_current_user`.
+- **`ui/backend/auth_api.py`** (`/api/auth`) — `POST /login` (returns
+  `{access_token, token_type}`), `GET /me` (requires `Authorization: Bearer
+  <token>`; returns `{username, is_admin, org}`). **There is no public
+  registration endpoint** — orgs, users, and admins are all provisioned via
+  the operator CLI (`python -m ui.backend.admin create-org / create-user /
+  promote`; tests use `tests/helpers.py::create_user_and_login`). Exports
+  three dependencies: `get_current_user` (bearer → `User` row),
+  `get_current_admin` (403s non-admins; router-level guards the admin-only
+  `/api/config/*` and `/api/memory/*`), and `get_current_org` (the user's
+  `Organization`; **403s platform operators** — org-NULL users — on org-user
+  surfaces: workflows list/graph, `POST /api/runs`, the builder router).
+  Admin is granted only via the operator CLI, never from a username match,
+  and never read at import (a DB predating the migrations still boots; the
+  module-level seeding likewise warns-and-skips on a pre-migration schema).
+  `/api/health` and `/api/auth/*` stay public; the run stream WebSocket
+  authenticates with a single-use `?ticket=` (see the runs section).
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
   Solution Architect's prompt. `builder.py::_with_model_catalog(db, text)`

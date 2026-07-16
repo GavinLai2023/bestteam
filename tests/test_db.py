@@ -35,6 +35,7 @@ def test_init_db_creates_all_tables():
 
     tables = set(inspect(engine).get_table_names())
     assert tables == {
+        "organizations",
         "users",
         "agents",
         "teams",
@@ -61,6 +62,74 @@ def test_workflow_and_agent_records_round_trip_json_config(db_session):
     assert fetched_agent.config == {"role": "Support", "goal": "Help", "model": "fake:hi"}
     assert fetched_workflow.status == "draft"
     assert fetched_workflow.config["workflow"] == {"steps": []}
+
+
+def test_same_name_allowed_in_two_orgs_but_not_within_one(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    from ui.backend.db.orgs import create_org
+
+    org_a = create_org(db_session, "org_a")
+    org_b = create_org(db_session, "org_b")
+
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_b.id))
+    db_session.commit()  # same name in two orgs: fine
+
+    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
+    with pytest.raises(IntegrityError):
+        db_session.commit()  # duplicate within one org: rejected
+    db_session.rollback()
+
+
+def test_organization_round_trip(db_session):
+    from ui.backend.db.orgs import create_org, get_org_by_name, seed_default_org
+
+    create_org(db_session, "acme", display_name="Acme Corp")
+    fetched = get_org_by_name(db_session, "acme")
+    assert fetched.display_name == "Acme Corp"
+
+    seed_default_org(db_session)
+    seed_default_org(db_session)  # idempotent
+    assert get_org_by_name(db_session, "default") is not None
+
+
+def test_email_guard_rejects_multi_org_with_email_configured(db_session, monkeypatch):
+    # CR-031: BESTTEAM_EMAIL_* configures ONE process-wide mailbox and the
+    # built-in email skill is visible to every org, so a second org would let
+    # another customer read the configured mailbox. Until per-org credentials
+    # exist, that combination must refuse to run.
+    from ui.backend.db.orgs import create_org, ensure_email_single_org, seed_default_org
+
+    seed_default_org(db_session)
+    monkeypatch.setenv("BESTTEAM_EMAIL_BACKEND", "imap")
+
+    ensure_email_single_org(db_session)  # one org: fine
+
+    create_org(db_session, "acme")
+    with pytest.raises(RuntimeError, match="BESTTEAM_EMAIL_BACKEND"):
+        ensure_email_single_org(db_session)
+
+
+def test_email_guard_allows_multi_org_without_email(db_session, monkeypatch):
+    from ui.backend.db.orgs import create_org, ensure_email_single_org, seed_default_org
+
+    monkeypatch.delenv("BESTTEAM_EMAIL_BACKEND", raising=False)
+    seed_default_org(db_session)
+    create_org(db_session, "acme")
+
+    ensure_email_single_org(db_session)  # no email config: multi-org is fine
+
+
+def test_email_guard_counts_an_org_about_to_be_created(db_session, monkeypatch):
+    # The create-org CLI checks BEFORE inserting, passing creating=1.
+    from ui.backend.db.orgs import ensure_email_single_org, seed_default_org
+
+    seed_default_org(db_session)
+    monkeypatch.setenv("BESTTEAM_EMAIL_BACKEND", "graph")
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_EMAIL_BACKEND"):
+        ensure_email_single_org(db_session, creating=1)
 
 
 def test_create_session_starts_in_intent_stage(db_session):

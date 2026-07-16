@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,15 @@ from bestteam.exceptions import BestTeamError
 
 from .auth_api import get_current_admin
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
-from .db.models import AgentRecord, KnowledgeBaseRecord, SkillRecord, TeamRecord, WorkflowRecord
+from .db.models import (
+    AgentRecord,
+    KnowledgeBaseRecord,
+    Organization,
+    SkillRecord,
+    TeamRecord,
+    WorkflowRecord,
+)
+from .db.orgs import get_org_by_name
 from .db_session import get_db
 from .knowledge_bases import (
     _KB_CURRENT_POINTER,
@@ -152,23 +160,69 @@ def _invalidate_workflow_cache() -> None:
         main._workflow_cache_generation += 1
 
 
+def _resolve_org_id(db: Session, org: Optional[str], *, allow_platform: bool) -> Optional[int]:
+    """Resolve an admin request's `?org=<name>` to an org id.
+
+    Omitted `org` means the platform tier (org_id NULL) where allowed
+    (skills' built-ins); otherwise it's an error -- admin mutations must
+    target an explicit org so a multi-org operator can't edit the wrong
+    customer by accident.
+    """
+    if org is None or org == "":
+        if allow_platform:
+            return None
+        raise HTTPException(
+            status_code=422,
+            detail="Query parameter 'org' is required (the organization the item belongs to)",
+        )
+    record = get_org_by_name(db, org)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown organization '{org}'")
+    return record.id
+
+
+def _org_name_map(db: Session) -> Dict[int, str]:
+    return {o.id: o.name for o in db.query(Organization).all()}
+
+
 def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel]) -> APIRouter:
     sub = APIRouter(prefix=f"/{name}")
+    # Skills have a platform tier (org_id NULL = built-ins visible to every
+    # org), so `?org=` may be omitted there; everything else requires it.
+    allow_platform = name == "skills"
 
     @sub.get("")
-    def list_items(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
-        items = db.query(record_cls).order_by(record_cls.name).all()
-        return [{"name": item.name, "config": item.config} for item in items]
+    def list_items(
+        org: Optional[str] = Query(None), db: Session = Depends(get_db)
+    ) -> list[Dict[str, Any]]:
+        query = db.query(record_cls)
+        if org is not None:
+            query = query.filter(record_cls.org_id == _resolve_org_id(db, org, allow_platform=False))
+        items = query.order_by(record_cls.name).all()
+        org_names = _org_name_map(db)
+        return [
+            {"name": item.name, "org": org_names.get(item.org_id), "config": item.config}
+            for item in items
+        ]
 
     @sub.get("/{item_name}")
-    def get_item(item_name: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
-        item = db.query(record_cls).filter_by(name=item_name).one_or_none()
+    def get_item(
+        item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
+    ) -> Dict[str, Any]:
+        org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
+        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
-        return {"name": item.name, "config": item.config}
+        return {"name": item.name, "org": org, "config": item.config}
 
     @sub.put("/{item_name}")
-    def upsert_item(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    def upsert_item(
+        item_name: str,
+        config: Dict[str, Any] = Body(...),
+        org: Optional[str] = Query(None),
+        db: Session = Depends(get_db),
+    ) -> Dict[str, Any]:
+        org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
         if name == "knowledge_bases":
             _validate_kb_paths(config)
         try:
@@ -177,26 +231,29 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        item = db.query(record_cls).filter_by(name=item_name).one_or_none()
+        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
-            item = record_cls(name=item_name, config=raw)
+            item = record_cls(name=item_name, config=raw, org_id=org_id)
             db.add(item)
         else:
             item.config = raw
         db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
-        return {"name": item_name, "config": raw}
+        return {"name": item_name, "org": org, "config": raw}
 
     @sub.delete("/{item_name}", status_code=204)
-    def delete_item(item_name: str, db: Session = Depends(get_db)) -> Response:
-        item = db.query(record_cls).filter_by(name=item_name).one_or_none()
+    def delete_item(
+        item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
+    ) -> Response:
+        org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
+        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
         if name == "knowledge_bases":
             # Same per-KB lock as upload, so a delete can't race a promotion.
-            with _kb_upload_lock(item_name):
-                upload_dir = _KB_UPLOADS_DIR / item_name
+            with _kb_upload_lock(f"{org_id}/{item_name}"):
+                upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
                 if upload_dir.is_dir():
                     shutil.rmtree(upload_dir, ignore_errors=True)
         db.delete(item)
@@ -221,8 +278,10 @@ def upload_knowledge_base_files(
     chunk_size: int = 1000,
     chunk_overlap: int = 100,
     top_k: int = 5,
+    org: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    org_id = _resolve_org_id(db, org, allow_platform=False)
     try:
         _validate_tool_name(item_name)
     except ValueError as exc:
@@ -267,7 +326,11 @@ def upload_knowledge_base_files(
     # without a live version (no rename-swap gap), and the prior version is kept
     # until the new one commits -- so any failure leaves the previous KB and its
     # DB record intact (CR-008).
-    kb_root = _KB_UPLOADS_DIR / item_name
+    # Uploads are org-scoped on disk so two orgs' same-named KBs can't share
+    # (or clobber) a directory. Legacy pre-multi-tenancy uploads at
+    # `_KB_UPLOADS_DIR/<name>` keep working: KB configs embed the absolute
+    # root, so existing records still resolve their old directory.
+    kb_root = _KB_UPLOADS_DIR / str(org_id) / item_name
     pointer = kb_root / _KB_CURRENT_POINTER
     version = f"v_{uuid.uuid4().hex[:12]}"
     version_dir = kb_root / version
@@ -291,7 +354,7 @@ def upload_knowledge_base_files(
         # uploads of the same KB can't interleave and leave CURRENT dangling.
         # (The file writes + validation above run outside the lock -- each
         # uploader owns a unique version dir, so they don't conflict.)
-        with _kb_upload_lock(item_name):
+        with _kb_upload_lock(f"{org_id}/{item_name}"):
             previous_version = _read_pointer(pointer)
             _write_pointer(pointer, version)  # atomic promotion
 
@@ -304,9 +367,9 @@ def upload_knowledge_base_files(
                 top_k=top_k,
             )
             raw = spec.to_raw()
-            item = db.query(KnowledgeBaseRecord).filter_by(name=item_name).one_or_none()
+            item = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
             if item is None:
-                item = KnowledgeBaseRecord(name=item_name, config=raw)
+                item = KnowledgeBaseRecord(name=item_name, config=raw, org_id=org_id)
                 db.add(item)
             else:
                 item.config = raw
@@ -345,45 +408,67 @@ _workflows = APIRouter(prefix="/workflows")
 
 
 @_workflows.get("")
-def list_workflow_configs(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
-    items = db.query(WorkflowRecord).order_by(WorkflowRecord.name).all()
-    return [{"name": item.name, "status": item.status, "config": item.config} for item in items]
+def list_workflow_configs(
+    org: Optional[str] = Query(None), db: Session = Depends(get_db)
+) -> list[Dict[str, Any]]:
+    query = db.query(WorkflowRecord)
+    if org is not None:
+        query = query.filter(WorkflowRecord.org_id == _resolve_org_id(db, org, allow_platform=False))
+    items = query.order_by(WorkflowRecord.name).all()
+    org_names = _org_name_map(db)
+    return [
+        {"name": item.name, "org": org_names.get(item.org_id), "status": item.status, "config": item.config}
+        for item in items
+    ]
 
 
 @_workflows.get("/{item_name}")
-def get_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    item = db.query(WorkflowRecord).filter_by(name=item_name).one_or_none()
+def get_workflow_config(
+    item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    org_id = _resolve_org_id(db, org, allow_platform=False)
+    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
-    return {"name": item.name, "status": item.status, "config": item.config}
+    return {"name": item.name, "org": org, "status": item.status, "config": item.config}
 
 
 @_workflows.put("/{item_name}")
-def upsert_workflow_config(item_name: str, config: Dict[str, Any] = Body(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+def upsert_workflow_config(
+    item_name: str,
+    config: Dict[str, Any] = Body(...),
+    org: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    org_id = _resolve_org_id(db, org, allow_platform=False)
     raw = {**config, "name": item_name}
     try:
         for kb_config in raw.get("knowledge_bases", []) or []:
             if isinstance(kb_config, dict):
                 _validate_kb_paths(kb_config)
         source = _WORKFLOWS_DIR / f"{item_name}.yaml"
-        kb_tools = load_knowledge_base_tools(db, raw, source)
-        _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db))
+        # Dependencies resolve within the workflow's own org (+ built-in skills).
+        kb_tools = load_knowledge_base_tools(db, raw, source, org_id=org_id)
+        _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db, org_id))
     except (KeyError, TypeError, BestTeamError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    item = db.query(WorkflowRecord).filter_by(name=item_name).one_or_none()
+    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
-        item = WorkflowRecord(name=item_name, config=raw, status="draft")
+        item = WorkflowRecord(name=item_name, config=raw, status="draft", org_id=org_id)
         db.add(item)
     else:
         item.config = raw
     db.commit()
-    return {"name": item_name, "status": item.status, "config": raw}
+    return {"name": item_name, "org": org, "status": item.status, "config": raw}
 
 
 @_workflows.delete("/{item_name}", status_code=204)
-def delete_workflow_config(item_name: str, db: Session = Depends(get_db)) -> Response:
-    item = db.query(WorkflowRecord).filter_by(name=item_name).one_or_none()
+def delete_workflow_config(
+    item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
+) -> Response:
+    org_id = _resolve_org_id(db, org, allow_platform=False)
+    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
     db.delete(item)

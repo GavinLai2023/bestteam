@@ -43,21 +43,46 @@ Append new entries at the bottom using this template:
 
 ## Deployment: per-customer instance, no multi-tenancy
 
-- **Status**: Accepted
+- **Status**: **Superseded** (2026-07-16) by "Deployment: org-scoped
+  multi-tenancy, one codebase for both models" below.
 - **Context**: bestteam needs a deployment model for delivering the Team
   Builder + monitoring UI to customers.
-- **Decision**: bestteam ships as **one independent instance per customer**
-  (Docker Compose, its own SQLite database), not a shared multi-tenant SaaS.
+- **Decision (original)**: bestteam ships as **one independent instance per
+  customer** (Docker Compose, its own SQLite database), not a shared
+  multi-tenant SaaS.
+- **Why superseded**: the business now anticipates one shared hosted
+  platform serving several customer organisations (one or more accounts per
+  customer org, each org on its own external services). A shared instance
+  under the original model had zero cross-customer isolation.
+
+## Deployment: org-scoped multi-tenancy, one codebase for both models
+
+- **Status**: Accepted (2026-07-16)
+- **Context**: several customer organisations should be servable from one
+  hosted deployment, with multiple employee accounts per org, without
+  giving up the existing per-customer-instance option.
+- **Decision**: row-level multi-tenancy via an `organizations` table and
+  `org_id` columns on every org-owned resource (users, agents, teams,
+  knowledge bases, skills, workflows, builder sessions, runs, usage), with
+  API-layer scoping through a `get_current_org` dependency. **The same code
+  serves both deployment models** — a per-customer instance is simply a
+  deployment with one org (the migration backfills `default`), a shared
+  platform is one with many.
 - **Consequences**:
-  - The `users` table (`ui/backend/db/users.py`) has no `tenant_id` — it's
-    "a handful of users sharing one deployment", not cross-customer
-    isolation.
-  - Each customer's config, builder sessions, run history, and usage records
-    live in their own SQLite file (`bestteam_data` volume — see
-    `deployment.md`).
-  - Distributing code updates *across* many customer deployments is a
-    separate, deferred concern (Phase 6 in `team_builder_methodology.md`),
-    not something app-level multi-tenancy would solve anyway.
+  - Public registration is removed; orgs and accounts are provisioned by
+    the platform operator via the `ui.backend.admin` CLI. Platform
+    operators are org-NULL users; org users never see another org's data
+    (cross-org access is 404 — existence is not revealed).
+  - Component names are unique per `(org_id, name)`, not globally; skills
+    have a platform tier (`org_id IS NULL` = built-ins visible to all).
+  - Isolation is enforced in the API layer (central loaders + dependency),
+    not the database engine; Postgres row-level security can be layered
+    onto the same `org_id` columns later if the DB moves off SQLite.
+  - Per-org secrets (email/LLM credentials) are NOT part of this decision —
+    they need an encrypted secrets store (separate sub-project); until
+    then, process-env email credentials must not be set on a shared
+    instance.
+  - See `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
 
 ## Memory: SQLite + BM25 in-house, not the mem0 library
 

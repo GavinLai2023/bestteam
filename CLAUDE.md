@@ -70,7 +70,7 @@ relevant file below the first time it reads a file in that directory:
 - `docs/STATUS.md` — living kanban: done / in progress / known issues and
   tech debt / next steps.
 - `docs/DECISIONS.md` — why significant decisions were made (e.g. LangGraph
-  vs CrewAI, no multi-tenancy), so they aren't re-litigated.
+  vs CrewAI, org-scoped multi-tenancy), so they aren't re-litigated.
 
 ## Known limitations / unimplemented extension points
 

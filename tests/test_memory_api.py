@@ -9,9 +9,9 @@ from fastapi.testclient import TestClient
 
 from bestteam import SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, SEMANTIC
+from helpers import create_user_and_login
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import User
 from ui.backend.db_session import get_db
 
 
@@ -43,10 +43,7 @@ def admin_client(monkeypatch):
     backend_main.app.dependency_overrides[get_db] = override_get_db
     try:
         c = TestClient(backend_main.app)
-        token = c.post("/api/auth/register", json={"username": "admin", "password": "pw"}).json()["access_token"]
-        with TestSessionLocal() as db:
-            db.query(User).filter_by(username="admin").update({"is_admin": True})
-            db.commit()
+        token = create_user_and_login(c, username="admin", password="pw", org=None, admin=True)
         c.headers["Authorization"] = f"Bearer {token}"
         yield c
     finally:
@@ -123,7 +120,7 @@ def test_clear_user_memory(admin_client, memory_db):
 
 
 def test_requires_admin(admin_client, memory_db):
-    token = admin_client.post("/api/auth/register", json={"username": "regular", "password": "pw"}).json()["access_token"]
+    token = create_user_and_login(admin_client, username="regular", password="pw")
     headers = {"Authorization": f"Bearer {token}"}
 
     assert admin_client.get("/api/memory/users", headers=headers).status_code == 403

@@ -83,21 +83,39 @@
   TDD regressions, full suite (356 passed), and frontend build/lint. See
   `docs/CODE_REVIEW_TRIAGE.md` (Round 3).
 
-## In Progress
-
-- Email toolkit (branch `feat/email-toolkit`): three draft-only built-in
-  tools — `email_find` / `email_read` / `email_draft_reply` — over one
-  env-configured mailbox, with MS Graph (M365/Exchange Online, app-only
-  OAuth, `createReply`) and generic IMAP (stdlib, `BODY.PEEK`, threaded
-  MIME draft APPENDed to Drafts) backends behind one seam
+- Email toolkit (merged to `main`, PR #13 `704797b`): three draft-only
+  built-in tools — `email_find` / `email_read` / `email_draft_reply` — over
+  one env-configured mailbox; MS Graph (app-only OAuth, `createReply`) and
+  generic IMAP (stdlib, `BODY.PEEK`, threaded MIME drafts, UTF-8-literal
+  CJK search) backends behind one seam
   (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
-  verb / no SMTP by design — drafts are reviewed and sent by a human from
-  their own mail client. Ships with a seeded `email_triage_reply` built-in
-  Skill (`ui/backend/skills.py::seed_default_skills`, per-row
-  seed-if-absent) so Team Builder customers just pick the skill. Deferred:
-  real sending, ambient run-on-new-mail, per-user OAuth/secrets store,
+  verb / no SMTP by design. Seeded `email_triage_reply` built-in Skill.
+  Deferred: real sending, ambient triggering, per-org credentials,
   attachments. Spec:
   `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
+
+## In Progress
+
+- Org multi-tenancy sub-project 1 (branch `feat/org-multi-tenancy`):
+  `organizations` table + `org_id` row-level isolation across users/agents/
+  teams/KBs/skills/workflows/builder sessions/runs/usage;
+  `get_current_org` dependency; cross-org access → 404 (WS 4404, no
+  existence oracle); public registration REMOVED (operator CLI
+  `create-org`/`create-user`/`list-orgs`); `(org_id, name)` composite
+  uniques; org-scoped loaders + workflow cache `(org_id, name)`; KB uploads
+  per org; admin `/api/config` targets orgs via `?org=`. Also fixes two
+  pre-existing holes: run GET/WS-stream and builder sessions had NO
+  ownership checks. Same code serves per-customer instances (one org) and
+  the shared platform (many). DECISIONS.md superseded accordingly. Spec:
+  `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
+  Code-review round 4 (CR-030…CR-032, all fixed on the branch): platform
+  admins must be org-less accounts (promotion of org members refused,
+  enforced in `get_current_admin` + run passthrough); multi-org +
+  `BESTTEAM_EMAIL_*` now refuses startup / `create-org` (interim guard until
+  the secrets store); `runs.username` persisted (migration `c9d0e1f2a3b4`).
+  See `docs/CODE_REVIEW_TRIAGE.md` (Round 4).
+  Remaining sub-projects: encrypted per-org secrets store (2), per-org
+  email/LLM credentials (3), infra hardening/Postgres when scale demands (4).
 
 ## Known issues / tech debt
 
@@ -107,7 +125,10 @@
 - **Per-user memory recall is single-stage BM25** — no rerank/expansion;
   semantic/procedural records have no auto-dedup. Admin view/search/delete UI
   exists (`/api/memory`), but there's no manual add/edit and no retention/quota
-  policy. See `core/memory.py`.
+  policy. `GET /api/memory/users` is unpaginated (CR-029, deferred P3): fine
+  today (admin-only, opt-in, operator-provisioned accounts), but the
+  shared-platform ceiling is the sum of memory-enabled users across all orgs
+  — add a limit/cursor if a customer reaches ~hundreds. See `core/memory.py`.
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain
@@ -121,17 +142,13 @@
 
 ## Next steps / roadmap
 
-- **OPEN DECISION — deployment model (raised 2026-07-15):** the business now
-  anticipates one **shared hosted platform** serving several customer
-  organisations (one account per customer), which would reverse the Accepted
-  "per-customer instance, no multi-tenancy" decision in `DECISIONS.md`. A
-  shared instance today has **no cross-customer isolation** (any user can see
-  all workflows/runs/KBs/usage), so this is a multi-tenancy program, not a
-  feature: (1) org model + row-level isolation, (2) encrypted per-org secrets
-  store, (3) per-org email/LLM credential settings (email tools' env-based
-  `_get_backend()` would swap its credential source; the toolkit itself is
-  unaffected). Alternative still on the table: keep per-customer instances
-  and skip the build. Revisit `DECISIONS.md` formally before starting.
+- **Deployment model — RESOLVED 2026-07-16:** the shared-hosted-platform
+  question (raised 2026-07-15) was decided in favour of **org-scoped
+  multi-tenancy, one codebase for both models** — see `DECISIONS.md`
+  (supersedes "per-customer instance, no multi-tenancy") and the In
+  Progress entry above. Remaining program: (2) encrypted per-org secrets
+  store, (3) per-org email/LLM credential settings, (4) infra hardening /
+  Postgres when real usage numbers demand it.
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the
   current engine).

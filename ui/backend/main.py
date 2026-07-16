@@ -29,12 +29,12 @@ from bestteam.exceptions import BestTeamError
 
 from . import auth
 from . import interview
-from .auth_api import get_current_user, router as auth_router
+from .auth_api import get_current_org, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
-from .db.models import KnowledgeBaseRecord, SkillRecord, User, WorkflowRecord
+from .db.models import KnowledgeBaseRecord, Organization, SkillRecord, User, WorkflowRecord
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
 from .knowledge_bases import (
@@ -169,7 +169,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-_workflow_cache: Dict[str, Tuple[Workflow, Any]] = {}
+# Keyed by (org_id, workflow name): two orgs' same-named workflows are
+# different entries, so one org's cached build can never serve another org.
+# YAML demo workflows are global and cache under (None, name).
+_workflow_cache: Dict[Tuple[Optional[int], str], Tuple[Workflow, Any]] = {}
 # Guards the cache dict and a monotonic generation counter. `_get_workflow`
 # snapshots the generation before it builds and only stores the result if the
 # generation hasn't advanced -- so a concurrent KB/skill invalidation (which
@@ -179,10 +182,12 @@ _workflow_cache_lock = threading.Lock()
 _workflow_cache_generation = 0
 
 
-def _store_workflow_in_cache(name: str, workflow: Workflow, cache_key: Any, generation: int) -> None:
+def _store_workflow_in_cache(
+    key: Tuple[Optional[int], str], workflow: Workflow, cache_key: Any, generation: int
+) -> None:
     with _workflow_cache_lock:
         if generation == _workflow_cache_generation:
-            _workflow_cache[name] = (workflow, cache_key)
+            _workflow_cache[key] = (workflow, cache_key)
 
 
 class RunRequest(BaseModel):
@@ -216,16 +221,19 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     return (skills_count, skills_max, kb_count, kb_max)
 
 
-def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
-    """Load and cache a workflow by name (Workflow already memoizes its own
-    compiled graph, so repeat runs of the same workflow stay cheap).
+def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
+    """Load and cache a workflow by name for one org (Workflow already
+    memoizes its own compiled graph, so repeat runs of the same workflow
+    stay cheap).
 
     A `WorkflowRecord` in the database (e.g. one deployed via the Team
-    Builder Wizard, or edited through the `/api/config` CRUD API) takes
-    priority over a YAML file of the same name, and is cached on its
-    `updated_at`. Otherwise falls back to `WORKFLOWS_DIR/<name>.yaml`, cached
-    by the file's mtime, so editing a workflow file on disk is picked up on
-    the next request.
+    Builder Wizard, or edited through the `/api/config` CRUD API) is looked
+    up within `org_id` -- another org's same-named workflow is invisible --
+    and is cached on its `updated_at` under the `(org_id, name)` cache key.
+    Otherwise falls back to `WORKFLOWS_DIR/<name>.yaml` (global demo
+    workflows, shared across orgs under `(None, name)`), cached by the
+    file's mtime, so editing a workflow file on disk is picked up on the
+    next request.
 
     `db` is the request's `get_db`-provided session, if available, so this
     sees the same data as the `/api/builder` and `/api/config` routers
@@ -237,28 +245,32 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
     # result rather than repopulating the cache after the invalidation (CR-005).
     generation = _workflow_cache_generation
     if db is not None:
-        record = db.query(WorkflowRecord).filter_by(name=name).one_or_none()
+        record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
-            record = session.query(WorkflowRecord).filter_by(name=name).one_or_none()
+            record = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
             dependency_freshness = _dependency_freshness(session) if record is not None else None
 
     if record is not None:
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
-        cached = _workflow_cache.get(name)
+        cached = _workflow_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
             return cached[0]
         # Only load skills and build standalone KB tools (which may re-chunk
         # files and, for type: vector, call a paid embedding model) on a cache
-        # miss -- not on every request.
+        # miss -- not on every request. Dependencies resolve within the
+        # workflow record's own org (+ platform built-in skills), so one org's
+        # workflow can never pull in another org's KB or skill by name.
         if db is not None:
-            skill_lookup = load_skills(db)
-            kb_tools = load_knowledge_base_tools(db, record.config, source)
+            skill_lookup = load_skills(db, record.org_id)
+            kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
         else:
             with SessionLocal() as session:
-                skill_lookup = load_skills(session)
-                kb_tools = load_knowledge_base_tools(session, record.config, source)
+                skill_lookup = load_skills(session, record.org_id)
+                kb_tools = load_knowledge_base_tools(
+                    session, record.config, source, org_id=record.org_id
+                )
         try:
             config = contain_workflow_config_for_load(record.config)
             ensure_workflow_cache_paths_for_source(config, source)
@@ -270,7 +282,7 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
             )
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _store_workflow_in_cache(name, workflow, cache_key, generation)
+        _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
         return workflow
 
     path = WORKFLOWS_DIR / f"{name}.yaml"
@@ -278,14 +290,24 @@ def _get_workflow(name: str, db: Optional[Session] = None) -> Workflow:
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
 
     cache_key = ("file", path.stat().st_mtime)
-    cached = _workflow_cache.get(name)
+    cached = _workflow_cache.get((None, name))
     if cached is not None and cached[1] == cache_key:
         return cached[0]
     try:
-        workflow = load_workflow(path)
+        # YAML demo workflows are global (visible to every org), so they may
+        # reference platform built-in skills (org NULL) only -- never an
+        # org's own skills or knowledge bases. Without this, a YAML workflow
+        # referencing a seeded skill (e.g. email_triage_demo_live ->
+        # email_triage_reply) fails to load with "Unknown skill".
+        if db is not None:
+            builtin_skills = load_skills(db, None)
+        else:
+            with SessionLocal() as session:
+                builtin_skills = load_skills(session, None)
+        workflow = load_workflow(path, skills=list(builtin_skills.values()))
     except BestTeamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _store_workflow_in_cache(name, workflow, cache_key, generation)
+    _store_workflow_in_cache((None, name), workflow, cache_key, generation)
     return workflow
 
 
@@ -295,15 +317,18 @@ def health():
 
 
 @app.get("/api/workflows")
-def list_workflows(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    db_names = {row.name for row in db.query(WorkflowRecord.name).all()}
+def list_workflows(db: Session = Depends(get_db), org: Organization = Depends(get_current_org)):
+    # The org's own deployed/edited workflows plus the global YAML demos.
+    db_names = {
+        row.name for row in db.query(WorkflowRecord.name).filter(WorkflowRecord.org_id == org.id)
+    }
     yaml_names = {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")}
     return {"workflows": sorted(db_names | yaml_names)}
 
 
 @app.get("/api/workflows/{name}/graph")
-def workflow_graph(name: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    workflow = _get_workflow(name, db)
+def workflow_graph(name: str, db: Session = Depends(get_db), org: Organization = Depends(get_current_org)):
+    workflow = _get_workflow(name, db, org.id)
     try:
         return {"mermaid": workflow.visualize()}
     except BestTeamError as exc:
@@ -311,11 +336,25 @@ def workflow_graph(name: str, db: Session = Depends(get_db), user: User = Depend
 
 
 @app.post("/api/runs")
-async def create_run(req: RunRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    workflow = _get_workflow(req.workflow, db)
-    run = registry.create(req.workflow, req.input)
+async def create_run(
+    req: RunRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org: Organization = Depends(get_current_org),
+):
+    workflow = _get_workflow(req.workflow, db, org.id)
+    run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
-    _executor.submit(run_in_background, run.id, workflow, req.input, db.get_bind(), user.username)
+    _executor.submit(
+        run_in_background,
+        run.id,
+        workflow,
+        req.input,
+        engine=db.get_bind(),
+        user_id=user.username,
+        org_id=org.id,
+        username=user.username,
+    )
 
     return {"run_id": run.id}
 
@@ -323,7 +362,12 @@ async def create_run(req: RunRequest, db: Session = Depends(get_db), user: User 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str, user: User = Depends(get_current_user)):
     run = registry.get(run_id)
-    if run is None:
+    # Cross-org access is a 404, not a 403 -- existence is not revealed.
+    # Org-less platform admins pass (operator debugging; an org-bound
+    # is_admin flag does NOT qualify, CR-030); runs with org_id=None (e.g.
+    # builder sandbox runs) are visible to admins and org-less callers only.
+    is_platform_admin = user.is_admin and user.org_id is None
+    if run is None or (run.org_id != user.org_id and not is_platform_admin):
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
     return dataclasses.asdict(run)
 
@@ -349,13 +393,19 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
     if username is None:
         await websocket.close(code=4401)
         return
-    if get_user_by_username(db, username) is None:
+    ws_user = get_user_by_username(db, username)
+    if ws_user is None:
         db.close()
         await websocket.close(code=4401)
         return
 
     run = registry.get(run_id)
-    if run is None:
+    # Same close code for "unknown run" and "another org's run" so a probing
+    # client can't distinguish existence (no cross-org oracle). Org-less
+    # platform admins pass through for operator debugging (an org-bound
+    # is_admin flag does NOT qualify, CR-030).
+    is_platform_admin = ws_user.is_admin and ws_user.org_id is None
+    if run is None or (run.org_id != ws_user.org_id and not is_platform_admin):
         db.close()
         await websocket.close(code=4404)
         return
