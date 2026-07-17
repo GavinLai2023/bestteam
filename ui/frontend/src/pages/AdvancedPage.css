@@ -76,6 +76,8 @@
   justify-content: space-between;
   align-items: center;
   gap: 6px;
+  /* Component names are long and unspaced (ecommerce_support_policies). */
+  overflow-wrap: anywhere;
 }
 
 .status-badge {
@@ -88,20 +90,25 @@
   border-radius: 999px;
 }
 
+/* Stacked, not a row: this column is far too narrow to fit an input beside a
+   button. A file input's intrinsic width alone exceeds it. */
 .advanced-new {
   display: flex;
+  flex-direction: column;
   gap: 6px;
   border-top: 1px solid #e5e7eb;
   padding-top: 12px;
 }
 
 .advanced-new input {
-  flex: 1;
   font: inherit;
   font-size: 0.85rem;
   padding: 6px 8px;
   border: 1px solid #d1d5db;
   border-radius: 8px;
+  /* Flex items default to min-width: auto, so without this an input refuses to
+     shrink below its intrinsic size and overflows the card. */
+  min-width: 0;
 }
 
 .advanced-editor h2 {
