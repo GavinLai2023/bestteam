@@ -22,10 +22,15 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `organizations` table may already exist when it runs) and backfills only
   NULL `org_id`s: non-admin users and all org-owned rows → `default`;
   admins and built-in skills stay NULL.
-- `agents` / `teams` / `knowledge_bases` / `skills` / `workflows` — each row's `config`
-  is a JSON `raw` dict (the technical fields from `AgentSpec`/`TeamSpec`/
-  `KnowledgeBaseSpec`/`SkillSpec`/`Specification.to_raw()`, see `core/specification.py`);
-  `workflows.status` tracks `draft` / `ready_for_testing` / `deployed`.
+- `knowledge_bases` / `skills` / `workflows` — each row's `config` is a JSON
+  `raw` dict (the technical fields from `KnowledgeBaseSpec`/`SkillSpec`/
+  `Specification.to_raw()`, see `core/specification.py`); `workflows.status`
+  tracks `draft` / `ready_for_testing` / `deployed`.
+- `agents` / `teams` — **vestigial**. `AgentRecord`/`TeamRecord` still exist
+  here, but nothing reads them and their `/api/config` routes were removed: a
+  workflow carries its agents/teams inline in its own `config`, and
+  `_build_workflow` accepts only `extra_tools`/`extra_skills`, so a standalone
+  row could never reach a run. Kept (empty) rather than migrated away.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/
@@ -60,8 +65,8 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 runs), `init_db(engine)` (`Base.metadata.create_all`), and
 `session_factory(engine)`. `db/builder_sessions.py` has the
 `builder_sessions` CRUD (`create_session`/`get_session`/`update_session`/
-`append_feedback`); CRUD for `agents`/`teams`/`knowledge_bases`/`workflows`
-lives in `ui/backend/crud.py` (Phase 2, see `ui/backend/CLAUDE.md`).
+`append_feedback`); CRUD for `knowledge_bases`/`skills`/`workflows` lives in
+`ui/backend/crud.py` (Phase 2, see `ui/backend/CLAUDE.md`).
 `ui/backend/db_session.py` wires up the per-deployment engine (default
 `ui/backend/data/bestteam.db`, override with `BESTTEAM_DB_PATH`) and a
 `get_db()` FastAPI dependency.

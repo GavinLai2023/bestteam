@@ -210,7 +210,7 @@ def test_org_bound_admin_flag_does_not_grant_admin_api(client):
         user.is_admin = True  # bypasses the set_admin_status guard on purpose
         db.commit()
 
-    resp = client.get("/api/config/agents", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get("/api/config/knowledge_bases", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
 
 
@@ -263,7 +263,7 @@ def test_me_rejects_invalid_token(client):
     [
         "/api/workflows",
         "/api/builder/sessions/missing-id",
-        "/api/config/agents",
+        "/api/config/knowledge_bases",
     ],
 )
 def test_protected_endpoints_reject_missing_token(client, path):

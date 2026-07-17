@@ -1,21 +1,26 @@
-"""CRUD API for `agents`/`teams`/`knowledge_bases`/`workflows` (Phase 2).
+"""CRUD API for `knowledge_bases`/`skills`/`workflows` + the model catalog.
 
 The "advanced view" referenced by docs/team_builder_methodology.md's Phase 2:
-a fine-tuning surface for already-deployed configs, reusing the same
-`*Spec.to_raw()` / `_build_workflow()` validation as the wizard.
+an operator-facing fine-tuning surface for already-deployed configs, reusing
+the same `*Spec.to_raw()` / `_build_workflow()` validation as the wizard.
 
-`agents`/`teams`/`knowledge_bases` are validated as standalone components
-(field shape only, via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`) -- of
-these, only `knowledge_bases` are also resolvable by name from a workflow's
-`tools:` list (via `ui/backend/knowledge_bases.py::load_knowledge_base_tools`);
-`agents`/`teams`/`skills` are not cross-referenced into a `workflows` config
-automatically. A `workflows` entry is a complete, self-contained
-`Specification.to_raw()` dict and is validated as a whole via
-`_build_workflow`, exactly like the wizard's Specification stage.
+A `workflows` entry is a complete, self-contained `Specification.to_raw()`
+dict -- it carries its own `agents:` and `teams:` inline -- and is validated
+as a whole via `_build_workflow`, exactly like the wizard's Specification
+stage. `knowledge_bases` and `skills` are the only standalone records a
+workflow resolves by name (via `knowledge_bases.py::load_knowledge_base_tools`
+and `skills.py::load_skills`).
+
+Standalone `agents`/`teams` CRUD used to live here too, but nothing ever
+consumed those records: `_build_workflow` takes only `extra_tools`/
+`extra_skills`, so they could never reach a running workflow. Both tables
+were empty in every deployment, so the routes were removed; the models
+remain in `db/models.py`.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import threading
@@ -27,23 +32,22 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Respon
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from bestteam import AgentSpec, KnowledgeBaseSpec, SkillSpec, TeamSpec
+from bestteam import KnowledgeBaseSpec, SkillSpec
 from bestteam.core.knowledge_base import LocalFolderKnowledgeBase
 from bestteam.core.loader import _build_workflow
 from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError
+from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import (
-    AgentRecord,
     KnowledgeBaseRecord,
     Organization,
     SkillRecord,
-    TeamRecord,
     WorkflowRecord,
 )
-from .db.orgs import get_org_by_name
+from .db.orgs import get_org_by_name, list_orgs
 from .db_session import get_db
 from .knowledge_bases import (
     _KB_CURRENT_POINTER,
@@ -66,6 +70,33 @@ _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_admin)])
+
+
+@router.get("/orgs")
+def list_organizations(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
+    """Organizations, for the Advanced page's org selector.
+
+    Read-only on purpose: orgs are provisioned out-of-band by the operator
+    CLI (`python -m ui.backend.admin create-org`), so this adds no
+    self-service provisioning surface -- it only lets an admin target an
+    existing org on the `?org=`-scoped item routes below.
+    """
+    return [{"name": org.name, "display_name": org.display_name} for org in list_orgs(db)]
+
+
+@router.get("/tools")
+def list_tools() -> list[Dict[str, Any]]:
+    """The built-in tools an agent or skill can reference by name.
+
+    Read-only: tools are Python functions in `bestteam.tools.REGISTRY`, not
+    config rows. Their docstrings are already written as the LLM-facing tool
+    description (that's what the loader passes to the model), so they serve
+    as the reference text here too.
+    """
+    return [
+        {"name": name, "description": inspect.getdoc(fn) or ""}
+        for name, fn in sorted(REGISTRY.items())
+    ]
 
 
 # Per-KB locks serialising the upload promotion/commit/cleanup critical section.
@@ -265,8 +296,6 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
     return sub
 
 
-router.include_router(_make_component_router("agents", AgentRecord, AgentSpec))
-router.include_router(_make_component_router("teams", TeamRecord, TeamSpec))
 router.include_router(_make_component_router("knowledge_bases", KnowledgeBaseRecord, KnowledgeBaseSpec))
 router.include_router(_make_component_router("skills", SkillRecord, SkillSpec))
 

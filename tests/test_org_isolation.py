@@ -238,5 +238,5 @@ def test_platform_operator_gets_403_on_org_user_surfaces(rig):
 
 def test_org_users_cannot_reach_admin_surfaces(rig):
     client, headers, _ = rig
-    assert client.get("/api/config/agents", headers=headers["alice"]).status_code == 403
+    assert client.get("/api/config/knowledge_bases", headers=headers["alice"]).status_code == 403
     assert client.get("/api/memory/users", headers=headers["alice"]).status_code == 403
