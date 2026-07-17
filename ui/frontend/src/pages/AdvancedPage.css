@@ -16,9 +16,28 @@
 
 .advanced-layout {
   display: grid;
-  grid-template-columns: 180px 220px 1fr;
+  grid-template-columns: 180px 240px 1fr;
   gap: 16px;
   align-items: start;
+}
+
+.advanced-org {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 24px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4b5563;
+}
+
+.advanced-org select {
+  font: inherit;
+  font-weight: 500;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .advanced-kinds,
@@ -125,6 +144,16 @@
   border: 1px solid #d1d5db;
   border-radius: 8px;
   resize: vertical;
+}
+
+/* Tools tab: a tool's docstring, shown as reference text instead of an editor
+   (tools are Python functions in the registry, not editable config). */
+.advanced-readonly-text {
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Memory management page: two columns (user list + records), plus a

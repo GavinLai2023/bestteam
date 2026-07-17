@@ -3,6 +3,12 @@ export const WS_BASE = import.meta.env.VITE_WS_BASE ?? 'ws://127.0.0.1:8000'
 
 export const TOKEN_KEY = 'bestteam_token'
 
+// `?org=<name>`, or '' when no org applies (the skills built-in tier, the
+// org-less model catalog). Omitting it on an org-scoped item route is a 422.
+function orgQuery(org) {
+  return org ? `?${new URLSearchParams({ org })}` : ''
+}
+
 async function request(path, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY)
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
@@ -131,15 +137,22 @@ export const api = {
   // Model catalog
   modelCatalog: () => request('/api/config/model-catalog'),
 
-  // Advanced config (CRUD)
-  listConfig: (kind) => request(`/api/config/${kind}`),
-  getConfigItem: (kind, name) => request(`/api/config/${kind}/${encodeURIComponent(name)}`),
-  putConfigItem: (kind, name, payload) =>
-    request(`/api/config/${kind}/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(payload) }),
-  deleteConfigItem: (kind, name) =>
-    request(`/api/config/${kind}/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-  uploadKnowledgeBaseFiles: (name, files, options = {}) =>
-    uploadFiles(`/api/config/knowledge_bases/${encodeURIComponent(name)}/upload`, files, options),
+  // Advanced config (CRUD). `org` is the organization an item belongs to; the
+  // backend requires it on every item route except skills (where omitting it
+  // means the platform built-in tier) and the org-less model catalog.
+  listOrgs: () => request('/api/config/orgs'),
+  listConfig: (kind, org) => request(`/api/config/${kind}${orgQuery(org)}`),
+  getConfigItem: (kind, name, org) =>
+    request(`/api/config/${kind}/${encodeURIComponent(name)}${orgQuery(org)}`),
+  putConfigItem: (kind, name, payload, org) =>
+    request(`/api/config/${kind}/${encodeURIComponent(name)}${orgQuery(org)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  deleteConfigItem: (kind, name, org) =>
+    request(`/api/config/${kind}/${encodeURIComponent(name)}${orgQuery(org)}`, { method: 'DELETE' }),
+  uploadKnowledgeBaseFiles: (name, files, org) =>
+    uploadFiles(`/api/config/knowledge_bases/${encodeURIComponent(name)}/upload${orgQuery(org)}`, files),
 
   // Interview recording transcription
   transcribeInterview: (file, model) =>

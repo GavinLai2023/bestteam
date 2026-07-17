@@ -21,8 +21,14 @@ three areas, all under a shared `<Layout/>` nav shell (`components/Layout.jsx`):
   dashboard, unchanged apart from reading an optional `?workflow=` query
   param via `useSearchParams` to pre-select a workflow).
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
-  `/api/config/{agents|teams|knowledge_bases|workflows|model-catalog}` — the
-  "advanced view" fallback for direct edits.
+  `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
+  read-only `tools` tab — the operator-only "advanced view" for direct edits.
+  Tabs run whole-then-parts (Workflows → Skills → Knowledge bases → Tools →
+  Model catalog). Each `KINDS` entry carries an `orgScope` mirroring the
+  backend: `required` (`?org=` or 422), `optional` (skills — omitted means the
+  platform built-in tier), `none` (org-less). **A workflow is what the wizard
+  and customer UI call an "AI team"**; this page uses the technical noun
+  because it matches the JSON keys the operator is editing.
 - **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
   — the six-stage Team Builder wizard, `components/WizardLayout.jsx` as the
   shared chrome:
