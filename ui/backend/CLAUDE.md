@@ -13,9 +13,10 @@ One deployment can serve several customer **organizations** (see
 every endpoint follows:
 
 - Org-owned rows carry `org_id`; org users only ever see their own org's
-  data plus platform built-ins (`skills.org_id IS NULL`) and the global
-  YAML demo workflows. **Cross-org access is a 404** (and the WS stream
-  closes 4404 == unknown-run) — existence is never revealed.
+  data plus platform built-ins (`skills.org_id IS NULL`), and — only where
+  `BESTTEAM_DEMO_WORKFLOWS` is on — the global YAML demo workflows.
+  **Cross-org access is a 404** (and the WS stream closes 4404 ==
+  unknown-run) — existence is never revealed.
 - Scoping is centralized: `get_current_org` (auth_api),
   `load_skills(db, org_id)` (org's own shadows a same-named built-in),
   `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in

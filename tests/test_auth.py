@@ -310,9 +310,10 @@ def test_stream_run_rejects_invalid_ticket(client):
             ws.receive_json()
 
 
-def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
+def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir, monkeypatch):
     from tests.test_ui_backend import _write_workflow
 
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="bob", password="hunter2")
@@ -326,10 +327,11 @@ def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
         assert event["type"] == "run_started"
 
 
-def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir):
+def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir, monkeypatch):
     from tests.test_ui_backend import _write_workflow
     from ui.backend.db.models import User
 
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="carol", password="hunter2")

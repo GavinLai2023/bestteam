@@ -57,6 +57,7 @@ def test_yaml_workflow_referencing_builtin_skill_loads(db_session, tmp_path, mon
     from ui.backend import main as backend_main
 
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # exercising the YAML branch
     backend_main._workflow_cache.clear()
     seed_default_skills(db_session)
 
