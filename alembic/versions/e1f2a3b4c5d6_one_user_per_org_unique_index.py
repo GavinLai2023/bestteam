@@ -66,9 +66,11 @@ def upgrade() -> None:
         offending = ", ".join(f"org_id={row[0]} ({row[1]} members)" for row in duplicates)
         raise RuntimeError(
             "Cannot enforce one member per org: these orgs already have multiple "
-            f"members: {offending}. Resolve them (remove or move the extra "
-            "accounts) before running this migration -- accounts are not deleted "
-            "automatically. See docs/DECISIONS.md ('one member per org')."
+            f"members: {offending}. Resolve them before running this migration -- "
+            "accounts are not deleted automatically. Use the operator CLI: "
+            "`admin delete-user <name>` to remove an extra account, or "
+            "`admin move-user <name> --to-org <other> | --platform` to reassign it "
+            "(see docs/deployment.md 'Recovering a legacy multi-member org')."
         )
 
     op.create_index(

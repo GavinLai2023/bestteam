@@ -150,6 +150,48 @@ def test_create_user_password_mismatch_errors(session_local, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Recovery: delete-user / move-user
+# ---------------------------------------------------------------------------
+
+def test_delete_user_removes_account(session_local, monkeypatch, capsys):
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+    capsys.readouterr()
+    assert admin_cli.main(["delete-user", "op"]) == 0
+    assert "Deleted user 'op'" in capsys.readouterr().out
+    with session_local() as db:
+        assert get_user_by_username(db, "op") is None
+
+
+def test_delete_unknown_user_errors(session_local):
+    with pytest.raises(SystemExit):
+        admin_cli.main(["delete-user", "ghost"])
+
+
+def test_move_user_to_platform(session_local, monkeypatch):
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "alice", "--org", "acme"])
+    assert admin_cli.main(["move-user", "alice", "--platform"]) == 0
+    with session_local() as db:
+        assert get_user_by_username(db, "alice").org_id is None
+
+
+def test_move_user_into_full_org_errors(session_local, monkeypatch):
+    # Recovery still respects one-member-per-org: moving into an org that
+    # already has a member is refused.
+    admin_cli.main(["create-org", "acme"])
+    admin_cli.main(["create-org", "beta"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "alice", "--org", "acme"])
+    admin_cli.main(["create-user", "bob", "--org", "beta"])
+    with pytest.raises(SystemExit):
+        admin_cli.main(["move-user", "alice", "--to-org", "beta"])
+    with session_local() as db:
+        assert get_user_by_username(db, "alice").org_id == get_org_by_name(db, "acme").id
+
+
+# ---------------------------------------------------------------------------
 # Per-org email (set-email / clear-email)
 # ---------------------------------------------------------------------------
 
