@@ -79,34 +79,28 @@ The default dev DB (`ui/backend/data/bestteam.db`) is already at head.
 
 ---
 
-## 5. Provision login accounts
+## 5. Provision the login account
 
-Public registration was removed — accounts are operator-provisioned. Two
-accounts cover the test (already created in the dev DB; the commands are here
-so you can recreate them on a fresh DB). `create-user` prompts for a password
-interactively; to script it non-interactively, use the Python form below.
+Public registration was removed — accounts are operator-provisioned. This test
+runs the workflow as one org user; no admin account is needed. `create-user`
+prompts for a password interactively.
 
-| Account | Password | Role | Used for |
-|---|---|---|---|
-| `demo` | `demo-pass-123` | org user (`default` org) | running the workflow |
-| `op` | `op-pass-123` | platform admin (no org) | Advanced / Memory pages (optional) |
+| Account | Role | Used for |
+|---|---|---|
+| `demo` | org user (`default` org) | running the workflow |
 
-Interactive CLI (prompts twice for the password):
+Pick your own password when prompted (the examples below use `demo` as the
+username; choose any password you like — it only guards this local account):
 
 ```powershell
 .\.venv\Scripts\python.exe -m ui.backend.admin create-user demo --org default
-.\.venv\Scripts\python.exe -m ui.backend.admin create-user op --platform
-.\.venv\Scripts\python.exe -m ui.backend.admin promote op
 ```
 
-Non-interactive (fixed dev passwords, mirrors what the CLI does):
+Non-interactive, if you'd rather script it (substitute your own password):
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from ui.backend.db_session import SessionLocal; from ui.backend.db.users import create_user, set_admin_status; from ui.backend.db.orgs import get_or_create_org; db=SessionLocal(); oid=get_or_create_org(db,'default').id; create_user(db,'demo','demo-pass-123',org_id=oid); create_user(db,'op','op-pass-123',org_id=None); set_admin_status(db,'op',True); db.close(); print('provisioned')"
+.\.venv\Scripts\python.exe -c "from ui.backend.db_session import SessionLocal; from ui.backend.db.users import create_user; from ui.backend.db.orgs import get_or_create_org; db=SessionLocal(); oid=get_or_create_org(db,'default').id; create_user(db,'demo','choose-a-password',org_id=oid); db.close(); print('provisioned')"
 ```
-
-> `op` **must** be a platform account (no org): admin is platform-wide, so
-> promoting an org member is refused (CR-030).
 
 ---
 
@@ -125,13 +119,21 @@ backend on `:8000` (allowed by the default CORS origins).
 ## 7. Start the backend (with mailbox credentials)
 
 Run this in a **separate terminal** so your credentials stay in your own
-shell (not in any transcript) and are present at process start — the email
-env vars are read once at boot.
+shell (not in any transcript). Set the env vars **before** starting uvicorn,
+in the same shell: a running process can't pick up variables you export in
+another window, so exporting them afterward has no effect (the email backend
+reads them from the process environment on each tool call, not from a config
+file).
+
+First generate a signing key for this session — don't reuse a published value:
+
+```powershell
+$env:BESTTEAM_SECRET_KEY = $(.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_hex(32))")
+```
 
 **IMAP mailbox:**
 
 ```powershell
-$env:BESTTEAM_SECRET_KEY="dev-only-secret-change-me-for-real-use"
 $env:OPENAI_API_KEY="sk-..."
 $env:BESTTEAM_DEMO_WORKFLOWS="1"
 $env:BESTTEAM_EMAIL_BACKEND="imap"
@@ -142,7 +144,8 @@ $env:BESTTEAM_IMAP_PASSWORD="your-app-password"
 .\.venv\Scripts\python.exe -m uvicorn ui.backend.main:app --port 8000 --host 127.0.0.1
 ```
 
-**Microsoft 365 / Graph mailbox:** same first three lines, then:
+**Microsoft 365 / Graph mailbox:** same signing key (above) plus the
+`OPENAI_API_KEY` and `BESTTEAM_DEMO_WORKFLOWS` lines, then:
 
 ```powershell
 $env:BESTTEAM_EMAIL_BACKEND="graph"
@@ -154,9 +157,10 @@ $env:BESTTEAM_GRAPH_MAILBOX="support@yourcompany.com"
 ```
 
 Notes:
-- The secret key above passes the startup guard. Only
-  `bestteam-dev-secret-change-me` and the `.env.example` placeholder are
-  rejected; for a real value: `python -c "import secrets; print(secrets.token_hex(32))"`.
+- Generate your own `BESTTEAM_SECRET_KEY` (above) rather than reusing any
+  value from the repo. The startup guard only rejects the two known
+  placeholders (`bestteam-dev-secret-change-me` and the `.env.example`
+  default); it does not vouch for anything else, so treat the key as a secret.
 - `BESTTEAM_DEMO_WORKFLOWS="1"` is **required for this test**. The bundled
   YAML workflows (including `email_triage_demo_live`) are off by default —
   they're demo fixtures, not customer teams — so without this flag the
@@ -180,7 +184,7 @@ org:
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"demo","password":"demo-pass-123"}'
+  -d '{"username":"demo","password":"<the password you set in step 5>"}'
 # -> {"access_token":"...","token_type":"bearer"}
 ```
 
@@ -188,7 +192,8 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/login \
 
 ## 9. Run the workflow (browser — the primary path)
 
-1. Open `http://localhost:5173` and log in as **`demo` / `demo-pass-123`**.
+1. Open `http://localhost:5173` and log in as **`demo`** with the password you
+   set in step 5.
 2. In the monitoring dashboard, select the **`email_triage_demo_live`**
    workflow. It's a bundled YAML demo (`ui/backend/workflows/`), so it only
    appears when `BESTTEAM_DEMO_WORKFLOWS="1"` is set — which you did in step 7.
@@ -259,7 +264,7 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 | Boot warning "Skipping default-data seeding ... schema predates the latest migration" | DB behind head | `alembic upgrade head`, restart |
 | `email_triage_demo_live` missing from the workflow list (or `POST /api/runs` returns 404 for it) | `BESTTEAM_DEMO_WORKFLOWS` not set — bundled demos are off by default | set `$env:BESTTEAM_DEMO_WORKFLOWS="1"` before starting the backend (step 7) |
 | Login returns 401 | wrong password, or account not provisioned | re-run step 5 |
-| Run fails with "Unknown skill 'email_triage_reply'" | skill not seeded | restart backend (seeds on boot); confirm with the skills query in step 5 |
+| Run fails with "Unknown skill 'email_triage_reply'" | skill not seeded (DB predates the skill, or seeding was skipped on a pre-migration schema) | restart the backend — built-in skills are seeded on boot; if it persists, run `alembic upgrade head` first |
 | Trace shows the agent answering **without** any `email_*` tool calls | `OPENAI_API_KEY` missing/invalid, or a `fake:` model | set a real key; `fake:` models never call tools |
 | `email_find` errors with auth failure | bad IMAP/Graph credentials | verify creds; for Graph, confirm `Mail.ReadWrite` **application** permission + Application Access Policy scoped to the mailbox |
 | Frontend loads but every API call fails | backend not on `:8000`, or CORS | confirm backend port; default CORS allows `localhost:5173` |

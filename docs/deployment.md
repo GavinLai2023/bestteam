@@ -114,6 +114,21 @@ run workflows creates themselves an org user too.
   with the user created above; you should land on the monitoring page
   (`/`) with a "Log out" link in the nav.
 
+## Updating built-in skills on an existing deployment
+
+Built-in skills (e.g. `email_triage_reply`) are seeded on boot **only if the
+row is absent** — seeding never overwrites an existing row, so an admin's
+edits are never clobbered. The flip side: when a new release ships an improved
+built-in, a deployment that already has the row keeps the old version.
+
+To adopt an updated built-in on an existing database, an admin re-saves the
+new definition through the Advanced UI → Skills (or
+`PUT /api/config/skills/<name>` with the org query omitted — that targets the
+platform tier). Alternatively, delete the row and restart to let it re-seed.
+There is no automatic version-and-overwrite: distinguishing a stock value from
+a genuine customization would need stored versioning, which isn't warranted at
+this scale.
+
 ## Data persistence
 
 The SQLite database (agents, teams, workflows, users — config persistence,
