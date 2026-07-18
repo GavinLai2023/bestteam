@@ -85,7 +85,10 @@ store path, where the host is customer-supplied) additionally re-runs the SSRF
 check on every connect and pins the socket to the checked IP while keeping the
 hostname for SNI/cert — closing the DNS-rebinding window (`_PinnedIMAP4_SSL`).
 It stays `False` for the operator-trusted env path, which may legitimately point
-at an internal IMAP server. The UI backend uses this to give each org its own encrypted mailbox
+at an internal IMAP server. TLS is still verified there — an internal server
+with a private/self-signed CA must have that CA trusted (point `SSL_CERT_FILE`
+at the CA bundle, which `ssl.create_default_context()` honors); there is no
+verification-off switch, by design. The UI backend uses this to give each org its own encrypted mailbox
 (see `ui/backend/email_tools.py`), overriding the env-based `REGISTRY` tools
 by name. With `BESTTEAM_EMAIL_BACKEND` set and more than one org, the UI
 backend still refuses to start (`ensure_email_single_org`, CR-031) — the env
