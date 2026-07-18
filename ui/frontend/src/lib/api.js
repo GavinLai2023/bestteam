@@ -135,7 +135,7 @@ export const api = {
   createWsTicket: () => request('/api/runs/ws-ticket', { method: 'POST' }),
 
   // Model catalog
-  modelCatalog: () => request('/api/config/model-catalog'),
+  modelCatalog: () => request('/api/model-catalog'),
 
   // Advanced config (CRUD). `org` is the organization an item belongs to; the
   // backend requires it on every item route except skills (where omitting it
