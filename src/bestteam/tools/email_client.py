@@ -21,6 +21,8 @@ import functools
 import imaplib
 import os
 import re
+import socket
+import ssl
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -28,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from ..exceptions import ConfigurationError
 from ._retry import with_retry
+from .http_client import check_host_allowed
 
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _TIMEOUT_SECONDS = 30
@@ -239,6 +242,26 @@ def _graph_address(recipient: Optional[Dict[str, Any]]) -> str:
 # Generic IMAP backend
 # ---------------------------------------------------------------------------
 
+class _PinnedIMAP4_SSL(imaplib.IMAP4_SSL):
+    """IMAP4_SSL that dials a pre-validated IP while verifying TLS against the
+    original hostname (SNI + certificate).
+
+    For customer-supplied hosts this closes the DNS-rebinding window: the
+    address the SSRF guard checked is the exact address connected to, so a
+    hostname that resolved public at validation time can't resolve to an
+    internal address at connect time. The hostname is still used for SNI and
+    certificate verification, so a pinned IP does not weaken TLS.
+    """
+
+    def __init__(self, host, port, *, pinned_ip, ssl_context, timeout):
+        self._pinned_ip = pinned_ip
+        super().__init__(host, port, ssl_context=ssl_context, timeout=timeout)
+
+    def _create_socket(self, timeout):  # noqa: D401 -- overrides IMAP4_SSL
+        sock = socket.create_connection((self._pinned_ip, self.port), timeout)
+        return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+
+
 class _ImapBackend:
     """Read + draft against any IMAP server. Drafts only — no SMTP anywhere."""
 
@@ -250,12 +273,17 @@ class _ImapBackend:
         password: str,
         port: int = 993,
         drafts: Optional[str] = None,
+        restrict_to_public: bool = False,
     ) -> None:
         self._host = host
         self._user = user
         self._password = password
         self._port = port
         self._drafts_override = (drafts or "").strip() or None
+        # Customer-supplied hosts (per-org store) validate + pin to a public IP
+        # on every connect; the operator-trusted env path may point at an
+        # internal IMAP server, so it stays False.
+        self._restrict_to_public = restrict_to_public
 
     @classmethod
     def from_env(cls) -> "_ImapBackend":
@@ -284,11 +312,27 @@ class _ImapBackend:
         )
 
     def _connect(self):
+        # Verify the server's certificate against the hostname (an explicit
+        # default context; imaplib's fallback does not verify), and bound every
+        # socket operation so a stalled server can't pin a worker forever.
+        ssl_context = ssl.create_default_context()
+        if self._restrict_to_public:
+            # Re-validate at connect time and dial only the checked IP so a
+            # public->private DNS rebind can't reach an internal service.
+            pinned_ip = check_host_allowed(self._host)
+            factory = lambda: _PinnedIMAP4_SSL(  # noqa: E731
+                self._host,
+                self._port,
+                pinned_ip=pinned_ip,
+                ssl_context=ssl_context,
+                timeout=_TIMEOUT_SECONDS,
+            )
+        else:
+            factory = lambda: imaplib.IMAP4_SSL(  # noqa: E731
+                self._host, self._port, ssl_context=ssl_context, timeout=_TIMEOUT_SECONDS
+            )
         # Retry only network-level connect errors; auth errors fail fast.
-        conn = with_retry(
-            lambda: imaplib.IMAP4_SSL(self._host, self._port),
-            retriable_exc=(OSError,),
-        )
+        conn = with_retry(factory, retriable_exc=(OSError,))
         try:
             conn.login(self._user, self._password)
         except imaplib.IMAP4.error as exc:

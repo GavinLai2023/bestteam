@@ -75,10 +75,17 @@ live in env vars (one mailbox per process): `_get_backend()` builds the
 backend via `_ImapBackend.from_env()` / `_GraphBackend()`.
 
 **Per-mailbox seam (used by the UI backend for multi-tenancy).**
-`_ImapBackend(host=, user=, password=, port=, drafts=)` builds a backend from
-explicit params (not env), and `make_email_tools(backend)` returns the three
-`email_*` tools bound to it — same names/docstrings the model sees for the env
-tools. The UI backend uses this to give each org its own encrypted mailbox
+`_ImapBackend(host=, user=, password=, port=, drafts=, restrict_to_public=)`
+builds a backend from explicit params (not env), and `make_email_tools(backend)`
+returns the three `email_*` tools bound to it — same names/docstrings the model
+sees for the env tools. `_connect()` always uses a verifying TLS context
+(`ssl.create_default_context()` — imaplib's fallback does *not* verify the cert)
+and a bounded socket timeout. `restrict_to_public=True` (set by the per-org
+store path, where the host is customer-supplied) additionally re-runs the SSRF
+check on every connect and pins the socket to the checked IP while keeping the
+hostname for SNI/cert — closing the DNS-rebinding window (`_PinnedIMAP4_SSL`).
+It stays `False` for the operator-trusted env path, which may legitimately point
+at an internal IMAP server. The UI backend uses this to give each org its own encrypted mailbox
 (see `ui/backend/email_tools.py`), overriding the env-based `REGISTRY` tools
 by name. With `BESTTEAM_EMAIL_BACKEND` set and more than one org, the UI
 backend still refuses to start (`ensure_email_single_org`, CR-031) — the env

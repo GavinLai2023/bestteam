@@ -117,6 +117,7 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
             password=password,
             port=cred.port,
             drafts=cred.drafts_folder,
+            restrict_to_public=True,  # customer-supplied host: validate + pin on connect
         )
         return make_email_tools(backend)
     if os.environ.get("BESTTEAM_EMAIL_BACKEND", "").strip():

@@ -99,7 +99,8 @@ def test_email(
     """
     _reject_private_host(req.host)
     backend = _ImapBackend(
-        host=req.host, user=req.username, password=req.password, port=req.port, drafts=req.drafts,
+        host=req.host, user=req.username, password=req.password, port=req.port,
+        drafts=req.drafts, restrict_to_public=True,
     )
     try:
         conn = backend._connect()

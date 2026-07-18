@@ -143,7 +143,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
                 backend = _ImapBackend(
                     host=args.host, user=args.user, password=password,
-                    port=args.port, drafts=args.drafts,
+                    port=args.port, drafts=args.drafts, restrict_to_public=True,
                 )
                 try:
                     conn = backend._connect()
