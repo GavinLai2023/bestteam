@@ -266,7 +266,7 @@ def create_builder_session(
 ) -> Dict[str, Any]:
     """Stage 1 (Intent): start a session with the customer's free-text intent/as-is."""
     session = create_session(db, intent_text=req.intent_text, as_is_text=req.as_is_text, org_id=org.id)
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.get("")
@@ -316,7 +316,7 @@ def submit_requirements(
         append_feedback(db, session_id, {"stage": "requirements", "note": req.feedback})
 
     session = update_session(db, session_id, requirements_json=requirements.model_dump(), status="requirements")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/specification")
@@ -363,7 +363,7 @@ def submit_specification(
     # uncontained cache_path that test-run/deploy would later build (CR-001).
     _prepare_generated_specification(spec, source)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="spec")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/solution")
@@ -411,7 +411,7 @@ def submit_solution_feedback(
     append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
     _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/test-runs")
@@ -507,4 +507,4 @@ def deploy_session(
     db.commit()
 
     session = update_session(db, session_id, status="deployed")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)

@@ -221,3 +221,14 @@ def test_session_response_carries_uses_email(client):
     assert client.get(f"/api/builder/sessions/{sid}").json()["uses_email"] is True
     sid2 = _make_session(_PLAIN_SPEC)
     assert client.get(f"/api/builder/sessions/{sid2}").json()["uses_email"] is False
+
+
+def test_mutation_response_carries_uses_email(client):
+    # The flag must be computed on mutation responses too, not just GET -- else
+    # a refine/save drops the connector while deploy still requires a mailbox.
+    with open_test_db() as db:
+        seed_default_skills(db)
+    sid = client.post("/api/builder/sessions", json={"intent_text": "triage my inbox"}).json()["id"]
+    resp = client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": _EMAIL_SPEC})
+    assert resp.status_code == 200
+    assert resp.json()["uses_email"] is True

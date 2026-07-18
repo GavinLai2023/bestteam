@@ -3,18 +3,36 @@ import { api } from '../lib/api'
 
 // Connect / test / rotate / disconnect the org's mailbox for the email tools.
 // Shown inside the wizard only when the team uses email (session.uses_email).
-// `onChange` is called after a successful connect/disconnect so a parent (the
-// Deploy gate) can re-check whether a mailbox is now connected.
-export default function EmailConnect({ onChange }) {
-  const [status, setStatus] = useState(null) // {connected, host, username, ...} | null (loading)
+// `onChange` fires after a successful connect/disconnect (a parent may clear its
+// own error). `onStatusChange` fires with the current connected boolean whenever
+// it's known, so the Deploy gate can disable launch until a mailbox is connected.
+export default function EmailConnect({ onChange, onStatusChange }) {
+  const [status, setStatus] = useState(null) // {connected, host, username, ...} | null
+  const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ host: '', username: '', password: '', port: 993, drafts: '' })
   const [testResult, setTestResult] = useState(null) // {ok, error} | null
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState('') // '' | 'test' | 'save' | 'clear'
 
-  const refresh = () => api.getOrgEmail().then(setStatus).catch((e) => setError(e.message))
-  useEffect(() => { refresh() }, [])
+  const refresh = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const s = await api.getOrgEmail()
+      setStatus(s)
+      onStatusChange?.(!!s.connected)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount
+    refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const field = (k) => (e) => setForm({ ...form, [k]: e.target.value })
 
@@ -66,7 +84,34 @@ export default function EmailConnect({ onChange }) {
     }
   }
 
-  if (status === null) return <p className="hint">Checking mailbox…</p>
+  // Prefill from the existing connection when reconnecting (password is
+  // write-only, so it stays blank).
+  const startReconnect = () => {
+    setForm({
+      host: status.host || '',
+      username: status.username || '',
+      password: '',
+      port: status.port || 993,
+      drafts: status.drafts || '',
+    })
+    setEditing(true)
+  }
+
+  if (loading) return <p className="hint">Checking mailbox…</p>
+
+  // Initial status fetch failed: show the error and let them retry, rather than
+  // sitting on "Checking mailbox…" forever.
+  if (status === null) {
+    return (
+      <div className="wizard-card" style={{ background: '#f9fafb' }}>
+        <h3>Connect your mailbox</h3>
+        {error && <p className="banner banner-error">{error}</p>}
+        <div className="wizard-actions">
+          <button className="btn btn-secondary" onClick={refresh}>Retry</button>
+        </div>
+      </div>
+    )
+  }
 
   const canSubmit = form.host.trim() && form.username.trim() && form.password
 
@@ -86,7 +131,7 @@ export default function EmailConnect({ onChange }) {
             Connected as <strong>{status.username}</strong> on {status.host}.
           </p>
           <div className="wizard-actions">
-            <button className="btn btn-secondary" onClick={() => setEditing(true)}>Reconnect</button>
+            <button className="btn btn-secondary" onClick={startReconnect}>Reconnect</button>
             <button className="btn btn-link" onClick={disconnect} disabled={busy === 'clear'}>
               {busy === 'clear' ? 'Disconnecting…' : 'Disconnect'}
             </button>
@@ -105,6 +150,14 @@ export default function EmailConnect({ onChange }) {
           <div className="field">
             <label htmlFor="ec-pass">App password</label>
             <input id="ec-pass" type="password" value={form.password} onChange={field('password')} autoComplete="off" />
+          </div>
+          <div className="field">
+            <label htmlFor="ec-port">IMAP port</label>
+            <input id="ec-port" type="number" value={form.port} onChange={field('port')} placeholder="993" />
+          </div>
+          <div className="field">
+            <label htmlFor="ec-drafts">Drafts folder (optional)</label>
+            <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder="Auto-detected if left blank" />
           </div>
 
           {testResult && (
