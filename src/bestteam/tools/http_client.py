@@ -21,23 +21,17 @@ _BLOCKED_IP_PREDICATES = (
 )
 
 
-def _check_host_allowed(url: str) -> str:
-    """Validate `url`'s host and return the IP the request must connect to.
+def check_host_allowed(hostname: str) -> str:
+    """Resolve `hostname` and return the first IP, rejecting private/internal ones.
 
-    Guards against SSRF (e.g. an agent fetching cloud metadata endpoints or
-    internal services) by resolving the hostname and rejecting any address
-    that's private, loopback, link-local (incl. 169.254.169.254), reserved,
-    multicast, or unspecified.
-
+    Guards against SSRF by rejecting any address that's private, loopback,
+    link-local (incl. 169.254.169.254), reserved, multicast, or unspecified.
     Returns the first resolved address as a string so the caller can pin the
-    connection to it. Pinning closes the DNS-rebinding TOCTOU (CR-023): without
-    it, `httpx` would independently re-resolve the hostname when connecting, so
-    an attacker-controlled name could pass this check as a public address and
-    then resolve to a private one for the actual request.
+    connection to it (closing the DNS-rebinding TOCTOU, CR-023). Reused by the
+    IMAP mailbox-connection endpoints, where the host is customer-supplied.
     """
-    hostname = urlsplit(url).hostname
     if not hostname:
-        raise ConfigurationError(f"Invalid URL '{url}': could not determine host")
+        raise ConfigurationError("Could not determine host to connect to")
 
     try:
         infos = socket.getaddrinfo(hostname, None)
@@ -49,8 +43,7 @@ def _check_host_allowed(url: str) -> str:
         ip = ipaddress.ip_address(info[4][0])
         if any(getattr(ip, predicate) for predicate in _BLOCKED_IP_PREDICATES):
             raise ConfigurationError(
-                f"Refusing to fetch '{url}': host '{hostname}' resolves to a "
-                f"private/internal address ({ip})"
+                f"host '{hostname}' resolves to a private/internal address ({ip})"
             )
         if not validated_ip:
             validated_ip = str(ip)
@@ -58,6 +51,17 @@ def _check_host_allowed(url: str) -> str:
     if not validated_ip:
         raise ConfigurationError(f"Could not resolve host '{hostname}'")
     return validated_ip
+
+
+def _check_host_allowed(url: str) -> str:
+    """URL variant used by `http_get` -- keeps the URL in the error message."""
+    hostname = urlsplit(url).hostname
+    if not hostname:
+        raise ConfigurationError(f"Invalid URL '{url}': could not determine host")
+    try:
+        return check_host_allowed(hostname)
+    except ConfigurationError as exc:
+        raise ConfigurationError(f"Refusing to fetch '{url}': {exc}") from exc
 
 
 def _pin_to_ip(url: str, ip: str) -> tuple[str, str, str]:

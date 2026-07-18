@@ -36,6 +36,7 @@ from .builder import router as builder_router
 from .crud import router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
+from .org_settings import router as org_settings_router
 from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
@@ -202,6 +203,7 @@ app.include_router(builder_router)
 app.include_router(interview_router)
 app.include_router(crud_router)
 app.include_router(memory_router)
+app.include_router(org_settings_router)
 
 logger = logging.getLogger("bestteam.api")
 
