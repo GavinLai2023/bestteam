@@ -153,7 +153,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
           </div>
           <div className="field">
             <label htmlFor="ec-port">IMAP port</label>
-            <input id="ec-port" type="number" value={form.port} onChange={field('port')} placeholder="993" />
+            <input id="ec-port" type="number" min={1} max={65535} value={form.port} onChange={field('port')} placeholder="993" />
           </div>
           <div className="field">
             <label htmlFor="ec-drafts">Drafts folder (optional)</label>

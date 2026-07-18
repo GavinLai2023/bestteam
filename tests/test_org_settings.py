@@ -144,6 +144,24 @@ def test_test_connection_rejects_private_host(client):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("bad_port", [0, -1, 70000])
+def test_set_email_rejects_out_of_range_port(client, bad_port):
+    # An out-of-range port must not be stored as a "connected" config -- 422 at
+    # validation, before it can be persisted.
+    resp = client.put("/api/org/email", json={
+        "host": "imap.acme.com", "username": "u", "password": "p", "port": bad_port,
+    })
+    assert resp.status_code == 422
+    assert client.get("/api/org/email").json() == {"connected": False}
+
+
+def test_test_email_rejects_out_of_range_port(client):
+    resp = client.post("/api/org/email/test", json={
+        "host": "imap.acme.com", "username": "u", "password": "p", "port": 70000,
+    })
+    assert resp.status_code == 422
+
+
 def test_delete_email(client, monkeypatch):
     _bypass_ssrf(monkeypatch)
     client.put("/api/org/email", json={"host": "h", "username": "u", "password": "p"})

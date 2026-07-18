@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from bestteam.exceptions import ConfigurationError
@@ -39,7 +39,7 @@ class EmailConnectRequest(BaseModel):
     host: str
     username: str
     password: str
-    port: int = 993
+    port: int = Field(default=993, ge=1, le=65535)
     drafts: Optional[str] = None
 
 
