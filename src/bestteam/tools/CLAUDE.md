@@ -70,11 +70,20 @@ blast radius — drafts are human-reviewed), the seeded skill instructs the
 agent to treat message content as data rather than instructions, and
 `email_read` caps body size. For the Graph backend, use least privilege:
 `Mail.ReadWrite` **application** permission restricted to the single mailbox
-with an Exchange Application Access Policy. Credentials live in env vars
-(one mailbox per deployment); there is no per-user OAuth or secrets store.
-The UI backend enforces this single-mailbox model against multi-tenancy:
-with `BESTTEAM_EMAIL_BACKEND` set and more than one organization it refuses
-to start (`ui/backend/db/orgs.py::ensure_email_single_org`, CR-031).
+with an Exchange Application Access Policy. In this SDK layer, credentials
+live in env vars (one mailbox per process): `_get_backend()` builds the
+backend via `_ImapBackend.from_env()` / `_GraphBackend()`.
+
+**Per-mailbox seam (used by the UI backend for multi-tenancy).**
+`_ImapBackend(host=, user=, password=, port=, drafts=)` builds a backend from
+explicit params (not env), and `make_email_tools(backend)` returns the three
+`email_*` tools bound to it — same names/docstrings the model sees for the env
+tools. The UI backend uses this to give each org its own encrypted mailbox
+(see `ui/backend/email_tools.py`), overriding the env-based `REGISTRY` tools
+by name. With `BESTTEAM_EMAIL_BACKEND` set and more than one org, the UI
+backend still refuses to start (`ensure_email_single_org`, CR-031) — the env
+path is process-wide/single-mailbox by design; multi-tenant email uses the
+per-org store instead.
 
 Tier 2 tools (SQL executor, Python sandbox), real email *sending*, and
 ambient run-on-new-mail triggering are planned but not yet implemented.
