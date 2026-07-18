@@ -332,6 +332,77 @@ def test_migration_audit_flags_existing_duplicate_org_members():
     assert [tuple(r) for r in dups] == [(5, 2)]
 
 
+def test_startup_guard_refuses_legacy_multi_member_org():
+    # A legacy DB (index never created by create_all on the existing table) can
+    # still hold two members in one org; the HTTP startup guard must refuse so
+    # the pre-migration rollout window can't serve the mailbox routes.
+    import sqlalchemy as sa
+
+    from ui.backend.auth import hash_password
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import User
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.main import _enforce_one_member_per_org_or_raise
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        # Simulate the legacy schema: no enforcing index, so duplicates exist.
+        db.execute(sa.text("DROP INDEX IF EXISTS uq_users_org_id_not_null"))
+        db.add(User(username="a", password_hash=hash_password("p"), org_id=org.id))
+        db.add(User(username="b", password_hash=hash_password("p"), org_id=org.id))
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="multiple members"):
+            _enforce_one_member_per_org_or_raise(db)
+
+
+def test_startup_guard_passes_when_invariant_holds():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.users import create_user
+    from ui.backend.main import _enforce_one_member_per_org_or_raise
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        create_user(db, "alice", "pw", org_id=get_or_create_org(db, "acme").id)
+        create_user(db, "op1", "pw")  # platform operators may be many
+        create_user(db, "op2", "pw")
+        _enforce_one_member_per_org_or_raise(db)  # no raise
+
+
+def test_lifespan_refuses_to_serve_with_multi_member_org(monkeypatch):
+    # The guard runs from the ASGI lifespan, so a real server start (entering the
+    # TestClient context) refuses while an org has multiple members -- but a bare
+    # import of the app (every other test) is unaffected.
+    import sqlalchemy as sa
+
+    from ui.backend import main as backend_main
+    from ui.backend.auth import hash_password
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import User
+    from ui.backend.db.orgs import get_or_create_org
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        db.execute(sa.text("DROP INDEX IF EXISTS uq_users_org_id_not_null"))
+        db.add(User(username="a", password_hash=hash_password("p"), org_id=org.id))
+        db.add(User(username="b", password_hash=hash_password("p"), org_id=org.id))
+        db.commit()
+
+    monkeypatch.setattr(backend_main, "SessionLocal", Session)
+    with pytest.raises(RuntimeError, match="multiple members"):
+        with TestClient(backend_main.app):
+            pass
+
+
 def test_me_rejects_invalid_token(client):
     resp = client.get("/api/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
 
