@@ -138,6 +138,33 @@ class WorkflowRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class OrgEmailCredential(Base):
+    """One org's mailbox connection for the email tools (per-org secrets store).
+
+    Replaces the process-wide `BESTTEAM_EMAIL_*` env vars on a multi-org
+    deployment: each org connects its own mailbox, and a run resolves the
+    running org's credentials (see `ui/backend/email_tools.py`). The password
+    is encrypted at rest (`secret_store`); `password_encrypted` holds the
+    Fernet token, never plaintext. One mailbox per org (unique `org_id`).
+    IMAP only for now (`backend='imap'`); Graph/OAuth are future work.
+    """
+
+    __tablename__ = "org_email_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, nullable=False
+    )
+    backend: Mapped[str] = mapped_column(default="imap")
+    host: Mapped[str]
+    port: Mapped[int] = mapped_column(default=993)
+    username: Mapped[str]
+    password_encrypted: Mapped[str]
+    drafts_folder: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
 class BuilderSession(Base):
     """State for one customer's trip through the Team Builder Wizard.
 
