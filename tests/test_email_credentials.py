@@ -1,5 +1,7 @@
 """Tests for per-org email credential storage (db/email_credentials.py)."""
 
+import os
+
 import pytest
 
 pytest.importorskip("sqlalchemy")
@@ -92,3 +94,32 @@ def test_startup_guard_rejects_wrong_key(db_session, monkeypatch):
     monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())
     with pytest.raises(RuntimeError, match="cannot decrypt"):
         ensure_secrets_key_for_stored_credentials(db_session)
+
+
+def test_startup_guard_checks_every_row_and_names_affected_orgs(db_session):
+    # A partial rotation can leave one org readable and another not. The guard
+    # must check ALL rows (not just the first) and report which org failed.
+    good = _org(db_session, "org_good")
+    bad = _org(db_session, "org_bad")
+    set_email_credentials(db_session, good, host="h", username="u", password="p")
+    # A row whose token doesn't decrypt under the current key (e.g. old key).
+    db_session.add(OrgEmailCredential(
+        org_id=bad, host="h", port=993, username="u", password_encrypted="not-a-valid-token"
+    ))
+    db_session.commit()
+    with pytest.raises(RuntimeError, match=str(bad)):
+        ensure_secrets_key_for_stored_credentials(db_session)
+
+
+def test_startup_guard_rejects_key_collision(db_session, monkeypatch):
+    set_email_credentials(db_session, _org(db_session), host="h", username="u", password="p")
+    same = os.environ[secret_store.SECRETS_KEY_ENV]
+    monkeypatch.setenv("BESTTEAM_SECRET_KEY", same)
+    with pytest.raises(secret_store.SecretsKeyError, match="BESTTEAM_SECRET_KEY"):
+        ensure_secrets_key_for_stored_credentials(db_session)
+
+
+def test_set_credentials_rejects_key_collision(db_session, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_SECRET_KEY", os.environ[secret_store.SECRETS_KEY_ENV])
+    with pytest.raises(secret_store.SecretsKeyError):
+        set_email_credentials(db_session, _org(db_session), host="h", username="u", password="p")

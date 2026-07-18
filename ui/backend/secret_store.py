@@ -33,6 +33,22 @@ def secrets_key_configured() -> bool:
     return bool(os.environ.get(SECRETS_KEY_ENV, "").strip())
 
 
+def ensure_key_separation() -> None:
+    """Reject reusing the JWT signing key as the secrets encryption key.
+
+    They must be different values: leaking one must not leak the other (a
+    disclosed signing key would otherwise also expose every stored password).
+    """
+    signing = os.environ.get("BESTTEAM_SECRET_KEY", "").strip()
+    encrypting = os.environ.get(SECRETS_KEY_ENV, "").strip()
+    if signing and encrypting and signing == encrypting:
+        raise SecretsKeyError(
+            f"{SECRETS_KEY_ENV} must not be the same value as BESTTEAM_SECRET_KEY "
+            "(the JWT signing key) -- use a separate key so leaking one does not "
+            "expose the other."
+        )
+
+
 def _fernet() -> Fernet:
     key = os.environ.get(SECRETS_KEY_ENV, "").strip()
     if not key:

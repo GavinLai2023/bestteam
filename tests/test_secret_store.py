@@ -54,3 +54,23 @@ def test_invalid_key_raises(monkeypatch):
     monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, "not-a-valid-fernet-key")
     with pytest.raises(secret_store.SecretsKeyError):
         secret_store.encrypt("x")
+
+
+def test_key_separation_rejects_reuse_of_signing_key(monkeypatch):
+    same = Fernet.generate_key().decode()
+    monkeypatch.setenv("BESTTEAM_SECRET_KEY", same)
+    monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, same)
+    with pytest.raises(secret_store.SecretsKeyError, match="BESTTEAM_SECRET_KEY"):
+        secret_store.ensure_key_separation()
+
+
+def test_key_separation_allows_distinct_keys(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_SECRET_KEY", "a-signing-key")
+    monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())
+    secret_store.ensure_key_separation()  # no error
+
+
+def test_key_separation_noop_when_secrets_key_unset(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_SECRET_KEY", "a-signing-key")
+    monkeypatch.delenv(secret_store.SECRETS_KEY_ENV, raising=False)
+    secret_store.ensure_key_separation()  # no error

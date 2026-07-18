@@ -35,8 +35,10 @@ def set_email_credentials(
     """Create or replace an org's mailbox credentials (upsert on `org_id`).
 
     `password` is plaintext in; it is encrypted before storage. Raises
-    `secret_store.SecretsKeyError` if `BESTTEAM_SECRETS_KEY` is unset/invalid.
+    `secret_store.SecretsKeyError` if `BESTTEAM_SECRETS_KEY` is unset/invalid,
+    or if it collides with the JWT signing key.
     """
+    secret_store.ensure_key_separation()
     token = secret_store.encrypt(password)
     row = get_email_credentials(db, org_id)
     if row is None:
@@ -67,20 +69,26 @@ def ensure_secrets_key_for_stored_credentials(db: Session) -> None:
     """Refuse to boot if credentials are stored but the secrets key can't read them.
 
     A missing/rotated `BESTTEAM_SECRETS_KEY` would otherwise surface only when a
-    run first tries to use email -- much worse than failing at startup. No-op
-    when no org has stored credentials (the key isn't needed then).
+    run first tries to use email -- much worse than failing at startup. Checks
+    **every** stored row (a partial rotation could leave some rows readable and
+    others not) and names the affected orgs. No-op when no org has stored
+    credentials (the key isn't needed then).
     """
-    row = db.query(OrgEmailCredential).first()
-    if row is None:
+    rows = db.query(OrgEmailCredential).all()
+    if not rows:
         return
+    secret_store.ensure_key_separation()
     if not secret_store.secrets_key_configured():
         raise RuntimeError(
             f"Stored per-org email credentials exist, but {secret_store.SECRETS_KEY_ENV} "
             "is not set. Set it to the Fernet key those credentials were encrypted with."
         )
-    if not secret_store.can_decrypt(row.password_encrypted):
+    undecryptable = [r.org_id for r in rows if not secret_store.can_decrypt(r.password_encrypted)]
+    if undecryptable:
         raise RuntimeError(
-            f"{secret_store.SECRETS_KEY_ENV} cannot decrypt the stored email credentials "
-            "(wrong or rotated key). Restore the original key, or clear and re-enter the "
-            "affected mailboxes (`admin clear-email` / `set-email`)."
+            f"{secret_store.SECRETS_KEY_ENV} cannot decrypt the stored email credentials for "
+            f"org id(s) {sorted(undecryptable)} (wrong or rotated key). Restore the original "
+            "key, or clear and re-enter the affected mailboxes "
+            "(`admin clear-email <org>` / `set-email <org>`). The operator CLI runs even when "
+            "the app refuses to start."
         )

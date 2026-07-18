@@ -200,6 +200,25 @@ def test_clear_email_removes_credentials(session_local, secrets_key, monkeypatch
         assert get_email_credentials(db, get_org_by_name(db, "acme").id) is None
 
 
+def test_clear_email_recovers_when_key_cannot_decrypt(session_local, secrets_key, monkeypatch):
+    # Finding 1: if the secrets key is lost/rotated the app refuses to start,
+    # but the operator CLI must still run so an admin can recover. clear-email
+    # deletes the row without decrypting, and the CLI never triggers the
+    # app-startup credential guard (it doesn't import main).
+    from cryptography.fernet import Fernet
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["set-email", "acme", "--host", "h", "--user", "u"])
+    # Key changes to something that can't decrypt the stored row.
+    monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
+
+    assert admin_cli.main(["clear-email", "acme"]) == 0
+    with session_local() as db:
+        assert get_email_credentials(db, get_org_by_name(db, "acme").id) is None
+
+
 def test_set_email_test_flag_rejects_bad_login(session_local, secrets_key, monkeypatch):
     from bestteam.exceptions import ConfigurationError
     from ui.backend.db.email_credentials import get_email_credentials

@@ -19,9 +19,11 @@ Resolution order for one org:
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from typing import Any, Dict
 
+from cryptography.fernet import InvalidToken
 from sqlalchemy.orm import Session
 
 from bestteam.tools.email_client import (
@@ -35,24 +37,36 @@ from bestteam.tools.email_client import (
 from . import secret_store
 from .db.email_credentials import get_email_credentials
 
+_logger = logging.getLogger(__name__)
+
 _NOT_CONNECTED = (
     "No mailbox is connected for your team yet. Ask an admin to connect one "
     "before using the email tools."
 )
+_UNREADABLE = (
+    "The connected mailbox can't be read right now (its stored credentials "
+    "could not be decrypted). Ask an admin to reconnect it."
+)
 
 
-def _not_connected_tools() -> Dict[str, Any]:
+def _fixed_message_tools(message: str) -> Dict[str, Any]:
+    """Three email tools that ignore their input and return `message`.
+
+    Keeps the public names/docstrings so a workflow referencing the built-in
+    email skill still compiles, while communicating the state to the model.
+    """
+
     @functools.wraps(email_find)
     def find(query: str = "") -> str:
-        return _NOT_CONNECTED
+        return message
 
     @functools.wraps(email_read)
     def read(message_id: str) -> str:
-        return _NOT_CONNECTED
+        return message
 
     @functools.wraps(email_draft_reply)
     def draft_reply(message_id: str, body: str) -> str:
-        return _NOT_CONNECTED
+        return message
 
     return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}
 
@@ -65,7 +79,14 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
     """
     cred = get_email_credentials(db, org_id)
     if cred is not None:
-        password = secret_store.decrypt(cred.password_encrypted)
+        try:
+            password = secret_store.decrypt(cred.password_encrypted)
+        except (InvalidToken, secret_store.SecretsKeyError):
+            # A wrong/rotated key must not crash the workflow build for this (or
+            # any other) org -- surface it as a clear tool-level message and log
+            # server-side. Startup validation normally catches this first.
+            _logger.warning("Could not decrypt email credentials for org_id=%s", org_id)
+            return _fixed_message_tools(_UNREADABLE)
         backend = _ImapBackend(
             host=cred.host,
             user=cred.username,
@@ -77,4 +98,4 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
     if os.environ.get("BESTTEAM_EMAIL_BACKEND", "").strip():
         # Single-org / SDK env path handles email; don't shadow the env tools.
         return {}
-    return _not_connected_tools()
+    return _fixed_message_tools(_NOT_CONNECTED)
