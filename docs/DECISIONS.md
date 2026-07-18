@@ -78,10 +78,12 @@ Append new entries at the bottom using this template:
   - Isolation is enforced in the API layer (central loaders + dependency),
     not the database engine; Postgres row-level security can be layered
     onto the same `org_id` columns later if the DB moves off SQLite.
-  - Per-org secrets (email/LLM credentials) are NOT part of this decision —
-    they need an encrypted secrets store (separate sub-project); until
-    then, process-env email credentials must not be set on a shared
-    instance.
+  - Per-org secrets were NOT part of this decision. Per-org **email**
+    credentials are now implemented (encrypted secrets store + `admin
+    set-email`; spec `2026-07-18-per-org-email-credentials-design.md`);
+    per-org LLM credentials and a self-service settings UI remain future.
+    Process-env email credentials still must not be set on a shared instance
+    (the env path stays single-org and is refused on multi-org).
   - See `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
 
 ## Memory: SQLite + BM25 in-house, not the mem0 library

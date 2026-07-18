@@ -90,8 +90,8 @@
   CJK search) backends behind one seam
   (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
   verb / no SMTP by design. Seeded `email_triage_reply` built-in Skill.
-  Deferred: real sending, ambient triggering, per-org credentials,
-  attachments. Spec:
+  Deferred: real sending, ambient triggering, attachments. (Per-org email
+  credentials are now implemented — see the per-org email entry below.) Spec:
   `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
 
 ## In Progress
@@ -114,8 +114,11 @@
   `BESTTEAM_EMAIL_*` now refuses startup / `create-org` (interim guard until
   the secrets store); `runs.username` persisted (migration `c9d0e1f2a3b4`).
   See `docs/CODE_REVIEW_TRIAGE.md` (Round 4).
-  Remaining sub-projects: encrypted per-org secrets store (2), per-org
-  email/LLM credentials (3), infra hardening/Postgres when scale demands (4).
+  Sub-project done: encrypted per-org **email** credentials (secrets store +
+  `admin set-email`; `email_tools.load_email_tools` resolves the running org's
+  mailbox; spec `2026-07-18-per-org-email-credentials-design.md`). Remaining:
+  a customer-facing self-service settings UI + per-org admin role, per-org LLM
+  credentials, infra hardening/Postgres when scale demands.
 
 ## Known issues / tech debt
 

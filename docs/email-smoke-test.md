@@ -289,10 +289,13 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 
 - **Sending** email (no send verb exists — planned, not built).
 - **Ambient triggering** on new mail (planned, not built).
-- **Per-org mailboxes.** This test uses one process-wide mailbox on a
-  single-org deployment. Multi-org email needs the per-org secrets store
-  (a future sub-project) — until then, the CR-031 guard blocks the unsafe
-  combination. See `docs/STATUS.md`.
+- **Per-org mailboxes.** This test uses the process-wide `BESTTEAM_EMAIL_*`
+  mailbox — the single-org / SDK path. A multi-org platform instead connects
+  each customer's mailbox per-org with `admin set-email <org>` (encrypted at
+  rest), which is what a deployed workflow uses at run time; the process-wide
+  env vars stay refused on a multi-org deployment (CR-031). This runbook
+  exercises the single-org env path; see `docs/deployment.md` §4c for the
+  per-org setup.
 
 ---
 

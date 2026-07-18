@@ -11,8 +11,9 @@ behind Docker Compose.
 > **Shared-platform caveat:** the email-tool environment variables
 > (`BESTTEAM_EMAIL_*`) configure ONE mailbox for the whole process — the
 > backend refuses to start (and `create-org` refuses a second org) when they
-> are set on a multi-org deployment (per-org credentials are a future
-> sub-project). The same applies to any other process-wide integration env.
+> are set on a multi-org deployment. On a multi-org platform connect each
+> customer's mailbox per-org with `admin set-email` instead (§4c). The
+> process-wide caveat still applies to any other process-wide integration env.
 
 ## 1. Configure environment
 

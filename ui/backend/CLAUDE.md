@@ -137,8 +137,9 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   while DB rows are what the wizard creates per-org at runtime. The files in
   `WORKFLOWS_DIR` are our shipped fixtures — mostly `fake:` models returning
   hardcoded text, plus `*_live` ones that spend real quota and, for
-  `email_triage_demo_live`, read the `BESTTEAM_EMAIL_*` mailbox — and they
-  carry no `org_id`, so while enabled *every* org user sees and can run them.
+  `email_triage_demo_live`, read the running org's connected mailbox (per-org
+  stored credentials, env fallback on single-org) — and they carry no `org_id`,
+  so while enabled *every* org user sees and can run them.
   The gate covers **both** the list (`GET /api/workflows`) and resolution
   (`_get_workflow`, hence `/api/runs` and `/graph`): hiding them from the
   list alone would leave them runnable by name. Disabled ⇒ the same 404 as an

@@ -66,9 +66,10 @@ def demo_workflows_enabled() -> bool:
     Off by default. Those files are *our* demo fixtures, not any customer's
     teams: most run `fake:` models that emit a hardcoded, plausible-looking
     answer regardless of input, and the `*_live` ones spend real API quota --
-    `email_triage_demo_live` reads whatever mailbox `BESTTEAM_EMAIL_*` points
-    at. They are global (no `org_id`), so while this is on, every org user on
-    the deployment sees and can run all of them.
+    `email_triage_demo_live` reads the running org's connected mailbox (its
+    per-org stored credentials), falling back to the `BESTTEAM_EMAIL_*` env
+    mailbox on a single-org deployment. They are global (no `org_id`), so while
+    this is on, every org user on the deployment sees and can run all of them.
 
     Turn it on (`BESTTEAM_DEMO_WORKFLOWS=1`) only on a dev box or a sales-demo
     instance. This gates the UI backend only -- the SDK/CLI YAML path
