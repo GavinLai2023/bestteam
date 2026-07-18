@@ -193,6 +193,21 @@ Back up the live database (safe to run while the backend is running):
 ./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
 ```
 
+**Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
+or secrets vault — NOT alongside the database dump). Stored mailbox passwords
+are encrypted with it, so a database backup is useless for email without the
+key. If the key is lost or changed, the backend refuses to start (it names the
+affected org ids), but the **operator CLI still runs** — recover by clearing
+and re-entering the affected mailboxes:
+
+```bash
+docker compose run --rm --no-deps backend python -m ui.backend.admin clear-email <org>
+docker compose run --rm --no-deps backend python -m ui.backend.admin set-email <org> --host ... --user ... --test
+```
+
+There is no in-place re-encrypt/rekey command yet; rotating the key means
+clearing and re-entering each org's mailbox under the new key.
+
 To restore from a backup:
 
 1. Stop the backend so nothing writes to the database during restore:
