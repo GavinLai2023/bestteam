@@ -24,6 +24,19 @@ def test_seed_creates_email_skill(db_session):
     assert record.config["instructions"]
 
 
+def test_triage_playbook_uses_only_agent_visible_signals(db_session):
+    # The bulk-mail rule must key off signals email_read actually returns
+    # (sender address, body text), not a List-Unsubscribe header -- neither
+    # the IMAP nor the Graph backend surfaces headers to the agent.
+    seed_default_skills(db_session)
+    instructions = (
+        db_session.query(SkillRecord).filter_by(name="email_triage_reply").one().config["instructions"]
+    )
+    assert "List-Unsubscribe" not in instructions
+    assert "bulk mail is fyi" in instructions.lower()
+    assert "no-reply" in instructions.lower()
+
+
 def test_seed_is_idempotent(db_session):
     seed_default_skills(db_session)
     seed_default_skills(db_session)
