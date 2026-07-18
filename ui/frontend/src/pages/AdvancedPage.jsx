@@ -59,6 +59,11 @@ export default function AdvancedPage() {
 
   const kind = KINDS.find((k) => k.key === activeKey)
   const activeKeyRef = useRef(activeKey)
+  // Monotonic load token: a list response is only applied if it's the most
+  // recent request, so a slow response for a previous org/tab can't overwrite
+  // the current one (and can't leave a stale item selectable for a mutation
+  // that would then target the wrong org).
+  const loadSeq = useRef(0)
 
   // What actually goes on the wire: the platform tier is expressed by omitting
   // `?org=` entirely, and org-less resources never send it.
@@ -78,13 +83,20 @@ export default function AdvancedPage() {
   }, [activeKey])
 
   const loadItems = () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     setError(null)
     api
       .listConfig(activeKey, apiOrg)
-      .then((data) => setItems(data))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false))
+      .then((data) => {
+        if (seq === loadSeq.current) setItems(data)
+      })
+      .catch((e) => {
+        if (seq === loadSeq.current) setError(e.message)
+      })
+      .finally(() => {
+        if (seq === loadSeq.current) setLoading(false)
+      })
   }
 
   useEffect(() => {
@@ -107,12 +119,11 @@ export default function AdvancedPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey, org])
 
-  // activeKey and org move together so the load effect fires once, with a
-  // matching pair -- switching tabs must never request the previous tab's org.
-  const selectKind = (k) => {
-    if (k.key === activeKey) return
-    setActiveKey(k.key)
-    setOrg(defaultOrgFor(k, orgs))
+  // Drop any open editor/selection. Both switching tab and switching org must
+  // do this: otherwise the editor keeps the previous context's item id + JSON,
+  // and a Save/Delete would then create or destroy that item in the newly
+  // selected org (a cross-tenant write). See selectKind / selectOrg.
+  const resetSelection = () => {
     setSelectedId(null)
     setJsonText('')
     setMessage(null)
@@ -120,6 +131,21 @@ export default function AdvancedPage() {
     setNewId('')
     setCreateMode('manual')
     setUploadFiles([])
+  }
+
+  // activeKey and org move together so the load effect fires once, with a
+  // matching pair -- switching tabs must never request the previous tab's org.
+  const selectKind = (k) => {
+    if (k.key === activeKey) return
+    setActiveKey(k.key)
+    setOrg(defaultOrgFor(k, orgs))
+    resetSelection()
+  }
+
+  const selectOrg = (value) => {
+    if (value === org) return
+    setOrg(value)
+    resetSelection()
   }
 
   const select = (id) => {
@@ -212,7 +238,7 @@ export default function AdvancedPage() {
         {kind.orgScope !== 'none' && (
           <label className="advanced-org">
             Organization
-            <select value={org ?? ''} onChange={(e) => setOrg(e.target.value)}>
+            <select value={org ?? ''} onChange={(e) => selectOrg(e.target.value)}>
               {kind.orgScope === 'optional' && <option value={PLATFORM_TIER}>Platform (built-ins)</option>}
               {orgs.map((o) => (
                 <option key={o.name} value={o.name}>
