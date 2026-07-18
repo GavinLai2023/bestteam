@@ -275,6 +275,63 @@ def test_create_user_enforces_one_member_per_org():
         create_user(db, "op2", "pw")
 
 
+def test_db_index_rejects_second_org_member_even_bypassing_app_check():
+    # The invariant is enforced by the schema, not just create_user: inserting a
+    # second same-org member directly (bypassing the pre-check) must still fail,
+    # covering the race the query-before-insert check can't see.
+    from sqlalchemy.exc import IntegrityError
+
+    from ui.backend.auth import hash_password
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import User
+    from ui.backend.db.orgs import get_or_create_org
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        db.add(User(username="a", password_hash=hash_password("p"), org_id=org.id))
+        db.commit()
+        db.add(User(username="b", password_hash=hash_password("p"), org_id=org.id))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        # Multiple platform operators (org_id NULL) remain allowed by the index.
+        db.add(User(username="op_a", password_hash=hash_password("p"), org_id=None))
+        db.add(User(username="op_b", password_hash=hash_password("p"), org_id=None))
+        db.commit()
+
+
+def test_migration_audit_flags_existing_duplicate_org_members():
+    # The upgrade policy is non-destructive: the migration detects pre-existing
+    # multi-member orgs (so it can refuse) rather than deleting accounts. NULL
+    # org_ids (platform operators) are never counted.
+    import importlib.util
+    from pathlib import Path
+
+    import sqlalchemy as sa
+
+    mig_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic" / "versions" / "e1f2a3b4c5d6_one_user_per_org_unique_index.py"
+    )
+    spec = importlib.util.spec_from_file_location("mig_e1f2a3b4c5d6", mig_path)
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+
+    engine = sa.create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.execute(sa.text("CREATE TABLE users (id INTEGER PRIMARY KEY, org_id INTEGER)"))
+        conn.execute(
+            sa.text("INSERT INTO users (id, org_id) VALUES (1, 5), (2, 5), (3, 9), (4, NULL), (5, NULL)")
+        )
+    with engine.connect() as conn:
+        dups = mig.duplicate_org_members(conn)
+    assert [tuple(r) for r in dups] == [(5, 2)]
+
+
 def test_me_rejects_invalid_token(client):
     resp = client.get("/api/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
 

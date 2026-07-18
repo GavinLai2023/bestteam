@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, ForeignKey, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -46,6 +46,20 @@ class User(Base):
     """A login. Belongs to an organization, or is a platform operator (org NULL)."""
 
     __tablename__ = "users"
+    # One member per org is a hard invariant, not just an app-level check: an
+    # org's resources (notably the shared mailbox) have no per-member privilege
+    # separation yet. The partial unique index enforces it in the schema so a
+    # race or a bypass of `create_user` still can't create a second member,
+    # while leaving platform operators (org_id NULL, excluded from the index)
+    # free to be many. See docs/DECISIONS.md ("one member per org").
+    __table_args__ = (
+        Index(
+            "uq_users_org_id_not_null",
+            "org_id",
+            unique=True,
+            sqlite_where=text("org_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # Usernames stay globally unique across orgs: the JWT `sub` claim and

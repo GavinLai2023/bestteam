@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import hash_password, verify_password
@@ -38,7 +39,16 @@ def create_user(db: Session, username: str, password: str, org_id: Optional[int]
 
     user = User(username=username, password_hash=hash_password(password), org_id=org_id)
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Backstop for a race the query-above check can't see: the DB enforces
+        # both unique username and the one-member-per-org partial index.
+        db.rollback()
+        raise ValueError(
+            "Could not create user -- a concurrent request may have taken this "
+            "username or the org's single membership slot."
+        ) from exc
     db.refresh(user)
     return user
 

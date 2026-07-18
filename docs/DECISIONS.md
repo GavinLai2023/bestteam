@@ -84,15 +84,21 @@ Append new entries at the bottom using this template:
     per-org LLM credentials and a self-service settings UI remain future.
     Process-env email credentials still must not be set on a shared instance
     (the env path stays single-org and is refused on multi-org).
-  - **Interim: one member per org is enforced** (`create_user` refuses a
-    second member of an org). The architecture allows multiple accounts per
-    org, but org-scoped resources — notably the self-service shared mailbox —
-    have no per-member privilege separation yet: any member can
+  - **Interim: one member per org is enforced at the schema level** — a
+    partial unique index on `users.org_id WHERE org_id IS NOT NULL`
+    (migration `e1f2a3b4c5d6`), with `create_user` doing a friendly
+    pre-check. The architecture allows multiple accounts per org, but
+    org-scoped resources — notably the self-service shared mailbox — have no
+    per-member privilege separation yet: any member can
     connect/redirect/disconnect them. Until a per-org admin role exists, a
     second member would mean unprivileged co-management of the org's mailbox,
-    so the invariant is enforced rather than assumed. Lifting it is gated on
-    that role (deferred sub-project C). Platform operators (org-NULL) are
-    exempt — there can be several.
+    so the invariant is enforced (not merely assumed) and a race or a bypass
+    of `create_user` still can't create one. A database upgraded from the
+    earlier multi-member architecture is not mutated automatically: the
+    migration **refuses and names the offending orgs** so the operator
+    resolves duplicates by hand (accounts are never auto-deleted). Lifting the
+    constraint is gated on the per-org admin role (deferred sub-project C).
+    Platform operators (org-NULL) are exempt — there can be several.
   - See `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
 
 ## Memory: SQLite + BM25 in-house, not the mem0 library
