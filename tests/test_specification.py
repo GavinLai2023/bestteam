@@ -246,6 +246,16 @@ def test_generate_specification_returns_first_valid_spec(tmp_path):
     assert spec == valid
 
 
+def test_generate_specification_with_fake_model_raises_clear_error(tmp_path):
+    # A `fake:` chat model can't do structured output; the customer should get a
+    # clear message, not the cryptic "with_structured_output is not implemented".
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    fake = FakeListChatModel(responses=["anything"])
+    with pytest.raises(ConfigurationError, match="real AI model"):
+        generate_specification(fake, "We need help answering emails.", source=tmp_path / "workflow.yaml")
+
+
 def test_generate_specification_calls_pre_validation(tmp_path):
     valid = _basic_spec()
     model = _FakeArchitectChatModel(responses=[valid])

@@ -34,7 +34,7 @@ from . import interview
 from . import secret_store
 from .auth_api import get_current_org, get_current_user, router as auth_router
 from .builder import router as builder_router
-from .crud import router as crud_router
+from .crud import public_router as catalog_read_router, router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
 from .org_settings import router as org_settings_router
@@ -241,6 +241,7 @@ app.include_router(auth_router)
 app.include_router(builder_router)
 app.include_router(interview_router)
 app.include_router(crud_router)
+app.include_router(catalog_read_router)
 app.include_router(memory_router)
 app.include_router(org_settings_router)
 

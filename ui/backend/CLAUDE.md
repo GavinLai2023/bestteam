@@ -186,7 +186,14 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   appends this to the requirements text before `generate_specification()` (in
   both `submit_specification` and `submit_solution_feedback`'s `model=`
   paths), so the architect picks `AgentSpec.model` specs by role complexity
-  and pricing rather than guessing provider names.
+  and pricing rather than guessing provider names. CRUD is admin-only, but the
+  **list is also exposed read-only at `/api/model-catalog`** (`crud.public_router`,
+  any authenticated user): the Team Builder wizard runs as an org member and
+  needs the catalog to pick a real model — without it the frontend falls back
+  to a `fake:` model and generation fails (`with_structured_output`). The two
+  generation steps translate that fake-model failure into a clear
+  `ConfigurationError` ("needs a real AI model") rather than the raw
+  `NotImplementedError`.
 - **Skills library** (`ui/backend/skills.py` + `/api/config/skills` CRUD in `crud.py`)
   — `load_skills(db)` queries all `SkillRecord` rows and returns `Dict[str, SkillSpec]`
   keyed by name, used by `main.py`, `crud.py`, and `builder.py` to pass `extra_skills=`

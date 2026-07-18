@@ -6,6 +6,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from ..exceptions import ConfigurationError
+
 # Guides the "Business Analyst" agent (see docs/team_builder_methodology.md,
 # Requirements stage) from a customer's free-text Intent/As-is description to
 # structured Requirements. Written for a real, structured-output-capable
@@ -69,7 +71,14 @@ def generate_requirements(
     `clarifying_questions`, or a correction) and is appended to the prompt so
     the analyst can revise its summary.
     """
-    structured_model = model.with_structured_output(Requirements)
+    try:
+        structured_model = model.with_structured_output(Requirements)
+    except NotImplementedError as exc:
+        raise ConfigurationError(
+            "The Team Builder needs a real AI model that can produce structured "
+            "output; the selected model can't (for example, a demo 'fake:' model). "
+            "Choose a real model to design your team."
+        ) from exc
 
     content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
     if feedback:
