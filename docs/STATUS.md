@@ -117,18 +117,33 @@
   signals (no-reply sender, unsubscribe wording), not headers the backends
   don't expose to the agent.
 
+- Per-org email credentials — foundation (merged to `main`, PR #17 `0dd8b44`):
+  encrypted per-org mailbox store (`org_email_credentials`, Fernet under
+  `BESTTEAM_SECRETS_KEY`, separate from the JWT key); `email_tools.load_email_tools`
+  resolves the running org's mailbox (overrides the env tools by name; per-org
+  workflow cache keyed on `OrgEmailCredential` freshness); `admin
+  set-email`/`clear-email` CLI; startup refuses to boot if stored credentials
+  can't be decrypted (operator CLI stays usable for recovery). The env
+  `BESTTEAM_EMAIL_*` path stays single-org and is still refused on multi-org.
+  Spec: `2026-07-18-per-org-email-credentials-design.md`.
+
+- Self-service mailbox connection in the Team Builder wizard (merged to `main`,
+  PR #18 `e04b3b4`): customers connect/test/rotate/disconnect their own IMAP
+  mailbox inside the wizard, shown only when the built team uses email
+  (`spec_uses_email` resolves each agent's tools + skills) — soft at Preview
+  (test against the real inbox), hard-gated at Deploy (backend refuses to deploy
+  an email team without a mailbox). `/api/org/email` endpoints guarded by the
+  org's own login; SSRF guard on the customer-supplied host. Deliberately built
+  **without** a per-org admin role: **one member per org is enforced** instead
+  (partial unique index + non-destructive migration audit + ASGI startup guard;
+  `admin delete-user`/`move-user` recovery). Also hardened the IMAP transport
+  (verified TLS, bounded timeouts, connect-time IP pinning vs DNS rebinding) and
+  bounded the IMAP port. Three code-review rounds (12 findings) resolved; 500
+  tests, green CI. Spec: `2026-07-18-wizard-email-connect-design.md`.
+
 ## In Progress
 
-- Per-org email credentials — foundation (PR #17, in review): encrypted
-  per-org mailbox store (`org_email_credentials`, Fernet under
-  `BESTTEAM_SECRETS_KEY`); `email_tools.load_email_tools` resolves the running
-  org's mailbox (overrides the env tools; per-org workflow cache);
-  `admin set-email`/`clear-email` CLI; startup refuses to boot if stored
-  credentials can't be decrypted (CLI stays usable for recovery). The env
-  `BESTTEAM_EMAIL_*` path stays single-org and is still refused on multi-org.
-  Spec: `2026-07-18-per-org-email-credentials-design.md`. Remaining: a
-  customer-facing self-service settings UI + per-org admin role, per-org LLM
-  credentials, per-org Microsoft Graph / OAuth, an in-place key-rekey command.
+- _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
 
@@ -159,10 +174,13 @@
   question (raised 2026-07-15) was decided in favour of **org-scoped
   multi-tenancy, one codebase for both models** — see `DECISIONS.md`
   (supersedes "per-customer instance, no multi-tenancy"). Program status:
-  sub-project 1 (org isolation, PR #14) and the per-org **email** secrets
-  store (PR #17) are done; remaining: a customer-facing self-service settings
-  UI + per-org admin role, per-org LLM credentials, and infra hardening /
-  Postgres when real usage numbers demand it.
+  sub-project 1 (org isolation, PR #14), the per-org **email** secrets store
+  (PR #17), and customer self-service mailbox connection in the wizard
+  (PR #18) are done. Remaining: a **per-org admin role** (which would lift the
+  interim one-member-per-org constraint — see `DECISIONS.md`), per-org LLM
+  credentials, per-org Microsoft Graph / OAuth ("connect your inbox"), an
+  in-place secrets-key rekey command, and infra hardening / Postgres when real
+  usage numbers demand it.
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the
   current engine).
