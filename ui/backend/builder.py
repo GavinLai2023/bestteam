@@ -37,6 +37,7 @@ from .knowledge_bases import (
     load_knowledge_base_tools,
     resolve_kb_upload_path,
 )
+from .email_tools import load_email_tools
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -208,7 +209,10 @@ def _validate_spec_payload(
         spec = Specification.model_validate(payload)
         _reject_unsafe_kb_paths(spec)
         ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-        extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org_id)
+        extra_tools = {
+            **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org_id),
+            **(load_email_tools(db, org_id) if org_id is not None else {}),
+        }
         validate_specification(spec, source=source, extra_tools=extra_tools, extra_skills=extra_skills or {})
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -418,7 +422,10 @@ async def create_test_run(
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id)
+    extra_tools = {
+        **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
+        **load_email_tools(db, org.id),
+    }
     try:
         workflow = validate_specification(
             spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
@@ -460,7 +467,10 @@ def deploy_session(
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id)
+    extra_tools = {
+        **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
+        **load_email_tools(db, org.id),
+    }
     try:
         validate_specification(
             spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)

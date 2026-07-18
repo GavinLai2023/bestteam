@@ -1,5 +1,15 @@
 # 面向非技术客户的"团队搭建向导"方法论与架构规划
 
+> **Historical planning doc — methodology, not current API reference.** This
+> describes the original phased plan; several specifics have since changed.
+> Notably: the wizard shipped as **4 customer-facing stages, not 6**; the
+> `/api/config` "advanced view" now covers **workflows/skills/knowledge_bases**
+> only — the standalone **agents/teams CRUD was removed** (PR #15, nothing
+> consumed those records); and the deployment model is now **org-scoped
+> multi-tenancy** (PR #14). For current state see `docs/STATUS.md`,
+> `docs/DECISIONS.md`, and the per-directory `CLAUDE.md` files. The philosophy
+> below (把复杂留给自己 / AI-guided wizard as the core interaction) still holds.
+
 ## Context
 
 ### 产品定位

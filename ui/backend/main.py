@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import func
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from bestteam import Workflow, load_workflow
@@ -29,14 +30,24 @@ from bestteam.exceptions import BestTeamError
 
 from . import auth
 from . import interview
+from . import secret_store
 from .auth_api import get_current_org, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
-from .db.models import KnowledgeBaseRecord, Organization, SkillRecord, User, WorkflowRecord
+from .db.models import (
+    KnowledgeBaseRecord,
+    OrgEmailCredential,
+    Organization,
+    SkillRecord,
+    User,
+    WorkflowRecord,
+)
+from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
+from .email_tools import load_email_tools
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -55,9 +66,10 @@ def demo_workflows_enabled() -> bool:
     Off by default. Those files are *our* demo fixtures, not any customer's
     teams: most run `fake:` models that emit a hardcoded, plausible-looking
     answer regardless of input, and the `*_live` ones spend real API quota --
-    `email_triage_demo_live` reads whatever mailbox `BESTTEAM_EMAIL_*` points
-    at. They are global (no `org_id`), so while this is on, every org user on
-    the deployment sees and can run all of them.
+    `email_triage_demo_live` reads the running org's connected mailbox (its
+    per-org stored credentials), falling back to the `BESTTEAM_EMAIL_*` env
+    mailbox on a single-org deployment. They are global (no `org_id`), so while
+    this is on, every org user on the deployment sees and can run all of them.
 
     Turn it on (`BESTTEAM_DEMO_WORKFLOWS=1`) only on a dev box or a sales-demo
     instance. This gates the UI backend only -- the SDK/CLI YAML path
@@ -79,6 +91,16 @@ if auth.is_insecure_secret_key(auth.SECRET_KEY):
         "Set BESTTEAM_SECRET_KEY to a long random value before starting this service "
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
+
+# Secrets-store guards run here (app import), NOT in db_session, so the operator
+# CLI -- which imports db_session but not main -- can still run recovery
+# commands (`admin clear-email`/`set-email`) when the key can't decrypt.
+secret_store.ensure_key_separation()
+with SessionLocal() as _startup_session:
+    try:
+        ensure_secrets_key_for_stored_credentials(_startup_session)
+    except OperationalError:
+        pass  # pre-migration schema; db_session already warned about seeding
 
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
@@ -243,7 +265,12 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     kb_count, kb_max = db.query(
         func.count(KnowledgeBaseRecord.id), func.max(KnowledgeBaseRecord.updated_at)
     ).one()
-    return (skills_count, skills_max, kb_count, kb_max)
+    # Per-org email tools are baked into the compiled workflow, so connecting /
+    # rotating / clearing a mailbox must invalidate that org's cached workflows.
+    email_count, email_max = db.query(
+        func.count(OrgEmailCredential.id), func.max(OrgEmailCredential.updated_at)
+    ).one()
+    return (skills_count, skills_max, kb_count, kb_max, email_count, email_max)
 
 
 def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
@@ -290,19 +317,23 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         if db is not None:
             skill_lookup = load_skills(db, record.org_id)
             kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
+            email_tools = load_email_tools(db, record.org_id)
         else:
             with SessionLocal() as session:
                 skill_lookup = load_skills(session, record.org_id)
                 kb_tools = load_knowledge_base_tools(
                     session, record.config, source, org_id=record.org_id
                 )
+                email_tools = load_email_tools(session, record.org_id)
         try:
             config = contain_workflow_config_for_load(record.config)
             ensure_workflow_cache_paths_for_source(config, source)
             workflow = _build_workflow(
                 config,
                 source=source,
-                extra_tools=kb_tools,
+                # Per-org email tools override the env-based ones in REGISTRY by
+                # name, so this org's agents reach this org's mailbox.
+                extra_tools={**kb_tools, **email_tools},
                 extra_skills=skill_lookup,
             )
         except (KeyError, TypeError, BestTeamError) as exc:
@@ -318,25 +349,39 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
     if not demo_workflows_enabled() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
 
-    cache_key = ("file", path.stat().st_mtime)
-    cached = _workflow_cache.get((None, name))
-    if cached is not None and cached[1] == cache_key:
-        return cached[0]
+    # A global YAML demo can reference the built-in email_triage_reply skill,
+    # whose email_* tools otherwise resolve to the env-based REGISTRY. Inject the
+    # requesting org's mailbox tools and cache per (org_id, name): a global
+    # (None, name) cache would let one org reuse another org's baked-in mailbox.
+    # org_id None keeps the shared global cache and the env/REGISTRY tools (the
+    # SDK / single-org path). YAML demos reference only platform built-in skills
+    # (org NULL), never an org's own skills or knowledge bases.
+    own_session = db is None
+    session = SessionLocal() if own_session else db
     try:
-        # YAML demo workflows are global (visible to every org), so they may
-        # reference platform built-in skills (org NULL) only -- never an
-        # org's own skills or knowledge bases. Without this, a YAML workflow
-        # referencing a seeded skill (e.g. email_triage_demo_live ->
-        # email_triage_reply) fails to load with "Unknown skill".
-        if db is not None:
-            builtin_skills = load_skills(db, None)
+        mtime = path.stat().st_mtime
+        if org_id is not None:
+            cache_key = ("file", mtime, *_dependency_freshness(session))
+            email_tools = load_email_tools(session, org_id)
         else:
-            with SessionLocal() as session:
-                builtin_skills = load_skills(session, None)
-        workflow = load_workflow(path, skills=list(builtin_skills.values()))
-    except BestTeamError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _store_workflow_in_cache((None, name), workflow, cache_key, generation)
+            cache_key = ("file", mtime)
+            email_tools = {}
+        cached = _workflow_cache.get((org_id, name))
+        if cached is not None and cached[1] == cache_key:
+            return cached[0]
+        builtin_skills = load_skills(session, None)
+        try:
+            workflow = load_workflow(
+                path,
+                toolkits=[email_tools] if email_tools else None,
+                skills=list(builtin_skills.values()),
+            )
+        except BestTeamError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if own_session:
+            session.close()
+    _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
     return workflow
 
 

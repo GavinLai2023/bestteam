@@ -10,7 +10,8 @@
   SEQUENTIAL/PARALLEL/HIERARCHICAL collaboration modes.
 - CLI: `init` / `run` / `graph`.
 - YAML loader, including `local_folder` (BM25) and `vector` knowledge bases.
-- Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator`.
+- Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator`, and
+  the draft-only email toolkit (`email_find`/`email_read`/`email_draft_reply`).
 - UI backend: monitoring API, 6-stage builder session state machine, config
   CRUD ("advanced view"), model catalog, usage metering.
 - UI frontend: monitoring dashboard, 4-stage Team Builder wizard, login UI.
@@ -90,32 +91,44 @@
   CJK search) backends behind one seam
   (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
   verb / no SMTP by design. Seeded `email_triage_reply` built-in Skill.
-  Deferred: real sending, ambient triggering, per-org credentials,
-  attachments. Spec:
+  Deferred: real sending, ambient triggering, attachments. Spec:
   `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
+
+- Org multi-tenancy — sub-project 1 (merged to `main`, PR #14): `organizations`
+  table + `org_id` row-level isolation across users/agents/teams/KBs/skills/
+  workflows/builder sessions/runs/usage; `get_current_org` dependency;
+  cross-org access → 404 (WS 4404, no existence oracle); public registration
+  REMOVED (operator CLI `create-org`/`create-user`/`list-orgs`); `(org_id, name)`
+  uniques; org-scoped loaders + `(org_id, name)` workflow cache; per-org KB
+  uploads; admin `/api/config` targets orgs via `?org=`. Also closed two
+  pre-existing holes (run GET/WS-stream and builder sessions had no ownership
+  checks). Same code serves one-org and many-org deployments. Triage Round 4
+  (CR-030…032). Spec: `2026-07-15-org-multi-tenancy-design.md`.
+
+- Advanced page + demo-workflow gate (merged, PR #15): org selector (fixes the
+  Save 422), read-only Tools tab, removed the dead Agents/Teams config API +
+  tabs, renamed the workflows tab AI Teams → Workflows, CSS overlap fix;
+  `GET /api/config/orgs` + `/tools`; shipped demo workflows gated **off by
+  default** (`BESTTEAM_DEMO_WORKFLOWS`) so they don't leak into customers'
+  dropdowns.
+
+- Email smoke-test + triage rule (merged, PR #16): `docs/email-smoke-test.md`
+  runbook; the `email_triage_reply` bulk-mail rule keys off agent-visible
+  signals (no-reply sender, unsubscribe wording), not headers the backends
+  don't expose to the agent.
 
 ## In Progress
 
-- Org multi-tenancy sub-project 1 (branch `feat/org-multi-tenancy`):
-  `organizations` table + `org_id` row-level isolation across users/agents/
-  teams/KBs/skills/workflows/builder sessions/runs/usage;
-  `get_current_org` dependency; cross-org access → 404 (WS 4404, no
-  existence oracle); public registration REMOVED (operator CLI
-  `create-org`/`create-user`/`list-orgs`); `(org_id, name)` composite
-  uniques; org-scoped loaders + workflow cache `(org_id, name)`; KB uploads
-  per org; admin `/api/config` targets orgs via `?org=`. Also fixes two
-  pre-existing holes: run GET/WS-stream and builder sessions had NO
-  ownership checks. Same code serves per-customer instances (one org) and
-  the shared platform (many). DECISIONS.md superseded accordingly. Spec:
-  `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
-  Code-review round 4 (CR-030…CR-032, all fixed on the branch): platform
-  admins must be org-less accounts (promotion of org members refused,
-  enforced in `get_current_admin` + run passthrough); multi-org +
-  `BESTTEAM_EMAIL_*` now refuses startup / `create-org` (interim guard until
-  the secrets store); `runs.username` persisted (migration `c9d0e1f2a3b4`).
-  See `docs/CODE_REVIEW_TRIAGE.md` (Round 4).
-  Remaining sub-projects: encrypted per-org secrets store (2), per-org
-  email/LLM credentials (3), infra hardening/Postgres when scale demands (4).
+- Per-org email credentials — foundation (PR #17, in review): encrypted
+  per-org mailbox store (`org_email_credentials`, Fernet under
+  `BESTTEAM_SECRETS_KEY`); `email_tools.load_email_tools` resolves the running
+  org's mailbox (overrides the env tools; per-org workflow cache);
+  `admin set-email`/`clear-email` CLI; startup refuses to boot if stored
+  credentials can't be decrypted (CLI stays usable for recovery). The env
+  `BESTTEAM_EMAIL_*` path stays single-org and is still refused on multi-org.
+  Spec: `2026-07-18-per-org-email-credentials-design.md`. Remaining: a
+  customer-facing self-service settings UI + per-org admin role, per-org LLM
+  credentials, per-org Microsoft Graph / OAuth, an in-place key-rekey command.
 
 ## Known issues / tech debt
 
@@ -145,9 +158,10 @@
 - **Deployment model — RESOLVED 2026-07-16:** the shared-hosted-platform
   question (raised 2026-07-15) was decided in favour of **org-scoped
   multi-tenancy, one codebase for both models** — see `DECISIONS.md`
-  (supersedes "per-customer instance, no multi-tenancy") and the In
-  Progress entry above. Remaining program: (2) encrypted per-org secrets
-  store, (3) per-org email/LLM credential settings, (4) infra hardening /
+  (supersedes "per-customer instance, no multi-tenancy"). Program status:
+  sub-project 1 (org isolation, PR #14) and the per-org **email** secrets
+  store (PR #17) are done; remaining: a customer-facing self-service settings
+  UI + per-org admin role, per-org LLM credentials, and infra hardening /
   Postgres when real usage numbers demand it.
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the

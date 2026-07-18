@@ -44,6 +44,10 @@ with SessionLocal() as _session:
         # mailbox to every tenant -- refuse to boot (CR-031). The RuntimeError
         # deliberately escapes the OperationalError catch below.
         ensure_email_single_org(_session)
+        # NB: the secrets-key / stored-credential guard runs in `main.py` at
+        # app import, NOT here -- the operator CLI (`ui.backend.admin`) imports
+        # this module for recovery (`clear-email`/`set-email`) and must boot
+        # even when the key can't decrypt existing rows.
     except OperationalError as _exc:
         warnings.warn(
             "Skipping default-data seeding: the database schema predates the "

@@ -11,6 +11,8 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin demote <username>
     docker compose exec backend python -m ui.backend.admin list
     docker compose exec backend python -m ui.backend.admin list-orgs
+    docker compose exec backend python -m ui.backend.admin set-email acme --host imap.gmail.com --user support@acme.com --test
+    docker compose exec backend python -m ui.backend.admin clear-email acme
 
 `create-user --platform` creates a platform operator (no org); org members
 are created with `--org <name>` (default: the `default` org). Admin rights
@@ -24,6 +26,7 @@ import argparse
 import getpass
 from typing import Optional, Sequence
 
+from .db.email_credentials import clear_email_credentials, set_email_credentials
 from .db.models import User
 from .db.orgs import (
     DEFAULT_ORG_NAME,
@@ -72,6 +75,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="create a platform operator that belongs to no organization",
     )
 
+    set_email_p = sub.add_parser(
+        "set-email", help="connect an org's IMAP mailbox (prompts for the password)"
+    )
+    set_email_p.add_argument("org", help="organization name")
+    set_email_p.add_argument("--host", required=True, help="IMAP host, e.g. imap.gmail.com")
+    set_email_p.add_argument("--user", required=True, help="IMAP username / email address")
+    set_email_p.add_argument("--port", type=int, default=993)
+    set_email_p.add_argument("--drafts", default=None, help="Drafts folder name (auto-detected if omitted)")
+    set_email_p.add_argument(
+        "--test", action="store_true", help="verify the credentials with a login before saving"
+    )
+
+    clear_email_p = sub.add_parser("clear-email", help="disconnect an org's mailbox")
+    clear_email_p.add_argument("org", help="organization name")
+
     args = parser.parse_args(argv)
 
     with SessionLocal() as db:
@@ -111,6 +129,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 parser.error(str(exc))
             where = "platform operator" if args.platform else f"member of '{args.org}'"
             print(f"Created user '{args.username}' ({where}).")
+            return 0
+        if args.command == "set-email":
+            org = get_org_by_name(db, args.org)
+            if org is None:
+                parser.error(f"Unknown organization '{args.org}'. Create it first with create-org.")
+            password = _prompt_password(parser)
+            if args.test:
+                # Build the same backend the tools use and attempt a login, so a
+                # bad credential is caught here rather than at first run.
+                from bestteam.exceptions import ConfigurationError
+                from bestteam.tools.email_client import _ImapBackend
+
+                backend = _ImapBackend(
+                    host=args.host, user=args.user, password=password,
+                    port=args.port, drafts=args.drafts,
+                )
+                try:
+                    conn = backend._connect()
+                    conn.logout()
+                except ConfigurationError as exc:
+                    parser.error(f"Login test failed, not saved: {exc}")
+                except OSError as exc:
+                    parser.error(f"Could not reach '{args.host}:{args.port}', not saved: {exc}")
+            try:
+                set_email_credentials(
+                    db, org.id, host=args.host, username=args.user, password=password,
+                    port=args.port, drafts_folder=args.drafts,
+                )
+            except Exception as exc:  # noqa: BLE001 -- surface a clear CLI error (e.g. missing key)
+                parser.error(str(exc))
+            print(f"Connected mailbox '{args.user}' for organization '{args.org}'.")
+            return 0
+        if args.command == "clear-email":
+            org = get_org_by_name(db, args.org)
+            if org is None:
+                parser.error(f"Unknown organization '{args.org}'.")
+            removed = clear_email_credentials(db, org.id)
+            print(
+                f"Disconnected mailbox for '{args.org}'." if removed
+                else f"No mailbox was connected for '{args.org}'."
+            )
             return 0
         try:
             set_admin_status(db, args.username, args.command == "promote")

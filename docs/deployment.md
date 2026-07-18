@@ -11,8 +11,9 @@ behind Docker Compose.
 > **Shared-platform caveat:** the email-tool environment variables
 > (`BESTTEAM_EMAIL_*`) configure ONE mailbox for the whole process — the
 > backend refuses to start (and `create-org` refuses a second org) when they
-> are set on a multi-org deployment (per-org credentials are a future
-> sub-project). The same applies to any other process-wide integration env.
+> are set on a multi-org deployment. On a multi-org platform connect each
+> customer's mailbox per-org with `admin set-email` instead (§4c). The
+> process-wide caveat still applies to any other process-wide integration env.
 
 ## 1. Configure environment
 
@@ -34,6 +35,14 @@ Edit `.env` and fill in:
 - `VITE_API_BASE` / `VITE_WS_BASE` — the backend's public URL, as reachable
   from the customer's browser (`https://...` / `wss://...`). These are baked
   into the frontend at build time.
+- `BESTTEAM_SECRETS_KEY` — encryption key for at-rest secrets (currently the
+  per-org mailbox passwords set with `admin set-email`; see "Per-org email"
+  below). Required once any org has connected a mailbox — the backend refuses
+  to start if it can't decrypt stored credentials. Must be a **different** key
+  from `BESTTEAM_SECRET_KEY`. Generate with:
+  ```bash
+  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  ```
 - `BESTTEAM_DEMO_WORKFLOWS` — **leave unset on a customer deployment.** It
   exposes the shipped demo workflows in `ui/backend/workflows/`, which belong
   to no org, so every user would see and be able to run them. Most return
@@ -109,6 +118,29 @@ target one explicitly via `?org=<name>`. Org-user surfaces (the wizard,
 running workflows) require an org account; a platform operator who wants to
 run workflows creates themselves an org user too.
 
+## 4c. Connect each org's mailbox (per-org email)
+
+The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
+**per organization** — each customer's agents reach only that customer's inbox.
+Requires `BESTTEAM_SECRETS_KEY` set (step 1); passwords are stored encrypted.
+
+```bash
+# IMAP with an app password (prompts for the password; --test verifies a login
+# before saving). Use an app-specific password, not the account password.
+docker compose exec backend python -m ui.backend.admin set-email acme \
+  --host imap.gmail.com --user support@acme.com --test
+
+# Disconnect:
+docker compose exec backend python -m ui.backend.admin clear-email acme
+```
+
+IMAP only for now (Microsoft Graph / OAuth per-org are future work). This is
+the multi-tenant path; the process-wide `BESTTEAM_EMAIL_*` env vars remain the
+single-mailbox path for the SDK/CLI and single-customer deployments, and stay
+**refused** on a multi-org deployment (one mailbox can't be shared safely
+across tenants). An org with no mailbox connected gets a clear "no mailbox
+connected" message from the tools rather than an error.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,
@@ -161,6 +193,21 @@ Back up the live database (safe to run while the backend is running):
 # or with an explicit path:
 ./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
 ```
+
+**Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
+or secrets vault — NOT alongside the database dump). Stored mailbox passwords
+are encrypted with it, so a database backup is useless for email without the
+key. If the key is lost or changed, the backend refuses to start (it names the
+affected org ids), but the **operator CLI still runs** — recover by clearing
+and re-entering the affected mailboxes:
+
+```bash
+docker compose run --rm --no-deps backend python -m ui.backend.admin clear-email <org>
+docker compose run --rm --no-deps backend python -m ui.backend.admin set-email <org> --host ... --user ... --test
+```
+
+There is no in-place re-encrypt/rekey command yet; rotating the key means
+clearing and re-entering each org's mailbox under the new key.
 
 To restore from a backup:
 
