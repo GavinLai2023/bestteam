@@ -121,13 +121,23 @@ row is absent** — seeding never overwrites an existing row, so an admin's
 edits are never clobbered. The flip side: when a new release ships an improved
 built-in, a deployment that already has the row keeps the old version.
 
-To adopt an updated built-in on an existing database, an admin re-saves the
-new definition through the Advanced UI → Skills (or
-`PUT /api/config/skills/<name>` with the org query omitted — that targets the
-platform tier). Alternatively, delete the row and restart to let it re-seed.
-There is no automatic version-and-overwrite: distinguishing a stock value from
-a genuine customization would need stored versioning, which isn't warranted at
-this scale.
+To adopt an updated built-in on an existing database you need the **new**
+shipped definition — the Advanced UI shows the *stored* (old) row, so opening
+and saving it just re-writes the old value. Print the current shipped default:
+
+```bash
+docker compose exec backend python -c "import json; from ui.backend.skills import DEFAULT_SKILLS; print(json.dumps(next(s.to_raw() for s in DEFAULT_SKILLS if s.name == 'email_triage_reply'), indent=2))"
+```
+
+Then paste that JSON into Advanced UI → Skills → `email_triage_reply` and
+**Save** (or `PUT /api/config/skills/email_triage_reply` with the org query
+omitted — that targets the platform tier). Deleting the row and restarting
+re-seeds the same default.
+
+**If you have customized that skill locally, both paths overwrite your edits** —
+there is no automatic version-and-overwrite (distinguishing a stock row from a
+customized one would need stored versioning, not warranted at this scale), so
+diff the printed default against your stored value and merge by hand.
 
 ## Data persistence
 

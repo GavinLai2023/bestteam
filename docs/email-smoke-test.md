@@ -17,7 +17,10 @@ test mailbox and an OpenAI key.
   (`src/bestteam/tools/email_client.py`).
 - The seeded built-in Skill `email_triage_reply` (platform tier,
   `org_id IS NULL`, visible to every org) that packages the triage playbook +
-  those three tools.
+  those three tools. Note this runs the playbook **as currently stored** in the
+  database, which on an existing deployment may lag the shipped default — if
+  you're validating a change to the rule itself, adopt it first (see
+  `docs/deployment.md` → "Updating built-in skills").
 - The full run path: `POST /api/runs` → `RunRegistry` → `Workflow.stream()`
   on a worker thread → live trace over the WebSocket → the frontend
   monitoring dashboard.
@@ -275,8 +278,8 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 ## 13. Teardown
 
 - Stop the backend (Ctrl-C in its terminal) and the frontend dev server.
-- The `demo` / `op` accounts and any drafts you created persist; delete the
-  drafts from your mail client if you don't want them.
+- The `demo` account and any drafts you created persist; delete the drafts
+  from your mail client if you don't want them.
 - Nothing needs to be reverted in the repo — no code changes are part of
   running this test.
 
