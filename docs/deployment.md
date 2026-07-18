@@ -124,6 +124,13 @@ The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
 **per organization** — each customer's agents reach only that customer's inbox.
 Requires `BESTTEAM_SECRETS_KEY` set (step 1); passwords are stored encrypted.
 
+**Customers self-connect in the Team Builder wizard.** When a customer builds a
+team that uses email, the wizard shows a "Connect your mailbox" step (soft at
+Preview so they can test against their real inbox; a hard gate at Deploy —
+`org/email` endpoints, guarded by their own org login). So the operator CLI
+below is mainly for onboarding on the customer's behalf; day-to-day, customers
+connect themselves.
+
 ```bash
 # IMAP with an app password (prompts for the password; --test verifies a login
 # before saving). Use an app-specific password, not the account password.
