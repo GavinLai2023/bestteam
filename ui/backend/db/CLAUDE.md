@@ -31,6 +31,12 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   workflow carries its agents/teams inline in its own `config`, and
   `_build_workflow` accepts only `extra_tools`/`extra_skills`, so a standalone
   row could never reach a run. Kept (empty) rather than migrated away.
+- `org_email_credentials` — one org's mailbox connection for the email tools
+  (unique `org_id`; IMAP host/port/username + encrypted password + optional
+  drafts folder). The password is a Fernet token (`secret_store`), never
+  plaintext. CRUD in `db/email_credentials.py`; resolved at run time by
+  `email_tools.load_email_tools`. The multi-tenant replacement for the
+  process-wide `BESTTEAM_EMAIL_*` env vars.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/

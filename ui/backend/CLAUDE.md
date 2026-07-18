@@ -38,12 +38,26 @@ every endpoint follows:
   also persist `username` — who started them (CR-032, audit-only; ownership
   stays org-level, and builder sandbox runs record it without a memory
   `user_id`).
-- Process-wide email env vars (`BESTTEAM_EMAIL_*`) on a multi-org deployment
-  are **refused, not just discouraged** (CR-031):
-  `db/orgs.py::ensure_email_single_org` raises at backend startup and in the
-  `create-org` CLI when `BESTTEAM_EMAIL_BACKEND` is set with more than one
-  org. Per-org credentials are a future sub-project (encrypted secrets
-  store).
+- **Per-org email** is the multi-tenant path: each org connects its own
+  mailbox (`admin set-email <org>`), stored encrypted in
+  `org_email_credentials` (`db/email_credentials.py`; password via
+  `secret_store` / `BESTTEAM_SECRETS_KEY`, a key distinct from the JWT one).
+  `email_tools.load_email_tools(db, org_id)` resolves the running org's
+  mailbox and is merged into `extra_tools` beside `load_knowledge_base_tools`
+  at every workflow-build site (main/builder/crud), overriding the env-based
+  `email_*` tools in `REGISTRY` by name — so org A's agents reach only org A's
+  inbox. `_dependency_freshness` includes `OrgEmailCredential`, so connecting/
+  rotating a mailbox invalidates that org's cached workflows. An org with no
+  stored mailbox gets `{}` when `BESTTEAM_EMAIL_BACKEND` is set (env single-
+  mailbox path still applies) or friendly "no mailbox connected" tools
+  otherwise. Startup refuses to boot if stored credentials exist but the
+  secrets key can't decrypt them.
+- Process-wide email env vars (`BESTTEAM_EMAIL_*`) remain the single-mailbox
+  path for the SDK/CLI and single-org deployments, and are still **refused**
+  on a multi-org deployment (CR-031): `db/orgs.py::ensure_email_single_org`
+  raises at startup and in `create-org` when `BESTTEAM_EMAIL_BACKEND` is set
+  with more than one org. Graph/OAuth per-org and a customer-facing
+  self-service settings UI are the next sub-project.
 - Memory stays keyed by globally-unique username (no org dimension needed).
 - The isolation test net: `tests/test_org_isolation.py` plus per-surface
   tests in test_crud_api/test_ws_stream/test_builder_api.

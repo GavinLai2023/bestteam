@@ -34,6 +34,14 @@ Edit `.env` and fill in:
 - `VITE_API_BASE` / `VITE_WS_BASE` — the backend's public URL, as reachable
   from the customer's browser (`https://...` / `wss://...`). These are baked
   into the frontend at build time.
+- `BESTTEAM_SECRETS_KEY` — encryption key for at-rest secrets (currently the
+  per-org mailbox passwords set with `admin set-email`; see "Per-org email"
+  below). Required once any org has connected a mailbox — the backend refuses
+  to start if it can't decrypt stored credentials. Must be a **different** key
+  from `BESTTEAM_SECRET_KEY`. Generate with:
+  ```bash
+  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  ```
 - `BESTTEAM_DEMO_WORKFLOWS` — **leave unset on a customer deployment.** It
   exposes the shipped demo workflows in `ui/backend/workflows/`, which belong
   to no org, so every user would see and be able to run them. Most return
@@ -108,6 +116,29 @@ Admin surfaces (`/api/config`, `/api/memory`) work across orgs — mutations
 target one explicitly via `?org=<name>`. Org-user surfaces (the wizard,
 running workflows) require an org account; a platform operator who wants to
 run workflows creates themselves an org user too.
+
+## 4c. Connect each org's mailbox (per-org email)
+
+The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
+**per organization** — each customer's agents reach only that customer's inbox.
+Requires `BESTTEAM_SECRETS_KEY` set (step 1); passwords are stored encrypted.
+
+```bash
+# IMAP with an app password (prompts for the password; --test verifies a login
+# before saving). Use an app-specific password, not the account password.
+docker compose exec backend python -m ui.backend.admin set-email acme \
+  --host imap.gmail.com --user support@acme.com --test
+
+# Disconnect:
+docker compose exec backend python -m ui.backend.admin clear-email acme
+```
+
+IMAP only for now (Microsoft Graph / OAuth per-org are future work). This is
+the multi-tenant path; the process-wide `BESTTEAM_EMAIL_*` env vars remain the
+single-mailbox path for the SDK/CLI and single-customer deployments, and stay
+**refused** on a multi-org deployment (one mailbox can't be shared safely
+across tenants). An org with no mailbox connected gets a clear "no mailbox
+connected" message from the tools rather than an error.
 
 ## 5. Verify
 
