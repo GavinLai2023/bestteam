@@ -36,6 +36,7 @@ The worst outcome is a bad draft a human reviews in their own mail client.
 | A test mailbox | a compatible IMAP account **or** an M365/Graph app registration — see [§15](#15-provider-notes--mailbox-compatibility) | the tools need a real inbox |
 | `OPENAI_API_KEY` | a working OpenAI key with quota | the demo uses `openai:gpt-4o-mini`; `fake:` models never call tools |
 | DB at migration head | see step 4 | boots clean, no seeding warning |
+| `BESTTEAM_DEMO_WORKFLOWS=1` | set at backend startup (step 7) | the bundled demo workflows are off by default; the flag exposes `email_triage_demo_live` |
 
 > **Cost note:** the demo makes real OpenAI calls (a handful of small
 > `gpt-4o-mini` requests per run). Reading is `BODY.PEEK`/read-only for IMAP,
@@ -132,6 +133,7 @@ env vars are read once at boot.
 ```powershell
 $env:BESTTEAM_SECRET_KEY="dev-only-secret-change-me-for-real-use"
 $env:OPENAI_API_KEY="sk-..."
+$env:BESTTEAM_DEMO_WORKFLOWS="1"
 $env:BESTTEAM_EMAIL_BACKEND="imap"
 $env:BESTTEAM_IMAP_HOST="imap.yourhost.com"
 $env:BESTTEAM_IMAP_PORT="993"
@@ -140,7 +142,7 @@ $env:BESTTEAM_IMAP_PASSWORD="your-app-password"
 .\.venv\Scripts\python.exe -m uvicorn ui.backend.main:app --port 8000 --host 127.0.0.1
 ```
 
-**Microsoft 365 / Graph mailbox:** same first two lines, then:
+**Microsoft 365 / Graph mailbox:** same first three lines, then:
 
 ```powershell
 $env:BESTTEAM_EMAIL_BACKEND="graph"
@@ -155,6 +157,11 @@ Notes:
 - The secret key above passes the startup guard. Only
   `bestteam-dev-secret-change-me` and the `.env.example` placeholder are
   rejected; for a real value: `python -c "import secrets; print(secrets.token_hex(32))"`.
+- `BESTTEAM_DEMO_WORKFLOWS="1"` is **required for this test**. The bundled
+  YAML workflows (including `email_triage_demo_live`) are off by default —
+  they're demo fixtures, not customer teams — so without this flag the
+  workflow won't appear in the list and running it by name returns 404. Leave
+  it unset on a real deployment. See `.env.example` / `docs/deployment.md`.
 - This is a **single-org** deployment (only the `default` org), so the CR-031
   guard permits `BESTTEAM_EMAIL_*`. If you ever add a second org to this DB,
   the backend will refuse to start while email is configured — by design.
@@ -183,8 +190,9 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/login \
 
 1. Open `http://localhost:5173` and log in as **`demo` / `demo-pass-123`**.
 2. In the monitoring dashboard, select the **`email_triage_demo_live`**
-   workflow (it appears alongside the YAML demos because it lives in
-   `ui/backend/workflows/`).
+   workflow. It's a bundled YAML demo (`ui/backend/workflows/`), so it only
+   appears when `BESTTEAM_DEMO_WORKFLOWS="1"` is set — which you did in step 7.
+   If it's missing from the list, that flag isn't set on the running backend.
 3. Enter an input such as:
    > `Triage my unread emails and draft replies.`
 4. Start the run and watch the live trace stream.
@@ -226,7 +234,8 @@ token; `POST /api/runs` is an org-user surface):
 ```bash
 TOKEN="<access_token from step 8>"
 
-# list workflows the org can see (includes the YAML demo)
+# list workflows the org can see (includes the YAML demo when
+# BESTTEAM_DEMO_WORKFLOWS=1 is set on the backend, per step 7)
 curl -s http://127.0.0.1:8000/api/workflows -H "Authorization: Bearer $TOKEN"
 
 # start the run
@@ -248,6 +257,7 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 | Backend `RuntimeError: BESTTEAM_SECRET_KEY ... placeholder` on boot | secret key unset or a known placeholder | set a non-placeholder `BESTTEAM_SECRET_KEY` (step 7) |
 | Backend `RuntimeError` about email + more than one org | CR-031 guard: `BESTTEAM_EMAIL_*` set with >1 org | keep a single org, or unset the email vars |
 | Boot warning "Skipping default-data seeding ... schema predates the latest migration" | DB behind head | `alembic upgrade head`, restart |
+| `email_triage_demo_live` missing from the workflow list (or `POST /api/runs` returns 404 for it) | `BESTTEAM_DEMO_WORKFLOWS` not set — bundled demos are off by default | set `$env:BESTTEAM_DEMO_WORKFLOWS="1"` before starting the backend (step 7) |
 | Login returns 401 | wrong password, or account not provisioned | re-run step 5 |
 | Run fails with "Unknown skill 'email_triage_reply'" | skill not seeded | restart backend (seeds on boot); confirm with the skills query in step 5 |
 | Trace shows the agent answering **without** any `email_*` tool calls | `OPENAI_API_KEY` missing/invalid, or a `fake:` model | set a real key; `fake:` models never call tools |
