@@ -90,6 +90,9 @@ docker compose exec backend python -m ui.backend.admin create-org acme --display
 
 # Org members (prompts for a password; --org defaults to "default"):
 docker compose exec backend python -m ui.backend.admin create-user alice --org acme
+# NOTE: one member per org is currently enforced -- create-user refuses a
+# second member of the same org (org resources such as the shared mailbox have
+# no per-member privilege separation yet). Platform operators are exempt.
 
 # Yourself, as a platform operator (belongs to no org):
 docker compose exec backend python -m ui.backend.admin create-user op --platform

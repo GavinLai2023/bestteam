@@ -84,6 +84,15 @@ Append new entries at the bottom using this template:
     per-org LLM credentials and a self-service settings UI remain future.
     Process-env email credentials still must not be set on a shared instance
     (the env path stays single-org and is refused on multi-org).
+  - **Interim: one member per org is enforced** (`create_user` refuses a
+    second member of an org). The architecture allows multiple accounts per
+    org, but org-scoped resources — notably the self-service shared mailbox —
+    have no per-member privilege separation yet: any member can
+    connect/redirect/disconnect them. Until a per-org admin role exists, a
+    second member would mean unprivileged co-management of the org's mailbox,
+    so the invariant is enforced rather than assumed. Lifting it is gated on
+    that role (deferred sub-project C). Platform operators (org-NULL) are
+    exempt — there can be several.
   - See `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.
 
 ## Memory: SQLite + BM25 in-house, not the mem0 library

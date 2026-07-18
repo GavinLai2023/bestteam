@@ -14,10 +14,27 @@ def create_user(db: Session, username: str, password: str, org_id: Optional[int]
     """Create a new user (org member, or platform operator when org_id is None).
 
     Raises `ValueError` if `username` is already taken (usernames are globally
-    unique across orgs -- JWT `sub` and per-user memory key on them).
+    unique across orgs -- JWT `sub` and per-user memory key on them), or if the
+    target org already has a member.
+
+    One member per org is enforced here (not just assumed) because org-scoped
+    resources -- notably the shared mailbox -- have no per-org privilege
+    separation yet: every org member can connect/redirect/disconnect them. A
+    second member would mean unprivileged co-management of the org's mailbox.
+    Platform operators (`org_id is None`) are exempt -- there can be several.
     """
     if get_user_by_username(db, username) is not None:
         raise ValueError(f"Username '{username}' is already taken")
+
+    if org_id is not None:
+        existing = db.query(User).filter_by(org_id=org_id).first()
+        if existing is not None:
+            raise ValueError(
+                f"Organization already has a member ('{existing.username}'); "
+                "one user per org is enforced at this stage (org resources such "
+                "as the shared mailbox have no per-member privilege separation). "
+                "Add a per-org admin role before allowing a second member."
+            )
 
     user = User(username=username, password_hash=hash_password(password), org_id=org_id)
     db.add(user)

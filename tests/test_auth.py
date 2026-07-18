@@ -252,6 +252,29 @@ def test_set_admin_status_rejects_unknown_user():
             set_admin_status(db, "ghost", True)
 
 
+def test_create_user_enforces_one_member_per_org():
+    # One member per org is enforced (not assumed): org resources such as the
+    # shared mailbox have no per-member privilege separation yet, so a second
+    # member would be unprivileged co-management. Platform operators are exempt.
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.users import create_user
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    with Session() as db:
+        org = get_or_create_org(db, "acme")
+        create_user(db, "alice", "pw", org_id=org.id)
+
+        with pytest.raises(ValueError, match="one user per org"):
+            create_user(db, "bob", "pw", org_id=org.id)
+
+        # Platform operators (org_id NULL) are exempt -- several are allowed.
+        create_user(db, "op1", "pw")
+        create_user(db, "op2", "pw")
+
+
 def test_me_rejects_invalid_token(client):
     resp = client.get("/api/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
 
