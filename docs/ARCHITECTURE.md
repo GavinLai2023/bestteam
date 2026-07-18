@@ -34,10 +34,10 @@ graph TB
 |---|---|---|
 | `src/bestteam/` | SDK core — `Agent`/`Team`/`Workflow` dataclasses, `EngineAdapter` ABC, `LangGraphAdapter` | `src/bestteam/CLAUDE.md` |
 | `src/bestteam/core/` | `Specification`/`Requirements` structured outputs for the Team Builder, YAML loader, `local_folder`/`vector` knowledge bases | `src/bestteam/core/CLAUDE.md` |
-| `src/bestteam/tools/` | Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator` | `src/bestteam/tools/CLAUDE.md` |
+| `src/bestteam/tools/` | Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator`, and the draft-only email toolkit (`email_find`/`email_read`/`email_draft_reply`) | `src/bestteam/tools/CLAUDE.md` |
 | `src/bestteam/cli/` | Typer CLI: `init` / `run` / `graph` | root `CLAUDE.md` |
-| `ui/backend/` | FastAPI + WebSocket API — monitoring, builder wizard state machine, config CRUD, auth, model catalog, usage metering | `ui/backend/CLAUDE.md` |
-| `ui/backend/db/` | SQLAlchemy persistence schema (per-customer SQLite) | `ui/backend/db/CLAUDE.md` |
+| `ui/backend/` | FastAPI + WebSocket API — monitoring, builder wizard state machine, config CRUD, auth, model catalog, usage metering, per-org email credentials (encrypted secrets store) | `ui/backend/CLAUDE.md` |
+| `ui/backend/db/` | SQLAlchemy persistence schema (SQLite; org-scoped multi-tenancy) | `ui/backend/db/CLAUDE.md` |
 | `ui/frontend/` | React/Vite monitoring dashboard, Team Builder wizard, login UI | `ui/frontend/CLAUDE.md` |
 
 ## Tech stack and rationale
@@ -48,7 +48,7 @@ graph TB
 | Core abstractions | `langchain-core`, Pydantic v2 | `langchain-core` supplies model specs, tools, and `with_structured_output`; Pydantic v2 backs the `AgentSpec`/`TeamSpec`/`Specification`/`Requirements` schemas. |
 | CLI | Typer + Rich | Ergonomic command definitions with good terminal output for `init`/`run`/`graph`. |
 | Backend | FastAPI + Uvicorn + WebSocket | REST endpoints plus a streaming channel for live agent trace events to the dashboard. |
-| Persistence | SQLAlchemy 2.0 + SQLite | Per-customer deployment — a single file-based DB needs no separate database server. |
+| Persistence | SQLAlchemy 2.0 + SQLite | One file-based DB per deployment, no separate database server. Org-scoped multi-tenancy (row-level `org_id`) lets the same code serve a single-customer instance (one org) or a shared platform (many). |
 | Default knowledge base | `rank-bm25` | Zero-API-key keyword search; good enough for the common case (a handful to a couple dozen documents). |
 | Optional vector knowledge base | `numpy` + an embeddings model | Semantic search (e.g. "refund" matching "money back") when keyword search isn't enough. |
 | Frontend | React 19 + `react-router-dom` 7 + Vite | SPA for the monitoring dashboard and the Team Builder wizard. |
