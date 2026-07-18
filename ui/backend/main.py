@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import func
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from bestteam import Workflow, load_workflow
@@ -29,6 +30,7 @@ from bestteam.exceptions import BestTeamError
 
 from . import auth
 from . import interview
+from . import secret_store
 from .auth_api import get_current_org, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import router as crud_router
@@ -42,6 +44,7 @@ from .db.models import (
     User,
     WorkflowRecord,
 )
+from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
 from .email_tools import load_email_tools
@@ -87,6 +90,16 @@ if auth.is_insecure_secret_key(auth.SECRET_KEY):
         "Set BESTTEAM_SECRET_KEY to a long random value before starting this service "
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
+
+# Secrets-store guards run here (app import), NOT in db_session, so the operator
+# CLI -- which imports db_session but not main -- can still run recovery
+# commands (`admin clear-email`/`set-email`) when the key can't decrypt.
+secret_store.ensure_key_separation()
+with SessionLocal() as _startup_session:
+    try:
+        ensure_secrets_key_for_stored_credentials(_startup_session)
+    except OperationalError:
+        pass  # pre-migration schema; db_session already warned about seeding
 
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
@@ -335,25 +348,39 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
     if not demo_workflows_enabled() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
 
-    cache_key = ("file", path.stat().st_mtime)
-    cached = _workflow_cache.get((None, name))
-    if cached is not None and cached[1] == cache_key:
-        return cached[0]
+    # A global YAML demo can reference the built-in email_triage_reply skill,
+    # whose email_* tools otherwise resolve to the env-based REGISTRY. Inject the
+    # requesting org's mailbox tools and cache per (org_id, name): a global
+    # (None, name) cache would let one org reuse another org's baked-in mailbox.
+    # org_id None keeps the shared global cache and the env/REGISTRY tools (the
+    # SDK / single-org path). YAML demos reference only platform built-in skills
+    # (org NULL), never an org's own skills or knowledge bases.
+    own_session = db is None
+    session = SessionLocal() if own_session else db
     try:
-        # YAML demo workflows are global (visible to every org), so they may
-        # reference platform built-in skills (org NULL) only -- never an
-        # org's own skills or knowledge bases. Without this, a YAML workflow
-        # referencing a seeded skill (e.g. email_triage_demo_live ->
-        # email_triage_reply) fails to load with "Unknown skill".
-        if db is not None:
-            builtin_skills = load_skills(db, None)
+        mtime = path.stat().st_mtime
+        if org_id is not None:
+            cache_key = ("file", mtime, *_dependency_freshness(session))
+            email_tools = load_email_tools(session, org_id)
         else:
-            with SessionLocal() as session:
-                builtin_skills = load_skills(session, None)
-        workflow = load_workflow(path, skills=list(builtin_skills.values()))
-    except BestTeamError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _store_workflow_in_cache((None, name), workflow, cache_key, generation)
+            cache_key = ("file", mtime)
+            email_tools = {}
+        cached = _workflow_cache.get((org_id, name))
+        if cached is not None and cached[1] == cache_key:
+            return cached[0]
+        builtin_skills = load_skills(session, None)
+        try:
+            workflow = load_workflow(
+                path,
+                toolkits=[email_tools] if email_tools else None,
+                skills=list(builtin_skills.values()),
+            )
+        except BestTeamError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if own_session:
+            session.close()
+    _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
     return workflow
 
 

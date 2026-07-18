@@ -114,6 +114,61 @@ def test_no_credentials_no_env_yields_friendly_tools(db_session, monkeypatch):
     assert tools["email_read"].__name__ == "email_read"
 
 
+def test_undecryptable_credentials_yield_unreadable_tools_not_a_crash(db_session, monkeypatch):
+    # A wrong/rotated key must not crash the workflow build with InvalidToken;
+    # the tools return a clear message instead.
+    org_id = _org(db_session, "acme")
+    set_email_credentials(db_session, org_id, host="h", username="u", password="p")
+    monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())  # wrong key
+    tools = email_tools.load_email_tools(db_session, org_id)
+    assert set(tools) == {"email_find", "email_read", "email_draft_reply"}
+    assert "can't be read" in tools["email_find"]("").lower()
+
+
+def test_yaml_demo_resolves_per_org_mailbox(db_session, monkeypatch, tmp_path):
+    # Finding 2: a global YAML demo that uses the built-in email skill must
+    # resolve the RUNNING org's mailbox, not the env registry -- and org A's
+    # build must never carry org B's mailbox (per-org cache key).
+    from ui.backend import main as backend_main
+    from ui.backend.skills import seed_default_skills
+
+    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
+    monkeypatch.delenv("BESTTEAM_EMAIL_BACKEND", raising=False)
+    backend_main._workflow_cache.clear()
+    seed_default_skills(db_session)
+    (tmp_path / "emaildemo.yaml").write_text(
+        "name: emaildemo\n"
+        "agents:\n"
+        "  - name: triager\n"
+        "    role: Triager\n"
+        "    goal: Triage the mailbox\n"
+        '    model: "fake:done"\n'
+        "    skills: [email_triage_reply]\n"
+        "teams:\n"
+        "  - name: t\n"
+        "    agents: [triager]\n"
+        "    mode: sequential\n"
+        "workflow:\n"
+        "  steps: [t]\n",
+        encoding="utf-8",
+    )
+    a = _org(db_session, "org_a")
+    b = _org(db_session, "org_b")
+    set_email_credentials(db_session, a, host="ha", username="a@x", password="pa")
+    set_email_credentials(db_session, b, host="hb", username="b@x", password="pb")
+
+    def _email_find(wf):
+        agent = wf.steps[0].agents[0]
+        return next(t for t in agent.tools if t.__name__ == "email_find")
+
+    wf_a = backend_main._get_workflow("emaildemo", db_session, a)
+    wf_b = backend_main._get_workflow("emaildemo", db_session, b)
+    assert "a@x" in _email_find(wf_a)("")
+    assert "b@x" in _email_find(wf_b)("")
+    assert "b@x" not in _email_find(wf_a)("")  # no cross-org leak
+
+
 def test_connecting_mailbox_invalidates_workflow_cache_key(db_session):
     # Per-org email tools are baked into the compiled workflow, so connecting a
     # mailbox must change the freshness key that keys the workflow cache --
