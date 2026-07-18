@@ -78,12 +78,54 @@ def test_config_forbidden_for_non_admin(client):
     token = create_user_and_login(client, username="regular", password="pw")
     headers = {"Authorization": f"Bearer {token}"}
 
-    assert client.get("/api/config/agents", headers=headers).status_code == 403
+    assert client.get("/api/config/knowledge_bases", headers=headers).status_code == 403
     assert client.put(
-        "/api/config/agents/x",
-        json={"role": "R", "goal": "G", "model": "fake:hi", "tools": []},
+        "/api/config/knowledge_bases/x",
+        json={"path": "./docs"},
         headers=headers,
     ).status_code == 403
+
+
+def test_list_orgs(client):
+    # The Advanced page's org selector is populated from here; without it the
+    # admin has no way to target an org on the item routes below.
+    body = client.get("/api/config/orgs").json()
+    assert {o["name"] for o in body} == {"default"}
+    assert "display_name" in body[0]
+
+
+def test_list_orgs_forbidden_for_non_admin(client):
+    token = create_user_and_login(client, username="nosy", password="pw")
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/config/orgs", headers=headers).status_code == 403
+
+
+def test_list_tools(client):
+    # Read-only tool reference for skill authoring: tools are Python functions
+    # in the registry, not config, so this lists them and nothing more.
+    from bestteam.tools import REGISTRY
+
+    body = client.get("/api/config/tools").json()
+    assert {t["name"] for t in body} == set(REGISTRY)
+    assert all(t["description"].strip() for t in body)
+
+
+def test_list_tools_forbidden_for_non_admin(client):
+    token = create_user_and_login(client, username="curious", password="pw")
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/config/tools", headers=headers).status_code == 403
+
+
+def test_org_query_param_is_required_on_item_routes(client):
+    # Pins the contract the frontend must honor: omitting ?org= on a non-skills
+    # item route is a 422, not a silent write to some default org. The Advanced
+    # page regressed by not sending it.
+    config = {"path": "./docs"}
+
+    assert client.put("/api/config/knowledge_bases/kb1", json=config).status_code == 422
+    assert client.put("/api/config/knowledge_bases/kb1?org=default", json=config).status_code == 200
+    assert client.delete("/api/config/knowledge_bases/kb1").status_code == 422
+    assert client.delete("/api/config/knowledge_bases/kb1?org=default").status_code == 204
 
 
 def test_cross_org_config_access_is_404(client):
@@ -96,27 +138,27 @@ def test_cross_org_config_access_is_404(client):
     with open_test_db() as db:
         get_or_create_org(db, "other")
 
-    config = {"role": "Support", "goal": "Help", "model": "fake:hi", "tools": []}
-    assert client.put("/api/config/agents/dup?org=default", json=config).status_code == 200
-    assert client.get("/api/config/agents/dup?org=other").status_code == 404
-    assert client.delete("/api/config/agents/dup?org=other").status_code == 404
-    assert client.put("/api/config/agents/dup?org=other", json=config).status_code == 200
+    config = {"path": "./docs"}
+    assert client.put("/api/config/knowledge_bases/dup?org=default", json=config).status_code == 200
+    assert client.get("/api/config/knowledge_bases/dup?org=other").status_code == 404
+    assert client.delete("/api/config/knowledge_bases/dup?org=other").status_code == 404
+    assert client.put("/api/config/knowledge_bases/dup?org=other", json=config).status_code == 200
 
-    listed = client.get("/api/config/agents").json()
+    listed = client.get("/api/config/knowledge_bases").json()
     assert sorted((item["name"], item["org"]) for item in listed) == [
         ("dup", "default"),
         ("dup", "other"),
     ]
-    filtered = client.get("/api/config/agents?org=other").json()
+    filtered = client.get("/api/config/knowledge_bases?org=other").json()
     assert [(item["name"], item["org"]) for item in filtered] == [("dup", "other")]
 
 
 def test_config_mutations_require_org_param(client):
-    config = {"role": "R", "goal": "G", "model": "fake:hi", "tools": []}
-    assert client.put("/api/config/agents/x", json=config).status_code == 422
-    assert client.get("/api/config/agents/x").status_code == 422
-    assert client.delete("/api/config/agents/x").status_code == 422
-    assert client.put("/api/config/agents/x?org=ghost", json=config).status_code == 404
+    config = {"path": "./docs"}
+    assert client.put("/api/config/knowledge_bases/x", json=config).status_code == 422
+    assert client.get("/api/config/knowledge_bases/x").status_code == 422
+    assert client.delete("/api/config/knowledge_bases/x").status_code == 422
+    assert client.put("/api/config/knowledge_bases/x?org=ghost", json=config).status_code == 404
 
 
 def test_skills_without_org_hit_platform_tier(client):
@@ -135,39 +177,13 @@ def test_skills_without_org_hit_platform_tier(client):
     assert org_view["config"]["instructions"] == "Org-specific playbook."
 
 
-def test_agent_crud_round_trip(client):
-    config = {"role": "Support", "goal": "Help customers", "model": "fake:hi", "tools": []}
-
-    create = client.put("/api/config/agents/support_agent?org=default", json=config)
-    assert create.status_code == 200
-    assert create.json()["config"]["role"] == "Support"
-
-    listed = client.get("/api/config/agents")
-    assert [item["name"] for item in listed.json()] == ["support_agent"]
-
-    fetched = client.get("/api/config/agents/support_agent?org=default")
-    assert fetched.status_code == 200
-    assert fetched.json()["config"]["goal"] == "Help customers"
-
-    deleted = client.delete("/api/config/agents/support_agent?org=default")
-    assert deleted.status_code == 204
-    assert client.get("/api/config/agents/support_agent?org=default").status_code == 404
-
-
-def test_agent_put_rejects_invalid_shape(client):
-    resp = client.put("/api/config/agents/support_agent?org=default", json={"role": "Support"})
-    assert resp.status_code == 400
-
-
-def test_team_crud_round_trip(client):
-    config = {"agents": ["support_agent"], "mode": "sequential"}
-
-    create = client.put("/api/config/teams/support_team?org=default", json=config)
-    assert create.status_code == 200
-    assert create.json()["config"]["agents"] == ["support_agent"]
-
-    assert client.get("/api/config/teams/support_team?org=default").status_code == 200
-    assert client.delete("/api/config/teams/support_team?org=default").status_code == 204
+def test_standalone_agents_and_teams_are_not_a_config_resource(client):
+    # Nothing ever consumed AgentRecord/TeamRecord -- `_build_workflow` takes
+    # only extra_tools/extra_skills, so a standalone agent or team could never
+    # reach a running workflow. A workflow carries its agents/teams inline.
+    for kind in ("agents", "teams"):
+        assert client.get(f"/api/config/{kind}").status_code == 404
+        assert client.put(f"/api/config/{kind}/x?org=default", json={}).status_code == 404
 
 
 def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
@@ -303,9 +319,9 @@ def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
     assert "cache_path" in resp.json()["detail"]
 
 
-def test_unknown_agent_returns_404(client):
-    assert client.get("/api/config/agents/does-not-exist?org=default").status_code == 404
-    assert client.delete("/api/config/agents/does-not-exist?org=default").status_code == 404
+def test_unknown_item_returns_404(client):
+    assert client.get("/api/config/knowledge_bases/does-not-exist?org=default").status_code == 404
+    assert client.delete("/api/config/knowledge_bases/does-not-exist?org=default").status_code == 404
 
 
 def test_contain_kb_config_for_load_confines_legacy_cache_path():

@@ -210,7 +210,7 @@ def test_org_bound_admin_flag_does_not_grant_admin_api(client):
         user.is_admin = True  # bypasses the set_admin_status guard on purpose
         db.commit()
 
-    resp = client.get("/api/config/agents", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get("/api/config/knowledge_bases", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
 
 
@@ -263,7 +263,7 @@ def test_me_rejects_invalid_token(client):
     [
         "/api/workflows",
         "/api/builder/sessions/missing-id",
-        "/api/config/agents",
+        "/api/config/knowledge_bases",
     ],
 )
 def test_protected_endpoints_reject_missing_token(client, path):
@@ -310,9 +310,10 @@ def test_stream_run_rejects_invalid_ticket(client):
             ws.receive_json()
 
 
-def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
+def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir, monkeypatch):
     from tests.test_ui_backend import _write_workflow
 
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="bob", password="hunter2")
@@ -326,10 +327,11 @@ def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir):
         assert event["type"] == "run_started"
 
 
-def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir):
+def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir, monkeypatch):
     from tests.test_ui_backend import _write_workflow
     from ui.backend.db.models import User
 
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
     _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="carol", password="hunter2")

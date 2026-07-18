@@ -13,9 +13,10 @@ One deployment can serve several customer **organizations** (see
 every endpoint follows:
 
 - Org-owned rows carry `org_id`; org users only ever see their own org's
-  data plus platform built-ins (`skills.org_id IS NULL`) and the global
-  YAML demo workflows. **Cross-org access is a 404** (and the WS stream
-  closes 4404 == unknown-run) — existence is never revealed.
+  data plus platform built-ins (`skills.org_id IS NULL`), and — only where
+  `BESTTEAM_DEMO_WORKFLOWS` is on — the global YAML demo workflows.
+  **Cross-org access is a 404** (and the WS stream closes 4404 ==
+  unknown-run) — existence is never revealed.
 - Scoping is centralized: `get_current_org` (auth_api),
   `load_skills(db, org_id)` (org's own shadows a same-named built-in),
   `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in
@@ -98,20 +99,36 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     an invalid spec the architect couldn't self-correct) to `400`, and any
     other exception (e.g. a real provider call without an API key) to `502`
     — see `_call_model()`.
-- **`crud.py`** (`/api/config/...`) — the "advanced view": `GET`/`PUT`/
-  `DELETE` for `agents`/`teams`/`knowledge_bases`/`skills` (validated as standalone
-  components via `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/`SkillSpec` — field shape
-  only; `agents`/`teams`/`skills` are not cross-referenced into any workflow, but
-  `knowledge_bases` are resolvable by name from a workflow's `tools:` list via
-  `ui/backend/knowledge_bases.py::load_knowledge_base_tools`) and `workflows` (a complete
-  `Specification.to_raw()`-shaped dict, validated via `_build_workflow()`
-  exactly like the wizard's Specification stage).
-- **`_get_workflow()`** (`main.py`) now checks for a `WorkflowRecord` in the
-  DB first (cached on `updated_at`) and falls back to
-  `WORKFLOWS_DIR/<name>.yaml` (cached on mtime) — so a workflow
-  deployed via the wizard or edited via `/api/config/workflows` is
-  immediately runnable through `/api/runs`, alongside the YAML demo
-  workflows.
+- **`crud.py`** (`/api/config/...`) — the "advanced view" (operator-only):
+  `GET`/`PUT`/`DELETE` for `knowledge_bases`/`skills` (validated as standalone
+  components via `KnowledgeBaseSpec`/`SkillSpec` — field shape only; both are
+  resolvable by name from a workflow, via `load_knowledge_base_tools` and
+  `load_skills`) and `workflows` (a complete `Specification.to_raw()`-shaped
+  dict carrying its own `agents:`/`teams:` inline, validated via
+  `_build_workflow()` exactly like the wizard's Specification stage). Plus two
+  read-only reference routes for the UI: `GET /orgs` (the org selector) and
+  `GET /tools` (the built-in `bestteam.tools.REGISTRY`, name + docstring).
+  **Standalone `agents`/`teams` CRUD was removed**: nothing consumed those
+  records (`_build_workflow` takes only `extra_tools`/`extra_skills`), and both
+  tables were empty everywhere. The models remain in `db/models.py`.
+- **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
+  first, within the caller's org (cached on `updated_at`), then falls back to
+  `WORKFLOWS_DIR/<name>.yaml` (cached on mtime) — so a workflow deployed via
+  the wizard or edited via `/api/config/workflows` is immediately runnable
+  through `/api/runs`.
+- **Demo YAML workflows are opt-in** (`main.py::demo_workflows_enabled`,
+  `BESTTEAM_DEMO_WORKFLOWS`, **off by default**). The two workflow sources
+  serve different audiences: YAML is the *SDK's* format (`load_workflow`,
+  `bestteam run x.yaml`, unaffected by this flag and by the DB entirely),
+  while DB rows are what the wizard creates per-org at runtime. The files in
+  `WORKFLOWS_DIR` are our shipped fixtures — mostly `fake:` models returning
+  hardcoded text, plus `*_live` ones that spend real quota and, for
+  `email_triage_demo_live`, read the `BESTTEAM_EMAIL_*` mailbox — and they
+  carry no `org_id`, so while enabled *every* org user sees and can run them.
+  The gate covers **both** the list (`GET /api/workflows`) and resolution
+  (`_get_workflow`, hence `/api/runs` and `/graph`): hiding them from the
+  list alone would leave them runnable by name. Disabled ⇒ the same 404 as an
+  unknown workflow.
 
 ## Auth, model catalog, and usage metering (Phase 3)
 

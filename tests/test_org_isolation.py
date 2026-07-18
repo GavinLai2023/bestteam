@@ -86,11 +86,55 @@ def test_workflow_list_and_graph_are_org_scoped(rig):
     bob_list = client.get("/api/workflows", headers=headers["bob"]).json()["workflows"]
     assert "secret_wf" in alice_list
     assert "secret_wf" not in bob_list
-    # Global YAML demos are visible to every org.
-    assert "demo" in alice_list and "demo" in bob_list
+    # Shipped YAML demos are off by default -- they're our fixtures, not any
+    # customer's teams, and they're global (every org would see them).
+    assert "demo" not in alice_list and "demo" not in bob_list
 
     assert client.get("/api/workflows/secret_wf/graph", headers=headers["alice"]).status_code == 200
     assert client.get("/api/workflows/secret_wf/graph", headers=headers["bob"]).status_code == 404
+
+
+def _write_demo_yaml(workflows_dir):
+    (workflows_dir / "demo.yaml").write_text(
+        "name: demo\n"
+        "agents:\n"
+        "  - name: a\n"
+        "    role: r\n"
+        "    goal: g\n"
+        '    model: "fake:hi"\n'
+        "teams:\n"
+        "  - name: t\n"
+        "    agents: [a]\n"
+        "    mode: sequential\n"
+        "workflow:\n"
+        "  steps: [t]\n",
+        encoding="utf-8",
+    )
+
+
+def test_disabled_demo_workflows_are_unreachable_not_just_hidden(rig, monkeypatch):
+    # Hiding a demo from the list isn't enough: it must not be runnable by
+    # name either. email_triage_demo_live reaches the configured mailbox, so a
+    # listed-but-runnable demo would let any org user read that inbox.
+    client, headers, workflows_dir = rig
+    _write_demo_yaml(workflows_dir)
+    monkeypatch.delenv("BESTTEAM_DEMO_WORKFLOWS", raising=False)
+
+    assert "demo" not in client.get("/api/workflows", headers=headers["alice"]).json()["workflows"]
+    assert client.get("/api/workflows/demo/graph", headers=headers["alice"]).status_code == 404
+    run = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}, headers=headers["alice"])
+    assert run.status_code == 404
+
+
+def test_demo_workflows_are_available_when_enabled(rig, monkeypatch):
+    client, headers, workflows_dir = rig
+    _write_demo_yaml(workflows_dir)
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
+
+    assert "demo" in client.get("/api/workflows", headers=headers["alice"]).json()["workflows"]
+    assert client.get("/api/workflows/demo/graph", headers=headers["alice"]).status_code == 200
+    run = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}, headers=headers["alice"])
+    assert run.status_code == 200
 
 
 def test_running_another_orgs_workflow_is_404(rig):
@@ -194,5 +238,5 @@ def test_platform_operator_gets_403_on_org_user_surfaces(rig):
 
 def test_org_users_cannot_reach_admin_surfaces(rig):
     client, headers, _ = rig
-    assert client.get("/api/config/agents", headers=headers["alice"]).status_code == 403
+    assert client.get("/api/config/knowledge_bases", headers=headers["alice"]).status_code == 403
     assert client.get("/api/memory/users", headers=headers["alice"]).status_code == 403

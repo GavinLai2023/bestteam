@@ -139,8 +139,12 @@ Requires `pip install 'bestteam[tools-rag]'`. See
 ## Monitoring dashboard
 
 ```bash
-# Terminal 1 — backend
-python -m uvicorn ui.backend.main:app --port 8000
+# Terminal 1 — backend.
+# BESTTEAM_DEMO_WORKFLOWS=1 exposes the bundled example workflows in
+# ui/backend/workflows/ so the dropdown has something to pick on a fresh
+# database. It is off by default (those are demo fixtures, not tenant data) —
+# leave it unset on a real deployment. See docs/deployment.md.
+BESTTEAM_DEMO_WORKFLOWS=1 python -m uvicorn ui.backend.main:app --port 8000
 
 # Terminal 2 — frontend
 cd ui/frontend && npm run dev

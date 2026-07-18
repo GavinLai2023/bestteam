@@ -48,6 +48,31 @@ from .ws_tickets import consume_ticket, issue_ticket
 
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
 
+
+def demo_workflows_enabled() -> bool:
+    """Whether the shipped YAML workflows in `WORKFLOWS_DIR` are exposed.
+
+    Off by default. Those files are *our* demo fixtures, not any customer's
+    teams: most run `fake:` models that emit a hardcoded, plausible-looking
+    answer regardless of input, and the `*_live` ones spend real API quota --
+    `email_triage_demo_live` reads whatever mailbox `BESTTEAM_EMAIL_*` points
+    at. They are global (no `org_id`), so while this is on, every org user on
+    the deployment sees and can run all of them.
+
+    Turn it on (`BESTTEAM_DEMO_WORKFLOWS=1`) only on a dev box or a sales-demo
+    instance. This gates the UI backend only -- the SDK/CLI YAML path
+    (`load_workflow(path)`) is unaffected and always works.
+
+    Read per-call rather than at import so a deployment (or a test) can flip it
+    without re-importing the module.
+    """
+    return os.environ.get("BESTTEAM_DEMO_WORKFLOWS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
 if auth.is_insecure_secret_key(auth.SECRET_KEY):
     raise RuntimeError(
         "BESTTEAM_SECRET_KEY is unset or still a known placeholder value. "
@@ -285,8 +310,12 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
         return workflow
 
+    # Same 404 whether the demos are disabled or the file is absent -- hiding
+    # them from the list alone would still leave them runnable by name via
+    # POST /api/runs, which for email_triage_demo_live means a customer's agent
+    # reaching the configured mailbox.
     path = WORKFLOWS_DIR / f"{name}.yaml"
-    if not path.is_file():
+    if not demo_workflows_enabled() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
 
     cache_key = ("file", path.stat().st_mtime)
@@ -318,11 +347,14 @@ def health():
 
 @app.get("/api/workflows")
 def list_workflows(db: Session = Depends(get_db), org: Organization = Depends(get_current_org)):
-    # The org's own deployed/edited workflows plus the global YAML demos.
+    # The org's own deployed/edited workflows, plus the global YAML demos only
+    # where they're deliberately enabled (see `demo_workflows_enabled`).
     db_names = {
         row.name for row in db.query(WorkflowRecord.name).filter(WorkflowRecord.org_id == org.id)
     }
-    yaml_names = {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")}
+    yaml_names = (
+        {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
+    )
     return {"workflows": sorted(db_names | yaml_names)}
 
 

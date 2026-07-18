@@ -34,6 +34,12 @@ Edit `.env` and fill in:
 - `VITE_API_BASE` / `VITE_WS_BASE` — the backend's public URL, as reachable
   from the customer's browser (`https://...` / `wss://...`). These are baked
   into the frontend at build time.
+- `BESTTEAM_DEMO_WORKFLOWS` — **leave unset on a customer deployment.** It
+  exposes the shipped demo workflows in `ui/backend/workflows/`, which belong
+  to no org, so every user would see and be able to run them. Most return
+  hardcoded `fake:` text that reads like a real answer; `email_triage_demo_live`
+  reads the `BESTTEAM_EMAIL_*` mailbox. Set it to `1` only on a dev or
+  sales-demo instance.
 
 TLS termination (HTTPS/WSS) is assumed to be handled by a reverse proxy or
 the hosting platform's load balancer in front of these containers.

@@ -13,6 +13,8 @@ from ui.backend import main as backend_main
 @pytest.fixture
 def workflows_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    # This module tests the YAML-file branch itself, which is opt-in.
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
     backend_main._workflow_cache.clear()
     return tmp_path
 
