@@ -154,6 +154,13 @@ export const api = {
   uploadKnowledgeBaseFiles: (name, files, org) =>
     uploadFiles(`/api/config/knowledge_bases/${encodeURIComponent(name)}/upload${orgQuery(org)}`, files),
 
+  // Org self-service settings: the org's mailbox for the email tools.
+  getOrgEmail: () => request('/api/org/email'),
+  setOrgEmail: (payload) => request('/api/org/email', { method: 'PUT', body: JSON.stringify(payload) }),
+  testOrgEmail: (payload) =>
+    request('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
+  clearOrgEmail: () => request('/api/org/email', { method: 'DELETE' }),
+
   // Interview recording transcription
   transcribeInterview: (file, model) =>
     uploadSingleFile('/api/builder/interview/transcribe', file, { model }),

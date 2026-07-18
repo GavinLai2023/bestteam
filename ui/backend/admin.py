@@ -7,6 +7,8 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin create-org acme --display-name "Acme Corp"
     docker compose exec backend python -m ui.backend.admin create-user alice --org acme
     docker compose exec backend python -m ui.backend.admin create-user op --platform
+    docker compose exec backend python -m ui.backend.admin delete-user alice
+    docker compose exec backend python -m ui.backend.admin move-user alice --to-org beta
     docker compose exec backend python -m ui.backend.admin promote op
     docker compose exec backend python -m ui.backend.admin demote <username>
     docker compose exec backend python -m ui.backend.admin list
@@ -35,7 +37,13 @@ from .db.orgs import (
     get_org_by_name,
     list_orgs,
 )
-from .db.users import create_user, set_admin_status
+from .db.users import (
+    create_user,
+    delete_user,
+    orgs_with_multiple_members,
+    set_admin_status,
+    set_user_org,
+)
 from .db_session import SessionLocal
 
 
@@ -73,6 +81,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     org_group.add_argument(
         "--platform", action="store_true",
         help="create a platform operator that belongs to no organization",
+    )
+
+    delete_user_p = sub.add_parser(
+        "delete-user", help="delete a user account (e.g. a duplicate org member)"
+    )
+    delete_user_p.add_argument("username")
+
+    move_user_p = sub.add_parser(
+        "move-user", help="move a user to another org or to a platform operator"
+    )
+    move_user_p.add_argument("username")
+    move_group = move_user_p.add_mutually_exclusive_group(required=True)
+    move_group.add_argument("--to-org", help="destination organization name")
+    move_group.add_argument(
+        "--platform", action="store_true", help="make the user a platform operator (no org)"
     )
 
     set_email_p = sub.add_parser(
@@ -130,6 +153,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             where = "platform operator" if args.platform else f"member of '{args.org}'"
             print(f"Created user '{args.username}' ({where}).")
             return 0
+        if args.command == "delete-user":
+            try:
+                delete_user(db, args.username)
+            except ValueError as exc:
+                parser.error(str(exc))
+            print(f"Deleted user '{args.username}'.")
+            return 0
+        if args.command == "move-user":
+            if args.platform:
+                org_id = None
+                where = "platform operator"
+            else:
+                org = get_org_by_name(db, args.to_org)
+                if org is None:
+                    parser.error(f"Unknown organization '{args.to_org}'. Create it first with create-org.")
+                org_id = org.id
+                where = f"member of '{args.to_org}'"
+            try:
+                set_user_org(db, args.username, org_id)
+            except ValueError as exc:
+                parser.error(str(exc))
+            print(f"Moved user '{args.username}' -> {where}.")
+            return 0
         if args.command == "set-email":
             org = get_org_by_name(db, args.org)
             if org is None:
@@ -143,7 +189,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
                 backend = _ImapBackend(
                     host=args.host, user=args.user, password=password,
-                    port=args.port, drafts=args.drafts,
+                    port=args.port, drafts=args.drafts, restrict_to_public=True,
                 )
                 try:
                     conn = backend._connect()

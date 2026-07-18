@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import EmailConnect from '../../components/EmailConnect'
 import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
 
@@ -103,6 +104,17 @@ export default function PreviewPage() {
       {error && <p className="banner banner-error">{error}</p>}
 
       <TeamFlow specification={spec} />
+
+      {session.uses_email && (
+        <>
+          <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
+          <EmailConnect />
+          <p className="hint" style={{ marginTop: 8 }}>
+            Connect your mailbox to try the team against your real inbox below — or skip for now and
+            connect before you go live.
+          </p>
+        </>
+      )}
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 

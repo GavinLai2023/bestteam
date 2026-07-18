@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -36,6 +37,7 @@ from .builder import router as builder_router
 from .crud import router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
+from .org_settings import router as org_settings_router
 from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
@@ -45,7 +47,7 @@ from .db.models import (
     WorkflowRecord,
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
-from .db.users import get_user_by_username
+from .db.users import get_user_by_username, orgs_with_multiple_members
 from .db_session import SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
@@ -92,9 +94,47 @@ if auth.is_insecure_secret_key(auth.SECRET_KEY):
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
 
-# Secrets-store guards run here (app import), NOT in db_session, so the operator
-# CLI -- which imports db_session but not main -- can still run recovery
-# commands (`admin clear-email`/`set-email`) when the key can't decrypt.
+def _enforce_one_member_per_org_or_raise(db) -> None:
+    """Raise if any org has multiple members (the one-member-per-org invariant).
+
+    `create_all` never adds the enforcing index to a pre-existing `users`
+    table, so a database created under the earlier multi-member architecture
+    (and started before `alembic upgrade head`) would otherwise serve the
+    mailbox-management routes with no per-member separation. Run from the ASGI
+    lifespan (below) so real serving is refused while the operator CLI --
+    delete-user / move-user recovery, which doesn't import this module -- still
+    runs. It is NOT run at import so tools/tests that merely import the app
+    aren't coupled to the live database's contents.
+    """
+    duplicates = orgs_with_multiple_members(db)
+    if duplicates:
+        offending = ", ".join(f"org_id={oid} ({n} members)" for oid, n in duplicates)
+        raise RuntimeError(
+            "One member per org is required, but these orgs have multiple members: "
+            f"{offending}. This database predates the one-member-per-org rule. "
+            "Resolve it with the operator CLI (admin delete-user / move-user), run "
+            "`alembic upgrade head`, then restart -- the CLI still runs while HTTP "
+            "serving is blocked (see docs/deployment.md)."
+        )
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    """ASGI startup: refuse to serve while the membership invariant is violated.
+
+    A data-dependent guard (unlike the config guards below), so it runs when the
+    server actually starts serving, not at import."""
+    with SessionLocal() as session:
+        try:
+            _enforce_one_member_per_org_or_raise(session)
+        except OperationalError:
+            pass  # pre-migration schema (no users table yet); nothing to enforce
+    yield
+
+
+# Secrets-store guards run at app import, NOT in db_session, so the operator CLI
+# -- which imports db_session but not main -- can still run recovery commands
+# (`admin clear-email`/`set-email`) when the key can't decrypt.
 secret_store.ensure_key_separation()
 with SessionLocal() as _startup_session:
     try:
@@ -105,7 +145,7 @@ with SessionLocal() as _startup_session:
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
 
-app = FastAPI(title="bestteam monitoring dashboard")
+app = FastAPI(title="bestteam monitoring dashboard", lifespan=_lifespan)
 
 # Generous ceiling on any request body; the interview endpoint keeps its own
 # tighter limit. Reverse-proxy client_max_body_size remains the authoritative
@@ -202,6 +242,7 @@ app.include_router(builder_router)
 app.include_router(interview_router)
 app.include_router(crud_router)
 app.include_router(memory_router)
+app.include_router(org_settings_router)
 
 logger = logging.getLogger("bestteam.api")
 

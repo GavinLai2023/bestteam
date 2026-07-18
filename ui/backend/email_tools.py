@@ -39,6 +39,30 @@ from .db.email_credentials import get_email_credentials
 
 _logger = logging.getLogger(__name__)
 
+EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
+
+
+def spec_uses_email(db: Session, spec_raw: Dict[str, Any], org_id: int) -> bool:
+    """True if any agent in a Specification resolves to an email tool.
+
+    Email tools reach an agent either directly (its `tools:`) or via a skill it
+    references (`skills:`, e.g. the built-in `email_triage_reply`), so this
+    resolves each referenced skill to its tools. Used by the wizard to decide
+    whether to ask the customer to connect a mailbox (and to gate deploy).
+    """
+    from .skills import load_skills
+
+    skills = load_skills(db, org_id)
+    for agent in spec_raw.get("agents", []) or []:
+        names = set(agent.get("tools", []) or [])
+        for skill_name in agent.get("skills", []) or []:
+            skill = skills.get(skill_name)
+            if skill is not None:
+                names.update(skill.tools)
+        if names & EMAIL_TOOL_NAMES:
+            return True
+    return False
+
 _NOT_CONNECTED = (
     "No mailbox is connected for your team yet. Ask an admin to connect one "
     "before using the email tools."
@@ -93,6 +117,7 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
             password=password,
             port=cred.port,
             drafts=cred.drafts_folder,
+            restrict_to_public=True,  # customer-supplied host: validate + pin on connect
         )
         return make_email_tools(backend)
     if os.environ.get("BESTTEAM_EMAIL_BACKEND", "").strip():

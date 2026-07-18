@@ -22,10 +22,11 @@ class _FakeBackend:
 
     made = []
 
-    def __init__(self, *, host, user, password, port=993, drafts=None):
+    def __init__(self, *, host, user, password, port=993, drafts=None, restrict_to_public=False):
         self.host, self.user, self.password, self.port, self.drafts = (
             host, user, password, port, drafts,
         )
+        self.restrict_to_public = restrict_to_public
         _FakeBackend.made.append(self)
 
     def find(self, query):
@@ -71,6 +72,8 @@ def test_configured_org_binds_tools_to_its_mailbox(db_session):
     assert backend.host == "imap.acme.com"
     assert backend.user == "support@acme.com"
     assert backend.password == "pw"
+    # Customer-supplied host: the per-org path validates + pins on connect.
+    assert backend.restrict_to_public is True
     # And the tool actually routes to that mailbox.
     assert "support@acme.com" in tools["email_find"]("")
 

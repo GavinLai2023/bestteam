@@ -52,6 +52,15 @@ every endpoint follows:
   mailbox path still applies) or friendly "no mailbox connected" tools
   otherwise. Startup refuses to boot if stored credentials exist but the
   secrets key can't decrypt them.
+- **Self-service mailbox connection** (`org_settings.py`, `/api/org/email`,
+  guarded by `get_current_org` — the org's own user, no admin role): GET status
+  (never returns the password), PUT set/rotate, POST `/test` (IMAP login on the
+  posted creds without saving), DELETE. The customer-supplied host is SSRF-
+  checked (`http_client.check_host_allowed`). The wizard shows the connect step
+  only when the team uses email: `email_tools.spec_uses_email` resolves each
+  agent's `tools` + skill tools and drives the `uses_email` flag on the builder
+  session response (soft prompt at Preview) and a hard gate in `deploy_session`
+  (an email team can't go live without a connected mailbox).
 - Process-wide email env vars (`BESTTEAM_EMAIL_*`) remain the single-mailbox
   path for the SDK/CLI and single-org deployments, and are still **refused**
   on a multi-org deployment (CR-031): `db/orgs.py::ensure_email_single_org`

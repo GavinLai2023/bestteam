@@ -270,6 +270,7 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 | Run fails with "Unknown skill 'email_triage_reply'" | skill not seeded (DB predates the skill, or seeding was skipped on a pre-migration schema) | restart the backend — built-in skills are seeded on boot; if it persists, run `alembic upgrade head` first |
 | Trace shows the agent answering **without** any `email_*` tool calls | `OPENAI_API_KEY` missing/invalid, or a `fake:` model | set a real key; `fake:` models never call tools |
 | `email_find` errors with auth failure | bad IMAP/Graph credentials | verify creds; for Graph, confirm `Mail.ReadWrite` **application** permission + Application Access Policy scoped to the mailbox |
+| `email_find` errors with a TLS/certificate verification failure | IMAP server presents an untrusted (e.g. private/self-signed) certificate — the client always verifies TLS, there is no verify-off switch by design | trust the server's CA: point `SSL_CERT_FILE` at a PEM bundle that includes it before starting the backend (public providers like Gmail/O365 need nothing) |
 | Frontend loads but every API call fails | backend not on `:8000`, or CORS | confirm backend port; default CORS allows `localhost:5173` |
 | Drafts don't appear but the run completed | wrong Drafts folder detected (IMAP) | set `BESTTEAM_IMAP_DRAFTS` to the exact folder name |
 

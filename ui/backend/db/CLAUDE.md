@@ -65,6 +65,12 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `set_admin_status` refuses to promote org members, and the API guards
   ignore the flag on org-bound rows anyway.
   Usernames stay globally unique across orgs (JWT `sub` + memory keying).
+  **One member per org** is a schema invariant: a partial unique index
+  `uq_users_org_id_not_null` on `org_id WHERE org_id IS NOT NULL` (migration
+  `e1f2a3b4c5d6`) — platform operators (NULL) are excluded, so there can be
+  many. That migration **refuses** if an upgraded DB already has multi-member
+  orgs (names them; never auto-deletes). See `db/users.py::create_user` (the
+  friendly pre-check) and `docs/DECISIONS.md`.
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry

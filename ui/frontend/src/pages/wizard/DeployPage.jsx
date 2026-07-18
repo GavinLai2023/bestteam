@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import EmailConnect from '../../components/EmailConnect'
 import { api } from '../../lib/api'
 
 export default function DeployPage() {
@@ -8,6 +9,7 @@ export default function DeployPage() {
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [emailConnected, setEmailConnected] = useState(false)
 
   if (loading) return <p className="hint">Loading…</p>
   if (!session) return null
@@ -67,13 +69,20 @@ export default function DeployPage() {
         it later.
       </p>
 
+      {session.uses_email && (
+        <EmailConnect onChange={() => setError(null)} onStatusChange={setEmailConnected} />
+      )}
+
       {error && <p className="banner banner-error">{error}</p>}
 
       <div className="wizard-actions">
-        <button className="btn btn-primary" onClick={deploy} disabled={busy}>
+        <button className="btn btn-primary" onClick={deploy} disabled={busy || (session.uses_email && !emailConnected)}>
           {busy ? 'Launching…' : 'Launch my team'}
         </button>
       </div>
+      {session.uses_email && !emailConnected && (
+        <p className="hint">Connect your mailbox above before you can launch this team.</p>
+      )}
     </div>
   )
 }

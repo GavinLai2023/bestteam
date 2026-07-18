@@ -77,6 +77,35 @@ is the canonical way the database schema is created/updated going forward
 (replacing a bare `Base.metadata.create_all()`, which still runs
 automatically as a harmless no-op safety net on a brand-new database).
 
+**Run migrations promptly after an upgrade.** `create_all()` never adds a new
+index/constraint to a pre-existing table, so a security invariant introduced by
+a migration (currently: one member per org) isn't in force until
+`alembic upgrade head` runs. As a backstop the backend **refuses to start**
+(HTTP) while that invariant is violated — see the recovery procedure below —
+so the window can't be served through, but you still complete the upgrade by
+running the migration.
+
+### Recovering a legacy multi-member org
+
+A database created under the earlier "multiple members per org" model may still
+have such an org. The one-member-per-org migration **refuses** (naming the
+offending orgs) rather than deleting accounts, and the backend refuses HTTP
+startup for the same reason. Because the main service won't be serving, run
+recovery in a throwaway container (`run --rm --no-deps`, not `exec`):
+
+```bash
+# See which orgs are affected: the startup error / migration error names them.
+# Then, per extra account, either remove it...
+docker compose run --rm --no-deps backend python -m ui.backend.admin delete-user <username>
+# ...or reassign it to another (empty) org or to a platform operator:
+docker compose run --rm --no-deps backend python -m ui.backend.admin move-user <username> --to-org <other>
+docker compose run --rm --no-deps backend python -m ui.backend.admin move-user <username> --platform
+
+# Once each org has at most one member, apply the migration and restart:
+docker compose run --rm --no-deps backend alembic upgrade head
+docker compose up -d
+```
+
 ## 4. Provision orgs and users (operator CLI)
 
 There is **no public registration** — neither a UI nor an API endpoint.
@@ -90,6 +119,9 @@ docker compose exec backend python -m ui.backend.admin create-org acme --display
 
 # Org members (prompts for a password; --org defaults to "default"):
 docker compose exec backend python -m ui.backend.admin create-user alice --org acme
+# NOTE: one member per org is currently enforced -- create-user refuses a
+# second member of the same org (org resources such as the shared mailbox have
+# no per-member privilege separation yet). Platform operators are exempt.
 
 # Yourself, as a platform operator (belongs to no org):
 docker compose exec backend python -m ui.backend.admin create-user op --platform
@@ -123,6 +155,13 @@ run workflows creates themselves an org user too.
 The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
 **per organization** — each customer's agents reach only that customer's inbox.
 Requires `BESTTEAM_SECRETS_KEY` set (step 1); passwords are stored encrypted.
+
+**Customers self-connect in the Team Builder wizard.** When a customer builds a
+team that uses email, the wizard shows a "Connect your mailbox" step (soft at
+Preview so they can test against their real inbox; a hard gate at Deploy —
+`org/email` endpoints, guarded by their own org login). So the operator CLI
+below is mainly for onboarding on the customer's behalf; day-to-day, customers
+connect themselves.
 
 ```bash
 # IMAP with an app password (prompts for the password; --test verifies a login

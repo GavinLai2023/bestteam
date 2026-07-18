@@ -37,7 +37,8 @@ from .knowledge_bases import (
     load_knowledge_base_tools,
     resolve_kb_upload_path,
 )
-from .email_tools import load_email_tools
+from .db.email_credentials import get_email_credentials
+from .email_tools import load_email_tools, spec_uses_email
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -64,7 +65,15 @@ def _call_model(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
         raise HTTPException(status_code=502, detail=f"Model call failed: {exc}") from exc
 
 
-def _session_to_dict(session: BuilderSession) -> Dict[str, Any]:
+def _session_to_dict(
+    session: BuilderSession, db: Optional[Session] = None, org_id: Optional[int] = None
+) -> Dict[str, Any]:
+    # `uses_email` tells the wizard UI whether the built team needs a mailbox
+    # (so it shows the connect-mailbox step). Computed only when a spec exists
+    # and the caller passes its org context; defaults False otherwise.
+    uses_email = False
+    if db is not None and org_id is not None and session.specification_json:
+        uses_email = spec_uses_email(db, session.specification_json, org_id)
     return {
         "id": session.id,
         "intent_text": session.intent_text,
@@ -73,6 +82,7 @@ def _session_to_dict(session: BuilderSession) -> Dict[str, Any]:
         "specification_json": session.specification_json,
         "status": session.status,
         "feedback_history": session.feedback_history,
+        "uses_email": uses_email,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
@@ -256,7 +266,7 @@ def create_builder_session(
 ) -> Dict[str, Any]:
     """Stage 1 (Intent): start a session with the customer's free-text intent/as-is."""
     session = create_session(db, intent_text=req.intent_text, as_is_text=req.as_is_text, org_id=org.id)
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.get("")
@@ -275,7 +285,7 @@ def get_builder_session(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
-    return _session_to_dict(_get_session_or_404(db, session_id, org.id))
+    return _session_to_dict(_get_session_or_404(db, session_id, org.id), db, org.id)
 
 
 @router.post("/{session_id}/requirements")
@@ -306,7 +316,7 @@ def submit_requirements(
         append_feedback(db, session_id, {"stage": "requirements", "note": req.feedback})
 
     session = update_session(db, session_id, requirements_json=requirements.model_dump(), status="requirements")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/specification")
@@ -353,7 +363,7 @@ def submit_specification(
     # uncontained cache_path that test-run/deploy would later build (CR-001).
     _prepare_generated_specification(spec, source)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="spec")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/solution")
@@ -401,7 +411,7 @@ def submit_solution_feedback(
     append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
     _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
 
 
 @router.post("/{session_id}/test-runs")
@@ -465,6 +475,14 @@ def deploy_session(
 
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
+    # A team that reads/drafts email can't go live without a connected mailbox.
+    if spec_uses_email(db, session.specification_json, org.id) and (
+        get_email_credentials(db, org.id) is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This team works in your email, so connect a mailbox before going live.",
+        )
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
     extra_tools = {
@@ -489,4 +507,4 @@ def deploy_session(
     db.commit()
 
     session = update_session(db, session_id, status="deployed")
-    return _session_to_dict(session)
+    return _session_to_dict(session, db, org.id)
