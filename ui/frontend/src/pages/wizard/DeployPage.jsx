@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import EmailConnect from '../../components/EmailConnect'
 import { api } from '../../lib/api'
 
 export default function DeployPage() {
@@ -66,6 +67,8 @@ export default function DeployPage() {
         Once you launch, "{spec.name}" will be available to handle real requests. You can always come back and adjust
         it later.
       </p>
+
+      {session.uses_email && <EmailConnect onChange={() => setError(null)} />}
 
       {error && <p className="banner banner-error">{error}</p>}
 
