@@ -95,8 +95,13 @@ Append new entries at the bottom using this template:
     so the invariant is enforced (not merely assumed) and a race or a bypass
     of `create_user` still can't create one. A database upgraded from the
     earlier multi-member architecture is not mutated automatically: the
-    migration **refuses and names the offending orgs** so the operator
-    resolves duplicates by hand (accounts are never auto-deleted). Lifting the
+    migration **refuses and names the offending orgs**, and — because
+    `create_all` never adds the index to an existing table — the **backend
+    also refuses HTTP startup** while a violation exists, so the pre-migration
+    rollout window can't be served through. Recovery is via the operator CLI
+    (`admin delete-user` / `move-user`, runnable in a throwaway container while
+    HTTP is blocked); accounts are never auto-deleted. See
+    `docs/deployment.md` ("Recovering a legacy multi-member org"). Lifting the
     constraint is gated on the per-org admin role (deferred sub-project C).
     Platform operators (org-NULL) are exempt — there can be several.
   - See `docs/superpowers/specs/2026-07-15-org-multi-tenancy-design.md`.

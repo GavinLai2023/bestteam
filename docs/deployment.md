@@ -77,6 +77,35 @@ is the canonical way the database schema is created/updated going forward
 (replacing a bare `Base.metadata.create_all()`, which still runs
 automatically as a harmless no-op safety net on a brand-new database).
 
+**Run migrations promptly after an upgrade.** `create_all()` never adds a new
+index/constraint to a pre-existing table, so a security invariant introduced by
+a migration (currently: one member per org) isn't in force until
+`alembic upgrade head` runs. As a backstop the backend **refuses to start**
+(HTTP) while that invariant is violated — see the recovery procedure below —
+so the window can't be served through, but you still complete the upgrade by
+running the migration.
+
+### Recovering a legacy multi-member org
+
+A database created under the earlier "multiple members per org" model may still
+have such an org. The one-member-per-org migration **refuses** (naming the
+offending orgs) rather than deleting accounts, and the backend refuses HTTP
+startup for the same reason. Because the main service won't be serving, run
+recovery in a throwaway container (`run --rm --no-deps`, not `exec`):
+
+```bash
+# See which orgs are affected: the startup error / migration error names them.
+# Then, per extra account, either remove it...
+docker compose run --rm --no-deps backend python -m ui.backend.admin delete-user <username>
+# ...or reassign it to another (empty) org or to a platform operator:
+docker compose run --rm --no-deps backend python -m ui.backend.admin move-user <username> --to-org <other>
+docker compose run --rm --no-deps backend python -m ui.backend.admin move-user <username> --platform
+
+# Once each org has at most one member, apply the migration and restart:
+docker compose run --rm --no-deps backend alembic upgrade head
+docker compose up -d
+```
+
 ## 4. Provision orgs and users (operator CLI)
 
 There is **no public registration** — neither a UI nor an API endpoint.
