@@ -53,6 +53,15 @@ DEFAULT_SKILLS: List[SkillSpec] = [
             "   needs-reply, FYI (no action), spam, or escalate (a human "
             "must decide — complaints, legal or payment issues, anything "
             "you are unsure about).\n"
+            "   Automated bulk mail is FYI, never needs-reply: marketing, "
+            "promotions, newsletters, receipts, shipping notices, and "
+            "review or feedback requests — including 'how did we do?' and "
+            "'rate your purchase' surveys, even when phrased as a question "
+            "addressed to you. Signals you can see in email_read: a no-reply "
+            "or noreply@ sender address, a sender that is a brand rather than "
+            "a person, and unsubscribe or 'manage preferences' wording in the "
+            "body. Only mail written by a human expecting a human answer is "
+            "needs-reply.\n"
             "3. Only for needs-reply messages, call email_draft_reply with "
             "a professional, concise reply that directly answers the "
             "sender's question. Never invent facts, prices, or promises — "
@@ -76,6 +85,16 @@ def seed_default_skills(db: Session) -> None:
     Built-ins live in the platform tier (org_id IS NULL); the existence check
     looks only at that tier so an org's same-named skill can't suppress
     seeding of the built-in.
+
+    Because existing rows are never overwritten (to protect admin edits), a
+    change to a built-in's ``DEFAULT_SKILLS`` definition reaches **new**
+    deployments only. To adopt an updated built-in on a deployment that
+    already has the row, an operator re-saves the new JSON through the Advanced
+    UI / ``PUT /api/config/skills/<name>`` (org omitted = platform tier), or
+    deletes the row and restarts to let it re-seed. There is deliberately no
+    automatic version-and-overwrite here: distinguishing an untouched shipped
+    value from a genuine customization would need a stored version, which isn't
+    worth it at this scale.
     """
     existing = {
         name

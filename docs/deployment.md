@@ -120,6 +120,31 @@ run workflows creates themselves an org user too.
   with the user created above; you should land on the monitoring page
   (`/`) with a "Log out" link in the nav.
 
+## Updating built-in skills on an existing deployment
+
+Built-in skills (e.g. `email_triage_reply`) are seeded on boot **only if the
+row is absent** — seeding never overwrites an existing row, so an admin's
+edits are never clobbered. The flip side: when a new release ships an improved
+built-in, a deployment that already has the row keeps the old version.
+
+To adopt an updated built-in on an existing database you need the **new**
+shipped definition — the Advanced UI shows the *stored* (old) row, so opening
+and saving it just re-writes the old value. Print the current shipped default:
+
+```bash
+docker compose exec backend python -c "import json; from ui.backend.skills import DEFAULT_SKILLS; print(json.dumps(next(s.to_raw() for s in DEFAULT_SKILLS if s.name == 'email_triage_reply'), indent=2))"
+```
+
+Then paste that JSON into Advanced UI → Skills → `email_triage_reply` and
+**Save** (or `PUT /api/config/skills/email_triage_reply` with the org query
+omitted — that targets the platform tier). Deleting the row and restarting
+re-seeds the same default.
+
+**If you have customized that skill locally, both paths overwrite your edits** —
+there is no automatic version-and-overwrite (distinguishing a stock row from a
+customized one would need stored versioning, not warranted at this scale), so
+diff the printed default against your stored value and merge by hand.
+
 ## Data persistence
 
 The SQLite database (agents, teams, workflows, users — config persistence,
