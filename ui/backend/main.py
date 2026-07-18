@@ -34,9 +34,17 @@ from .builder import router as builder_router
 from .crud import router as crud_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
-from .db.models import KnowledgeBaseRecord, Organization, SkillRecord, User, WorkflowRecord
+from .db.models import (
+    KnowledgeBaseRecord,
+    OrgEmailCredential,
+    Organization,
+    SkillRecord,
+    User,
+    WorkflowRecord,
+)
 from .db.users import get_user_by_username
 from .db_session import SessionLocal, get_db
+from .email_tools import load_email_tools
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -243,7 +251,12 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     kb_count, kb_max = db.query(
         func.count(KnowledgeBaseRecord.id), func.max(KnowledgeBaseRecord.updated_at)
     ).one()
-    return (skills_count, skills_max, kb_count, kb_max)
+    # Per-org email tools are baked into the compiled workflow, so connecting /
+    # rotating / clearing a mailbox must invalidate that org's cached workflows.
+    email_count, email_max = db.query(
+        func.count(OrgEmailCredential.id), func.max(OrgEmailCredential.updated_at)
+    ).one()
+    return (skills_count, skills_max, kb_count, kb_max, email_count, email_max)
 
 
 def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
@@ -290,19 +303,23 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         if db is not None:
             skill_lookup = load_skills(db, record.org_id)
             kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
+            email_tools = load_email_tools(db, record.org_id)
         else:
             with SessionLocal() as session:
                 skill_lookup = load_skills(session, record.org_id)
                 kb_tools = load_knowledge_base_tools(
                     session, record.config, source, org_id=record.org_id
                 )
+                email_tools = load_email_tools(session, record.org_id)
         try:
             config = contain_workflow_config_for_load(record.config)
             ensure_workflow_cache_paths_for_source(config, source)
             workflow = _build_workflow(
                 config,
                 source=source,
-                extra_tools=kb_tools,
+                # Per-org email tools override the env-based ones in REGISTRY by
+                # name, so this org's agents reach this org's mailbox.
+                extra_tools={**kb_tools, **email_tools},
                 extra_skills=skill_lookup,
             )
         except (KeyError, TypeError, BestTeamError) as exc:

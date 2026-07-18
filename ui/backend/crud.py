@@ -48,6 +48,7 @@ from .db.models import (
     WorkflowRecord,
 )
 from .db.orgs import get_org_by_name, list_orgs
+from .email_tools import load_email_tools
 from .db_session import get_db
 from .knowledge_bases import (
     _KB_CURRENT_POINTER,
@@ -477,8 +478,11 @@ def upsert_workflow_config(
                 _validate_kb_paths(kb_config)
         source = _WORKFLOWS_DIR / f"{item_name}.yaml"
         # Dependencies resolve within the workflow's own org (+ built-in skills).
-        kb_tools = load_knowledge_base_tools(db, raw, source, org_id=org_id)
-        _build_workflow(raw, source=source, extra_tools=kb_tools, extra_skills=load_skills(db, org_id))
+        extra_tools = {
+            **load_knowledge_base_tools(db, raw, source, org_id=org_id),
+            **(load_email_tools(db, org_id) if org_id is not None else {}),
+        }
+        _build_workflow(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
     except (KeyError, TypeError, BestTeamError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

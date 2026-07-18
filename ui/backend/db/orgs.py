@@ -20,12 +20,14 @@ DEFAULT_ORG_NAME = "default"
 def ensure_email_single_org(db: Session, creating: int = 0) -> None:
     """Refuse process-wide email credentials on a multi-org deployment (CR-031).
 
-    `BESTTEAM_EMAIL_*` configures exactly one mailbox for the whole process,
+    `BESTTEAM_EMAIL_*` configures exactly one mailbox for the *whole process*,
     and the built-in `email_triage_reply` skill is visible to every org -- so
     with more than one organization, any tenant's agents could read the
-    configured customer's mailbox. Until the per-org secrets store exists,
-    this combination is a hard error. `creating` counts orgs about to be
-    inserted (the create-org CLI checks before it commits).
+    configured customer's mailbox. This guards **only the env path**: the
+    supported multi-tenant path is now per-org stored credentials
+    (`db/email_credentials.py` + `email_tools.load_email_tools`), which resolve
+    the running org's own mailbox and are *not* blocked here. `creating` counts
+    orgs about to be inserted (the create-org CLI checks before it commits).
 
     Called at backend startup and from `create-org`; a no-op when
     `BESTTEAM_EMAIL_BACKEND` is unset.

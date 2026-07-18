@@ -147,3 +147,71 @@ def test_create_user_password_mismatch_errors(session_local, monkeypatch):
     monkeypatch.setattr(admin_cli.getpass, "getpass", lambda prompt="": next(answers))
     with pytest.raises(SystemExit):
         admin_cli.main(["create-user", "alice", "--org", "acme"])
+
+
+# ---------------------------------------------------------------------------
+# Per-org email (set-email / clear-email)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def secrets_key(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
+
+
+def test_set_email_stores_encrypted_credentials(session_local, secrets_key, monkeypatch):
+    from ui.backend import secret_store
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch, "app-password")
+
+    assert admin_cli.main(
+        ["set-email", "acme", "--host", "imap.gmail.com", "--user", "support@acme.com"]
+    ) == 0
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        cred = get_email_credentials(db, org.id)
+        assert cred is not None
+        assert cred.host == "imap.gmail.com"
+        assert cred.username == "support@acme.com"
+        assert cred.password_encrypted != "app-password"  # not plaintext
+        assert secret_store.decrypt(cred.password_encrypted) == "app-password"
+
+
+def test_set_email_unknown_org_errors(session_local, secrets_key, monkeypatch):
+    _patch_password(monkeypatch)
+    with pytest.raises(SystemExit):
+        admin_cli.main(["set-email", "ghost", "--host", "h", "--user", "u"])
+
+
+def test_clear_email_removes_credentials(session_local, secrets_key, monkeypatch, capsys):
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["set-email", "acme", "--host", "h", "--user", "u"])
+    capsys.readouterr()
+
+    assert admin_cli.main(["clear-email", "acme"]) == 0
+    assert "Disconnected" in capsys.readouterr().out
+    with session_local() as db:
+        assert get_email_credentials(db, get_org_by_name(db, "acme").id) is None
+
+
+def test_set_email_test_flag_rejects_bad_login(session_local, secrets_key, monkeypatch):
+    from bestteam.exceptions import ConfigurationError
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    # Make the login test fail; credentials must not be saved.
+    monkeypatch.setattr(
+        "bestteam.tools.email_client._ImapBackend._connect",
+        lambda self: (_ for _ in ()).throw(ConfigurationError("bad login")),
+    )
+    with pytest.raises(SystemExit):
+        admin_cli.main(["set-email", "acme", "--host", "h", "--user", "u", "--test"])
+    with session_local() as db:
+        assert get_email_credentials(db, get_org_by_name(db, "acme").id) is None
