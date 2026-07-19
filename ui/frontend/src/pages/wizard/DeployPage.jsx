@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailConnect from '../../components/EmailConnect'
+import EmailTriggerToggle from '../../components/EmailTriggerToggle'
 import { api } from '../../lib/api'
 
 export default function DeployPage() {
@@ -49,6 +50,7 @@ export default function DeployPage() {
       <div className="wizard-card">
         <h2>Your team is live 🎉</h2>
         <p className="banner banner-success">"{spec.name}" is up and running and ready to take on real requests.</p>
+        {session.uses_email && <EmailTriggerToggle workflowName={spec.name} />}
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate(`/?workflow=${encodeURIComponent(spec.name)}`)}>
             Talk to your team

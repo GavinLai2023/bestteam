@@ -161,6 +161,12 @@ export const api = {
     request('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
   clearOrgEmail: () => request('/api/org/email', { method: 'DELETE' }),
 
+  // Autonomous email trigger: org-level "run on new mail" opt-in + activity.
+  getEmailTrigger: () => request('/api/org/email-trigger'),
+  setEmailTrigger: (payload) =>
+    request('/api/org/email-trigger', { method: 'PUT', body: JSON.stringify(payload) }),
+  emailTriggerActivity: () => request('/api/org/email-trigger/activity'),
+
   // Interview recording transcription
   transcribeInterview: (file, model) =>
     uploadSingleFile('/api/builder/interview/transcribe', file, { model }),
