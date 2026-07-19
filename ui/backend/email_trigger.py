@@ -30,6 +30,7 @@ from bestteam.tools.email_client import _ImapBackend
 from . import secret_store
 from .db.email_credentials import get_email_credentials
 from .db.models import EmailTrigger, Run
+from .runtime import _executor, registry, run_in_background
 
 _logger = logging.getLogger(__name__)
 
@@ -202,5 +203,47 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
     _start_triggered_run(db, trigger, new_uids, get_workflow)
 
 
+def _trigger_input(new_uids) -> str:
+    ids = ", ".join(str(u) for u in new_uids)
+    return (
+        f"{len(new_uids)} new email(s) arrived in the inbox (message ids: {ids}). "
+        "Read each message by id and triage it, drafting replies where appropriate."
+    )
+
+
 def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow) -> None:
-    raise NotImplementedError  # implemented in the next commit
+    """Start ONE run covering all of this cycle's new messages.
+
+    `last_uid`/`runs_today` are advanced and committed BEFORE the run starts:
+    a crashed run must show as a failure in the activity list, not re-trigger
+    forever. No per-user memory (`user_id=None`) -- there is no human user.
+    """
+    trigger.last_uid = max(new_uids)
+    trigger.runs_today += 1
+    input_text = _trigger_input(new_uids)
+    try:
+        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id)
+    except Exception as exc:  # noqa: BLE001 -- e.g. team deleted since enabling
+        _logger.warning("email trigger: cannot load workflow %r for org %s: %s",
+                        trigger.workflow_name, trigger.org_id, exc)
+        trigger.last_error = (
+            f"Couldn't start the team '{trigger.workflow_name}' -- it may have "
+            "been changed or removed. Re-enable automatic runs from its page."
+        )
+        db.commit()
+        return
+    run = registry.create(
+        trigger.workflow_name, input_text, org_id=trigger.org_id,
+        username=TRIGGER_USERNAME,
+    )
+    trigger.last_run_id = run.id
+    db.commit()
+    _executor.submit(
+        run_in_background,
+        run.id,
+        workflow,
+        input_text,
+        engine=db.get_bind(),
+        org_id=trigger.org_id,
+        username=TRIGGER_USERNAME,
+    )
