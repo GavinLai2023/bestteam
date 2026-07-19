@@ -129,4 +129,8 @@ def set_trigger(
         db, org.id, workflow_name=req.workflow_name, enabled=True,
         last_uid=max_uid, uidvalidity=uidvalidity,
     )
+    # This enable just proved the mailbox reachable -- don't let a stale poll
+    # failure keep reporting "error" until the next cycle clears it.
+    trigger.last_error = None
+    db.commit()
     return _payload(trigger)

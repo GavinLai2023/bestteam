@@ -155,6 +155,26 @@ def test_disable_turns_off(client, monkeypatch):
     assert body["enabled"] is False and body["status"] == "off"
 
 
+def test_enable_clears_stale_error(client, monkeypatch):
+    # A successful (re-)enable just proved the mailbox reachable -- an old
+    # poll failure must not keep the status stuck on "error" until the next
+    # poll cycle.
+    org_id = _seed_team(_EMAIL_TEAM_CONFIG)
+    _connect_mailbox(org_id)
+    _stub_mailbox(monkeypatch)
+    client.put("/api/org/email-trigger", json={"workflow_name": "triage", "enabled": True})
+    with open_test_db() as db:
+        t = get_email_trigger(db, org_id)
+        t.last_error = "Couldn't check the mailbox. We'll keep retrying automatically."
+        db.commit()
+    body = client.put("/api/org/email-trigger",
+                      json={"workflow_name": "triage", "enabled": True}).json()
+    assert body["status"] == "active"
+    assert body["last_error"] is None
+    with open_test_db() as db:
+        assert get_email_trigger(db, org_id).last_error is None
+
+
 def test_platform_operator_gets_403(client):
     op = create_user_and_login(client, username="op", org=None, admin=True)
     resp = client.get("/api/org/email-trigger",
