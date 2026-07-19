@@ -176,6 +176,11 @@
   wizard** (`/wizard/:sessionId/{requirements|team|refine|test|deploy}`),
   not the current 4-stage flow introduced in commit `0d2490a` (flagged in
   that file already).
+- **Hard-restart orphans** — `runs` rows left `status="running"` by a killed
+  process are never swept. The email trigger's overlap guard now consults
+  the in-process registry instead of that row, so the trigger self-recovers
+  and doesn't wedge, but the activity list can still show a stale "running"
+  run. A startup sweep is future work.
 
 ## Next steps / roadmap
 

@@ -214,6 +214,9 @@ def test_activity_lists_org_runs_newest_first_with_autonomous_flag(client):
     assert [r["id"] for r in body["runs"]] == ["r-new", "r-old"]
     assert body["runs"][0]["autonomous"] is False
     assert body["runs"][1]["autonomous"] is True
+    # SQLite drops tzinfo -- the explicit UTC offset stops the browser from
+    # parsing this timestamp as local time.
+    assert body["runs"][0]["started_at"].endswith("+00:00")
 
 
 def test_activity_is_org_scoped(client):

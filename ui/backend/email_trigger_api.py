@@ -8,6 +8,7 @@ never env-var names, OS codes, or tracebacks (those go to the server log).
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,7 +59,9 @@ def _payload(trigger: EmailTrigger | None) -> Dict[str, Any]:
         "runs_today": runs_today,
         "daily_cap": daily_cap(),
         "last_checked_at": (
-            trigger.last_checked_at.isoformat()
+            # SQLite drops tzinfo -- reattach UTC so the browser doesn't parse
+            # this as local time.
+            trigger.last_checked_at.replace(tzinfo=timezone.utc).isoformat()
             if trigger is not None and trigger.last_checked_at
             else None
         ),
@@ -156,7 +159,12 @@ def trigger_activity(
                 "id": r.id,
                 "workflow": r.workflow,
                 "status": r.status,
-                "started_at": r.created_at.isoformat() if r.created_at else None,
+                # SQLite drops tzinfo -- reattach UTC so the browser doesn't
+                # parse this as local time.
+                "started_at": (
+                    r.created_at.replace(tzinfo=timezone.utc).isoformat()
+                    if r.created_at else None
+                ),
                 "autonomous": r.username == TRIGGER_USERNAME,
             }
             for r in rows

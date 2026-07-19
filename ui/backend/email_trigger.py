@@ -20,7 +20,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy.orm import Session
@@ -30,23 +30,30 @@ from bestteam.tools.email_client import _ImapBackend
 
 from . import secret_store
 from .db.email_credentials import get_email_credentials
-from .db.models import EmailTrigger, Run
+from .db.models import EmailTrigger
 from .runtime import _executor, registry, run_in_background
 
 _logger = logging.getLogger(__name__)
 
 TRIGGER_USERNAME = "email-trigger"
 
-_STATUS_RE = re.compile(rb"UIDVALIDITY (\d+) UIDNEXT (\d+)")
+_UIDVALIDITY_RE = re.compile(rb"UIDVALIDITY (\d+)")
+_UIDNEXT_RE = re.compile(rb"UIDNEXT (\d+)")
 
 
 def _parse_status(data) -> Tuple[int, int]:
-    """Parse `(uidvalidity, max_uid)` out of a STATUS response line."""
+    """Parse `(uidvalidity, max_uid)` out of a STATUS response line.
+
+    RFC 3501 does not guarantee UIDVALIDITY precedes UIDNEXT in the response,
+    so the two fields are searched independently rather than with one regex
+    that assumes a fixed order.
+    """
     line = data[0] if data else b""
-    match = _STATUS_RE.search(line or b"")
-    if match is None:
+    uidvalidity_match = _UIDVALIDITY_RE.search(line or b"")
+    uidnext_match = _UIDNEXT_RE.search(line or b"")
+    if uidvalidity_match is None or uidnext_match is None:
         raise OSError(f"unexpected INBOX STATUS response: {line!r}")
-    uidvalidity, uidnext = int(match.group(1)), int(match.group(2))
+    uidvalidity, uidnext = int(uidvalidity_match.group(1)), int(uidnext_match.group(1))
     return uidvalidity, uidnext - 1  # UIDNEXT is the *next* UID to be assigned
 
 
@@ -146,9 +153,13 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         return
 
     # Overlap guard: previous triggered run still executing -> skip; new UIDs
-    # simply accumulate for the next cycle.
+    # simply accumulate for the next cycle. The in-process registry is the
+    # authority: runs execute in this same process, so a run absent from the
+    # registry (e.g. after a hard restart left its DB row stuck "running")
+    # cannot actually be executing -- a DB-status check would wedge the
+    # trigger forever in that case.
     if trigger.last_run_id:
-        prev = db.get(Run, trigger.last_run_id)
+        prev = registry.get(trigger.last_run_id)
         if prev is not None and prev.status == "running":
             db.commit()
             return
@@ -237,8 +248,22 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         trigger.workflow_name, input_text, org_id=trigger.org_id,
         username=TRIGGER_USERNAME,
     )
+    # FK target created later: the `runs` row itself is only inserted by
+    # `run_in_background` on the worker thread, after this commit. Harmless
+    # today (SQLite FK enforcement is off) -- revisit if PRAGMA foreign_keys
+    # is ever enabled.
     trigger.last_run_id = run.id
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        # Never leave an orphan "running" registry entry for the overlap
+        # guard to trust -- mark it failed, then let poll_once log this.
+        registry.publish(run.id, {
+            "type": "run_failed",
+            "workflow": trigger.workflow_name,
+            "data": "The run failed due to an internal error.",
+        })
+        raise
     _executor.submit(
         run_in_background,
         run.id,

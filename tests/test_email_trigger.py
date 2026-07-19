@@ -78,6 +78,13 @@ def test_mailbox_state_raises_oserror_on_garbage():
         mailbox_state(FakeBackend(conn))
 
 
+def test_mailbox_state_parses_regardless_of_field_order():
+    # RFC 3501 doesn't guarantee UIDVALIDITY precedes UIDNEXT in the response.
+    conn = FakeConn()
+    conn._status_line = b'"INBOX" (UIDNEXT 46 UIDVALIDITY 3)'
+    assert mailbox_state(FakeBackend(conn)) == (3, 45)
+
+
 # --- poll_org: cap / baseline / bookkeeping / errors -------------------------
 
 from datetime import datetime, timezone
@@ -223,6 +230,29 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
 
 
 def test_poll_org_skips_while_previous_run_still_running(db, monkeypatch):
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    run = registry.create("triage", "x", org_id=org.id, username="email-trigger")
+    trigger.last_run_id = run.id
+    db.commit()
+
+    calls = []
+
+    def _track(backend, last_uid):
+        calls.append(last_uid)
+        return (3, 41, [])
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _track)
+    poll_org(db, trigger, _no_workflow)
+    assert calls == []  # mailbox never touched
+    assert trigger.last_uid == 41  # untouched
+
+
+def test_poll_org_recovers_when_registry_lost_the_run(db, monkeypatch):
+    # A hard restart can leave a `runs` row stuck "running" forever (the
+    # registry is never rehydrated). The overlap guard must trust the
+    # in-process registry, not that stale DB row, or the trigger wedges.
     from ui.backend.db.models import Run as RunRow
 
     org, trigger = _org_with_trigger(db, last_uid=41)
@@ -231,12 +261,9 @@ def test_poll_org_skips_while_previous_run_still_running(db, monkeypatch):
     trigger.last_run_id = "r-prev"
     db.commit()
 
-    def _boom(backend, last_uid):
-        raise AssertionError("must not touch the mailbox while a run is active")
-
-    monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
     poll_org(db, trigger, _no_workflow)
-    assert trigger.last_uid == 41  # untouched
+    assert trigger.last_checked_at is not None  # polling proceeded -- no wedge
 
 
 def test_poll_org_workflow_load_failure_recorded_not_raised(db, monkeypatch):
