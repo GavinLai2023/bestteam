@@ -9,6 +9,8 @@ from LangGraph's blocking `.stream()` generator into asyncio.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
@@ -30,6 +32,7 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
+from . import email_trigger
 from . import interview
 from . import secret_store
 from .auth_api import get_current_org, get_current_user, router as auth_router
@@ -120,16 +123,27 @@ def _enforce_one_member_per_org_or_raise(db) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app):
-    """ASGI startup: refuse to serve while the membership invariant is violated.
+    """ASGI startup: refuse to serve while the membership invariant is violated,
+    then run the autonomous email-trigger poller for the app's lifetime.
 
-    A data-dependent guard (unlike the config guards below), so it runs when the
-    server actually starts serving, not at import."""
+    The membership guard is data-dependent (unlike the config guards below), so
+    it runs when the server actually starts serving, not at import."""
     with SessionLocal() as session:
         try:
             _enforce_one_member_per_org_or_raise(session)
         except OperationalError:
             pass  # pre-migration schema (no users table yet); nothing to enforce
-    yield
+    stop_polling = asyncio.Event()
+    poller = asyncio.create_task(
+        email_trigger.poll_forever(stop_polling, _get_workflow)
+    )
+    try:
+        yield
+    finally:
+        stop_polling.set()
+        poller.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller
 
 
 # Secrets-store guards run at app import, NOT in db_session, so the operator CLI

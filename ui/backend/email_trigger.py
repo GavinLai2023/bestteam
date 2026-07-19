@@ -15,6 +15,7 @@ This module has NO FastAPI imports; the /api/org/email-trigger router lives in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -247,3 +248,40 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         org_id=trigger.org_id,
         username=TRIGGER_USERNAME,
     )
+
+
+def poll_once(get_workflow: Callable, session_factory=None) -> None:
+    """One pass over every enabled org. Runs on a worker thread (imaplib and
+    SQLAlchemy here are synchronous); a failure in one org never stops the rest."""
+    from .db_session import SessionLocal  # late import: keep module import-light
+
+    from .db.email_triggers import list_enabled_triggers
+
+    factory = session_factory or SessionLocal
+    with factory() as db:
+        for trigger in list_enabled_triggers(db):
+            try:
+                poll_org(db, trigger, get_workflow)
+            except Exception:  # noqa: BLE001 -- the loop must outlive any org's failure
+                _logger.exception("email trigger: unexpected failure for org %s",
+                                  trigger.org_id)
+
+
+async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:
+    """The poller task: sleep FIRST, then poll, forever until `stop_event`.
+
+    Sleeping first means app startup (and short-lived TestClient lifespans)
+    never trigger an immediate poll against the live database."""
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds())
+        except asyncio.TimeoutError:
+            pass
+        if stop_event.is_set():
+            return
+        if triggers_disabled():
+            continue
+        try:
+            await asyncio.to_thread(poll_once, get_workflow)
+        except Exception:  # noqa: BLE001 -- never let the task die
+            _logger.exception("email trigger: poll cycle failed")

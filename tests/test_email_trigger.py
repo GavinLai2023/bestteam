@@ -252,3 +252,60 @@ def test_poll_org_workflow_load_failure_recorded_not_raised(db, monkeypatch):
     assert recorder.calls == []
     assert trigger.last_error is not None
     assert "triage" in trigger.last_error
+
+
+# --- poll_once / poll_forever -------------------------------------------------
+
+import asyncio
+
+from ui.backend.email_trigger import poll_forever, poll_once
+
+
+def test_poll_once_covers_enabled_orgs_and_survives_failures(db, monkeypatch):
+    a = get_or_create_org(db, "org_a")
+    b = get_or_create_org(db, "org_b")
+    for org in (a, b):
+        set_email_credentials(db, org.id, host="h", username="u", password="p")
+        upsert_email_trigger(db, org.id, workflow_name="w", enabled=True,
+                             last_uid=0, uidvalidity=1)
+    polled = []
+
+    def fake_poll_org(session, trigger, get_workflow):
+        polled.append(trigger.org_id)
+        if trigger.org_id == a.id:
+            raise RuntimeError("org A explodes")  # must not stop org B
+
+    monkeypatch.setattr(email_trigger, "poll_org", fake_poll_org)
+
+    class _Factory:  # context-manager session factory over the test db
+        def __call__(self):
+            return self
+
+        def __enter__(self):
+            return db
+
+        def __exit__(self, *exc):
+            return False
+
+    poll_once(_no_workflow, session_factory=_Factory())
+    assert polled == [a.id, b.id]
+
+
+def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(email_trigger, "poll_once", lambda gw, session_factory=None: calls.append(1))
+    monkeypatch.setattr(email_trigger, "poll_seconds", lambda: 0.01)
+
+    async def run_briefly(disabled):
+        monkeypatch.setenv("BESTTEAM_TRIGGERS_DISABLED", "1" if disabled else "")
+        stop = asyncio.Event()
+        task = asyncio.ensure_future(poll_forever(stop, _no_workflow))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await task
+
+    asyncio.run(run_briefly(disabled=True))
+    assert calls == []  # kill switch: loop alive, no polling
+
+    asyncio.run(run_briefly(disabled=False))
+    assert len(calls) >= 1
