@@ -179,6 +179,39 @@ class OrgEmailCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class EmailTrigger(Base):
+    """One org's autonomous new-mail trigger (opt-in) plus poller state.
+
+    At most one auto-running team per org (unique `org_id`), mirroring
+    one-mailbox-per-org. `last_uid`/`uidvalidity` are the dedup baseline --
+    UIDs, never UNSEEN, because the draft-only toolkit deliberately never
+    marks mail seen. `runs_today`/`runs_date` implement the daily run cap.
+    See docs/superpowers/specs/2026-07-19-email-trigger-autonomous-runs-design.md.
+    """
+
+    __tablename__ = "email_triggers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, nullable=False
+    )
+    workflow_name: Mapped[str]
+    enabled: Mapped[bool] = mapped_column(default=False)
+    # Dedup baseline: only UIDs above this trigger a run. Set to the mailbox's
+    # current max UID at enable time so the existing backlog never triggers.
+    last_uid: Mapped[int] = mapped_column(default=0)
+    uidvalidity: Mapped[Optional[int]] = mapped_column(nullable=True)
+    # Daily cap state; runs_date is an ISO date string (UTC).
+    runs_today: Mapped[int] = mapped_column(default=0)
+    runs_date: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Overlap guard: skip a cycle while this run is still `running`.
+    last_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
 class BuilderSession(Base):
     """State for one customer's trip through the Team Builder Wizard.
 
