@@ -180,6 +180,20 @@ single-mailbox path for the SDK/CLI and single-customer deployments, and stay
 across tenants). An org with no mailbox connected gets a clear "no mailbox
 connected" message from the tools rather than an error.
 
+### Automatic runs (autonomous email trigger)
+
+Once a customer's email team is deployed and their mailbox is connected, they
+can opt in (Deploy page: "Run automatically when new email arrives") to have
+the platform poll their inbox every `BESTTEAM_TRIGGER_POLL_SECONDS` (default
+120) and run the team on new mail — no prompt needed. Safety rails:
+`BESTTEAM_TRIGGER_DAILY_CAP` automatic runs per org per day (default 50, then
+paused until midnight UTC), and `BESTTEAM_TRIGGERS_DISABLED=1` as a
+platform-wide operator kill switch. Autonomous runs appear in the org's
+activity list attributed to the `email-trigger` user; the team still only
+ever saves drafts. Dedup is by IMAP UID baseline, set at enable time, so the
+existing mailbox backlog never triggers runs. Design:
+`docs/superpowers/specs/2026-07-19-email-trigger-autonomous-runs-design.md`.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,

@@ -71,6 +71,22 @@ every endpoint follows:
 - The isolation test net: `tests/test_org_isolation.py` plus per-surface
   tests in test_crud_api/test_ws_stream/test_builder_api.
 
+## Autonomous email trigger (`email_trigger.py` + `email_trigger_api.py`)
+
+Opt-in per org (wizard Deploy page; `/api/org/email-trigger`): an asyncio
+poller started from `main._lifespan` checks each enabled org's mailbox every
+`BESTTEAM_TRIGGER_POLL_SECONDS` (default 120) and starts ONE run per cycle
+covering that cycle's new messages, attributed to the sentinel username
+`email-trigger`. Dedup is a per-org IMAP UID baseline in `email_triggers`
+(never UNSEEN -- the toolkit never marks mail seen); the baseline is set to
+the mailbox's current max UID at enable time so the backlog never triggers.
+Guards: per-org daily cap (`BESTTEAM_TRIGGER_DAILY_CAP`, default 50),
+platform kill switch (`BESTTEAM_TRIGGERS_DISABLED=1`), overlap guard (skips a
+cycle while the previous triggered run is still `running`), and per-org
+try/except so one org's mail-server failure never stops the loop (stored as
+customer-readable `last_error` on the row). Single-process poller: if the
+backend ever runs multiple workers, it needs a leader lock (known limitation).
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The

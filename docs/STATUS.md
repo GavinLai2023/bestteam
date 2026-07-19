@@ -91,7 +91,7 @@
   CJK search) backends behind one seam
   (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
   verb / no SMTP by design. Seeded `email_triage_reply` built-in Skill.
-  Deferred: real sending, ambient triggering, attachments. Spec:
+  Deferred: real sending, attachments. Spec:
   `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
 
 - Org multi-tenancy — sub-project 1 (merged to `main`, PR #14): `organizations`
@@ -140,6 +140,15 @@
   (verified TLS, bounded timeouts, connect-time IP pinning vs DNS rebinding) and
   bounded the IMAP port. Three code-review rounds (12 findings) resolved; 500
   tests, green CI. Spec: `2026-07-18-wizard-email-connect-design.md`.
+
+- Autonomous email-triggered runs (feature/email-trigger-autonomous-runs):
+  customers opt in at Deploy ("Run automatically when new email arrives") and
+  the platform polls their mailbox (default 120s) and runs their deployed
+  email team on new mail — no prompt. Per-org UID-baseline dedup (backlog
+  never triggers), one run per cycle, daily cap (default 50) with midnight
+  reset, operator kill switch (`BESTTEAM_TRIGGERS_DISABLED`), overlap guard,
+  activity list on "My teams" from persisted `runs` rows (sentinel username
+  `email-trigger`). Spec: `2026-07-19-email-trigger-autonomous-runs-design.md`.
 
 ## In Progress
 
