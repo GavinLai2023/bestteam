@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
+import EmailTriggerActivity from '../../components/EmailTriggerActivity'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
 
@@ -32,6 +33,8 @@ export default function SessionsPage() {
         <h1>My teams</h1>
         <p>Pick up where you left off, or make adjustments to a team you've already built.</p>
       </header>
+
+      <EmailTriggerActivity />
 
       {error && <p className="banner banner-error">{error}</p>}
 
