@@ -20,10 +20,10 @@ from . import secret_store
 from .auth_api import get_current_org
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger, upsert_email_trigger
-from .db.models import EmailTrigger, Organization, WorkflowRecord
+from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
 from .db_session import get_db
 from .email_tools import spec_uses_email
-from .email_trigger import daily_cap, mailbox_state, triggers_disabled, _today
+from .email_trigger import daily_cap, mailbox_state, triggers_disabled, TRIGGER_USERNAME, _today
 
 logger = logging.getLogger(__name__)
 
@@ -134,3 +134,31 @@ def set_trigger(
     trigger.last_error = None
     db.commit()
     return _payload(trigger)
+
+
+@router.get("/email-trigger/activity")
+def trigger_activity(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """Recent runs for this org (newest first, max 50) from the persisted
+    `runs` rows -- so autonomous activity is visible even though full Phase-5
+    trace persistence doesn't exist yet."""
+    rows = (
+        db.query(Run)
+        .filter(Run.org_id == org.id)
+        .order_by(Run.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return {
+        "runs": [
+            {
+                "id": r.id,
+                "workflow": r.workflow,
+                "status": r.status,
+                "started_at": r.created_at.isoformat() if r.created_at else None,
+                "autonomous": r.username == TRIGGER_USERNAME,
+            }
+            for r in rows
+        ]
+    }

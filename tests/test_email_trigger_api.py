@@ -7,6 +7,7 @@ pytest.importorskip("sqlalchemy")
 pytest.importorskip("cryptography")
 
 from cryptography.fernet import Fernet
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from helpers import create_user_and_login, open_test_db
@@ -15,7 +16,7 @@ from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.email_triggers import get_email_trigger
-from ui.backend.db.models import WorkflowRecord
+from ui.backend.db.models import Run, WorkflowRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 from ui.backend.skills import seed_default_skills
@@ -191,3 +192,35 @@ def test_cross_org_cannot_enable_other_orgs_team(client, monkeypatch):
                       headers={"Authorization": f"Bearer {other}"},
                       json={"workflow_name": "triage", "enabled": True})
     assert resp.status_code == 400  # 'triage' is invisible from org_b
+
+
+# --- activity list ------------------------------------------------------------
+
+
+def _add_run(org_id, run_id, username, minutes_ago, status="completed"):
+    with open_test_db() as db:
+        db.add(Run(id=run_id, workflow="triage", input="x", status=status,
+                   org_id=org_id, username=username,
+                   created_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)))
+        db.commit()
+
+
+def test_activity_lists_org_runs_newest_first_with_autonomous_flag(client):
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+    _add_run(org_id, "r-old", "email-trigger", minutes_ago=10)
+    _add_run(org_id, "r-new", "demo", minutes_ago=1)
+    body = client.get("/api/org/email-trigger/activity").json()
+    assert [r["id"] for r in body["runs"]] == ["r-new", "r-old"]
+    assert body["runs"][0]["autonomous"] is False
+    assert body["runs"][1]["autonomous"] is True
+
+
+def test_activity_is_org_scoped(client):
+    with open_test_db() as db:
+        mine = get_or_create_org(db, "default").id
+        theirs = get_or_create_org(db, "org_b").id
+    _add_run(mine, "r-mine", "email-trigger", minutes_ago=1)
+    _add_run(theirs, "r-theirs", "email-trigger", minutes_ago=1)
+    ids = [r["id"] for r in client.get("/api/org/email-trigger/activity").json()["runs"]]
+    assert ids == ["r-mine"]
