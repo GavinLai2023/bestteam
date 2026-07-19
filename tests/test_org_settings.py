@@ -321,3 +321,36 @@ def test_test_connection_returns_friendly_timeout(client, monkeypatch):
     assert body["ok"] is False
     assert "993" in body["error"]
     assert "WinError" not in body["error"]
+
+
+def test_connect_mailbox_without_secrets_key_is_operator_friendly(client, monkeypatch):
+    # A missing server-side encryption key is the operator's problem, not the
+    # customer's -- the store path must NOT leak "BESTTEAM_SECRETS_KEY is not set"
+    # to a non-technical end user, who can only be told to contact an admin.
+    _bypass_ssrf(monkeypatch)
+    monkeypatch.delenv("BESTTEAM_SECRETS_KEY", raising=False)
+    resp = client.put("/api/org/email", json={
+        "host": "imap.gmail.com", "username": "u@x", "password": "app-pw",
+    })
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert "BESTTEAM_SECRETS_KEY" not in detail
+    assert "administrator" in detail.lower()
+
+
+def test_connect_mailbox_unexpected_error_does_not_leak_internals(client, monkeypatch):
+    # Any other failure while saving must also surface an actionable message,
+    # never a raw internal string.
+    _bypass_ssrf(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("psycopg2.OperationalError: connection reset 0xdeadbeef")
+
+    monkeypatch.setattr(org_settings, "set_email_credentials", _boom)
+    resp = client.put("/api/org/email", json={
+        "host": "imap.gmail.com", "username": "u@x", "password": "p",
+    })
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert "0xdeadbeef" not in detail
+    assert "administrator" in detail.lower()

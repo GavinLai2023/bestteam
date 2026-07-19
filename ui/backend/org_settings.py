@@ -14,6 +14,7 @@ that resolves to a private/internal address (SSRF guard, reusing
 from __future__ import annotations
 
 import errno
+import logging
 import socket
 from typing import Any, Dict, Optional
 
@@ -33,6 +34,9 @@ from .db.email_credentials import (
 )
 from .db.models import Organization
 from .db_session import get_db
+from .secret_store import SecretsKeyError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/org", tags=["org-settings"])
 
@@ -120,8 +124,27 @@ def set_email(
             db, org.id, host=req.host, username=req.username, password=req.password,
             port=req.port, drafts_folder=req.drafts,
         )
-    except Exception as exc:  # noqa: BLE001 -- e.g. a missing/colliding secrets key
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SecretsKeyError as exc:
+        # The encryption key (BESTTEAM_SECRETS_KEY) is missing/invalid -- a server
+        # setup problem the customer can't fix. Log the real cause for the
+        # operator; tell the end user something actionable (contact an admin).
+        logger.error("Mailbox save failed: secrets key not configured (%s)", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Your mailbox couldn't be saved because secure storage isn't set "
+                "up on this service yet. Please contact your administrator."
+            ),
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- never leak internal errors to the user
+        logger.exception("Mailbox save failed unexpectedly for org %s", org.id)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Your mailbox couldn't be saved due to an unexpected problem. "
+                "Please try again, or contact your administrator if it continues."
+            ),
+        ) from exc
     return {"connected": True, "host": req.host, "username": req.username}
 
 
