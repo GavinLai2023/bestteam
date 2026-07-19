@@ -36,10 +36,19 @@ Edit `.env` and fill in:
   from the customer's browser (`https://...` / `wss://...`). These are baked
   into the frontend at build time.
 - `BESTTEAM_SECRETS_KEY` — encryption key for at-rest secrets (currently the
-  per-org mailbox passwords set with `admin set-email`; see "Per-org email"
-  below). Required once any org has connected a mailbox — the backend refuses
-  to start if it can't decrypt stored credentials. Must be a **different** key
-  from `BESTTEAM_SECRET_KEY`. Generate with:
+  per-org mailbox passwords set with `admin set-email`, or connected by
+  customers themselves in the wizard; see "Per-org email" below). **One key for
+  the whole deployment, not one per customer:** every org's mailbox password is
+  encrypted with this same key, which you (the operator) generate and set
+  **once** when standing up the server. Customers never see it, never generate
+  it, and are never asked for it — it is not a per-user or per-mailbox value.
+  Required once any org has connected a mailbox — the backend refuses to start
+  if it can't decrypt stored credentials. Must be a **different** key from
+  `BESTTEAM_SECRET_KEY`, and it lives in the environment (or a secrets manager)
+  — **never in the database.** Storing the key next to the ciphertext it
+  protects would defeat the encryption: anyone who obtained a database dump
+  would have both the locked passwords and the key to unlock them. Generate
+  with:
   ```bash
   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   ```
@@ -154,7 +163,9 @@ run workflows creates themselves an org user too.
 
 The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
 **per organization** — each customer's agents reach only that customer's inbox.
-Requires `BESTTEAM_SECRETS_KEY` set (step 1); passwords are stored encrypted.
+Requires `BESTTEAM_SECRETS_KEY` set (step 1) — the single deployment-wide key
+encrypts every org's password; the passwords are stored encrypted, the key is
+not stored in the database at all.
 
 **Customers self-connect in the Team Builder wizard.** When a customer builds a
 team that uses email, the wizard shows a "Connect your mailbox" step (soft at
