@@ -16,8 +16,20 @@ This module has NO FastAPI imports; the /api/org/email-trigger router lives in
 from __future__ import annotations
 
 import logging
+import os
 import re
-from typing import List, Tuple
+from datetime import datetime, timezone
+from typing import Callable, List, Optional, Tuple
+
+from cryptography.fernet import InvalidToken
+from sqlalchemy.orm import Session
+
+from bestteam.exceptions import ConfigurationError
+from bestteam.tools.email_client import _ImapBackend
+
+from . import secret_store
+from .db.email_credentials import get_email_credentials
+from .db.models import EmailTrigger, Run
 
 _logger = logging.getLogger(__name__)
 
@@ -77,3 +89,118 @@ def check_mailbox(backend, last_uid: int) -> Tuple[int, int, List[int]]:
             conn.logout()
         except Exception:  # noqa: BLE001 -- best-effort cleanup
             pass
+
+
+POLL_SECONDS_ENV = "BESTTEAM_TRIGGER_POLL_SECONDS"
+DAILY_CAP_ENV = "BESTTEAM_TRIGGER_DAILY_CAP"
+DISABLED_ENV = "BESTTEAM_TRIGGERS_DISABLED"
+
+
+def poll_seconds() -> float:
+    return float(os.environ.get(POLL_SECONDS_ENV, "").strip() or 120)
+
+
+def daily_cap() -> int:
+    return int(os.environ.get(DAILY_CAP_ENV, "").strip() or 50)
+
+
+def triggers_disabled() -> bool:
+    return os.environ.get(DISABLED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _today() -> str:
+    return _utcnow().date().isoformat()
+
+
+def _friendly_poll_error(exc: Exception) -> str:
+    """Customer-visible health message: actionable, never internals.
+
+    `ConfigurationError` messages are already written for humans (e.g. login
+    rejected, no mailbox connected); anything else is summarized generically
+    -- the real exception goes to the server log.
+    """
+    if isinstance(exc, ConfigurationError):
+        return str(exc)[:500]
+    return "Couldn't check the mailbox. We'll keep retrying automatically."
+
+
+def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None:
+    """One org's poll cycle. Never raises; all state changes committed here.
+
+    `get_workflow` is `main._get_workflow` injected by the loop (avoids a
+    circular import and lets tests pass a stub): `(name, db, org_id) -> Workflow`.
+    """
+    # Daily cap: reset on date rollover, and skip the mailbox entirely at cap.
+    today = _today()
+    if trigger.runs_date != today:
+        trigger.runs_today = 0
+        trigger.runs_date = today
+    if trigger.runs_today >= daily_cap():
+        db.commit()
+        return
+
+    # Overlap guard: previous triggered run still executing -> skip; new UIDs
+    # simply accumulate for the next cycle.
+    if trigger.last_run_id:
+        prev = db.get(Run, trigger.last_run_id)
+        if prev is not None and prev.status == "running":
+            db.commit()
+            return
+
+    try:
+        cred = get_email_credentials(db, trigger.org_id)
+        if cred is None:
+            raise ConfigurationError(
+                "No mailbox is connected -- reconnect it to resume automatic runs."
+            )
+        password = secret_store.decrypt(cred.password_encrypted)
+        backend = _ImapBackend(
+            host=cred.host,
+            user=cred.username,
+            password=password,
+            port=cred.port,
+            drafts=cred.drafts_folder,
+            restrict_to_public=True,  # customer-supplied host
+        )
+        uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
+    except (InvalidToken, secret_store.SecretsKeyError) as exc:
+        _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
+                        trigger.org_id, exc)
+        trigger.last_error = (
+            "The mailbox connection can't be read right now -- reconnect it to "
+            "resume automatic runs."
+        )
+        trigger.last_checked_at = _utcnow()
+        db.commit()
+        return
+    except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
+        _logger.warning("email trigger: poll failed for org %s: %s", trigger.org_id, exc)
+        trigger.last_error = _friendly_poll_error(exc)
+        trigger.last_checked_at = _utcnow()
+        db.commit()
+        return
+
+    trigger.last_checked_at = _utcnow()
+    trigger.last_error = None
+
+    # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
+    # re-baseline to now, never reprocess.
+    if trigger.uidvalidity is None or trigger.uidvalidity != uidvalidity:
+        trigger.uidvalidity = uidvalidity
+        trigger.last_uid = max_uid
+        db.commit()
+        return
+
+    if not new_uids:
+        db.commit()
+        return
+
+    _start_triggered_run(db, trigger, new_uids, get_workflow)
+
+
+def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow) -> None:
+    raise NotImplementedError  # implemented in the next commit
