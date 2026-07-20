@@ -370,8 +370,13 @@ def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
     def fake_poll_org(session, trigger, get_workflow):
         seen.append(trigger.org_id)
         if trigger.org_id == a.id:
-            from sqlalchemy.exc import SQLAlchemyError
-            raise SQLAlchemyError("boom")  # leaves the session needing rollback
+            from ui.backend.db.models import EmailTrigger
+            # org_id is unique -- a second row for org A raises IntegrityError
+            # from the session itself on flush, leaving the shared session in
+            # a pending-rollback state until poll_once rolls it back.
+            session.add(EmailTrigger(org_id=a.id, workflow_name="dup", enabled=True,
+                                     last_uid=0, uidvalidity=1))
+            session.flush()
 
     monkeypatch.setattr(email_trigger, "poll_org", fake_poll_org)
 
@@ -381,7 +386,10 @@ def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
         def __exit__(self, *exc): return False
 
     email_trigger.poll_once(_no_workflow, session_factory=_Factory())
-    assert seen == [a.id, b.id]   # org B still ran despite org A poisoning the session
+    # Org A really dirtied the shared session (IntegrityError on flush);
+    # poll_once must roll back before org B's list_enabled_triggers query,
+    # or that query raises PendingRollbackError and org B never runs.
+    assert seen == [a.id, b.id]
 
 
 def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):

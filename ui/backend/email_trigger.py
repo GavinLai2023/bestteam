@@ -322,9 +322,12 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
             try:
                 poll_org(db, trigger, get_workflow)
             except Exception:  # noqa: BLE001 -- the loop must outlive any org's failure
+                # Roll back BEFORE touching `trigger` again: a failed flush leaves
+                # the session's objects expired, so logging trigger.org_id first
+                # would itself raise PendingRollbackError trying to reload it.
+                db.rollback()
                 _logger.exception("email trigger: unexpected failure for org %s",
                                   trigger.org_id)
-                db.rollback()  # clear a poisoned transaction so later orgs still run
 
 
 async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:
