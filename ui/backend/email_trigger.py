@@ -32,7 +32,7 @@ from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store
 from .db.email_credentials import get_email_credentials
-from .db.models import EmailTrigger, WorkflowRecord
+from .db.models import EmailTrigger, Run, WorkflowRecord
 from .email_tools import build_org_imap_backend
 from .knowledge_bases import (
     contain_workflow_config_for_load,
@@ -181,8 +181,9 @@ def _friendly_poll_error(exc: Exception) -> str:
 def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None:
     """One org's poll cycle. Never raises; all state changes committed here.
 
-    `get_workflow` is `main._get_workflow` injected by the loop (avoids a
-    circular import and lets tests pass a stub): `(name, db, org_id) -> Workflow`.
+    `get_workflow` is `build_trigger_workflow` injected by the loop (avoids a
+    circular import and lets tests pass a stub):
+    `(name, db, org_id, allowed_uids) -> Workflow`.
     """
     # Daily cap: reset on date rollover, and skip the mailbox entirely at cap.
     today = _today()
@@ -239,7 +240,9 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         return
 
     trigger.last_checked_at = _utcnow()
-    trigger.last_error = None
+    # NOTE: do NOT clear last_error here -- a workflow fault must persist across
+    # empty polls (F5). last_error is cleared only on a successful dispatch
+    # (below) or on (re-)enable (the API).
 
     # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
     # re-baseline to now, never reprocess.
@@ -256,63 +259,53 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
     _start_triggered_run(db, trigger, new_uids, get_workflow)
 
 
-def _trigger_input(new_uids) -> str:
-    ids = ", ".join(str(u) for u in new_uids)
+def _trigger_input(uids) -> str:
+    ids = ", ".join(str(u) for u in uids)
     return (
-        f"{len(new_uids)} new email(s) arrived in the inbox (message ids: {ids}). "
+        f"{len(uids)} new email(s) arrived in the inbox (message ids: {ids}). "
         "Read each message by id and triage it, drafting replies where appropriate."
     )
 
 
 def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow) -> None:
-    """Start ONE run covering all of this cycle's new messages.
+    """Start ONE run over a bounded batch of the detected UIDs.
 
-    `last_uid`/`runs_today` are advanced and committed BEFORE the run starts:
-    a crashed run must show as a failure in the activity list, not re-trigger
-    forever. No per-user memory (`user_id=None`) -- there is no human user.
+    Build the workflow FIRST (a build failure must consume no message and no
+    cap), then persist a durable run row and advance state in one commit, then
+    dispatch. `get_workflow` is `build_trigger_workflow(name, db, org_id,
+    allowed_uids) -> Workflow`.
     """
-    trigger.last_uid = max(new_uids)
-    trigger.runs_today += 1
-    input_text = _trigger_input(new_uids)
+    batch = sorted(new_uids)[:batch_size()]
+    input_text = _trigger_input(batch)
     try:
-        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id)
-    except Exception as exc:  # noqa: BLE001 -- e.g. team deleted since enabling
-        _logger.warning("email trigger: cannot load workflow %r for org %s: %s",
+        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch))
+    except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
+        _logger.warning("email trigger: cannot build workflow %r for org %s: %s",
                         trigger.workflow_name, trigger.org_id, exc)
         trigger.last_error = (
             f"Couldn't start the team '{trigger.workflow_name}' -- it may have "
             "been changed or removed. Re-enable automatic runs from its page."
         )
-        db.commit()
+        db.commit()  # NB: last_uid / runs_today deliberately NOT advanced
         return
     run = registry.create(
         trigger.workflow_name, input_text, org_id=trigger.org_id,
         username=TRIGGER_USERNAME,
     )
-    # FK target created later: the `runs` row itself is only inserted by
-    # `run_in_background` on the worker thread, after this commit. Harmless
-    # today (SQLite FK enforcement is off) -- revisit if PRAGMA foreign_keys
-    # is ever enabled.
+    # Durable activity record before dispatch (worker updates its terminal
+    # status; run_in_background reuses this row rather than re-inserting).
+    db.add(Run(
+        id=run.id, workflow=trigger.workflow_name, input=input_text,
+        status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
+    ))
+    trigger.last_uid = max(batch)
+    trigger.runs_today += 1
     trigger.last_run_id = run.id
-    try:
-        db.commit()
-    except Exception:
-        # Never leave an orphan "running" registry entry for the overlap
-        # guard to trust -- mark it failed, then let poll_once log this.
-        registry.publish(run.id, {
-            "type": "run_failed",
-            "workflow": trigger.workflow_name,
-            "data": "The run failed due to an internal error.",
-        })
-        raise
+    trigger.last_error = None  # a run is going out: clear any prior fault
+    db.commit()
     _executor.submit(
-        run_in_background,
-        run.id,
-        workflow,
-        input_text,
-        engine=db.get_bind(),
-        org_id=trigger.org_id,
-        username=TRIGGER_USERNAME,
+        run_in_background, run.id, workflow, input_text,
+        engine=db.get_bind(), org_id=trigger.org_id, username=TRIGGER_USERNAME,
     )
 
 

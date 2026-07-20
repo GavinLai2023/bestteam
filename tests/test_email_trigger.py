@@ -119,8 +119,8 @@ def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
     return org, trigger
 
 
-def _no_workflow(name, db, org_id):  # get_workflow stub that must NOT be called
-    raise AssertionError("get_workflow should not be called in this test")
+def _no_workflow(name, db, org_id, allowed_uids):  # must NOT be called
+    raise AssertionError("build_trigger_workflow should not be called in this test")
 
 
 def test_poll_org_no_new_mail_updates_health_only(db, monkeypatch):
@@ -180,15 +180,6 @@ def test_poll_org_mailbox_failure_stores_friendly_error(db, monkeypatch):
     assert trigger.last_checked_at is not None
 
 
-def test_poll_org_error_clears_on_next_success(db, monkeypatch):
-    org, trigger = _org_with_trigger(db)
-    trigger.last_error = "Couldn't check the mailbox."
-    db.commit()
-    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
-    poll_org(db, trigger, _no_workflow)
-    assert trigger.last_error is None
-
-
 # --- poll_org: the new-mail path ---------------------------------------------
 
 
@@ -201,10 +192,10 @@ class _SubmitRecorder:
 
 
 def _fake_workflow_getter(calls):
-    def get_workflow(name, db, org_id):
-        calls.append((name, org_id))
-        return object()  # poll_org only hands it to the executor
-    return get_workflow
+    def build(name, db, org_id, allowed_uids):
+        calls.append((name, org_id, set(allowed_uids)))
+        return object()
+    return build
 
 
 def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
@@ -215,18 +206,56 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     calls = []
     poll_org(db, trigger, _fake_workflow_getter(calls))
 
-    assert calls == [("triage", org.id)]
-    assert len(recorder.calls) == 1  # ONE run for the whole batch
-    fn, args, kwargs = recorder.calls[0]
-    run_id, workflow, input_text = args[0], args[1], args[2]
-    assert "3 new email(s)" in input_text
+    assert calls == [("triage", org.id, {42, 43, 45})]  # scoped to the batch
+    assert len(recorder.calls) == 1
+    _, args, kwargs = recorder.calls[0]
+    run_id, input_text = args[0], args[2]
     assert "42, 43, 45" in input_text
     assert kwargs["username"] == "email-trigger"
-    assert kwargs["org_id"] == org.id
-    # State advanced BEFORE the run: a crashed run must not re-trigger.
-    assert trigger.last_uid == 45
+    # Durable run row exists BEFORE dispatch.
+    from ui.backend.db.models import Run
+    assert db.get(Run, run_id) is not None
+    assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
+
+
+def test_poll_org_bounded_batch_carries_remainder(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_BATCH_SIZE", "2")
+    org, trigger = _org_with_trigger(db, last_uid=40)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [41, 42, 43, 44, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+    assert calls[0][2] == {41, 42}          # oldest 2 only
+    assert trigger.last_uid == 42           # baseline advanced only past the batch
     assert trigger.runs_today == 1
-    assert trigger.last_run_id == run_id
+
+
+def test_poll_org_build_failure_advances_nothing(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    def _boom(name, db_, org_id, allowed_uids):
+        raise ValueError("No team named 'triage'")
+
+    poll_org(db, trigger, _boom)
+    assert recorder.calls == []
+    assert trigger.last_uid == 41          # NOT advanced -- no message consumed
+    assert trigger.runs_today == 0         # NO cap burned
+    assert trigger.last_error is not None and "triage" in trigger.last_error
+
+
+def test_poll_org_workflow_error_survives_empty_poll(db, monkeypatch):
+    # F5: a workflow fault must not be cleared by a later successful empty poll.
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))  # no new mail
+    poll_org(db, trigger, _no_workflow)
+    assert trigger.last_checked_at is not None
+    assert trigger.last_error is not None   # NOT cleared by an empty successful poll
 
 
 def test_poll_org_skips_while_previous_run_still_running(db, monkeypatch):
@@ -272,7 +301,7 @@ def test_poll_org_workflow_load_failure_recorded_not_raised(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    def _missing(name, db_, org_id):
+    def _missing(name, db_, org_id, allowed_uids):
         raise Exception("Unknown workflow 'triage'")
 
     poll_org(db, trigger, _missing)

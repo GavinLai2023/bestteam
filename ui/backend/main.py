@@ -136,7 +136,7 @@ async def _lifespan(_app):
             pass  # pre-migration schema (no users table yet); nothing to enforce
     stop_polling = asyncio.Event()
     poller = asyncio.create_task(
-        email_trigger.poll_forever(stop_polling, _get_workflow)
+        email_trigger.poll_forever(stop_polling, email_trigger.build_trigger_workflow)
     )
     try:
         yield
