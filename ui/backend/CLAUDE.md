@@ -86,6 +86,12 @@ cycle while the previous triggered run is still `running`), and per-org
 try/except so one org's mail-server failure never stops the loop (stored as
 customer-readable `last_error` on the row). Single-process poller: if the
 backend ever runs multiple workers, it needs a leader lock (known limitation).
+An automatic run is confined to the poller-detected UID batch: it runs an
+UNCACHED workflow (`email_trigger.build_trigger_workflow`) whose email tools
+are UID-scoped (`make_email_tools(backend, allowed_uids=)`), so the triage
+skill's `email_find` can only see that batch. State advances (baseline, cap)
+only after the workflow builds and a durable `runs` row is written; a build
+failure consumes nothing. Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
 
 ## Sync-to-async streaming bridge
 

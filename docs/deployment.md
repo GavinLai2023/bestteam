@@ -194,6 +194,13 @@ ever saves drafts. Dedup is by IMAP UID baseline, set at enable time, so the
 existing mailbox backlog never triggers runs. Design:
 `docs/superpowers/specs/2026-07-19-email-trigger-autonomous-runs-design.md`.
 
+Each automatic run handles at most `BESTTEAM_TRIGGER_BATCH_SIZE` messages
+(default 20) and is confined to exactly those messages; a larger burst is
+processed over successive polls, nothing skipped or reprocessed. **Run the
+backend as a single process/worker:** the poller and its overlap protection
+are in-process, so multiple ASGI workers would each poll and could double-
+process mail. Leader election is future work; until then, one worker.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,

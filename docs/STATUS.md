@@ -150,6 +150,16 @@
   activity list on "My teams" from persisted `runs` rows (sentinel username
   `email-trigger`). Spec: `2026-07-19-email-trigger-autonomous-runs-design.md`.
 
+- Autonomous email-trigger correctness fixes: runs are hard-confined to the
+  poller-detected UID batch (scoped tools + uncached per-run workflow), bounded
+  by `BESTTEAM_TRIGGER_BATCH_SIZE` with carry-over; state advances only through
+  a durable run; workflow faults persist across empty polls; mailbox
+  change/disconnect disables the trigger (rotation keeps it). Also: per-org poll
+  rollback, server-side autonomous activity filter, reserved sentinel username.
+  Spec: `2026-07-20-email-trigger-correctness-redesign-design.md`. Remaining P2
+  hardening (env validation, shutdown thread-stop, run-source enum, RunRegistry
+  eviction) tracked in Known issues.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -181,6 +191,12 @@
   the in-process registry instead of that row, so the trigger self-recovers
   and doesn't wedge, but the activity list can still show a stale "running"
   run. A startup sweep is future work.
+- **Autonomous trigger residuals:** invalid `BESTTEAM_TRIGGER_*` env values
+  aren't validated at startup (a bad value can stop/spin the poller);
+  `asyncio.to_thread` poll cycles aren't awaited on shutdown; a process killed
+  between a trigger's state commit and dispatch orphans a `runs` row (overlap
+  guard self-recovers on restart; no reconciliation sweep yet); `RunRegistry`
+  never evicts terminal runs, so autonomous volume grows process memory.
 
 ## Next steps / roadmap
 
