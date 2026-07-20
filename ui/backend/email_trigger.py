@@ -20,20 +20,31 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, List, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy.orm import Session
 
+from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import ConfigurationError
-from bestteam.tools.email_client import _ImapBackend
+from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store
 from .db.email_credentials import get_email_credentials
-from .db.models import EmailTrigger
+from .db.models import EmailTrigger, WorkflowRecord
+from .email_tools import build_org_imap_backend
+from .knowledge_bases import (
+    contain_workflow_config_for_load,
+    ensure_workflow_cache_paths_for_source,
+    load_knowledge_base_tools,
+)
 from .runtime import _executor, registry, run_in_background
+from .skills import load_skills
 
 _logger = logging.getLogger(__name__)
+
+_WORKFLOWS_DIR = Path(__file__).resolve().parent / "workflows"
 
 TRIGGER_USERNAME = "email-trigger"
 
@@ -103,6 +114,7 @@ def check_mailbox(backend, last_uid: int) -> Tuple[int, int, List[int]]:
 POLL_SECONDS_ENV = "BESTTEAM_TRIGGER_POLL_SECONDS"
 DAILY_CAP_ENV = "BESTTEAM_TRIGGER_DAILY_CAP"
 DISABLED_ENV = "BESTTEAM_TRIGGERS_DISABLED"
+BATCH_SIZE_ENV = "BESTTEAM_TRIGGER_BATCH_SIZE"
 
 
 def poll_seconds() -> float:
@@ -115,6 +127,35 @@ def daily_cap() -> int:
 
 def triggers_disabled() -> bool:
     return os.environ.get(DISABLED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def batch_size() -> int:
+    return int(os.environ.get(BATCH_SIZE_ENV, "").strip() or 20)
+
+
+def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids):
+    """An UNCACHED workflow for (org_id, name) whose email tools are confined to
+    `allowed_uids`. Mirrors main._get_workflow's DB-record build but substitutes
+    scoped email tools; not cached because the UID set is per-run. Raises on a
+    missing/invalid team or a missing mailbox connection."""
+    record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
+    if record is None:
+        raise ValueError(f"No team named '{name}' for org {org_id}")
+    backend = build_org_imap_backend(db, org_id)
+    if backend is None:
+        raise ValueError("No mailbox is connected for this org")
+    source = _WORKFLOWS_DIR / f"{name}.yaml"
+    kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
+    email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
+    skills = load_skills(db, org_id)
+    config = contain_workflow_config_for_load(record.config)
+    ensure_workflow_cache_paths_for_source(config, source)
+    return _build_workflow(
+        config,
+        source=source,
+        extra_tools={**kb_tools, **email_tools},
+        extra_skills=skills,
+    )
 
 
 def _utcnow() -> datetime:
