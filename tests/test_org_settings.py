@@ -250,3 +250,41 @@ def test_mutation_response_carries_uses_email(client):
     resp = client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": _EMAIL_SPEC})
     assert resp.status_code == 200
     assert resp.json()["uses_email"] is True
+
+
+from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
+
+
+def _enable_trigger(org_name="default"):
+    with open_test_db() as db:
+        org = get_or_create_org(db, org_name)
+        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+                             last_uid=10, uidvalidity=1)
+        return org.id
+
+
+def test_password_rotation_keeps_trigger_enabled(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    client.put("/api/org/email", json={"host": "imap.acme.com", "username": "u@acme.com", "password": "old"})
+    org_id = _enable_trigger()
+    client.put("/api/org/email", json={"host": "imap.acme.com", "username": "u@acme.com", "password": "new"})
+    with open_test_db() as db:
+        assert get_email_trigger(db, org_id).enabled is True
+
+
+def test_mailbox_host_change_disables_trigger(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    client.put("/api/org/email", json={"host": "imap.acme.com", "username": "u@acme.com", "password": "p"})
+    org_id = _enable_trigger()
+    client.put("/api/org/email", json={"host": "imap.other.com", "username": "u@acme.com", "password": "p"})
+    with open_test_db() as db:
+        assert get_email_trigger(db, org_id).enabled is False
+
+
+def test_disconnect_disables_trigger(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    client.put("/api/org/email", json={"host": "imap.acme.com", "username": "u@acme.com", "password": "p"})
+    org_id = _enable_trigger()
+    client.delete("/api/org/email")
+    with open_test_db() as db:
+        assert get_email_trigger(db, org_id).enabled is False
