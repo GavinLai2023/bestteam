@@ -218,6 +218,18 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 
+def test_poll_org_dispatch_clears_prior_error(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    trigger.last_error = "some prior fault"
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert len(recorder.calls) == 1          # a run was dispatched
+    assert trigger.last_error is None        # prior fault cleared on dispatch
+
+
 def test_poll_org_bounded_batch_carries_remainder(db, monkeypatch):
     monkeypatch.setenv("BESTTEAM_TRIGGER_BATCH_SIZE", "2")
     org, trigger = _org_with_trigger(db, last_uid=40)
@@ -345,6 +357,31 @@ def test_poll_once_covers_enabled_orgs_and_survives_failures(db, monkeypatch):
 
     poll_once(_no_workflow, session_factory=_Factory())
     assert polled == [a.id, b.id]
+
+
+def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
+    a = get_or_create_org(db, "org_a")
+    b = get_or_create_org(db, "org_b")
+    for org in (a, b):
+        set_email_credentials(db, org.id, host="h", username="u", password="p")
+        upsert_email_trigger(db, org.id, workflow_name="w", enabled=True, last_uid=0, uidvalidity=1)
+    seen = []
+
+    def fake_poll_org(session, trigger, get_workflow):
+        seen.append(trigger.org_id)
+        if trigger.org_id == a.id:
+            from sqlalchemy.exc import SQLAlchemyError
+            raise SQLAlchemyError("boom")  # leaves the session needing rollback
+
+    monkeypatch.setattr(email_trigger, "poll_org", fake_poll_org)
+
+    class _Factory:
+        def __call__(self): return self
+        def __enter__(self): return db
+        def __exit__(self, *exc): return False
+
+    email_trigger.poll_once(_no_workflow, session_factory=_Factory())
+    assert seen == [a.id, b.id]   # org B still ran despite org A poisoning the session
 
 
 def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):

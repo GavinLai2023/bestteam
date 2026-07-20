@@ -148,7 +148,7 @@ def trigger_activity(
     trace persistence doesn't exist yet."""
     rows = (
         db.query(Run)
-        .filter(Run.org_id == org.id)
+        .filter(Run.org_id == org.id, Run.username == TRIGGER_USERNAME)
         .order_by(Run.created_at.desc())
         .limit(50)
         .all()
@@ -165,6 +165,7 @@ def trigger_activity(
                     r.created_at.replace(tzinfo=timezone.utc).isoformat()
                     if r.created_at else None
                 ),
+                # always True post-filter; kept for the frontend contract.
                 "autonomous": r.username == TRIGGER_USERNAME,
             }
             for r in rows

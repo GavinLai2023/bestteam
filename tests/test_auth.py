@@ -144,6 +144,17 @@ def test_create_user_rejects_duplicate_username():
             create_user(db, "alice", "different")
 
 
+def test_create_user_rejects_reserved_sentinel_name():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.users import create_user
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    with session_factory(engine)() as db:
+        with pytest.raises(ValueError):
+            create_user(db, "email-trigger", "pw")
+
+
 def test_login_rejects_wrong_password(client):
     create_user_and_login(client, username="alice", password="hunter2")
 

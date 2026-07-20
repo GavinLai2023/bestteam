@@ -209,14 +209,34 @@ def test_activity_lists_org_runs_newest_first_with_autonomous_flag(client):
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
     _add_run(org_id, "r-old", "email-trigger", minutes_ago=10)
-    _add_run(org_id, "r-new", "demo", minutes_ago=1)
+    _add_run(org_id, "r-new", "email-trigger", minutes_ago=1)
+    _add_run(org_id, "r-manual", "demo", minutes_ago=0)  # not autonomous -- excluded
     body = client.get("/api/org/email-trigger/activity").json()
     assert [r["id"] for r in body["runs"]] == ["r-new", "r-old"]
-    assert body["runs"][0]["autonomous"] is False
+    assert body["runs"][0]["autonomous"] is True
     assert body["runs"][1]["autonomous"] is True
     # SQLite drops tzinfo -- the explicit UTC offset stops the browser from
     # parsing this timestamp as local time.
     assert body["runs"][0]["started_at"].endswith("+00:00")
+
+
+def test_activity_filters_autonomous_server_side(client):
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+    # 60 manual runs (newer) then 1 autonomous (older) -- the autonomous one must
+    # still appear (server-side filter), not be pushed out of a 50-row window.
+    with open_test_db() as db:
+        db.add(Run(id="auto", workflow="w", input="x", status="completed", org_id=org_id,
+                   username="email-trigger",
+                   created_at=datetime.now(timezone.utc) - timedelta(hours=1)))
+        for i in range(60):
+            db.add(Run(id=f"m{i}", workflow="w", input="x", status="completed", org_id=org_id,
+                       username="alice",
+                       created_at=datetime.now(timezone.utc) - timedelta(minutes=i)))
+        db.commit()
+    runs = client.get("/api/org/email-trigger/activity").json()["runs"]
+    assert any(r["id"] == "auto" for r in runs)
+    assert all(r["autonomous"] for r in runs)
 
 
 def test_activity_is_org_scoped(client):
