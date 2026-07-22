@@ -201,6 +201,9 @@ backend as a single process/worker:** the poller and its overlap protection
 are in-process, so multiple ASGI workers would each poll and could double-
 process mail. Leader election is future work; until then, one worker.
 
+An invalid `BESTTEAM_TRIGGER_*` value (non-numeric or non-positive) refuses
+startup with a clear error instead of silently stopping the poller later.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,

@@ -93,6 +93,25 @@ skill's `email_find` can only see that batch. State advances (baseline, cap)
 only after the workflow builds and a durable `runs` row is written; a build
 failure consumes nothing. Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
 
+Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
+resolves the IMAP backend once per cycle and threads it into
+`build_trigger_workflow` instead of letting it re-fetch credentials
+independently -- closes a race where a mid-cycle mailbox swap could detect
+mail on one mailbox and build tools against another. `admin.py`'s
+`set-email`/`clear-email` now call the same `email_trigger.disable_trigger`/
+`disable_trigger_on_identity_change` helpers as `org_settings.py`, so the
+operator CLI path disables the trigger on mailbox change too (previously
+only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
+"workflow" | None`) distinguishes a connectivity fault, which auto-clears on
+the next successful mailbox check, from a workflow/dispatch fault, which
+still persists until a real successful dispatch (F5, unchanged). A dispatch-
+submission failure now marks the run failed instead of leaving the overlap
+guard wedged. `BESTTEAM_TRIGGER_*` env values are validated at startup
+(`email_trigger.validate_trigger_env()`, called from `main.py` beside the
+`BESTTEAM_SECRET_KEY` guard) instead of being able to silently kill the
+poller mid-loop. Deferred: `RunRegistry` eviction and awaiting in-flight
+polling threads on shutdown (see `docs/STATUS.md`, Known issues).
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The

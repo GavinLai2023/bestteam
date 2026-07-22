@@ -160,6 +160,20 @@
   hardening (env validation, shutdown thread-stop, run-source enum, RunRegistry
   eviction) tracked in Known issues.
 
+- Autonomous email-trigger hardening round 2 (independent-reviewer follow-up
+  on PR #22): mailbox-replacement race closed (one IMAP backend resolved per
+  poll cycle, threaded through to workflow-building instead of re-fetched);
+  operator CLI (`admin set-email`/`clear-email`) now disables the trigger on
+  mailbox change/disconnect too, matching the wizard path; dispatch-
+  submission failures mark the run failed instead of wedging the overlap
+  guard; mailbox connectivity errors and workflow/dispatch errors are
+  tracked separately (`last_error_kind`) so a resolved mailbox outage clears
+  instead of showing "error" forever; `BESTTEAM_TRIGGER_*` env values
+  validated at startup (fail-fast, matching the `BESTTEAM_SECRET_KEY` guard);
+  "My teams" activity card distinguishes a failed status/activity fetch from
+  "off" or "no runs yet" and now shows `last_checked_at`. `RunRegistry`
+  eviction and shutdown thread-stop remain deferred (see Known issues).
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -191,12 +205,13 @@
   the in-process registry instead of that row, so the trigger self-recovers
   and doesn't wedge, but the activity list can still show a stale "running"
   run. A startup sweep is future work.
-- **Autonomous trigger residuals:** invalid `BESTTEAM_TRIGGER_*` env values
-  aren't validated at startup (a bad value can stop/spin the poller);
-  `asyncio.to_thread` poll cycles aren't awaited on shutdown; a process killed
-  between a trigger's state commit and dispatch orphans a `runs` row (overlap
-  guard self-recovers on restart; no reconciliation sweep yet); `RunRegistry`
-  never evicts terminal runs, so autonomous volume grows process memory.
+- **Autonomous trigger residuals:** `asyncio.to_thread` poll cycles aren't
+  awaited on shutdown, so a mailbox check/commit/dispatch already in flight
+  can keep running briefly after the ASGI shutdown handler returns; a process
+  killed between a trigger's state commit and dispatch orphans a `runs` row
+  (overlap guard self-recovers on restart; no reconciliation sweep yet);
+  `RunRegistry` never evicts terminal runs, so autonomous volume grows
+  process memory.
 
 ## Next steps / roadmap
 
