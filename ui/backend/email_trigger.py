@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -138,15 +139,27 @@ def batch_size() -> int:
     return int(os.environ.get(BATCH_SIZE_ENV, "").strip() or 20)
 
 
+_MIN_POLL_SECONDS = 5
+
+
 def validate_trigger_env() -> None:
     """Fail fast at startup on a malformed trigger env var, rather than
     letting the poller task die silently mid-loop later (poll_forever only
     catches asyncio.TimeoutError, so a bad value would otherwise kill
-    automatic runs for every org with no supervision or restart)."""
-    for env_name, getter in (
-        (POLL_SECONDS_ENV, poll_seconds),
-        (DAILY_CAP_ENV, daily_cap),
-        (BATCH_SIZE_ENV, batch_size),
+    automatic runs for every org with no supervision or restart).
+
+    `math.isfinite` matters because `float("nan")`/`float("inf")` both parse
+    without raising, and both compare `False` to a plain `<= 0` check, so
+    they'd otherwise slip through: a nan daily cap makes the cap comparison
+    always False (bypasses the safety rail), and an infinite batch size
+    crashes `list[:inf]` with a TypeError. `_MIN_POLL_SECONDS` blocks a
+    positive-but-absurdly-small interval from hammering the IMAP server in a
+    practical tight loop.
+    """
+    for env_name, getter, minimum in (
+        (POLL_SECONDS_ENV, poll_seconds, _MIN_POLL_SECONDS),
+        (DAILY_CAP_ENV, daily_cap, 1),
+        (BATCH_SIZE_ENV, batch_size, 1),
     ):
         raw = os.environ.get(env_name, "").strip()
         if not raw:
@@ -155,8 +168,10 @@ def validate_trigger_env() -> None:
             value = getter()
         except ValueError:
             raise RuntimeError(f"{env_name}={raw!r} is not a valid number.") from None
-        if value <= 0:
-            raise RuntimeError(f"{env_name}={raw!r} must be a positive number.")
+        if not math.isfinite(value) or value < minimum:
+            raise RuntimeError(
+                f"{env_name}={raw!r} must be a finite number >= {minimum}."
+            )
 
 
 def disable_trigger(db: Session, org_id: int) -> None:
@@ -348,6 +363,22 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
         db.commit()  # NB: last_uid / runs_today deliberately NOT advanced
         return
+    # Re-check against the DB: org_settings.py/admin.py disable the trigger
+    # in their own commit, separate from the credential write that may have
+    # landed while this workflow was being built (the mailbox has already
+    # changed by the time `backend`/`workflow` were resolved). If the
+    # customer/operator disabled it in that window, discard the built run
+    # rather than dispatching against a mailbox they just
+    # disconnected/replaced -- this shrinks that race to the width of the
+    # refresh below instead of up to a full poll interval.
+    db.refresh(trigger)
+    if not trigger.enabled:
+        _logger.info(
+            "email trigger: org %s disabled while this cycle's run was building -- discarding",
+            trigger.org_id,
+        )
+        db.commit()
+        return
     run = registry.create(
         trigger.workflow_name, input_text, org_id=trigger.org_id,
         username=TRIGGER_USERNAME,
@@ -378,7 +409,13 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         # block every later poll for this org.
         _logger.exception("email trigger: failed to dispatch run %s for org %s",
                           run.id, trigger.org_id)
-        message = "Couldn't start the automatic run. It will retry on the next new message."
+        # This batch's UIDs were already advanced past (above, before this
+        # try block) -- they will NOT be retried. Say so plainly rather than
+        # implying a retry that won't happen.
+        message = (
+            "Couldn't start the automatic run. It won't be retried, but "
+            "automatic runs will resume when new mail arrives."
+        )
         registry.publish(run.id, dataclasses.asdict(
             TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
         ))

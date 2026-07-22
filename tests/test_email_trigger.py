@@ -280,6 +280,36 @@ def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch
     assert calls == [1]  # mailbox was actually checked -- guard didn't wedge
 
 
+def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
+    # If the customer disconnects/replaces the mailbox WHILE this cycle's
+    # workflow is being built, org_settings.py/admin.py disable the trigger
+    # in a separate commit. A concurrent session is used here (StaticPool
+    # shares one in-memory DB) to simulate that race precisely.
+    from ui.backend.db import session_factory
+    from ui.backend.db.models import EmailTrigger
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    Session2 = session_factory(db.get_bind())
+
+    def build(name, db_, org_id, allowed_uids, backend):
+        with Session2() as db2:
+            other = db2.query(EmailTrigger).filter_by(org_id=org_id).one()
+            other.enabled = False
+            db2.commit()
+        return object()
+
+    poll_org(db, trigger, build)
+
+    assert recorder.calls == []      # never dispatched against the old mailbox
+    assert trigger.last_uid == 41    # NOT advanced
+    assert trigger.runs_today == 0   # NO cap burned
+    assert trigger.last_run_id is None
+
+
 def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
     # Fix 1: poll_org must not let workflow-building re-fetch credentials --
     # a credential change mid-cycle must not produce a run that detects mail
@@ -532,4 +562,26 @@ def test_validate_trigger_env_rejects_zero_batch_size(monkeypatch):
 def test_validate_trigger_env_rejects_negative_daily_cap(monkeypatch):
     monkeypatch.setenv("BESTTEAM_TRIGGER_DAILY_CAP", "-5")
     with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_DAILY_CAP"):
+        email_trigger.validate_trigger_env()
+
+
+def test_validate_trigger_env_rejects_nan_poll_seconds(monkeypatch):
+    # float("nan") parses without raising, and nan <= 0 is False -- a naive
+    # bounds check alone would let this through.
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "nan")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
+        email_trigger.validate_trigger_env()
+
+
+def test_validate_trigger_env_rejects_infinite_poll_seconds(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "inf")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
+        email_trigger.validate_trigger_env()
+
+
+def test_validate_trigger_env_rejects_poll_seconds_below_minimum(monkeypatch):
+    # A sub-minimum positive interval would hammer the IMAP server in a
+    # practical tight loop -- positive alone isn't a sufficient bound.
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "1")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
         email_trigger.validate_trigger_env()
