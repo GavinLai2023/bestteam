@@ -48,6 +48,9 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent / "workflows"
 
 TRIGGER_USERNAME = "email-trigger"
 
+_ERROR_KIND_MAILBOX = "mailbox"
+_ERROR_KIND_WORKFLOW = "workflow"
+
 _UIDVALIDITY_RE = re.compile(rb"UIDVALIDITY (\d+)")
 _UIDNEXT_RE = re.compile(rb"UIDNEXT (\d+)")
 
@@ -254,20 +257,28 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             "The mailbox connection can't be read right now -- reconnect it to "
             "resume automatic runs."
         )
+        trigger.last_error_kind = _ERROR_KIND_MAILBOX
         trigger.last_checked_at = _utcnow()
         db.commit()
         return
     except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
         _logger.warning("email trigger: poll failed for org %s: %s", trigger.org_id, exc)
         trigger.last_error = _friendly_poll_error(exc)
+        trigger.last_error_kind = _ERROR_KIND_MAILBOX
         trigger.last_checked_at = _utcnow()
         db.commit()
         return
 
     trigger.last_checked_at = _utcnow()
-    # NOTE: do NOT clear last_error here -- a workflow fault must persist across
-    # empty polls (F5). last_error is cleared only on a successful dispatch
-    # (below) or on (re-)enable (the API).
+    # A successful mailbox check is direct proof connectivity/credentials are
+    # fine, so a *mailbox*-kind error can auto-clear here. A *workflow*-kind
+    # error (or a legacy/unknown-kind row) must persist across empty polls
+    # (F5) -- an empty poll never rebuilds the workflow, so it proves nothing
+    # about whether the team still builds. Cleared only on a successful
+    # dispatch (below) or on (re-)enable (the API).
+    if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
+        trigger.last_error = None
+        trigger.last_error_kind = None
 
     # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
     # re-baseline to now, never reprocess.
@@ -311,6 +322,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
             f"Couldn't start the team '{trigger.workflow_name}' -- it may have "
             "been changed or removed. Re-enable automatic runs from its page."
         )
+        trigger.last_error_kind = _ERROR_KIND_WORKFLOW
         db.commit()  # NB: last_uid / runs_today deliberately NOT advanced
         return
     run = registry.create(
@@ -327,6 +339,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     trigger.runs_today += 1
     trigger.last_run_id = run.id
     trigger.last_error = None  # a run is going out: clear any prior fault
+    trigger.last_error_kind = None
     db.commit()
     _executor.submit(
         run_in_background, run.id, workflow, input_text,

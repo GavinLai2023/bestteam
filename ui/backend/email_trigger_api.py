@@ -135,6 +135,7 @@ def set_trigger(
     # This enable just proved the mailbox reachable -- don't let a stale poll
     # failure keep reporting "error" until the next cycle clears it.
     trigger.last_error = None
+    trigger.last_error_kind = None
     db.commit()
     return _payload(trigger)
 

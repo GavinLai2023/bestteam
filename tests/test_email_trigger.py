@@ -180,6 +180,36 @@ def test_poll_org_mailbox_failure_stores_friendly_error(db, monkeypatch):
     assert trigger.last_checked_at is not None
 
 
+def test_poll_org_mailbox_error_clears_on_next_successful_check(db, monkeypatch):
+    # A resolved mailbox outage must not keep showing "error" forever -- only
+    # a *workflow*-kind error must survive an empty poll (F5, unchanged).
+    org, trigger = _org_with_trigger(db, last_uid=41)
+
+    def _fail(backend, last_uid):
+        raise OSError("[WinError 10060] connection attempt failed")
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _fail)
+    poll_org(db, trigger, _no_workflow)
+    assert trigger.last_error is not None
+    assert trigger.last_error_kind == "mailbox"
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))
+    poll_org(db, trigger, _no_workflow)
+    assert trigger.last_error is None
+    assert trigger.last_error_kind is None
+
+
+def test_poll_org_workflow_error_kind_survives_empty_poll(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
+    trigger.last_error_kind = "workflow"
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))  # no new mail
+    poll_org(db, trigger, _no_workflow)
+    assert trigger.last_error is not None
+    assert trigger.last_error_kind == "workflow"
+
+
 # --- poll_org: the new-mail path ---------------------------------------------
 
 

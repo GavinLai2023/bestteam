@@ -208,6 +208,11 @@ class EmailTrigger(Base):
     last_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # "mailbox" (connectivity/credentials -- auto-clears on the next
+    # successful check) | "workflow" (dispatch/build fault -- persists until
+    # a real successful dispatch, F5) | None (no error, or a pre-migration
+    # row whose kind is unknown -- treated conservatively as sticky).
+    last_error_kind: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
