@@ -111,8 +111,10 @@ unrelated successful mailbox check) instead of leaving the overlap guard
 wedged. `BESTTEAM_TRIGGER_*` env values are validated at startup
 (`email_trigger.validate_trigger_env()`, called from `main.py` beside the
 `BESTTEAM_SECRET_KEY` guard) instead of being able to silently kill the
-poller mid-loop. Deferred: `RunRegistry` eviction and awaiting in-flight
-polling threads on shutdown (see `docs/STATUS.md`, Known issues).
+poller mid-loop. Deferred: awaiting in-flight polling threads on shutdown (see
+`docs/STATUS.md`, Known issues). `RunRegistry` eviction (the other
+previously-deferred item) is no longer deferred -- see "Sync-to-async
+streaming bridge" above.
 
 ## Sync-to-async streaming bridge
 
@@ -131,6 +133,19 @@ the WebSocket handler's `queue.get()` blocked forever. (A `queue.SimpleQueue`
 + `asyncio.to_thread(queue.get)` variant was tried next and rejected: a
 blocking `to_thread` call isn't cancellable, so it hung the same way when a
 client disconnected before the run finished.)
+
+`RunRegistry` bounds its own growth (`_MAX_RETAINED_RUNS = 1000`, hardcoded
+in `registry.py`): every `create()` call evicts the oldest terminal
+(non-`running`), subscriber-free runs until back within the bound. Added
+because the autonomous email trigger creates runs unattended and
+indefinitely, unlike the previous purely human-click-triggered regime this
+registry was originally sized for. A `running` run or one with an active
+WebSocket subscriber is never evicted. The autonomous-trigger activity list
+(`GET /api/org/email-trigger/activity`) is unaffected -- it reads the
+persisted `runs` table, not the registry; only the monitoring dashboard's
+`GET /api/runs/{id}` and its stream WebSocket can miss a very old, evicted
+run, which they already handle as "unknown run" (404 / WS 4404). Spec:
+`docs/superpowers/specs/2026-07-22-run-registry-bounded-eviction-design.md`.
 
 ## Backend API (`ui/backend/`)
 

@@ -174,6 +174,15 @@
   "off" or "no runs yet" and now shows `last_checked_at`. `RunRegistry`
   eviction and shutdown thread-stop remain deferred (see Known issues).
 
+- Bounded `RunRegistry` eviction: a third-round independent review
+  re-raised the RunRegistry unbounded-growth finding (previously deferred
+  twice) on the basis that the autonomous trigger removes the
+  human-rate-limiter that made those deferrals safe -- unattended,
+  continuous run creation vs. click-driven. `create()` now evicts the
+  oldest terminal, subscriber-free runs once the registry exceeds
+  `_MAX_RETAINED_RUNS` (1000, hardcoded). Spec:
+  `2026-07-22-run-registry-bounded-eviction-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -193,7 +202,9 @@
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain
-  Phase 5. See `ui/backend/db/CLAUDE.md`.
+  Phase 5. Growth is now bounded (terminal-run eviction, see Done above) —
+  what's left is that a restart still loses all live trace-event history,
+  not that it grows unbounded. See `ui/backend/db/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage
@@ -209,9 +220,7 @@
   awaited on shutdown, so a mailbox check/commit/dispatch already in flight
   can keep running briefly after the ASGI shutdown handler returns; a process
   killed between a trigger's state commit and dispatch orphans a `runs` row
-  (overlap guard self-recovers on restart; no reconciliation sweep yet);
-  `RunRegistry` never evicts terminal runs, so autonomous volume grows
-  process memory.
+  (overlap guard self-recovers on restart; no reconciliation sweep yet).
 
 ## Next steps / roadmap
 
