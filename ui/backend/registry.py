@@ -26,6 +26,9 @@ class Run:
     events: List[dict] = field(default_factory=list)
 
 
+_MAX_RETAINED_RUNS = 1000
+
+
 class RunRegistry:
     """In-memory run tracker with pub/sub for live event streaming.
 
@@ -56,7 +59,31 @@ class RunRegistry:
         with self._lock:
             self._runs[run.id] = run
             self._subscribers[run.id] = []
+            self._evict_if_over_bound()
         return run
+
+    def _evict_if_over_bound(self) -> None:
+        """Evict the oldest terminal, subscriber-free runs until back within
+        `_MAX_RETAINED_RUNS`. Must be called with `self._lock` already held.
+
+        The autonomous trigger creates runs unattended, indefinitely -- unlike
+        the previous purely human-click-triggered regime this registry was
+        originally sized for -- so without a bound, a long-lived process's
+        memory (every run's full input/output/event history) grows without
+        limit. A `running` run, or one with an active WebSocket subscriber, is
+        never evicted (a live view must never be pulled out from under it).
+        `_runs` is a plain dict, insertion-ordered since Python 3.7, so
+        iterating it is oldest-to-newest with no extra bookkeeping needed.
+        """
+        if len(self._runs) <= _MAX_RETAINED_RUNS:
+            return
+        for run_id, run in list(self._runs.items()):
+            if len(self._runs) <= _MAX_RETAINED_RUNS:
+                return
+            if run.status == "running" or self._subscribers.get(run_id):
+                continue
+            del self._runs[run_id]
+            del self._subscribers[run_id]
 
     def get(self, run_id: str) -> "Run | None":
         return self._runs.get(run_id)
