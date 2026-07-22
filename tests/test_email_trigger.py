@@ -500,3 +500,36 @@ def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):
 
     asyncio.run(run_briefly(disabled=False))
     assert len(calls) >= 1
+
+
+# --- validate_trigger_env -----------------------------------------------------
+
+
+def test_validate_trigger_env_accepts_unset_and_valid_values(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_TRIGGER_POLL_SECONDS", raising=False)
+    monkeypatch.delenv("BESTTEAM_TRIGGER_DAILY_CAP", raising=False)
+    monkeypatch.delenv("BESTTEAM_TRIGGER_BATCH_SIZE", raising=False)
+    email_trigger.validate_trigger_env()  # must not raise
+
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "60")
+    monkeypatch.setenv("BESTTEAM_TRIGGER_DAILY_CAP", "10")
+    monkeypatch.setenv("BESTTEAM_TRIGGER_BATCH_SIZE", "5")
+    email_trigger.validate_trigger_env()  # must not raise
+
+
+def test_validate_trigger_env_rejects_non_numeric_poll_seconds(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "soon")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
+        email_trigger.validate_trigger_env()
+
+
+def test_validate_trigger_env_rejects_zero_batch_size(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_BATCH_SIZE", "0")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_BATCH_SIZE"):
+        email_trigger.validate_trigger_env()
+
+
+def test_validate_trigger_env_rejects_negative_daily_cap(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_DAILY_CAP", "-5")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_DAILY_CAP"):
+        email_trigger.validate_trigger_env()

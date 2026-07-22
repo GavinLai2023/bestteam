@@ -458,6 +458,19 @@ def test_secret_key_guard_allows_custom_secret_without_env(monkeypatch):
     importlib.reload(backend_main)
 
 
+def test_trigger_env_guard_fires_on_bad_value(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
+        importlib.reload(backend_main)
+
+    # Restore a valid value and reload again so later tests in this process
+    # (which import backend_main.app directly) see a working app.
+    monkeypatch.delenv("BESTTEAM_TRIGGER_POLL_SECONDS", raising=False)
+    importlib.reload(backend_main)
+
+
 def test_stream_run_rejects_missing_token(client):
     with pytest.raises(Exception):
         with client.websocket_connect("/api/runs/some-run-id/stream") as ws:

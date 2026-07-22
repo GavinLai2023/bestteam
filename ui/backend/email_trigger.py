@@ -138,6 +138,27 @@ def batch_size() -> int:
     return int(os.environ.get(BATCH_SIZE_ENV, "").strip() or 20)
 
 
+def validate_trigger_env() -> None:
+    """Fail fast at startup on a malformed trigger env var, rather than
+    letting the poller task die silently mid-loop later (poll_forever only
+    catches asyncio.TimeoutError, so a bad value would otherwise kill
+    automatic runs for every org with no supervision or restart)."""
+    for env_name, getter in (
+        (POLL_SECONDS_ENV, poll_seconds),
+        (DAILY_CAP_ENV, daily_cap),
+        (BATCH_SIZE_ENV, batch_size),
+    ):
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        try:
+            value = getter()
+        except ValueError:
+            raise RuntimeError(f"{env_name}={raw!r} is not a valid number.") from None
+        if value <= 0:
+            raise RuntimeError(f"{env_name}={raw!r} must be a positive number.")
+
+
 def disable_trigger(db: Session, org_id: int) -> None:
     """Disable an org's trigger if it's currently enabled (mailbox cleared or
     replaced). Shared by the self-service API (org_settings.py) and the

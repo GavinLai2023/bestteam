@@ -98,6 +98,8 @@ if auth.is_insecure_secret_key(auth.SECRET_KEY):
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
 
+email_trigger.validate_trigger_env()
+
 def _enforce_one_member_per_org_or_raise(db) -> None:
     """Raise if any org has multiple members (the one-member-per-org invariant).
 
