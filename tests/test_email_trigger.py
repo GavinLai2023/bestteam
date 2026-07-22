@@ -248,6 +248,38 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 
+def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch):
+    from ui.backend.db.models import Run as RunRow
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = trigger.last_run_id
+    assert run_id is not None
+    assert registry.get(run_id).status == "failed"
+    assert db.get(RunRow, run_id).status == "failed"
+
+    # The overlap guard must not wedge on this run afterward.
+    calls = []
+
+    def _track(b, u):
+        calls.append(1)
+        return (3, 45, [])
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _track)
+    poll_org(db, trigger, _no_workflow)
+    assert calls == [1]  # mailbox was actually checked -- guard didn't wedge
+
+
 def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
     # Fix 1: poll_org must not let workflow-building re-fetch credentials --
     # a credential change mid-cycle must not produce a run that detects mail

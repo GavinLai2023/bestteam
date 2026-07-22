@@ -16,6 +16,7 @@ This module has NO FastAPI imports; the /api/org/email-trigger router lives in
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ from cryptography.fernet import InvalidToken
 from sqlalchemy.orm import Session
 
 from bestteam.core.loader import _build_workflow
+from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
@@ -331,20 +333,39 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     )
     # Durable activity record before dispatch (worker updates its terminal
     # status; run_in_background reuses this row rather than re-inserting).
-    db.add(Run(
+    run_row = Run(
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
-    ))
+    )
+    db.add(run_row)
     trigger.last_uid = max(batch)
     trigger.runs_today += 1
     trigger.last_run_id = run.id
     trigger.last_error = None  # a run is going out: clear any prior fault
     trigger.last_error_kind = None
     db.commit()
-    _executor.submit(
-        run_in_background, run.id, workflow, input_text,
-        engine=db.get_bind(), org_id=trigger.org_id, username=TRIGGER_USERNAME,
-    )
+    try:
+        _executor.submit(
+            run_in_background, run.id, workflow, input_text,
+            engine=db.get_bind(), org_id=trigger.org_id, username=TRIGGER_USERNAME,
+        )
+    except Exception:  # noqa: BLE001 -- submission itself must never wedge the trigger
+        # The batch/cap were already consumed by the commit above (the same
+        # accepted commit-then-crash window already disclosed for a process
+        # kill at this point). Without this, both the registry entry and the
+        # Run row would stay "running" forever and the overlap guard would
+        # block every later poll for this org.
+        _logger.exception("email trigger: failed to dispatch run %s for org %s",
+                          run.id, trigger.org_id)
+        message = "Couldn't start the automatic run. It will retry on the next new message."
+        registry.publish(run.id, dataclasses.asdict(
+            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
+        ))
+        run_row.status = "failed"
+        run_row.output = message
+        trigger.last_error = message
+        trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+        db.commit()
 
 
 def poll_once(get_workflow: Callable, session_factory=None) -> None:
