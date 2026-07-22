@@ -119,7 +119,7 @@ def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
     return org, trigger
 
 
-def _no_workflow(name, db, org_id, allowed_uids):  # must NOT be called
+def _no_workflow(name, db, org_id, allowed_uids, backend):  # must NOT be called
     raise AssertionError("build_trigger_workflow should not be called in this test")
 
 
@@ -192,7 +192,7 @@ class _SubmitRecorder:
 
 
 def _fake_workflow_getter(calls):
-    def build(name, db, org_id, allowed_uids):
+    def build(name, db, org_id, allowed_uids, backend):
         calls.append((name, org_id, set(allowed_uids)))
         return object()
     return build
@@ -216,6 +216,34 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     from ui.backend.db.models import Run
     assert db.get(Run, run_id) is not None
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
+
+
+def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
+    # Fix 1: poll_org must not let workflow-building re-fetch credentials --
+    # a credential change mid-cycle must not produce a run that detects mail
+    # on one mailbox and builds tools against another.
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    seen_check_backends = []
+
+    def fake_check_mailbox(backend, last_uid):
+        seen_check_backends.append(backend)
+        return (3, 45, [42, 45])
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", fake_check_mailbox)
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    seen_workflow_backends = []
+
+    def build(name, db_, org_id, allowed_uids, backend):
+        seen_workflow_backends.append(backend)
+        return object()
+
+    poll_org(db, trigger, build)
+
+    assert len(seen_check_backends) == 1
+    assert len(seen_workflow_backends) == 1
+    assert seen_workflow_backends[0] is seen_check_backends[0]
 
 
 def test_poll_org_dispatch_clears_prior_error(db, monkeypatch):
@@ -249,7 +277,7 @@ def test_poll_org_build_failure_advances_nothing(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    def _boom(name, db_, org_id, allowed_uids):
+    def _boom(name, db_, org_id, allowed_uids, backend):
         raise ValueError("No team named 'triage'")
 
     poll_org(db, trigger, _boom)
@@ -313,7 +341,7 @@ def test_poll_org_workflow_load_failure_recorded_not_raised(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    def _missing(name, db_, org_id, allowed_uids):
+    def _missing(name, db_, org_id, allowed_uids, backend):
         raise Exception("Unknown workflow 'triage'")
 
     poll_org(db, trigger, _missing)

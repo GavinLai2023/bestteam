@@ -29,9 +29,9 @@ from .db.email_credentials import (
     get_email_credentials,
     set_email_credentials,
 )
-from .db.email_triggers import get_email_trigger
 from .db.models import Organization
 from .db_session import get_db
+from .email_trigger import disable_trigger, disable_trigger_on_identity_change
 
 router = APIRouter(prefix="/api/org", tags=["org-settings"])
 
@@ -86,11 +86,7 @@ def set_email(
         )
     except Exception as exc:  # noqa: BLE001 -- e.g. a missing/colliding secrets key
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if prior_identity is not None and prior_identity != (req.host, req.username):
-        trigger = get_email_trigger(db, org.id)
-        if trigger is not None and trigger.enabled:
-            trigger.enabled = False
-            db.commit()
+    disable_trigger_on_identity_change(db, org.id, req.host, req.username, prior_identity)
     return {"connected": True, "host": req.host, "username": req.username}
 
 
@@ -124,7 +120,4 @@ def delete_email(
 ):
     """Disconnect the org's mailbox."""
     clear_email_credentials(db, org.id)
-    trigger = get_email_trigger(db, org.id)
-    if trigger is not None and trigger.enabled:
-        trigger.enabled = False
-        db.commit()
+    disable_trigger(db, org.id)

@@ -32,8 +32,8 @@ from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store
 from .db.email_credentials import get_email_credentials
+from .db.email_triggers import get_email_trigger
 from .db.models import EmailTrigger, Run, WorkflowRecord
-from .email_tools import build_org_imap_backend
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -133,17 +133,42 @@ def batch_size() -> int:
     return int(os.environ.get(BATCH_SIZE_ENV, "").strip() or 20)
 
 
-def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids):
+def disable_trigger(db: Session, org_id: int) -> None:
+    """Disable an org's trigger if it's currently enabled (mailbox cleared or
+    replaced). Shared by the self-service API (org_settings.py) and the
+    operator CLI (admin.py) so both mailbox-change paths behave the same."""
+    trigger = get_email_trigger(db, org_id)
+    if trigger is not None and trigger.enabled:
+        trigger.enabled = False
+        db.commit()
+
+
+def disable_trigger_on_identity_change(
+    db: Session,
+    org_id: int,
+    new_host: str,
+    new_username: str,
+    prior_identity,
+) -> None:
+    """disable_trigger(...) iff `prior_identity` (a prior (host, username)
+    tuple, or None if there was no prior mailbox) differs from the new one. A
+    port-only or password-only change is a rotation, not a replacement, and
+    leaves the trigger enabled."""
+    if prior_identity is not None and prior_identity != (new_host, new_username):
+        disable_trigger(db, org_id)
+
+
+def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, backend):
     """An UNCACHED workflow for (org_id, name) whose email tools are confined to
     `allowed_uids`. Mirrors main._get_workflow's DB-record build but substitutes
-    scoped email tools; not cached because the UID set is per-run. Raises on a
-    missing/invalid team or a missing mailbox connection."""
+    scoped email tools; not cached because the UID set is per-run. `backend` is
+    the IMAP backend the caller already resolved for this poll cycle -- reused
+    rather than re-fetched, so a mailbox swap mid-cycle can't produce a run
+    that detects mail on one mailbox and reads/drafts on another. Raises on a
+    missing/invalid team."""
     record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
     if record is None:
         raise ValueError(f"No team named '{name}' for org {org_id}")
-    backend = build_org_imap_backend(db, org_id)
-    if backend is None:
-        raise ValueError("No mailbox is connected for this org")
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
@@ -183,7 +208,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
 
     `get_workflow` is `build_trigger_workflow` injected by the loop (avoids a
     circular import and lets tests pass a stub):
-    `(name, db, org_id, allowed_uids) -> Workflow`.
+    `(name, db, org_id, allowed_uids, backend) -> Workflow`.
     """
     # Daily cap: reset on date rollover, and skip the mailbox entirely at cap.
     today = _today()
@@ -256,7 +281,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         db.commit()
         return
 
-    _start_triggered_run(db, trigger, new_uids, get_workflow)
+    _start_triggered_run(db, trigger, new_uids, get_workflow, backend)
 
 
 def _trigger_input(uids) -> str:
@@ -267,18 +292,18 @@ def _trigger_input(uids) -> str:
     )
 
 
-def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow) -> None:
+def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend) -> None:
     """Start ONE run over a bounded batch of the detected UIDs.
 
     Build the workflow FIRST (a build failure must consume no message and no
     cap), then persist a durable run row and advance state in one commit, then
     dispatch. `get_workflow` is `build_trigger_workflow(name, db, org_id,
-    allowed_uids) -> Workflow`.
+    allowed_uids, backend) -> Workflow`.
     """
     batch = sorted(new_uids)[:batch_size()]
     input_text = _trigger_input(batch)
     try:
-        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch))
+        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
         _logger.warning("email trigger: cannot build workflow %r for org %s: %s",
                         trigger.workflow_name, trigger.org_id, exc)

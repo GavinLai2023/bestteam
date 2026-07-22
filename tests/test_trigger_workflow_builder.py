@@ -55,7 +55,8 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
                 "email_draft_reply": lambda m, b: ""}
 
     monkeypatch.setattr(email_trigger, "make_email_tools", fake_make)
-    wf = email_trigger.build_trigger_workflow("triage", db, org_id, {42, 43})
+    backend = email_tools.build_org_imap_backend(db, org_id)
+    wf = email_trigger.build_trigger_workflow("triage", db, org_id, {42, 43}, backend)
     assert wf is not None
     assert captured["allowed"] == {42, 43}  # scoped to the batch
 
@@ -63,8 +64,9 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
 def test_build_trigger_workflow_raises_on_missing_team(db):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="h", username="u", password="pw")
+    backend = email_tools.build_org_imap_backend(db, org.id)
     with pytest.raises(Exception):
-        email_trigger.build_trigger_workflow("nope", db, org.id, {1})
+        email_trigger.build_trigger_workflow("nope", db, org.id, {1}, backend)
 
 
 def test_batch_size_default_and_override(monkeypatch):
