@@ -74,3 +74,19 @@ def test_registry_stays_within_bound_across_many_creates(monkeypatch):
 
     assert len(reg._runs) == 5
     assert len(reg._subscribers) == 5
+
+
+def test_subscribe_returns_none_for_an_evicted_run(monkeypatch):
+    # Before eviction existed, once get() returned non-None a run could never
+    # later disappear. Eviction breaks that invariant: a run can be evicted by
+    # a concurrent create() between a caller's existence check and its
+    # subscribe() call. subscribe() must degrade gracefully (None), not raise
+    # KeyError on the now-missing id.
+    monkeypatch.setattr(registry_module, "_MAX_RETAINED_RUNS", 1)
+    reg = RunRegistry()
+    run1 = reg.create("wf", "input 0")
+    _complete(reg, run1.id)
+    reg.create("wf", "input 1")  # evicts run1 (terminal, unsubscribed, over bound)
+    assert reg.get(run1.id) is None  # confirm it was actually evicted
+
+    assert reg.subscribe(run1.id) is None

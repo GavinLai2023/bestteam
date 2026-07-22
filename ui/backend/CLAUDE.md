@@ -144,7 +144,13 @@ WebSocket subscriber is never evicted. The autonomous-trigger activity list
 (`GET /api/org/email-trigger/activity`) is unaffected -- it reads the
 persisted `runs` table, not the registry; only the monitoring dashboard's
 `GET /api/runs/{id}` and its stream WebSocket can miss a very old, evicted
-run, which they already handle as "unknown run" (404 / WS 4404). Spec:
+run. `GET /api/runs/{id}`'s existing `run is None` check already covers
+this. The stream WebSocket needed one new check: eviction can land in the
+`await websocket.accept()` yield between `stream_run`'s initial
+`registry.get()` existence check and its later `registry.subscribe()` call,
+so `subscribe()` now returns `None` (instead of raising `KeyError`) for a
+run that's gone missing in that window, and `stream_run` closes 4404 on that
+`None` the same as any other unknown-run case. Spec:
 `docs/superpowers/specs/2026-07-22-run-registry-bounded-eviction-design.md`.
 
 ## Backend API (`ui/backend/`)

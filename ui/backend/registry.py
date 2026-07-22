@@ -103,10 +103,19 @@ class RunRegistry:
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
-    def subscribe(self, run_id: str) -> "asyncio.Queue[dict]":
-        """Return a queue pre-loaded with events seen so far, then live updates."""
+    def subscribe(self, run_id: str) -> "asyncio.Queue[dict] | None":
+        """Return a queue pre-loaded with events seen so far, then live
+        updates -- or None if `run_id` is unknown.
+
+        A caller that already checked `get(run_id)` can still see this: the
+        run may have been evicted (see `_evict_if_over_bound`) in the window
+        between that check and this call (e.g. across an `await` point). The
+        caller should treat None the same as a `get()` miss.
+        """
         subscriber_queue: "asyncio.Queue[dict]" = asyncio.Queue()
         with self._lock:
+            if run_id not in self._runs:
+                return None
             for event in self._runs[run_id].events:
                 subscriber_queue.put_nowait(event)
             self._subscribers[run_id].append((asyncio.get_running_loop(), subscriber_queue))

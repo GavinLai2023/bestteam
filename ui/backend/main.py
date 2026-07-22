@@ -553,6 +553,13 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
 
     await websocket.accept()
     subscriber_queue = registry.subscribe(run_id)
+    if subscriber_queue is None:
+        # The run existed at the check above but was evicted (bounded
+        # RunRegistry eviction, see registry.py) before subscribe() ran --
+        # same close code as "never existed", for the same reason: no
+        # cross-org/eviction-timing oracle for a probing client.
+        await websocket.close(code=4404)
+        return
     try:
         while True:
             event = await subscriber_queue.get()
