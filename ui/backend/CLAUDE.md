@@ -105,8 +105,10 @@ only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
 "workflow" | None`) distinguishes a connectivity fault, which auto-clears on
 the next successful mailbox check, from a workflow/dispatch fault, which
 still persists until a real successful dispatch (F5, unchanged). A dispatch-
-submission failure now marks the run failed instead of leaving the overlap
-guard wedged. `BESTTEAM_TRIGGER_*` env values are validated at startup
+submission failure now marks the run failed (`last_error_kind = "workflow"`,
+so it stays sticky the same way, rather than getting auto-cleared by an
+unrelated successful mailbox check) instead of leaving the overlap guard
+wedged. `BESTTEAM_TRIGGER_*` env values are validated at startup
 (`email_trigger.validate_trigger_env()`, called from `main.py` beside the
 `BESTTEAM_SECRET_KEY` guard) instead of being able to silently kill the
 poller mid-loop. Deferred: `RunRegistry` eviction and awaiting in-flight
