@@ -62,6 +62,19 @@ class RunRegistry:
             self._evict_if_over_bound()
         return run
 
+    def discard(self, run_id: str) -> None:
+        """Drop a run that was created but never dispatched.
+
+        The autonomous email trigger optimistically creates a run before its
+        final compare-and-swap advance; if that CAS finds the trigger was
+        disabled in the same cycle, the run is abandoned. Without this it would
+        linger in `_runs` as a `running` entry the eviction pass never reclaims.
+        Safe (no-op) if the id is unknown.
+        """
+        with self._lock:
+            self._runs.pop(run_id, None)
+            self._subscribers.pop(run_id, None)
+
     def _evict_if_over_bound(self) -> None:
         """Evict the oldest terminal, subscriber-free runs until back within
         `_MAX_RETAINED_RUNS`. Must be called with `self._lock` already held.
