@@ -310,6 +310,45 @@ def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     assert trigger.last_run_id is None
 
 
+def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkeypatch):
+    # The mid-build test above disables BEFORE the poller's enabled-check. This
+    # covers the narrower window the check-then-commit split left open: a disable
+    # landing AFTER the check but before the run is committed. We inject it at
+    # registry.create -- called inside that exact window -- by disabling from a
+    # concurrent session there. The atomic compare-and-swap on `enabled` must
+    # still refuse to advance the batch/cap or dispatch, and must leak no run.
+    from ui.backend.db import session_factory
+    from ui.backend.db.models import EmailTrigger
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    Session2 = session_factory(db.get_bind())
+    real_create = email_trigger.registry.create
+    created_ids = []
+
+    def create_then_disable(*a, **k):
+        run = real_create(*a, **k)
+        created_ids.append(run.id)
+        with Session2() as db2:
+            other = db2.query(EmailTrigger).filter_by(org_id=org.id).one()
+            other.enabled = False
+            db2.commit()
+        return run
+
+    monkeypatch.setattr(email_trigger.registry, "create", create_then_disable)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert recorder.calls == []       # never dispatched
+    assert trigger.last_uid == 41     # batch NOT advanced
+    assert trigger.runs_today == 0    # cap NOT burned
+    assert trigger.last_run_id is None
+    assert email_trigger.registry.get(created_ids[0]) is None  # no leaked run
+
+
 def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
     # Fix 1: poll_org must not let workflow-building re-fetch credentials --
     # a credential change mid-cycle must not produce a run that detects mail

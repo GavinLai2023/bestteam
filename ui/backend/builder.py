@@ -276,7 +276,7 @@ def list_builder_sessions(
     """List the org's builder sessions (most recent first), for an "AI teams
     I've built" list page. A session with status 'deployed' has a live
     WorkflowRecord matching specification_json['name']."""
-    return {"sessions": [_session_to_dict(s) for s in list_sessions(db, org_id=org.id)]}
+    return {"sessions": [_session_to_dict(s, db, org.id) for s in list_sessions(db, org_id=org.id)]}
 
 
 @router.get("/{session_id}")

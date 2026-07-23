@@ -278,6 +278,17 @@ def test_session_response_carries_uses_email(client):
     assert client.get(f"/api/builder/sessions/{sid2}").json()["uses_email"] is False
 
 
+def test_session_list_carries_uses_email(client):
+    # The list endpoint must resolve uses_email too -- it needs db + org context.
+    # Regressing to _session_to_dict(s) without them silently reports False for
+    # every listed session (a future "needs mailbox" badge would read wrong).
+    email_sid = _make_session(_EMAIL_SPEC)
+    plain_sid = _make_session(_PLAIN_SPEC)
+    sessions = {s["id"]: s for s in client.get("/api/builder/sessions").json()["sessions"]}
+    assert sessions[email_sid]["uses_email"] is True
+    assert sessions[plain_sid]["uses_email"] is False
+
+
 def test_mutation_response_carries_uses_email(client):
     # The flag must be computed on mutation responses too, not just GET -- else
     # a refine/save drops the connector while deploy still requires a mailbox.

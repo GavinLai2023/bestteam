@@ -91,7 +91,13 @@ UNCACHED workflow (`email_trigger.build_trigger_workflow`) whose email tools
 are UID-scoped (`make_email_tools(backend, allowed_uids=)`), so the triage
 skill's `email_find` can only see that batch. State advances (baseline, cap)
 only after the workflow builds and a durable `runs` row is written; a build
-failure consumes nothing. Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
+failure consumes nothing. The advance is a compare-and-swap
+(`UPDATE ... WHERE enabled = 1`): if the customer/operator disabled the trigger
+or replaced the mailbox (a replacement disables via
+`disable_trigger_on_identity_change`) between the enabled-check and the commit,
+the update matches no row and the built run is discarded
+(`registry.discard`) rather than dispatched against a just-disconnected mailbox.
+Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
 
 Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
 resolves the IMAP backend once per cycle and threads it into

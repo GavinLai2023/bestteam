@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, List, Tuple
 
 from cryptography.fernet import InvalidToken
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from bestteam.core.loader import _build_workflow
@@ -363,22 +364,6 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
         db.commit()  # NB: last_uid / runs_today deliberately NOT advanced
         return
-    # Re-check against the DB: org_settings.py/admin.py disable the trigger
-    # in their own commit, separate from the credential write that may have
-    # landed while this workflow was being built (the mailbox has already
-    # changed by the time `backend`/`workflow` were resolved). If the
-    # customer/operator disabled it in that window, discard the built run
-    # rather than dispatching against a mailbox they just
-    # disconnected/replaced -- this shrinks that race to the width of the
-    # refresh below instead of up to a full poll interval.
-    db.refresh(trigger)
-    if not trigger.enabled:
-        _logger.info(
-            "email trigger: org %s disabled while this cycle's run was building -- discarding",
-            trigger.org_id,
-        )
-        db.commit()
-        return
     run = registry.create(
         trigger.workflow_name, input_text, org_id=trigger.org_id,
         username=TRIGGER_USERNAME,
@@ -389,13 +374,38 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
     )
+    # Compare-and-swap: advance the batch/cap and record this run ONLY if the
+    # trigger is still enabled. org_settings.py/admin.py disable the trigger in
+    # their own commit when the customer/operator disconnects or replaces the
+    # mailbox (a replacement disables via disable_trigger_on_identity_change),
+    # separate from the credential write that may have landed while this
+    # workflow was being built. Guarding the advance and the enabled-check in
+    # ONE statement closes the read-then-commit window a separate refresh would
+    # leave open: if a disable landed in it, the UPDATE matches no row and we
+    # never dispatch against a mailbox they just disconnected/replaced.
+    advanced = db.execute(
+        update(EmailTrigger)
+        .where(EmailTrigger.id == trigger.id, EmailTrigger.enabled.is_(True))
+        .values(
+            last_uid=max(batch),
+            runs_today=EmailTrigger.runs_today + 1,
+            last_run_id=run.id,
+            last_error=None,  # a run is going out: clear any prior fault
+            last_error_kind=None,
+        )
+    ).rowcount
+    if not advanced:
+        registry.discard(run.id)
+        db.commit()  # persist last_checked_at; batch/cap deliberately NOT advanced
+        db.refresh(trigger)
+        _logger.info(
+            "email trigger: org %s disabled while this cycle's run was building -- discarding",
+            trigger.org_id,
+        )
+        return
     db.add(run_row)
-    trigger.last_uid = max(batch)
-    trigger.runs_today += 1
-    trigger.last_run_id = run.id
-    trigger.last_error = None  # a run is going out: clear any prior fault
-    trigger.last_error_kind = None
     db.commit()
+    db.refresh(trigger)  # resync the ORM object with the values the CAS wrote
     try:
         _executor.submit(
             run_in_background, run.id, workflow, input_text,
