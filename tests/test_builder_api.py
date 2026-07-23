@@ -437,6 +437,28 @@ def test_deploy_requires_specification(client):
     assert resp.status_code == 400
 
 
+def test_deploy_is_atomic_across_workflow_and_session_updates(client, monkeypatch):
+    # deploy_session persists a WorkflowRecord and then marks the
+    # BuilderSession deployed as two separate writes. A failure completing
+    # the second must not leave a durably-committed "deployed" WorkflowRecord
+    # behind -- both belong to one transaction (P1-14).
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    from ui.backend import builder
+    monkeypatch.setattr(
+        builder, "update_session", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+
+    with pytest.raises(RuntimeError):
+        client.post(f"/api/builder/sessions/{session_id}/deploy")
+
+    resp = client.get(
+        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+    )
+    assert resp.status_code == 404
+
+
 def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})

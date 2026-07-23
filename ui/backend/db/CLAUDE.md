@@ -26,11 +26,11 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `raw` dict (the technical fields from `KnowledgeBaseSpec`/`SkillSpec`/
   `Specification.to_raw()`, see `core/specification.py`); `workflows.status`
   tracks `draft` / `ready_for_testing` / `deployed`.
-- `agents` / `teams` — **vestigial**. `AgentRecord`/`TeamRecord` still exist
-  here, but nothing reads them and their `/api/config` routes were removed: a
+- `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
+  read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and
   `_build_workflow` accepts only `extra_tools`/`extra_skills`, so a standalone
-  row could never reach a run. Kept (empty) rather than migrated away.
+  row could never reach a run. No data was ever written to either table.
 - `org_email_credentials` — one org's mailbox connection for the email tools
   (unique `org_id`; IMAP host/port/username + encrypted password + optional
   drafts folder). The password is a Fernet token (`secret_store`), never
