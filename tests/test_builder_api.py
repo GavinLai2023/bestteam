@@ -161,6 +161,17 @@ def test_builder_sessions_are_org_scoped(client):
     assert [s["id"] for s in client.get("/api/builder/sessions").json()["sessions"]] == [session_id]
 
 
+def test_specification_generation_with_fake_model_returns_clear_error(client):
+    # The exact failure a demo/non-admin user hit: the wizard fell back to a
+    # fake model, so generation raised the cryptic "with_structured_output is
+    # not implemented". It must now be a clean 400 with an actionable message,
+    # not a 502.
+    sid = client.post("/api/builder/sessions", json={"intent_text": "handle my email"}).json()["id"]
+    resp = client.post(f"/api/builder/sessions/{sid}/specification", json={"model": "fake:ok"})
+    assert resp.status_code == 400
+    assert "real AI model" in resp.json()["detail"]
+
+
 def test_deploy_stamps_workflow_with_session_org(client):
     from helpers import get_org_id, open_test_db
     from ui.backend.db.models import WorkflowRecord

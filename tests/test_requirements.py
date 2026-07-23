@@ -68,6 +68,20 @@ def test_generate_requirements_includes_feedback_in_prompt():
     assert "We also use Zendesk." in seen_messages[0][1].content
 
 
+def test_generate_requirements_with_fake_model_raises_clear_error():
+    # A `fake:` chat model can't do structured output; instead of the cryptic
+    # "with_structured_output is not implemented for this model", the customer
+    # should get a clear, actionable message.
+    import pytest
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    from bestteam.exceptions import ConfigurationError
+
+    fake = FakeListChatModel(responses=["anything"])
+    with pytest.raises(ConfigurationError, match="real AI model"):
+        generate_requirements(fake, "Help me with my email.")
+
+
 def test_requirements_to_prompt_renders_sections():
     requirements = Requirements(
         summary="Faster support.",

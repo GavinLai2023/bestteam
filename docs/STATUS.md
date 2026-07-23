@@ -183,6 +183,31 @@
   `_MAX_RETAINED_RUNS` (1000, hardcoded). Spec:
   `2026-07-22-run-registry-bounded-eviction-design.md`.
 
+- Wizard model-catalog access fix (merged to `main`, PR #20
+  `fix/wizard-model-catalog-access`, commits `4d1e39b`+`78f1d82`): non-admin
+  org users hit "Model call failed: with_structured_output is not implemented"
+  on "start building my team" because the model catalog was served only from
+  the admin-only endpoint — the wizard's fetch 403'd, silently fell back to a
+  `fake:ok` model, and structured-output generation then crashed. Fix: a
+  non-admin `GET /api/model-catalog` read endpoint (`crud.public_router`, any
+  authenticated org member) with the frontend repointed to it, plus the
+  underlying `NotImplementedError` from a `fake:` model translated to a clear
+  `ConfigurationError` ("needs a real AI model that can produce structured
+  output…") in `requirements.py`/`specification.py` so a misconfigured model
+  never surfaces the cryptic message again. TDD (5 tests); 505 backend tests +
+  frontend lint/build green. NOTE: the wizard now reaches a real model, which
+  still needs a valid provider API key on the instance to actually generate.
+
+  Follow-up (commit `302cf12`, same PR): independent review found that the
+  catalog fetch's own loading/failure states were never gated on -- the Start
+  button (and the interview-upload path) stayed clickable while the catalog
+  was still loading or had failed to fetch, silently falling through
+  `pickDefaultModel([])` to `fake:ok` and hitting the same "unsupported
+  model" 400 with no visible model picker, no retry, and no recovery short
+  of a page reload. `useModelCatalog` now exposes `failed`/`retry`;
+  `IntentPage` disables generation while loading, failed, or genuinely empty
+  (no real model configured yet), with a retry banner in each case.
+
 - Wizard mailbox-connect UX fix (PR #21 `fix/wizard-email-connect-ux`,
   **open / CI green, pending merge**): raw socket/OS errors (e.g.
   `[WinError 10060] ...`) surfaced verbatim to non-technical customers
