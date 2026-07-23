@@ -19,7 +19,12 @@ const ACCEPTED_AUDIO = '.mp3,.mp4,.m4a,.wav,.webm,.mpeg,.mpga'
 
 export default function IntentPage() {
   const navigate = useNavigate()
-  const { entries } = useModelCatalog()
+  const { entries, loading: catalogLoading, failed: catalogFailed, retry: retryCatalog } = useModelCatalog()
+  // A fetch failure and a successfully-loaded-but-empty catalog (no real
+  // model configured yet) both mean "there's no real model to generate
+  // with" -- neither should silently fall through to pickDefaultModel's
+  // `fake:ok` last resort in the customer-facing wizard.
+  const catalogUnavailable = catalogFailed || (!catalogLoading && entries.length === 0)
   const [intentText, setIntentText] = useState('')
   const [asIsText, setAsIsText] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -34,7 +39,7 @@ export default function IntentPage() {
 
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0]
-    if (!file) return
+    if (!file || catalogLoading || catalogUnavailable) return
     e.target.value = '' // reset so the same file can be re-selected
 
     setUploadError(null)
@@ -73,7 +78,7 @@ export default function IntentPage() {
   }
 
   const start = async () => {
-    if (!intentText.trim() || submitting) return
+    if (!intentText.trim() || submitting || catalogLoading || catalogUnavailable) return
     setSubmitting(true)
     setError(null)
     const model = pickDefaultModel(entries)
@@ -107,6 +112,7 @@ export default function IntentPage() {
   }
 
   const retry = () => {
+    if (catalogLoading || catalogUnavailable) return
     setError(null)
     setSubmitting(true)
     if (sessionId) {
@@ -126,6 +132,19 @@ export default function IntentPage() {
         language is perfect.
       </p>
 
+      {catalogUnavailable && (
+        <div className="banner banner-error">
+          {catalogFailed
+            ? "Couldn't load the available AI models. Check your connection and try again."
+            : 'No AI models are available yet. Contact your administrator, or try again.'}
+          <div className="wizard-actions" style={{ marginTop: 8 }}>
+            <button className="btn btn-secondary" onClick={retryCatalog}>
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="banner banner-error">
           {error}
@@ -142,7 +161,7 @@ export default function IntentPage() {
           className="btn btn-secondary"
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={submitting || isUploading}
+          disabled={submitting || isUploading || catalogLoading || catalogUnavailable}
         >
           {UPLOAD_LABELS[uploadStage] ?? (uploadStage === 'done' ? 'Replace recording' : 'Upload interview recording')}
         </button>
@@ -199,8 +218,16 @@ export default function IntentPage() {
       </div>
 
       <div className="wizard-actions">
-        <button className="btn btn-primary" onClick={start} disabled={!intentText.trim() || submitting || isUploading}>
-          {submitting ? STAGE_LABELS[stage] ?? 'Starting…' : 'Start building my team'}
+        <button
+          className="btn btn-primary"
+          onClick={start}
+          disabled={!intentText.trim() || submitting || isUploading || catalogLoading || catalogUnavailable}
+        >
+          {submitting
+            ? STAGE_LABELS[stage] ?? 'Starting…'
+            : catalogLoading
+              ? 'Loading available models…'
+              : 'Start building my team'}
         </button>
       </div>
     </div>
