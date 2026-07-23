@@ -28,7 +28,8 @@ import argparse
 import getpass
 from typing import Optional, Sequence
 
-from .db.email_credentials import clear_email_credentials, set_email_credentials
+from . import email_trigger
+from .db.email_credentials import clear_email_credentials, get_email_credentials, set_email_credentials
 from .db.models import User
 from .db.orgs import (
     DEFAULT_ORG_NAME,
@@ -198,6 +199,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     parser.error(f"Login test failed, not saved: {exc}")
                 except OSError as exc:
                     parser.error(f"Could not reach '{args.host}:{args.port}', not saved: {exc}")
+            prior = get_email_credentials(db, org.id)
+            prior_identity = (prior.host, prior.username) if prior is not None else None
             try:
                 set_email_credentials(
                     db, org.id, host=args.host, username=args.user, password=password,
@@ -205,6 +208,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             except Exception as exc:  # noqa: BLE001 -- surface a clear CLI error (e.g. missing key)
                 parser.error(str(exc))
+            email_trigger.disable_trigger_on_identity_change(
+                db, org.id, args.host, args.user, prior_identity
+            )
             print(f"Connected mailbox '{args.user}' for organization '{args.org}'.")
             return 0
         if args.command == "clear-email":
@@ -212,6 +218,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if org is None:
                 parser.error(f"Unknown organization '{args.org}'.")
             removed = clear_email_credentials(db, org.id)
+            email_trigger.disable_trigger(db, org.id)
             print(
                 f"Disconnected mailbox for '{args.org}'." if removed
                 else f"No mailbox was connected for '{args.org}'."

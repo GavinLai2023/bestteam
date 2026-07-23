@@ -92,14 +92,20 @@ def run_in_background(
             # always exists; its terminal status/output are updated below. This
             # sits inside the try so a persistence failure still yields a
             # terminal event instead of leaving the run stuck "running" (CR-003).
-            run_row = Run(
-                id=run_id,
-                workflow=getattr(workflow, "name", ""),
-                input=input,
-                org_id=org_id,
-                username=username,
-            )
-            db.add(run_row)
+            run_row = db.get(Run, run_id)
+            if run_row is None:
+                run_row = Run(
+                    id=run_id,
+                    workflow=getattr(workflow, "name", ""),
+                    input=input,
+                    org_id=org_id,
+                    username=username,
+                )
+                db.add(run_row)
+            else:
+                # A caller (the autonomous trigger) already persisted this row
+                # before dispatch as a durable activity record; keep it.
+                run_row.workflow = getattr(workflow, "name", "") or run_row.workflow
             db.commit()
         for event in workflow.stream(input, user_id=user_id, memory=memory):
             payload = dataclasses.asdict(event)
