@@ -253,7 +253,14 @@ def generate_specification(
     fails, the `ConfigurationError` is turned into feedback appended to the
     conversation and the architect tries again, up to `max_attempts` times.
     """
-    structured_model = model.with_structured_output(Specification)
+    try:
+        structured_model = model.with_structured_output(Specification)
+    except NotImplementedError as exc:
+        raise ConfigurationError(
+            "The Team Builder needs a real AI model that can produce structured "
+            "output; the selected model can't (for example, a demo 'fake:' model). "
+            "Choose a real model to design your team."
+        ) from exc
 
     messages: List[BaseMessage] = [
         SystemMessage(content=_ARCHITECT_SYSTEM_PROMPT),

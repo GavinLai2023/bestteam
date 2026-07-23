@@ -161,3 +161,30 @@ def test_model_catalog_put_rejects_invalid_shape(client):
     resp = client.put("/api/config/model-catalog/openai:gpt-4o-mini", json={"tier": "fast"})
 
     assert resp.status_code == 400
+
+
+def test_org_user_can_read_model_catalog_for_wizard(client):
+    # The wizard runs as a non-admin org user; it needs the model catalog to
+    # pick a real model. If it can't read it, the frontend falls back to a
+    # fake model and team generation fails. So a plain org member must be able
+    # to GET the catalog (read-only, no admin).
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    from helpers import open_test_db
+
+    with open_test_db() as db:
+        seed_default_catalog(db)
+
+    org_token = create_user_and_login(client, username="customer", org="acme")
+    resp = client.get(
+        "/api/model-catalog", headers={"Authorization": f"Bearer {org_token}"}
+    )
+    assert resp.status_code == 200
+    specs = [entry["spec"] for entry in resp.json()]
+    assert "openai:gpt-4o-mini" in specs  # a real model, so no fake fallback
+
+
+def test_read_model_catalog_requires_authentication(client):
+    assert client.get(
+        "/api/model-catalog", headers={"Authorization": "Bearer nope"}
+    ).status_code == 401

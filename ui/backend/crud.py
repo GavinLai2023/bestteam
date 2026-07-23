@@ -39,7 +39,7 @@ from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError
 from bestteam.tools import REGISTRY
 
-from .auth_api import get_current_admin
+from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .db.models import (
     KnowledgeBaseRecord,
@@ -568,3 +568,16 @@ def delete_model_catalog_entry(spec: str, db: Session = Depends(get_db)) -> Resp
 
 
 router.include_router(_model_catalog)
+
+
+# Read-only model-catalog access for ANY authenticated user (not just admins).
+# The Team Builder wizard runs as an org member and needs the catalog to pick a
+# real model; without it the frontend falls back to a fake model and team
+# generation fails. Kept separate from the admin-gated `router` above -- this
+# exposes the list only, no CRUD.
+public_router = APIRouter(prefix="/api", tags=["model-catalog"], dependencies=[Depends(get_current_user)])
+
+
+@public_router.get("/model-catalog")
+def list_model_catalog_public(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
+    return [_model_catalog_entry_to_dict(entry) for entry in list_entries(db)]
