@@ -141,6 +141,27 @@
   bounded the IMAP port. Three code-review rounds (12 findings) resolved; 500
   tests, green CI. Spec: `2026-07-18-wizard-email-connect-design.md`.
 
+- Wizard mailbox-connect UX fix (PR #21 `fix/wizard-email-connect-ux`,
+  **open / CI green, pending merge**): raw socket/OS errors (e.g.
+  `[WinError 10060] ...`) surfaced verbatim to non-technical customers
+  testing/saving a mailbox connection. `_friendly_connect_error` now maps
+  timeout/refusal/login/DNS failures to plain-language, actionable
+  messages; a missing `BESTTEAM_SECRETS_KEY` or other unexpected save
+  failure is logged server-side and reported to the customer as "contact
+  your administrator" (503/500), never the raw exception. Port/drafts
+  fields moved under an "Advanced settings" disclosure to prevent
+  scroll-wheel port mistakes.
+
+  Follow-up (commit `a88aff4`, same PR): independent review found
+  `check_host_allowed()` (the shared SSRF guard) still embedded the raw OS
+  resolver exception and the resolved private/internal IP directly into its
+  `ConfigurationError` messages, which reach the customer via two paths
+  `_friendly_connect_error` doesn't cover — the preliminary host-validation
+  check (`_reject_private_host`, outside `_friendly_connect_error` entirely)
+  and its own non-login `ConfigurationError` passthrough branch. Sanitized
+  at the source in `http_client.py`: the customer-supplied hostname stays in
+  the message, the raw exception text and resolved IP don't.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
