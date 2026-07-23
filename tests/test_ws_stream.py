@@ -101,6 +101,33 @@ def test_ws_stream_refuses_cross_org_run_with_unknown_run_code(client):
     assert exc_info.value.code == 4404
 
 
+def test_ws_stream_closes_gracefully_if_run_evicted_between_check_and_subscribe(client, monkeypatch):
+    # RunRegistry eviction can remove a terminal, subscriber-free run between
+    # stream_run's initial registry.get() check and its later subscribe()
+    # call (the intervening `await websocket.accept()` is a real yield point
+    # a concurrent create() could land in). Simulate that race deterministically:
+    # the run vanishes from the registry as a side effect of the same get()
+    # call that finds it, so the ownership check still passes but subscribe()
+    # sees a genuinely missing id.
+    run = _completed_run()
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
+
+    real_get = runtime.registry.get
+
+    def get_then_evict(run_id):
+        result = real_get(run_id)
+        runtime.registry._runs.pop(run_id, None)
+        runtime.registry._subscribers.pop(run_id, None)
+        return result
+
+    monkeypatch.setattr(runtime.registry, "get", get_then_evict)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
+            ws.receive_json()
+    assert exc_info.value.code == 4404
+
+
 def test_ws_stream_allows_platform_admin_passthrough(client):
     run = _completed_run()
     create_user_and_login(client, username="op", org=None, admin=True)

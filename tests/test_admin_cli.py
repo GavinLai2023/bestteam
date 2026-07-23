@@ -276,3 +276,63 @@ def test_set_email_test_flag_rejects_bad_login(session_local, secrets_key, monke
         admin_cli.main(["set-email", "acme", "--host", "h", "--user", "u", "--test"])
     with session_local() as db:
         assert get_email_credentials(db, get_org_by_name(db, "acme").id) is None
+
+
+# ---------------------------------------------------------------------------
+# Trigger disable on mailbox change (mirrors org_settings.py's coverage,
+# applied to the operator CLI path -- finding #1's CLI-parity gap)
+# ---------------------------------------------------------------------------
+
+def test_set_email_disables_trigger_on_host_change(session_local, secrets_key, monkeypatch):
+    from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
+    from ui.backend.db.orgs import get_org_by_name
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+                             last_uid=10, uidvalidity=1)
+
+    admin_cli.main(["set-email", "acme", "--host", "imap.other.com", "--user", "u@acme.com"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        assert get_email_trigger(db, org.id).enabled is False
+
+
+def test_set_email_keeps_trigger_enabled_on_password_only_rotation(session_local, secrets_key, monkeypatch):
+    from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
+    from ui.backend.db.orgs import get_org_by_name
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch, "old-pw")
+    admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+                             last_uid=10, uidvalidity=1)
+
+    _patch_password(monkeypatch, "new-pw")
+    admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        assert get_email_trigger(db, org.id).enabled is True
+
+
+def test_clear_email_disables_trigger(session_local, secrets_key, monkeypatch):
+    from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
+    from ui.backend.db.orgs import get_org_by_name
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+                             last_uid=10, uidvalidity=1)
+
+    admin_cli.main(["clear-email", "acme"])
+    with session_local() as db:
+        org = get_org_by_name(db, "acme")
+        assert get_email_trigger(db, org.id).enabled is False

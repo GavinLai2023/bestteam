@@ -71,6 +71,51 @@ every endpoint follows:
 - The isolation test net: `tests/test_org_isolation.py` plus per-surface
   tests in test_crud_api/test_ws_stream/test_builder_api.
 
+## Autonomous email trigger (`email_trigger.py` + `email_trigger_api.py`)
+
+Opt-in per org (wizard Deploy page; `/api/org/email-trigger`): an asyncio
+poller started from `main._lifespan` checks each enabled org's mailbox every
+`BESTTEAM_TRIGGER_POLL_SECONDS` (default 120) and starts ONE run per cycle
+covering that cycle's new messages, attributed to the sentinel username
+`email-trigger`. Dedup is a per-org IMAP UID baseline in `email_triggers`
+(never UNSEEN -- the toolkit never marks mail seen); the baseline is set to
+the mailbox's current max UID at enable time so the backlog never triggers.
+Guards: per-org daily cap (`BESTTEAM_TRIGGER_DAILY_CAP`, default 50),
+platform kill switch (`BESTTEAM_TRIGGERS_DISABLED=1`), overlap guard (skips a
+cycle while the previous triggered run is still `running`), and per-org
+try/except so one org's mail-server failure never stops the loop (stored as
+customer-readable `last_error` on the row). Single-process poller: if the
+backend ever runs multiple workers, it needs a leader lock (known limitation).
+An automatic run is confined to the poller-detected UID batch: it runs an
+UNCACHED workflow (`email_trigger.build_trigger_workflow`) whose email tools
+are UID-scoped (`make_email_tools(backend, allowed_uids=)`), so the triage
+skill's `email_find` can only see that batch. State advances (baseline, cap)
+only after the workflow builds and a durable `runs` row is written; a build
+failure consumes nothing. Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
+
+Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
+resolves the IMAP backend once per cycle and threads it into
+`build_trigger_workflow` instead of letting it re-fetch credentials
+independently -- closes a race where a mid-cycle mailbox swap could detect
+mail on one mailbox and build tools against another. `admin.py`'s
+`set-email`/`clear-email` now call the same `email_trigger.disable_trigger`/
+`disable_trigger_on_identity_change` helpers as `org_settings.py`, so the
+operator CLI path disables the trigger on mailbox change too (previously
+only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
+"workflow" | None`) distinguishes a connectivity fault, which auto-clears on
+the next successful mailbox check, from a workflow/dispatch fault, which
+still persists until a real successful dispatch (F5, unchanged). A dispatch-
+submission failure now marks the run failed (`last_error_kind = "workflow"`,
+so it stays sticky the same way, rather than getting auto-cleared by an
+unrelated successful mailbox check) instead of leaving the overlap guard
+wedged. `BESTTEAM_TRIGGER_*` env values are validated at startup
+(`email_trigger.validate_trigger_env()`, called from `main.py` beside the
+`BESTTEAM_SECRET_KEY` guard) instead of being able to silently kill the
+poller mid-loop. Deferred: awaiting in-flight polling threads on shutdown (see
+`docs/STATUS.md`, Known issues). `RunRegistry` eviction (the other
+previously-deferred item) is no longer deferred -- see "Sync-to-async
+streaming bridge" above.
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The
@@ -88,6 +133,25 @@ the WebSocket handler's `queue.get()` blocked forever. (A `queue.SimpleQueue`
 + `asyncio.to_thread(queue.get)` variant was tried next and rejected: a
 blocking `to_thread` call isn't cancellable, so it hung the same way when a
 client disconnected before the run finished.)
+
+`RunRegistry` bounds its own growth (`_MAX_RETAINED_RUNS = 1000`, hardcoded
+in `registry.py`): every `create()` call evicts the oldest terminal
+(non-`running`), subscriber-free runs until back within the bound. Added
+because the autonomous email trigger creates runs unattended and
+indefinitely, unlike the previous purely human-click-triggered regime this
+registry was originally sized for. A `running` run or one with an active
+WebSocket subscriber is never evicted. The autonomous-trigger activity list
+(`GET /api/org/email-trigger/activity`) is unaffected -- it reads the
+persisted `runs` table, not the registry; only the monitoring dashboard's
+`GET /api/runs/{id}` and its stream WebSocket can miss a very old, evicted
+run. `GET /api/runs/{id}`'s existing `run is None` check already covers
+this. The stream WebSocket needed one new check: eviction can land in the
+`await websocket.accept()` yield between `stream_run`'s initial
+`registry.get()` existence check and its later `registry.subscribe()` call,
+so `subscribe()` now returns `None` (instead of raising `KeyError`) for a
+run that's gone missing in that window, and `stream_run` closes 4404 on that
+`None` the same as any other unknown-run case. Spec:
+`docs/superpowers/specs/2026-07-22-run-registry-bounded-eviction-design.md`.
 
 ## Backend API (`ui/backend/`)
 

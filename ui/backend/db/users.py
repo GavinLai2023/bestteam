@@ -25,6 +25,9 @@ def create_user(db: Session, username: str, password: str, org_id: Optional[int]
     second member would mean unprivileged co-management of the org's mailbox.
     Platform operators (`org_id is None`) are exempt -- there can be several.
     """
+    if username == "email-trigger":
+        raise ValueError("'email-trigger' is reserved for autonomous runs.")
+
     if get_user_by_username(db, username) is not None:
         raise ValueError(f"Username '{username}' is already taken")
 

@@ -361,25 +361,42 @@ class _ImapBackend:
             if typ != "OK" or not data or not data[0]:
                 return []
             uids = data[0].split()[-_MAX_RESULTS:]
-            messages = []
-            for uid in uids:
-                typ, msg_data = conn.uid(
-                    "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
-                )
-                raw = _imap_fetch_bytes(typ, msg_data)
-                if raw is None:
-                    continue
-                headers = message_from_bytes(raw, policy=policy.default)
-                messages.append(
-                    {
-                        "id": uid.decode(),
-                        "from": str(headers.get("From", "")),
-                        "subject": str(headers.get("Subject", "")),
-                        "date": str(headers.get("Date", "")),
-                        "snippet": "",
-                    }
-                )
-            return messages
+            return self._fetch_summaries(conn, uids)
+        finally:
+            _imap_logout(conn)
+
+    def _fetch_summaries(self, conn, uids) -> List[Dict[str, Any]]:
+        messages = []
+        for uid in uids:
+            if isinstance(uid, int):
+                uid = str(uid)
+            if isinstance(uid, str):
+                uid = uid.encode()
+            typ, msg_data = conn.uid(
+                "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+            )
+            raw = _imap_fetch_bytes(typ, msg_data)
+            if raw is None:
+                continue
+            headers = message_from_bytes(raw, policy=policy.default)
+            messages.append(
+                {
+                    "id": uid.decode(),
+                    "from": str(headers.get("From", "")),
+                    "subject": str(headers.get("Subject", "")),
+                    "date": str(headers.get("Date", "")),
+                    "snippet": "",
+                }
+            )
+        return messages
+
+    def summaries_for(self, uids) -> List[Dict[str, Any]]:
+        """Header summaries for exactly `uids` (read-only, no search) -- the
+        autonomous-trigger path, where the batch is already known."""
+        conn = self._connect()
+        try:
+            conn.select("INBOX", readonly=True)
+            return self._fetch_summaries(conn, uids)
         finally:
             _imap_logout(conn)
 
@@ -490,12 +507,10 @@ def _extract_text_body(msg: EmailMessage) -> str:
 # functions below) or a backend built from per-org stored credentials
 # (`make_email_tools`, used by the UI backend).
 
-def _find_impl(backend, query: str) -> str:
-    messages = backend.find(query.strip())
-    if not messages:
-        if query.strip():
-            return f"No emails found matching '{query.strip()}'."
-        return "No unread emails in the inbox."
+_OUT_OF_BATCH = "That message isn't part of this batch of new mail."
+
+
+def _format_summaries(messages) -> str:
     lines = []
     for m in messages:
         fields = [m["id"], m["from"], m["subject"], m["date"]]
@@ -504,6 +519,15 @@ def _find_impl(backend, query: str) -> str:
             fields.append(snippet[:_SNIPPET_CHARS])
         lines.append(" · ".join(str(field) for field in fields))
     return f"Found {len(messages)} message(s):\n" + "\n".join(lines)
+
+
+def _find_impl(backend, query: str) -> str:
+    messages = backend.find(query.strip())
+    if not messages:
+        if query.strip():
+            return f"No emails found matching '{query.strip()}'."
+        return "No unread emails in the inbox."
+    return _format_summaries(messages)
 
 
 def _read_impl(backend, message_id: str) -> str:
@@ -592,24 +616,38 @@ def email_draft_reply(message_id: str, body: str) -> str:
     return _draft_impl(_get_backend(), message_id, body)
 
 
-def make_email_tools(backend) -> Dict[str, Any]:
-    """Return the three email tools bound to a specific backend instance.
+def make_email_tools(backend, allowed_uids=None) -> Dict[str, Any]:
+    """Return the three email tools bound to `backend`.
 
-    Same names and docstrings the model sees for the env-based tools, so a
-    workflow references `email_find`/`email_read`/`email_draft_reply` the same
-    way whether the mailbox comes from env or from per-org stored credentials.
+    `allowed_uids=None` -> unchanged behavior. A set/iterable of IMAP UIDs
+    confines the tools to that batch: `email_find` ignores its query and lists
+    only those messages, and `email_read`/`email_draft_reply` refuse any id
+    outside the set. Used by the autonomous-trigger path so a run can only ever
+    touch the messages the poller detected.
     """
+    allowed = None if allowed_uids is None else {str(u) for u in allowed_uids}
 
     @functools.wraps(email_find)
     def find(query: str = "") -> str:
-        return _find_impl(backend, query)
+        if allowed is None:
+            return _find_impl(backend, query)
+        messages = backend.summaries_for(sorted(allowed, key=int))
+        if not messages:
+            return "No new messages in this batch."
+        return _format_summaries(messages)
 
     @functools.wraps(email_read)
     def read(message_id: str) -> str:
+        if allowed is not None and message_id.strip() not in allowed:
+            return _OUT_OF_BATCH
         return _read_impl(backend, message_id)
 
     @functools.wraps(email_draft_reply)
     def draft_reply(message_id: str, body: str) -> str:
+        if allowed is not None and message_id.strip() not in allowed:
+            return _OUT_OF_BATCH
+        if not body.strip():
+            raise ConfigurationError("email_draft_reply requires a non-empty body")
         return _draft_impl(backend, message_id, body)
 
     return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}

@@ -9,6 +9,8 @@ from LangGraph's blocking `.stream()` generator into asyncio.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
@@ -30,11 +32,13 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
+from . import email_trigger
 from . import interview
 from . import secret_store
 from .auth_api import get_current_org, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
+from .email_trigger_api import router as email_trigger_router
 from .interview import router as interview_router
 from .memory_api import router as memory_router
 from .org_settings import router as org_settings_router
@@ -94,6 +98,8 @@ if auth.is_insecure_secret_key(auth.SECRET_KEY):
         "-- generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
 
+email_trigger.validate_trigger_env()
+
 def _enforce_one_member_per_org_or_raise(db) -> None:
     """Raise if any org has multiple members (the one-member-per-org invariant).
 
@@ -120,16 +126,27 @@ def _enforce_one_member_per_org_or_raise(db) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app):
-    """ASGI startup: refuse to serve while the membership invariant is violated.
+    """ASGI startup: refuse to serve while the membership invariant is violated,
+    then run the autonomous email-trigger poller for the app's lifetime.
 
-    A data-dependent guard (unlike the config guards below), so it runs when the
-    server actually starts serving, not at import."""
+    The membership guard is data-dependent (unlike the config guards below), so
+    it runs when the server actually starts serving, not at import."""
     with SessionLocal() as session:
         try:
             _enforce_one_member_per_org_or_raise(session)
         except OperationalError:
             pass  # pre-migration schema (no users table yet); nothing to enforce
-    yield
+    stop_polling = asyncio.Event()
+    poller = asyncio.create_task(
+        email_trigger.poll_forever(stop_polling, email_trigger.build_trigger_workflow)
+    )
+    try:
+        yield
+    finally:
+        stop_polling.set()
+        poller.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller
 
 
 # Secrets-store guards run at app import, NOT in db_session, so the operator CLI
@@ -244,6 +261,7 @@ app.include_router(crud_router)
 app.include_router(catalog_read_router)
 app.include_router(memory_router)
 app.include_router(org_settings_router)
+app.include_router(email_trigger_router)
 
 logger = logging.getLogger("bestteam.api")
 
@@ -536,6 +554,13 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
 
     await websocket.accept()
     subscriber_queue = registry.subscribe(run_id)
+    if subscriber_queue is None:
+        # The run existed at the check above but was evicted (bounded
+        # RunRegistry eviction, see registry.py) before subscribe() ran --
+        # same close code as "never existed", for the same reason: no
+        # cross-org/eviction-timing oracle for a probing client.
+        await websocket.close(code=4404)
+        return
     try:
         while True:
             event = await subscriber_queue.get()
