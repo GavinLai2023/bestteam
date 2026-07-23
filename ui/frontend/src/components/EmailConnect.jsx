@@ -14,6 +14,10 @@ export default function EmailConnect({ onChange, onStatusChange }) {
   const [testResult, setTestResult] = useState(null) // {ok, error} | null
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState('') // '' | 'test' | 'save' | 'clear'
+  // Port + drafts live under "Advanced settings": a non-technical user (Gmail,
+  // Outlook) never needs them, and a visible number field invites the
+  // scroll-wheel-changes-993-to-994 mistake.
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const refresh = async () => {
     setLoading(true)
@@ -94,6 +98,8 @@ export default function EmailConnect({ onChange, onStatusChange }) {
       port: status.port || 993,
       drafts: status.drafts || '',
     })
+    // Reveal Advanced if this connection used non-default values, so they're visible.
+    setShowAdvanced((status.port && status.port !== 993) || !!status.drafts)
     setEditing(true)
   }
 
@@ -151,18 +157,45 @@ export default function EmailConnect({ onChange, onStatusChange }) {
             <label htmlFor="ec-pass">App password</label>
             <input id="ec-pass" type="password" value={form.password} onChange={field('password')} autoComplete="off" />
           </div>
-          <div className="field">
-            <label htmlFor="ec-port">IMAP port</label>
-            <input id="ec-port" type="number" min={1} max={65535} value={form.port} onChange={field('port')} placeholder="993" />
-          </div>
-          <div className="field">
-            <label htmlFor="ec-drafts">Drafts folder (optional)</label>
-            <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder="Auto-detected if left blank" />
-          </div>
+
+          <button
+            type="button"
+            className="btn btn-link"
+            style={{ padding: 0, alignSelf: 'flex-start' }}
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            {showAdvanced ? '▾ Advanced settings' : '▸ Advanced settings'}
+          </button>
+
+          {showAdvanced && (
+            <>
+              <div className="field">
+                <label htmlFor="ec-port">IMAP port</label>
+                {/* type=number changes on mouse-wheel scroll; blur on wheel so a
+                    non-technical user can't silently turn 993 into 994. */}
+                <input
+                  id="ec-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={form.port}
+                  onChange={field('port')}
+                  onWheel={(e) => e.currentTarget.blur()}
+                  placeholder="993"
+                />
+                <p className="hint">Almost always 993 — leave as-is unless your email provider says otherwise.</p>
+              </div>
+              <div className="field">
+                <label htmlFor="ec-drafts">Drafts folder</label>
+                <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder="Leave blank" />
+                <p className="hint">Leave blank — we'll find your Drafts folder automatically. Only set this to force a specific folder.</p>
+              </div>
+            </>
+          )}
 
           {testResult && (
             <p className={`banner ${testResult.ok ? 'banner-success' : 'banner-error'}`}>
-              {testResult.ok ? 'Connection works.' : `Couldn't connect: ${testResult.error}`}
+              {testResult.ok ? 'Connection works.' : testResult.error}
             </p>
           )}
 

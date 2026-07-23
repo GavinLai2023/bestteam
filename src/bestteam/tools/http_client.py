@@ -36,14 +36,19 @@ def check_host_allowed(hostname: str) -> str:
     try:
         infos = socket.getaddrinfo(hostname, None)
     except OSError as exc:
-        raise ConfigurationError(f"Could not resolve host '{hostname}': {exc}") from exc
+        # Don't embed the raw OS resolver exception in the message: it's
+        # relayed verbatim to customers by the mailbox-connection endpoints
+        # (ui/backend/org_settings.py) and can carry OS-specific internals.
+        raise ConfigurationError(f"Could not resolve host '{hostname}'") from exc
 
     validated_ip: str = ""
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if any(getattr(ip, predicate) for predicate in _BLOCKED_IP_PREDICATES):
+            # Same reasoning: don't leak the resolved private/internal IP to
+            # a customer-facing caller.
             raise ConfigurationError(
-                f"host '{hostname}' resolves to a private/internal address ({ip})"
+                f"host '{hostname}' resolves to a private/internal address"
             )
         if not validated_ip:
             validated_ip = str(ip)

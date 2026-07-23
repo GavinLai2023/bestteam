@@ -13,6 +13,9 @@ that resolves to a private/internal address (SSRF guard, reusing
 
 from __future__ import annotations
 
+import errno
+import logging
+import socket
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -32,6 +35,9 @@ from .db.email_credentials import (
 from .db.models import Organization
 from .db_session import get_db
 from .email_trigger import disable_trigger, disable_trigger_on_identity_change
+from .secret_store import SecretsKeyError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/org", tags=["org-settings"])
 
@@ -42,6 +48,43 @@ class EmailConnectRequest(BaseModel):
     password: str
     port: int = Field(default=993, ge=1, le=65535)
     drafts: Optional[str] = None
+
+
+def _friendly_connect_error(exc: Exception, host: str, port: int) -> str:
+    """Plain-language mailbox-connection error for the wizard.
+
+    The customer connecting a mailbox is non-technical, so raw socket strings
+    (e.g. ``[WinError 10060] ...``) are useless and alarming. Map the handful of
+    real failure modes to actionable sentences; never surface the OS code.
+    """
+    _timeout = (
+        f"Couldn't reach {host} on port {port} — the server didn't respond. "
+        f"Check the server address and port; most providers (including Gmail) use 993."
+    )
+    if isinstance(exc, ConfigurationError):
+        # From _connect: a login rejection (the only ConfigurationError that
+        # reaches here after the up-front SSRF check) -- otherwise show as-is.
+        if "login" in str(exc).lower():
+            return (
+                f"{host} rejected the sign-in. Use a 16-character app password "
+                "(not your normal account password), and double-check the email address."
+            )
+        return str(exc)
+    if isinstance(exc, socket.gaierror):
+        return f"Couldn't find a mail server at '{host}'. Check the spelling of the server address."
+    if isinstance(exc, TimeoutError):
+        return _timeout
+    if isinstance(exc, ConnectionRefusedError):
+        return f"{host} refused the connection on port {port}. Check the port — most providers use 993."
+    if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) == 10060 or exc.errno == errno.ETIMEDOUT:
+            return _timeout
+        if exc.errno == errno.ECONNREFUSED:
+            return f"{host} refused the connection on port {port}. Check the port — most providers use 993."
+    return (
+        f"Couldn't connect to {host} on port {port}. Double-check the server "
+        "address, the port, and that the mailbox has IMAP access enabled."
+    )
 
 
 def _reject_private_host(host: str) -> None:
@@ -84,8 +127,27 @@ def set_email(
             db, org.id, host=req.host, username=req.username, password=req.password,
             port=req.port, drafts_folder=req.drafts,
         )
-    except Exception as exc:  # noqa: BLE001 -- e.g. a missing/colliding secrets key
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SecretsKeyError as exc:
+        # The encryption key (BESTTEAM_SECRETS_KEY) is missing/invalid -- a server
+        # setup problem the customer can't fix. Log the real cause for the
+        # operator; tell the end user something actionable (contact an admin).
+        logger.error("Mailbox save failed: secrets key not configured (%s)", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Your mailbox couldn't be saved because secure storage isn't set "
+                "up on this service yet. Please contact your administrator."
+            ),
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- never leak internal errors to the user
+        logger.exception("Mailbox save failed unexpectedly for org %s", org.id)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Your mailbox couldn't be saved due to an unexpected problem. "
+                "Please try again, or contact your administrator if it continues."
+            ),
+        ) from exc
     disable_trigger_on_identity_change(db, org.id, req.host, req.username, prior_identity)
     return {"connected": True, "host": req.host, "username": req.username}
 
@@ -110,7 +172,7 @@ def test_email(
         conn = backend._connect()
         conn.logout()
     except (ConfigurationError, OSError) as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": _friendly_connect_error(exc, req.host, req.port)}
     return {"ok": True}
 
 

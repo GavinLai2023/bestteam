@@ -183,8 +183,8 @@
   `_MAX_RETAINED_RUNS` (1000, hardcoded). Spec:
   `2026-07-22-run-registry-bounded-eviction-design.md`.
 
-- Wizard model-catalog access fix (PR #20 `fix/wizard-model-catalog-access`,
-  commits `4d1e39b`+`78f1d82`, **open / CI green, pending merge**): non-admin
+- Wizard model-catalog access fix (merged to `main`, PR #20
+  `fix/wizard-model-catalog-access`, commits `4d1e39b`+`78f1d82`): non-admin
   org users hit "Model call failed: with_structured_output is not implemented"
   on "start building my team" because the model catalog was served only from
   the admin-only endpoint — the wizard's fetch 403'd, silently fell back to a
@@ -207,6 +207,27 @@
   of a page reload. `useModelCatalog` now exposes `failed`/`retry`;
   `IntentPage` disables generation while loading, failed, or genuinely empty
   (no real model configured yet), with a retry banner in each case.
+
+- Wizard mailbox-connect UX fix (PR #21 `fix/wizard-email-connect-ux`,
+  **open / CI green, pending merge**): raw socket/OS errors (e.g.
+  `[WinError 10060] ...`) surfaced verbatim to non-technical customers
+  testing/saving a mailbox connection. `_friendly_connect_error` now maps
+  timeout/refusal/login/DNS failures to plain-language, actionable
+  messages; a missing `BESTTEAM_SECRETS_KEY` or other unexpected save
+  failure is logged server-side and reported to the customer as "contact
+  your administrator" (503/500), never the raw exception. Port/drafts
+  fields moved under an "Advanced settings" disclosure to prevent
+  scroll-wheel port mistakes.
+
+  Follow-up (commit `a88aff4`, same PR): independent review found
+  `check_host_allowed()` (the shared SSRF guard) still embedded the raw OS
+  resolver exception and the resolved private/internal IP directly into its
+  `ConfigurationError` messages, which reach the customer via two paths
+  `_friendly_connect_error` doesn't cover — the preliminary host-validation
+  check (`_reject_private_host`, outside `_friendly_connect_error` entirely)
+  and its own non-login `ConfigurationError` passthrough branch. Sanitized
+  at the source in `http_client.py`: the customer-supplied hostname stays in
+  the message, the raw exception text and resolved IP don't.
 
 ## In Progress
 

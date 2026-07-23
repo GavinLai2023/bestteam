@@ -117,6 +117,41 @@ def test_set_email_rejects_private_host(client):
     assert "private/internal" in resp.json()["detail"]
 
 
+def test_set_email_private_host_rejection_does_not_leak_resolved_ip(client, monkeypatch):
+    # Exercises the real (non-monkeypatched) check_host_allowed(), not a
+    # stand-in exception -- hostname and resolved IP are distinct values so
+    # "the customer-supplied hostname is echoed back" (fine) can be told
+    # apart from "the resolved internal IP is disclosed" (the leak).
+    import socket
+
+    def _resolve_to_private(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr("bestteam.tools.http_client.socket.getaddrinfo", _resolve_to_private)
+    resp = client.put("/api/org/email", json={
+        "host": "internal.acme.com", "username": "u", "password": "p",
+    })
+    assert resp.status_code == 400
+    assert "10.0.0.5" not in resp.json()["detail"]
+
+
+def test_set_email_resolve_failure_does_not_leak_raw_os_error(client, monkeypatch):
+    # Same real-path concern for DNS resolution failure (vs. private-address
+    # rejection above): the raw OS resolver exception must not reach the
+    # customer-facing response.
+    import socket
+
+    def _raise_gaierror(host, port):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr("bestteam.tools.http_client.socket.getaddrinfo", _raise_gaierror)
+    resp = client.put("/api/org/email", json={
+        "host": "nonexistent.example", "username": "u", "password": "p",
+    })
+    assert resp.status_code == 400
+    assert "Name or service not known" not in resp.json()["detail"]
+
+
 def test_test_connection_success_does_not_save(client, monkeypatch):
     _bypass_ssrf(monkeypatch)
     monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
@@ -134,7 +169,9 @@ def test_test_connection_reports_failure(client, monkeypatch):
     body = client.post("/api/org/email/test", json={
         "host": "imap.acme.com", "username": "u", "password": "wrong",
     }).json()
-    assert body["ok"] is False and "login failed" in body["error"].lower()
+    # A login rejection now surfaces the friendly app-password guidance, not the
+    # raw "IMAP login failed" string (see _friendly_connect_error).
+    assert body["ok"] is False and "app password" in body["error"].lower()
 
 
 def test_test_connection_rejects_private_host(client):
@@ -251,6 +288,110 @@ def test_mutation_response_carries_uses_email(client):
     assert resp.status_code == 200
     assert resp.json()["uses_email"] is True
 
+
+# --- friendly connection-error messages (no raw OS codes to non-technical users)
+
+import socket  # noqa: E402
+
+from ui.backend.org_settings import _friendly_connect_error  # noqa: E402
+
+
+def test_friendly_error_timeout_points_at_993_without_os_code():
+    # The exact failure the customer hit: a wrong port times out. The message
+    # must name the port they used, suggest 993, and never leak "WinError 10060".
+    msg = _friendly_connect_error(TimeoutError("timed out"), "imap.gmail.com", 994)
+    assert "993" in msg
+    assert "994" in msg
+    assert "WinError" not in msg
+
+
+def test_friendly_error_oserror_winerror_10060_treated_as_timeout():
+    exc = OSError("[WinError 10060] A connection attempt failed ...")
+    exc.winerror = 10060
+    msg = _friendly_connect_error(exc, "imap.gmail.com", 994)
+    assert "993" in msg
+    assert "WinError" not in msg
+
+
+def test_friendly_error_connection_refused_names_port():
+    msg = _friendly_connect_error(ConnectionRefusedError("refused"), "mail.acme.com", 143)
+    assert "refused" in msg.lower()
+    assert "143" in msg
+
+
+def test_friendly_error_dns_failure_flags_server_address():
+    msg = _friendly_connect_error(socket.gaierror("name resolution failed"), "imap.typo.com", 993)
+    assert "imap.typo.com" in msg
+    assert "WinError" not in msg
+
+
+def test_friendly_error_login_rejection_suggests_app_password():
+    exc = ConfigurationError("IMAP login to 'h' as 'u@x' failed: [AUTHENTICATIONFAILED]")
+    msg = _friendly_connect_error(exc, "h", 993)
+    assert "app password" in msg.lower()
+
+
+def test_friendly_error_generic_does_not_leak_raw_reason():
+    msg = _friendly_connect_error(OSError("weird low-level thing"), "mail.acme.com", 993)
+    assert "weird low-level thing" not in msg
+    assert "mail.acme.com" in msg
+
+
+class _TimeoutBackend:
+    def __init__(self, **kw):
+        pass
+
+    def _connect(self):
+        raise TimeoutError("timed out")
+
+
+def test_test_connection_returns_friendly_timeout(client, monkeypatch):
+    # End-to-end: a connect timeout via /test surfaces the friendly message,
+    # not the raw OS string.
+    _bypass_ssrf(monkeypatch)
+    monkeypatch.setattr(org_settings, "_ImapBackend", _TimeoutBackend)
+    body = client.post("/api/org/email/test", json={
+        "host": "imap.gmail.com", "username": "u", "password": "p", "port": 994,
+    }).json()
+    assert body["ok"] is False
+    assert "993" in body["error"]
+    assert "WinError" not in body["error"]
+
+
+def test_connect_mailbox_without_secrets_key_is_operator_friendly(client, monkeypatch):
+    # A missing server-side encryption key is the operator's problem, not the
+    # customer's -- the store path must NOT leak "BESTTEAM_SECRETS_KEY is not set"
+    # to a non-technical end user, who can only be told to contact an admin.
+    _bypass_ssrf(monkeypatch)
+    monkeypatch.delenv("BESTTEAM_SECRETS_KEY", raising=False)
+    resp = client.put("/api/org/email", json={
+        "host": "imap.gmail.com", "username": "u@x", "password": "app-pw",
+    })
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert "BESTTEAM_SECRETS_KEY" not in detail
+    assert "administrator" in detail.lower()
+
+
+def test_connect_mailbox_unexpected_error_does_not_leak_internals(client, monkeypatch):
+    # Any other failure while saving must also surface an actionable message,
+    # never a raw internal string.
+    _bypass_ssrf(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("psycopg2.OperationalError: connection reset 0xdeadbeef")
+
+    monkeypatch.setattr(org_settings, "set_email_credentials", _boom)
+    resp = client.put("/api/org/email", json={
+        "host": "imap.gmail.com", "username": "u@x", "password": "p",
+    })
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert "0xdeadbeef" not in detail
+    assert "administrator" in detail.lower()
+
+
+# --- autonomous-trigger identity-change interactions ------------------------
 
 from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 
