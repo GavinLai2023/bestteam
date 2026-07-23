@@ -117,6 +117,41 @@ def test_set_email_rejects_private_host(client):
     assert "private/internal" in resp.json()["detail"]
 
 
+def test_set_email_private_host_rejection_does_not_leak_resolved_ip(client, monkeypatch):
+    # Exercises the real (non-monkeypatched) check_host_allowed(), not a
+    # stand-in exception -- hostname and resolved IP are distinct values so
+    # "the customer-supplied hostname is echoed back" (fine) can be told
+    # apart from "the resolved internal IP is disclosed" (the leak).
+    import socket
+
+    def _resolve_to_private(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr("bestteam.tools.http_client.socket.getaddrinfo", _resolve_to_private)
+    resp = client.put("/api/org/email", json={
+        "host": "internal.acme.com", "username": "u", "password": "p",
+    })
+    assert resp.status_code == 400
+    assert "10.0.0.5" not in resp.json()["detail"]
+
+
+def test_set_email_resolve_failure_does_not_leak_raw_os_error(client, monkeypatch):
+    # Same real-path concern for DNS resolution failure (vs. private-address
+    # rejection above): the raw OS resolver exception must not reach the
+    # customer-facing response.
+    import socket
+
+    def _raise_gaierror(host, port):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr("bestteam.tools.http_client.socket.getaddrinfo", _raise_gaierror)
+    resp = client.put("/api/org/email", json={
+        "host": "nonexistent.example", "username": "u", "password": "p",
+    })
+    assert resp.status_code == 400
+    assert "Name or service not known" not in resp.json()["detail"]
+
+
 def test_test_connection_success_does_not_save(client, monkeypatch):
     _bypass_ssrf(monkeypatch)
     monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
