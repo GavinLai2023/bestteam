@@ -237,8 +237,18 @@
   Implemented the two findings that were genuine, narrow, low-risk defects:
   deployment is now a single atomic transaction (`WorkflowRecord` write and
   the BuilderSession status update share one commit, P1-14), and the
-  vestigial `AgentRecord`/`TeamRecord` tables (zero readers, zero writers,
-  no data ever written) were dropped (migration `57b13700d5df`, P1-09).
+  vestigial `AgentRecord`/`TeamRecord` tables (no current reader or writer)
+  were dropped (migration `57b13700d5df`, P1-09).
+  A follow-up code review (PR #23) hardened both against data-safety edge
+  cases: (F1) writable `/api/config/agents`/`teams` routes existed historically
+  (`78c7a8a`..`036e1d6`), so the drop migration now **refuses** (with export
+  guidance) if either table holds rows and drops only when empty — a drop is
+  not data-reversible; (F2) `db_session` runs `create_all` at import and the
+  docs have the operator start the backend before `alembic upgrade head`, so
+  the baseline (`884e80106da7`) and add-`is_admin` (`a1b2c3d4e5f6`) migrations
+  are now inspection-guarded like the later ones, making that documented
+  sequence idempotent instead of failing with "table … already exists".
+  Covered by `tests/test_migrations.py` (real alembic upgrade runs).
   Explicitly did **not** implement SQLite foreign-key enforcement (P1-13),
   trace persistence / crash recovery (P1-16/P1-17), or one-member-per-org
   removal (P2-01/P2-02) — each restates a tradeoff already made deliberately
