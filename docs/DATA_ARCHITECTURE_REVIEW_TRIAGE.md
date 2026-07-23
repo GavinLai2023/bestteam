@@ -43,13 +43,15 @@ not a silent side effect of "implement all findings."
 | ID | Finding | Validation | Fix | Verification |
 |---|---|---|---|---|
 | P1-14 | Deployment is not a single atomic transaction — `deploy_session` committed the `WorkflowRecord` write, then called `update_session` (its own separate commit); a failure between them could leave a "deployed" Workflow with its BuilderSession still un-deployed | Confirmed: `ui/backend/builder.py` had `db.commit()` immediately after the `WorkflowRecord` write, then a second, independent `db.commit()` inside `db/builder_sessions.py::update_session` | Removed the intermediate `db.commit()`; both writes now share `update_session`'s single commit (`get_db`'s `finally: db.close()` rolls back the whole pending transaction if `update_session` raises first) | New test `test_deploy_is_atomic_across_workflow_and_session_updates` (`tests/test_builder_api.py`) — RED under the old code (WorkflowRecord persisted despite the overall call raising), GREEN after the fix. Full `test_builder_api.py` (27 passed) and full suite (593 passed) |
-| P1-09 | `AgentRecord`/`TeamRecord` are vestigial: tables exist, but no CRUD route and no runtime loader ever reads them | Confirmed via grep: referenced only in `models.py`/`db/__init__.py`, no writers anywhere (no route ever created a row) | Removed both model classes; Alembic migration `57b13700d5df` drops the tables (guarded, and reversible — downgrade recreates them matching the final pre-drop schema) | `tests/test_db.py` and `tests/test_crud_api.py` updated (dead-class references removed/rebased onto `SkillRecord`/`WorkflowRecord`); full suite (593 passed). Migration verified upgrade→downgrade→upgrade round-trip on a scratch DB |
+| P1-09 | `AgentRecord`/`TeamRecord` are vestigial: no runtime loader reads them, and their `/api/config` routes were removed in `036e1d6` | Confirmed no *current* reader/writer. Note: writable CRUD routes DID exist historically (`78c7a8a`..`036e1d6`), so we cannot assume every deployment's tables are empty — both are empty only in the deployments we operate | Removed both model classes; Alembic migration `57b13700d5df` drops the tables. **Guarded and non-destructive**: it refuses (raising with export guidance) if either table holds rows, and only drops when empty. A drop is *not* data-reversible — downgrade recreates the tables empty | `tests/test_migrations.py` — `create_all → upgrade head` idempotency + drop-refuses-when-populated / drops-when-empty (RED before the guards, GREEN after); `tests/test_db.py` / `tests/test_crud_api.py` rebased off the dead classes; full suite green |
 
 This reverses the "kept (empty) rather than migrated away" note that used to be
 in `ui/backend/db/CLAUDE.md` for these two tables — unlike the four findings
 above, that note documented a fact ("we didn't write the migration"), not a
-reasoned tradeoff, so removing genuinely dead, zero-data schema was judged
-in scope for a "small, low-risk fixes" pass.
+reasoned tradeoff, so removing this dead schema was judged in scope for a
+"small, low-risk fixes" pass — with the drop guarded to refuse rather than
+destroy data in the unlikely event a deployment populated the tables via the
+historical CRUD routes.
 
 ## Everything else: validated-accurate, out of scope for this pass
 
