@@ -144,6 +144,17 @@ def test_create_user_rejects_duplicate_username():
             create_user(db, "alice", "different")
 
 
+def test_create_user_rejects_reserved_sentinel_name():
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.users import create_user
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    with session_factory(engine)() as db:
+        with pytest.raises(ValueError):
+            create_user(db, "email-trigger", "pw")
+
+
 def test_login_rejects_wrong_password(client):
     create_user_and_login(client, username="alice", password="hunter2")
 
@@ -444,6 +455,19 @@ def test_secret_key_guard_allows_custom_secret_without_env(monkeypatch):
     importlib.reload(backend_main)  # must not raise
 
     monkeypatch.setattr(auth, "SECRET_KEY", "test-secret-key-not-for-production-use")
+    importlib.reload(backend_main)
+
+
+def test_trigger_env_guard_fires_on_bad_value(monkeypatch):
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
+        importlib.reload(backend_main)
+
+    # Restore a valid value and reload again so later tests in this process
+    # (which import backend_main.app directly) see a working app.
+    monkeypatch.delenv("BESTTEAM_TRIGGER_POLL_SECONDS", raising=False)
     importlib.reload(backend_main)
 
 

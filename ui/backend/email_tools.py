@@ -95,6 +95,26 @@ def _fixed_message_tools(message: str) -> Dict[str, Any]:
     return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}
 
 
+def build_org_imap_backend(db: Session, org_id: int):
+    """The org's IMAP backend from stored credentials, or None if unconnected.
+
+    Decrypts the password; raises secret_store.SecretsKeyError / InvalidToken on
+    a bad/rotated key (the caller decides how to surface that).
+    """
+    cred = get_email_credentials(db, org_id)
+    if cred is None:
+        return None
+    password = secret_store.decrypt(cred.password_encrypted)
+    return _ImapBackend(
+        host=cred.host,
+        user=cred.username,
+        password=password,
+        port=cred.port,
+        drafts=cred.drafts_folder,
+        restrict_to_public=True,  # customer-supplied host: validate + pin on connect
+    )
+
+
 def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
     """Return the email tools for `org_id` (see module docstring for the order).
 
@@ -104,21 +124,13 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
     cred = get_email_credentials(db, org_id)
     if cred is not None:
         try:
-            password = secret_store.decrypt(cred.password_encrypted)
+            backend = build_org_imap_backend(db, org_id)
         except (InvalidToken, secret_store.SecretsKeyError):
             # A wrong/rotated key must not crash the workflow build for this (or
             # any other) org -- surface it as a clear tool-level message and log
             # server-side. Startup validation normally catches this first.
             _logger.warning("Could not decrypt email credentials for org_id=%s", org_id)
             return _fixed_message_tools(_UNREADABLE)
-        backend = _ImapBackend(
-            host=cred.host,
-            user=cred.username,
-            password=password,
-            port=cred.port,
-            drafts=cred.drafts_folder,
-            restrict_to_public=True,  # customer-supplied host: validate + pin on connect
-        )
         return make_email_tools(backend)
     if os.environ.get("BESTTEAM_EMAIL_BACKEND", "").strip():
         # Single-org / SDK env path handles email; don't shadow the env tools.

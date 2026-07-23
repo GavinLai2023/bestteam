@@ -95,8 +95,10 @@ backend still refuses to start (`ensure_email_single_org`, CR-031) — the env
 path is process-wide/single-mailbox by design; multi-tenant email uses the
 per-org store instead.
 
-Tier 2 tools (SQL executor, Python sandbox), real email *sending*, and
-ambient run-on-new-mail triggering are planned but not yet implemented.
+Ambient run-on-new-mail triggering exists at the UI-backend layer (an opt-in
+per-org poller -- see `ui/backend/email_trigger.py` and `ui/backend/CLAUDE.md`),
+not in this SDK layer. Tier 2 tools (SQL executor, Python sandbox) and real
+email *sending* are planned but not yet implemented.
 
 ## Connecting to external systems (ERP / order databases)
 

@@ -91,7 +91,7 @@
   CJK search) backends behind one seam
   (`src/bestteam/tools/email_client.py`, `bestteam[tools-email]`). No send
   verb / no SMTP by design. Seeded `email_triage_reply` built-in Skill.
-  Deferred: real sending, ambient triggering, attachments. Spec:
+  Deferred: real sending, attachments. Spec:
   `docs/superpowers/specs/2026-07-15-email-toolkit-design.md`.
 
 - Org multi-tenancy — sub-project 1 (merged to `main`, PR #14): `organizations`
@@ -141,6 +141,48 @@
   bounded the IMAP port. Three code-review rounds (12 findings) resolved; 500
   tests, green CI. Spec: `2026-07-18-wizard-email-connect-design.md`.
 
+- Autonomous email-triggered runs (feature/email-trigger-autonomous-runs):
+  customers opt in at Deploy ("Run automatically when new email arrives") and
+  the platform polls their mailbox (default 120s) and runs their deployed
+  email team on new mail — no prompt. Per-org UID-baseline dedup (backlog
+  never triggers), one run per cycle, daily cap (default 50) with midnight
+  reset, operator kill switch (`BESTTEAM_TRIGGERS_DISABLED`), overlap guard,
+  activity list on "My teams" from persisted `runs` rows (sentinel username
+  `email-trigger`). Spec: `2026-07-19-email-trigger-autonomous-runs-design.md`.
+
+- Autonomous email-trigger correctness fixes: runs are hard-confined to the
+  poller-detected UID batch (scoped tools + uncached per-run workflow), bounded
+  by `BESTTEAM_TRIGGER_BATCH_SIZE` with carry-over; state advances only through
+  a durable run; workflow faults persist across empty polls; mailbox
+  change/disconnect disables the trigger (rotation keeps it). Also: per-org poll
+  rollback, server-side autonomous activity filter, reserved sentinel username.
+  Spec: `2026-07-20-email-trigger-correctness-redesign-design.md`. Remaining P2
+  hardening (env validation, shutdown thread-stop, run-source enum, RunRegistry
+  eviction) tracked in Known issues.
+
+- Autonomous email-trigger hardening round 2 (independent-reviewer follow-up
+  on PR #22): mailbox-replacement race closed (one IMAP backend resolved per
+  poll cycle, threaded through to workflow-building instead of re-fetched);
+  operator CLI (`admin set-email`/`clear-email`) now disables the trigger on
+  mailbox change/disconnect too, matching the wizard path; dispatch-
+  submission failures mark the run failed instead of wedging the overlap
+  guard; mailbox connectivity errors and workflow/dispatch errors are
+  tracked separately (`last_error_kind`) so a resolved mailbox outage clears
+  instead of showing "error" forever; `BESTTEAM_TRIGGER_*` env values
+  validated at startup (fail-fast, matching the `BESTTEAM_SECRET_KEY` guard);
+  "My teams" activity card distinguishes a failed status/activity fetch from
+  "off" or "no runs yet" and now shows `last_checked_at`. `RunRegistry`
+  eviction and shutdown thread-stop remain deferred (see Known issues).
+
+- Bounded `RunRegistry` eviction: a third-round independent review
+  re-raised the RunRegistry unbounded-growth finding (previously deferred
+  twice) on the basis that the autonomous trigger removes the
+  human-rate-limiter that made those deferrals safe -- unattended,
+  continuous run creation vs. click-driven. `create()` now evicts the
+  oldest terminal, subscriber-free runs once the registry exceeds
+  `_MAX_RETAINED_RUNS` (1000, hardcoded). Spec:
+  `2026-07-22-run-registry-bounded-eviction-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -160,13 +202,25 @@
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain
-  Phase 5. See `ui/backend/db/CLAUDE.md`.
+  Phase 5. Growth is now bounded (terminal-run eviction, see Done above) —
+  what's left is that a restart still loses all live trace-event history,
+  not that it grows unbounded. See `ui/backend/db/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage
   wizard** (`/wizard/:sessionId/{requirements|team|refine|test|deploy}`),
   not the current 4-stage flow introduced in commit `0d2490a` (flagged in
   that file already).
+- **Hard-restart orphans** — `runs` rows left `status="running"` by a killed
+  process are never swept. The email trigger's overlap guard now consults
+  the in-process registry instead of that row, so the trigger self-recovers
+  and doesn't wedge, but the activity list can still show a stale "running"
+  run. A startup sweep is future work.
+- **Autonomous trigger residuals:** `asyncio.to_thread` poll cycles aren't
+  awaited on shutdown, so a mailbox check/commit/dispatch already in flight
+  can keep running briefly after the ASGI shutdown handler returns; a process
+  killed between a trigger's state commit and dispatch orphans a `runs` row
+  (overlap guard self-recovers on restart; no reconciliation sweep yet).
 
 ## Next steps / roadmap
 

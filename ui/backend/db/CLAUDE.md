@@ -37,6 +37,12 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   plaintext. CRUD in `db/email_credentials.py`; resolved at run time by
   `email_tools.load_email_tools`. The multi-tenant replacement for the
   process-wide `BESTTEAM_EMAIL_*` env vars.
+- `email_triggers` — one org's autonomous new-mail trigger: opt-in flag +
+  target `workflow_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
+  daily-cap counters (`runs_today`/`runs_date`), overlap guard
+  (`last_run_id`), and health (`last_checked_at`/`last_error`). Unique
+  `org_id` — at most one auto-running team per org. CRUD in
+  `db/email_triggers.py`; poll-state mutations in `ui/backend/email_trigger.py`.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/

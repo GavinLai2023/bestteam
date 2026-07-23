@@ -43,6 +43,7 @@ def test_init_db_creates_all_tables():
         "skills",
         "workflows",
         "builder_sessions",
+        "email_triggers",
         "model_catalog",
         "runs",
         "trace_events",
