@@ -363,6 +363,16 @@ def test_deploy_rejects_agent_model_not_in_catalog(client):
     assert "openai:gpt-nope" in resp.json()["detail"]
 
 
+def test_deploy_rejects_agent_with_empty_model(client):
+    # AgentSpec.model:str accepts "" (no min-length), so the empty-model case
+    # must be caught by the deploy-time model check, not slip through to a run.
+    bad_spec = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "model": ""}]}
+    sid = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": bad_spec})
+    resp = client.post(f"/api/builder/sessions/{sid}/deploy")
+    assert resp.status_code == 400
+
+
 def test_test_run_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path):
     # Same as deploy: the sandbox test-run boundary builds the stored spec too.
     docs_dir = tmp_path / "docs"

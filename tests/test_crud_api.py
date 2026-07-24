@@ -764,6 +764,28 @@ def test_workflow_put_rejects_agent_model_not_in_catalog(client):
     assert "openai:gpt-nope" in resp.json()["detail"]
 
 
+def test_workflow_put_rejects_agent_with_missing_none_empty_or_nonstring_model(client):
+    # The operator CRUD path builds Agent(**spec) directly, bypassing the
+    # AgentSpec.model:str check -- so a missing/None/empty/non-string model must
+    # be rejected at save, not persisted as deployed and failing at first run.
+    base_agent = _VALID_WORKFLOW_CONFIG["agents"][0]
+    cases = [
+        {k: v for k, v in base_agent.items() if k != "model"},  # missing
+        {**base_agent, "model": None},
+        {**base_agent, "model": ""},
+        {**base_agent, "model": 42},
+    ]
+    headers = _org_user_headers(client)
+    for i, agent in enumerate(cases):
+        bad_config = {**_VALID_WORKFLOW_CONFIG, "agents": [agent]}
+        resp = client.put(f"/api/config/workflows/no_model_{i}?org=default", json=bad_config)
+        assert resp.status_code == 400, f"case {i} should be rejected"
+        # nothing persisted -> not runnable/listed
+        assert f"no_model_{i}" not in client.get(
+            "/api/workflows", headers=headers
+        ).json()["workflows"]
+
+
 def test_workflow_put_rejects_invalid_config(client):
     bad_config = {**_VALID_WORKFLOW_CONFIG, "teams": [{"name": "support_team", "agents": ["does_not_exist"], "mode": "sequential"}]}
 

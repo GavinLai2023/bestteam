@@ -1,9 +1,12 @@
 """Deploy-time validation that complements the SDK's structural validation.
 
 `validate_specification` (SDK) resolves an agent's tools/skills/KB references,
-but not that its model is one the platform actually offers. A bad model spec
-would otherwise pass deploy and fail only at first run. This checks agent model
-specs against the model catalog so the failure surfaces at deploy.
+and the wizard path enforces `AgentSpec.model: str`. But the operator CRUD path
+builds `Agent(**spec)` directly (`core/loader._build_workflow`), and
+`Agent.model` is `ModelSpec | None` -- so a missing, `None`, empty, or
+non-string model, or a real spec the platform doesn't offer, would otherwise
+pass deploy and fail only at first run (the P1-11 defect). This rejects all of
+those at deploy.
 """
 from __future__ import annotations
 
@@ -11,23 +14,29 @@ from typing import Any, Dict, Iterable, List
 
 
 def validate_agent_models(raw_spec: Dict[str, Any], catalog_specs: Iterable[str]) -> List[str]:
-    """Return the agent model specs in `raw_spec` that the platform doesn't offer.
+    """Return a problem string for each agent whose model can't be deployed.
 
-    A spec is offered if it is in `catalog_specs`. `fake:` specs (deterministic,
-    zero-cost demo/test models) are always allowed and never reported. The result
-    keeps first-seen order and is de-duplicated so the caller can name every
-    rejected model at once.
+    A deployable model is a non-empty **string** that is either a `fake:` spec
+    (deterministic, zero-cost demo/test model) or a member of `catalog_specs`.
+    An agent whose model is missing, `None`, empty, non-string, or not in the
+    catalog yields one problem string naming the agent and the reason, so the
+    caller can reject the deploy and name every problem at once (empty list =
+    all models deployable). Non-dict `agents` entries are left to the SDK's
+    structural validation and skipped here.
     """
     allowed = set(catalog_specs)
-    unknown: List[str] = []
-    seen = set()
-    for agent in raw_spec.get("agents", []) or []:
+    problems: List[str] = []
+    for index, agent in enumerate(raw_spec.get("agents", []) or []):
         if not isinstance(agent, dict):
             continue
+        name = agent.get("name") or f"#{index}"
         model = agent.get("model")
-        if not model or model.startswith("fake:"):
+        if not isinstance(model, str) or not model:
+            problems.append(f"agent '{name}' has no model set")
             continue
-        if model not in allowed and model not in seen:
-            unknown.append(model)
-        seen.add(model)
-    return unknown
+        if model.startswith("fake:") or model in allowed:
+            continue
+        problems.append(
+            f"agent '{name}' uses model '{model}', which isn't available on this platform"
+        )
+    return problems

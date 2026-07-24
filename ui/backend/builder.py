@@ -498,13 +498,13 @@ def deploy_session(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     raw = spec.to_raw()
-    unknown_models = validate_agent_models(raw, {e.spec for e in list_entries(db)})
-    if unknown_models:
+    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+    if model_problems:
         raise HTTPException(
             status_code=400,
             detail=(
-                "These models aren't available on this platform: "
-                + ", ".join(unknown_models)
+                "This team can't be deployed: "
+                + "; ".join(model_problems)
                 + ". Pick a model from the catalog."
             ),
         )
