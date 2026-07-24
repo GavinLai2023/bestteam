@@ -29,6 +29,7 @@ from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db_session import get_db
+from .component_lock import component_mutation_lock
 from .knowledge_bases import (
     check_path_traversal,
     checked_contained_cache_path,
@@ -497,35 +498,39 @@ def deploy_session(
         )
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = {
-        **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
-        **load_email_tools(db, org.id),
-    }
-    try:
-        validate_specification(
-            spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
-        )
-    except ConfigurationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Serialize dependency resolution + the deployed write against a concurrent
+    # component delete (F3): either the delete's scan sees this workflow, or this
+    # deploy's resolution fails because the resource was already removed.
+    with component_mutation_lock:
+        extra_tools = {
+            **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
+            **load_email_tools(db, org.id),
+        }
+        try:
+            validate_specification(
+                spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
+            )
+        except ConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    raw = spec.to_raw()
-    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
-    if model_problems:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This team can't be deployed: "
-                + "; ".join(model_problems)
-                + ". Pick a model from the catalog."
-            ),
-        )
-    record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
-    if record is None:
-        record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
-        db.add(record)
-    else:
-        record.config = raw
-        record.status = "deployed"
+        raw = spec.to_raw()
+        model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+        if model_problems:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This team can't be deployed: "
+                    + "; ".join(model_problems)
+                    + ". Pick a model from the catalog."
+                ),
+            )
+        record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
+        if record is None:
+            record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
+            db.add(record)
+        else:
+            record.config = raw
+            record.status = "deployed"
 
-    session = update_session(db, session_id, status="deployed")
+        session = update_session(db, session_id, status="deployed")
     return _session_to_dict(session, db, org.id)

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.loader import _build_knowledge_base
+from bestteam.exceptions import ConfigurationError
 from bestteam.tools import REGISTRY
 
 from .db.models import KnowledgeBaseRecord
@@ -188,6 +189,16 @@ def load_knowledge_base_tools(
     )
     tools: Dict[str, Any] = {}
     for record in records:
+        # Fail closed on a legacy KB whose name shadows a built-in tool (F4).
+        # New collisions are blocked at KB PUT/upload, but a record predating
+        # that guard would silently replace the built-in at load; refuse instead
+        # (covers both `_get_workflow` and the autonomous trigger, which share
+        # this loader).
+        if record.name in REGISTRY:
+            raise ConfigurationError(
+                f"Knowledge base '{record.name}' shadows a built-in tool of the "
+                "same name; rename the knowledge base."
+            )
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
         ensure_contained_cache_path_for_source(config, source)
         kb = _build_knowledge_base(config, source)

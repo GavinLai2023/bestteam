@@ -1270,3 +1270,40 @@ def test_delete_builtin_platform_skill_is_refused(client):
     resp = client.delete("/api/config/skills/email_triage_reply")  # platform (no ?org)
     assert resp.status_code == 409
     assert "built-in" in resp.json()["detail"].lower()
+
+
+# --- Third-round review fixes (dict-shaped refs, legacy-collision fail-closed) ---
+
+def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client):
+    # F2: the loader honors a dict-shaped `tools` ({"mykb": true} -> ["mykb"]), so
+    # the delete reference-scan must too, else the reference is missed (bypass).
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id, config={"name": "mykb", "path": "docs"}))
+        db.add(WorkflowRecord(name="dict_team", org_id=org_id, status="deployed",
+                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": {"mykb": True}}],
+                                      "teams": [], "workflow": {"steps": []}}))
+        db.commit()
+    resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
+    assert resp.status_code == 409
+    assert "dict_team" in resp.json()["detail"]
+
+
+def test_run_fails_closed_on_legacy_kb_shadowing_builtin(client):
+    # F4: a legacy KB named after a built-in (predating the KB-PUT guard) must
+    # fail closed at load, not silently shadow the built-in tool.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="calculator", org_id=org_id,
+                                   config={"name": "calculator", "path": "docs"}))
+        db.add(WorkflowRecord(name="legacy_wf", org_id=org_id, status="deployed",
+                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": ["calculator"]}],
+                                      "teams": [{"name": "t", "agents": ["a"], "mode": "sequential"}],
+                                      "workflow": {"steps": ["t"]}}))
+        db.commit()
+    resp = client.post("/api/runs", json={"workflow": "legacy_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 400
+    assert "built-in" in resp.json()["detail"]
