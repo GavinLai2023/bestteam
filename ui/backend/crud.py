@@ -41,6 +41,7 @@ from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
+from .deploy_validation import validate_agent_models
 from .db.models import (
     KnowledgeBaseRecord,
     Organization,
@@ -485,6 +486,17 @@ def upsert_workflow_config(
         _build_workflow(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
     except (KeyError, TypeError, BestTeamError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    unknown_models = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+    if unknown_models:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "These models aren't available on this platform: "
+                + ", ".join(unknown_models)
+                + ". Pick a model from the catalog."
+            ),
+        )
 
     item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:

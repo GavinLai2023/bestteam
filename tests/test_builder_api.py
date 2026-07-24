@@ -354,6 +354,15 @@ def test_deploy_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path
     assert "cache_path" in resp.json()["detail"]
 
 
+def test_deploy_rejects_agent_model_not_in_catalog(client):
+    bad_spec = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "model": "openai:gpt-nope"}]}
+    sid = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": bad_spec})
+    resp = client.post(f"/api/builder/sessions/{sid}/deploy")
+    assert resp.status_code == 400
+    assert "openai:gpt-nope" in resp.json()["detail"]
+
+
 def test_test_run_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path):
     # Same as deploy: the sandbox test-run boundary builds the stored spec too.
     docs_dir = tmp_path / "docs"

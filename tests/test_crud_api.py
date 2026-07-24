@@ -732,6 +732,14 @@ def test_workflow_crud_round_trip_and_validation(client):
     assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
 
 
+def test_workflow_put_rejects_agent_model_not_in_catalog(client):
+    bad_config = {**_VALID_WORKFLOW_CONFIG,
+                  "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "model": "openai:gpt-nope"}]}
+    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
+    assert resp.status_code == 400
+    assert "openai:gpt-nope" in resp.json()["detail"]
+
+
 def test_workflow_put_rejects_invalid_config(client):
     bad_config = {**_VALID_WORKFLOW_CONFIG, "teams": [{"name": "support_team", "agents": ["does_not_exist"], "mode": "sequential"}]}
 
