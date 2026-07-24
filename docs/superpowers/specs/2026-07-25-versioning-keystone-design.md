@@ -222,3 +222,13 @@ new table/columns — every step must be inspect-guarded):
 - SQLite FK enforcement (P1-13, still deferred; the new FKs are advisory like
   the rest).
 - Retro-linking historical runs / sessions (forward-populated only).
+
+## Known limitation
+
+- **Rename onto an existing team name is a hard error, not a friendly one.** If a
+  session pinned to head H (name "X") redeploys with its spec renamed to "Y" and
+  a *different* deployed team already owns "Y" in the org, the `record.name = "Y"`
+  write in `publish_workflow_version` collides with the `(org_id, name)` unique
+  constraint and surfaces as a 500. This is a narrow edge and strictly safer than
+  the pre-versioning behavior (which silently clobbered the other team — the P1-02
+  bug); a friendly 400 pre-check is deferred.

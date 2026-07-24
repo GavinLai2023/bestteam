@@ -56,6 +56,10 @@ def publish_workflow_version(
             record.config = config
             record.status = "deployed"
 
+    # NB: record.config and version.config below share ONE dict object. That is
+    # safe only because deploy never mutates config in place -- the next deploy
+    # rebinds record.config to a fresh object, leaving prior versions frozen. Do
+    # not mutate record.config / version.config in place, or you corrupt history.
     db.flush()  # need record.id
     next_number = (
         db.query(func.max(WorkflowVersion.version_number))

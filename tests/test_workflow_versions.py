@@ -79,6 +79,15 @@ def test_workflow_id_from_another_org_falls_back_to_own_org_head():
     assert frozen.config == {"v": 1}
 
 
+def test_created_by_is_recorded_on_the_version():
+    db = _db()
+    _, version = publish_workflow_version(
+        db, org_id=1, name="wf", config={"v": 1}, created_by="alice"
+    )
+    db.commit()
+    assert version.created_by == "alice"
+
+
 def test_current_version_id_returns_pointer_for_deployed_only():
     db = _db()
     record, version = publish_workflow_version(db, org_id=1, name="wf", config={"v": 1})
