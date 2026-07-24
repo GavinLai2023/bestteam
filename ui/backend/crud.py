@@ -194,6 +194,25 @@ def _invalidate_workflow_cache() -> None:
         main._workflow_cache_generation += 1
 
 
+def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -> list[str]:
+    """Names of deployed workflows whose config references `name`.
+
+    `kind="skill"` matches an agent's `skills`; `kind="knowledge_base"` matches an
+    agent's `tools` (a standalone KB is referenced by name there).
+    """
+    field = "skills" if kind == "skill" else "tools"
+    query = db.query(WorkflowRecord).filter(WorkflowRecord.status == "deployed")
+    if org_id is not None:
+        query = query.filter(WorkflowRecord.org_id == org_id)
+    hits = []
+    for row in query:
+        for agent in (row.config or {}).get("agents", []) or []:
+            if isinstance(agent, dict) and name in (agent.get(field) or []):
+                hits.append(row.name)
+                break
+    return sorted(hits)
+
+
 def _resolve_org_id(db: Session, org: Optional[str], *, allow_platform: bool) -> Optional[int]:
     """Resolve an admin request's `?org=<name>` to an org id.
 
@@ -284,6 +303,18 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
+        if name in ("skills", "knowledge_bases"):
+            kind = "skill" if name == "skills" else "knowledge_base"
+            used_by = _deployed_workflows_referencing(db, org_id, kind, item_name)
+            if used_by:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Can't delete '{item_name}': it's used by deployed team(s): "
+                        + ", ".join(used_by)
+                        + ". Update or remove those teams first."
+                    ),
+                )
         if name == "knowledge_bases":
             # Same per-KB lock as upload, so a delete can't race a promotion.
             with _kb_upload_lock(f"{org_id}/{item_name}"):

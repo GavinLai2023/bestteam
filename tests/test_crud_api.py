@@ -11,10 +11,11 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id
+from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, WorkflowRecord
 from ui.backend.db_session import get_db
 
 
@@ -1183,3 +1184,45 @@ def test_workflow_put_rejects_kb_named_after_builtin(client):
     assert "collide_wf" not in client.get(
         "/api/workflows", headers=_org_user_headers(client)
     ).json()["workflows"]
+
+
+def _deployed_wf(config_agents):
+    return {"agents": config_agents, "teams": [], "workflow": {"steps": []}}
+
+
+def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="greeting", org_id=org_id,
+                           config={"name": "greeting", "instructions": "hi", "tools": []}))
+        db.add(WorkflowRecord(name="greeter_team", org_id=org_id, status="deployed",
+                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                                                    "model": "fake:hi", "skills": ["greeting"]}])))
+        db.commit()
+    resp = client.delete("/api/config/skills/greeting?org=default")
+    assert resp.status_code == 409
+    assert "greeter_team" in resp.json()["detail"]
+    assert client.get("/api/config/skills/greeting?org=default").status_code == 200  # not deleted
+
+
+def test_delete_kb_referenced_by_deployed_workflow_is_409(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id,
+                                   config={"name": "mykb", "path": "docs"}))
+        db.add(WorkflowRecord(name="kb_team", org_id=org_id, status="deployed",
+                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                                                    "model": "fake:hi", "tools": ["mykb"]}])))
+        db.commit()
+    resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
+    assert resp.status_code == 409
+    assert "kb_team" in resp.json()["detail"]
+
+
+def test_delete_unreferenced_skill_still_204(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="unused", org_id=org_id,
+                           config={"name": "unused", "instructions": "x", "tools": []}))
+        db.commit()
+    assert client.delete("/api/config/skills/unused?org=default").status_code == 204
