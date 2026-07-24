@@ -174,6 +174,18 @@
   "off" or "no runs yet" and now shows `last_checked_at`. `RunRegistry`
   eviction and shutdown thread-stop remain deferred (see Known issues).
 
+- Autonomous email-trigger concurrency fix + `uses_email` list correction
+  (merged to `main`, PR #24 `1cde55f`): the poller's run-advance is now a
+  compare-and-swap (`UPDATE email_triggers ... WHERE enabled = 1`), so a
+  disable or mailbox replacement landing between the enabled-check and the
+  commit matches no row and the built run is discarded (`registry.discard`)
+  instead of dispatched against a just-disconnected mailbox — closing the
+  read-then-commit window a separate `refresh` left open (password rotation
+  keeps the same identity and is unaffected). Separately, the builder-session
+  *list* endpoint now passes db/org context to `_session_to_dict`, so
+  `uses_email` resolves per session instead of always reporting false
+  (detail/mutation responses were already correct). TDD regressions for both.
+
 - Bounded `RunRegistry` eviction: a third-round independent review
   re-raised the RunRegistry unbounded-growth finding (previously deferred
   twice) on the basis that the autonomous trigger removes the
