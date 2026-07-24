@@ -757,6 +757,34 @@ def test_workflow_put_appends_immutable_versions(client):
         assert head.current_version_id == versions[1].id  # pointer at latest
 
 
+def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
+    """POST /api/runs dispatches run_in_background with workflow_version_id set to
+    the deployed workflow's current version (the /api/runs -> stamp glue). The
+    executor submit is captured so the assertion is deterministic (no threadpool
+    wait) and no background run actually executes."""
+    import ui.backend.main as main
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    assert client.put("/api/config/workflows/stamp_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        expected = db.query(WorkflowRecord).filter_by(name="stamp_wf").one().current_version_id
+    assert expected is not None
+
+    captured = {}
+
+    def _fake_submit(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(main._executor, "submit", _fake_submit)
+    resp = client.post("/api/runs", json={"workflow": "stamp_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 200
+    assert captured["workflow_version_id"] == expected
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord

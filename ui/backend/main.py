@@ -487,6 +487,11 @@ async def create_run(
     org: Organization = Depends(get_current_org),
 ):
     workflow = _get_workflow(req.workflow, db, org.id)
+    # Best-effort audit stamp: a redeploy committing between the _get_workflow
+    # build and this read could stamp a version id that lags the built config by
+    # one deploy. Single-process, narrow, and never data loss (the run still
+    # executes the config _get_workflow returned); it can only mislabel the
+    # recorded version under a concurrent redeploy.
     version_id = current_version_id(db, org.id, req.workflow)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
