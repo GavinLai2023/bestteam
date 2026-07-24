@@ -133,6 +133,19 @@ _VALID_SPEC = {
 _INVALID_SPEC = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "tools": ["does_not_exist"]}]}
 
 
+def _make_deployable_session(client, *, name="support_workflow", marker=None):
+    """Create a session and store a deployable spec named `name`; `marker`
+    (embedded in the agent's backstory) lets two sessions with the same name
+    be told apart."""
+    spec = {**_VALID_SPEC, "name": name}
+    if marker is not None:
+        spec = {**spec, "agents": [{**spec["agents"][0], "backstory": marker}]}
+    session_id = client.post("/api/builder/sessions", json={"intent_text": name}).json()["id"]
+    resp = client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": spec})
+    assert resp.status_code == 200, resp.text
+    return session_id
+
+
 def test_builder_sessions_are_org_scoped(client):
     # Fixes the pre-existing hole where any authenticated user could read any
     # session by id: sessions belong to the creator's org; cross-org access
@@ -476,6 +489,54 @@ def test_deploy_is_atomic_across_workflow_and_session_updates(client, monkeypatc
         "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
     )
     assert resp.status_code == 404
+
+
+def test_redeploy_same_session_keeps_head_and_bumps_version(client):
+    """One session deployed twice -> same workflow_id, versions 1 then 2."""
+    from helpers import open_test_db
+    from ui.backend.db.models import BuilderSession, WorkflowVersion
+
+    session_id = _make_deployable_session(client, name="Acme")
+
+    client.post(f"/api/builder/sessions/{session_id}/deploy").raise_for_status()
+    with open_test_db() as db:
+        sess = db.get(BuilderSession, session_id)
+        head_id = sess.workflow_id
+        assert head_id is not None
+        assert db.query(WorkflowVersion).filter_by(workflow_id=head_id).count() == 1
+
+    client.post(f"/api/builder/sessions/{session_id}/deploy").raise_for_status()
+    with open_test_db() as db:
+        sess2 = db.get(BuilderSession, session_id)
+        assert sess2.workflow_id == head_id  # same head
+        assert db.query(WorkflowVersion).filter_by(workflow_id=head_id).count() == 2
+
+
+def test_two_sessions_same_name_converge_on_one_head_v1_preserved(client):
+    """P1-02: two sessions with the same team name deploy to the SAME head;
+    the first config survives as v1 (no silent clobber)."""
+    from helpers import open_test_db
+    from ui.backend.db.models import BuilderSession, WorkflowVersion
+
+    s_a = _make_deployable_session(client, name="Dup", marker="A")
+    s_b = _make_deployable_session(client, name="Dup", marker="B")
+
+    client.post(f"/api/builder/sessions/{s_a}/deploy").raise_for_status()
+    client.post(f"/api/builder/sessions/{s_b}/deploy").raise_for_status()
+
+    with open_test_db() as db:
+        head_a = db.get(BuilderSession, s_a).workflow_id
+        head_b = db.get(BuilderSession, s_b).workflow_id
+        assert head_a == head_b and head_a is not None  # one shared head
+        versions = (
+            db.query(WorkflowVersion)
+            .filter_by(workflow_id=head_a)
+            .order_by(WorkflowVersion.version_number)
+            .all()
+        )
+        assert [v.version_number for v in versions] == [1, 2]  # both preserved
+        assert versions[0].config["agents"][0]["backstory"] == "A"
+        assert versions[1].config["agents"][0]["backstory"] == "B"
 
 
 def test_deploy_persists_workflow_record_and_marks_session_deployed(client):

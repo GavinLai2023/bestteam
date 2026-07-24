@@ -27,6 +27,7 @@ _UPDATABLE_FIELDS = frozenset(
         "requirements_json",
         "specification_json",
         "status",
+        "workflow_id",
     }
 )
 
