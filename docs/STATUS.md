@@ -291,6 +291,16 @@
   / `test_status_check_rejects_invalid_value`. Spec:
   `docs/superpowers/specs/2026-07-24-deploy-is-the-gate-design.md`. See
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+  Post-merge review hardening (3 P1 findings): (F1) `validate_agent_models`
+  now rejects an agent whose model is missing/`None`/empty/non-string — the
+  operator CRUD path builds `Agent(**spec)` directly (`Agent.model` is
+  `ModelSpec | None`), so such a model previously deployed and failed at first
+  run; a non-string model also crashed the check (`42.startswith` → 500). (F3)
+  `build_trigger_workflow` now filters `status="deployed"`, extending the gate
+  to the autonomous poller (it queried by name+org only). (F2) Model validation
+  is deploy-time only by design — a catalog-removed or legacy model fails at
+  run, not load; documented as a known limitation (load-time re-validation
+  deliberately out of scope).
 
 ## In Progress
 
