@@ -269,6 +269,29 @@
   accurate but out of scope for a narrow fix pass — each needs its own
   brainstorm → spec → plan cycle as a future sub-project.
 
+- Data architecture review triage, second pass — "deploy is the gate"
+  (P1-06 + P1-11): P1-06, workflow lifecycle status was decorative
+  (`_get_workflow`/`GET /api/workflows` ignored `status`, so a draft could
+  run as production) — only `status="deployed"` `WorkflowRecord`s are now
+  resolved/listed; `workflows.status` is CHECK-constrained to `('draft',
+  'ready_for_testing', 'deployed')` (migration `b1d7e4f2a9c8`, guarded/
+  idempotent, with existing non-`deployed` rows backfilled to `deployed` so
+  upgrade doesn't retroactively hide previously-runnable workflows); an
+  operator save via `/api/config/workflows` now writes `status="deployed"`
+  (save = deploy, matching the wizard's `deploy_session`) — `/api/config/workflows`
+  (admin CRUD list) stays unfiltered by design. P1-11, deploy-time validation
+  didn't check agent model specs against what the platform actually offers —
+  `deploy_validation.validate_agent_models()` now checks every agent model
+  against the model catalog (`fake:` exempt) at both deploy points
+  (`builder.py::deploy_session`, `crud.py::upsert_workflow_config`), 400ing
+  with the full list of unknown models. TDD regressions: `tests/test_deploy_validation.py`
+  (the helper), `tests/test_crud_api.py::test_only_deployed_workflows_are_listed_and_runnable`
+  / `test_workflow_put_rejects_agent_model_not_in_catalog`, `tests/test_builder_api.py::test_deploy_rejects_agent_model_not_in_catalog`
+  / `test_deployed_workflow_can_be_run_via_get_workflow`, and `tests/test_migrations.py::test_existing_non_deployed_workflow_backfilled_to_deployed`
+  / `test_status_check_rejects_invalid_value`. Spec:
+  `docs/superpowers/specs/2026-07-24-deploy-is-the-gate-design.md`. See
+  `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

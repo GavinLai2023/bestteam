@@ -185,7 +185,9 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     `ThreadPoolExecutor` machinery as `/api/runs` (factored into
     `ui/backend/runtime.py` so both routers can use it without a circular
     import).
-  - `POST /{id}/deploy` — Stage 6: upserts a `WorkflowRecord` (`status=
+  - `POST /{id}/deploy` — Stage 6: validates agent models against the model
+    catalog (`deploy_validation.validate_agent_models`, `fake:` exempt; 400
+    listing any model not offered), then upserts a `WorkflowRecord` (`status=
     deployed`) from `specification.to_raw()` and marks the session
     `deployed`.
   - All generation endpoints (`model=...`) translate `BestTeamError` (e.g.
@@ -198,17 +200,30 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   resolvable by name from a workflow, via `load_knowledge_base_tools` and
   `load_skills`) and `workflows` (a complete `Specification.to_raw()`-shaped
   dict carrying its own `agents:`/`teams:` inline, validated via
-  `_build_workflow()` exactly like the wizard's Specification stage). Plus two
-  read-only reference routes for the UI: `GET /orgs` (the org selector) and
-  `GET /tools` (the built-in `bestteam.tools.REGISTRY`, name + docstring).
+  `_build_workflow()` exactly like the wizard's Specification stage, then
+  `deploy_validation.validate_agent_models()` against the model catalog —
+  `raw_spec` and `crud.py`'s `PUT /workflows/{name}` both 400 listing any
+  agent model spec not in `model_catalog` (`fake:` exempt)). An operator save
+  via `PUT /workflows/{name}` writes `status="deployed"` on both insert and
+  update — **save is deploy**: there is no separate promote step, mirroring
+  the wizard's `deploy_session`, which validates the same way at the same
+  point. Plus two read-only reference routes for the UI: `GET /orgs` (the org
+  selector) and `GET /tools` (the built-in `bestteam.tools.REGISTRY`, name +
+  docstring).
   **Standalone `agents`/`teams` CRUD was removed**: nothing consumed those
   records (`_build_workflow` takes only `extra_tools`/`extra_skills`), and both
   tables were empty everywhere. The models remain in `db/models.py`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
-  first, within the caller's org (cached on `updated_at`), then falls back to
-  `WORKFLOWS_DIR/<name>.yaml` (cached on mtime) — so a workflow deployed via
-  the wizard or edited via `/api/config/workflows` is immediately runnable
-  through `/api/runs`.
+  first, within the caller's org and filtered to `status == "deployed"`
+  (cached on `updated_at`), then falls back to `WORKFLOWS_DIR/<name>.yaml`
+  (cached on mtime) — so a workflow deployed via the wizard or saved via
+  `/api/config/workflows` is immediately runnable through `/api/runs`, and a
+  non-`deployed` record is treated as unknown (same 404 as absent, no
+  existence oracle). `GET /api/workflows` applies the same `status ==
+  "deployed"` filter to its DB-backed listing. `/api/config/workflows` (the
+  admin CRUD list) is **not** filtered — operators see all configs
+  regardless of status. P1-06, data-architecture review; see
+  `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **Demo YAML workflows are opt-in** (`main.py::demo_workflows_enabled`,
   `BESTTEAM_DEMO_WORKFLOWS`, **off by default**). The two workflow sources
   serve different audiences: YAML is the *SDK's* format (`load_workflow`,
