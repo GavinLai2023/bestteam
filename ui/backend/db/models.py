@@ -128,6 +128,33 @@ class WorkflowRecord(Base):
     status: Mapped[str] = mapped_column(default="draft")
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    current_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("workflow_versions.id"), nullable=True
+    )
+
+
+class WorkflowVersion(Base):
+    """An immutable published snapshot of a WorkflowRecord's config.
+
+    Deploy appends one row (never updates an existing one) and points the
+    parent WorkflowRecord.current_version_id at it; a Run references the exact
+    version it executed. This freezes the inline config blob only -- standalone
+    Skills/KBs/models are still resolved by name at load (P1-04/P1-05)."""
+
+    __tablename__ = "workflow_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_id", "version_number",
+            name="uq_workflow_versions_workflow_id_version_number",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"))
+    version_number: Mapped[int]
+    config: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
 class OrgEmailCredential(Base):
@@ -218,6 +245,12 @@ class BuilderSession(Base):
     status: Mapped[str] = mapped_column(default="intent")
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     feedback_history: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # The stable WorkflowRecord (team head) this session deploys to. Set on
+    # first deploy; a redeploy publishes a new version under the same head, so
+    # two sessions that deploy the same name converge on one head (P1-02).
+    workflow_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("workflows.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -243,6 +276,12 @@ class Run(Base):
     # Who started the run (CR-032) -- informational for audit; ownership is
     # org-level via org_id. NULL for legacy/pre-fix runs.
     username: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # The exact immutable version this run executed (P1-03/P1-15). NULL for
+    # sandbox test runs (they run the session spec, not a published version)
+    # and for pre-migration rows.
+    workflow_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("workflow_versions.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 

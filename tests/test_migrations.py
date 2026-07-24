@@ -185,3 +185,45 @@ def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
                 ))
     finally:
         engine.dispose()
+
+
+# Revision just before the workflow_versions migration.
+_PRE_VERSIONS = "b1d7e4f2a9c8"
+
+
+def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkeypatch):
+    """Upgrading past the versions migration gives each existing workflow
+    exactly one immutable v1 with its current-version pointer set."""
+    db_path = tmp_path / "wf_versions.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_VERSIONS)  # workflows exists, no workflow_versions yet
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at) "
+            "VALUES (7, 'wf', NULL, '{\"name\": \"wf\"}', 'deployed', '2026-01-01', '2026-01-01')"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text(
+                "SELECT workflow_id, version_number, config FROM workflow_versions"
+            )).all()
+            assert rows == [(7, 1, '{"name": "wf"}')]
+            ptr = conn.execute(sa.text(
+                "SELECT current_version_id FROM workflows WHERE id = 7"
+            )).scalar()
+            vid = conn.execute(sa.text(
+                "SELECT id FROM workflow_versions WHERE workflow_id = 7"
+            )).scalar()
+            assert ptr == vid
+            # Exactly one v1 -- the backfill did not duplicate.
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_versions")).scalar()
+            assert count == 1
+    finally:
+        engine.dispose()
