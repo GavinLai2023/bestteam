@@ -58,6 +58,27 @@ def test_stale_workflow_id_falls_back_to_resolve_or_create_by_name():
     assert v2.version_number == 1
 
 
+def test_workflow_id_from_another_org_falls_back_to_own_org_head():
+    """A workflow_id that belongs to a different org must not be rewritten;
+    the deploy creates/uses a head in the caller's own org instead."""
+    db = _db()
+    org1_head, _ = publish_workflow_version(db, org_id=1, name="wf", config={"v": 1})
+    db.commit()
+    org1_id = org1_head.id
+
+    org2_head, v = publish_workflow_version(
+        db, org_id=2, name="wf", config={"v": 2}, workflow_id=org1_id
+    )
+    db.commit()
+    assert org2_head.id != org1_id          # did not hijack org 1's head
+    assert org2_head.org_id == 2
+    assert v.version_number == 1            # a fresh head for org 2
+    # org 1's head is untouched: still v1, its own config.
+    frozen = db.get(WorkflowRecord, org1_id)
+    assert frozen.org_id == 1
+    assert frozen.config == {"v": 1}
+
+
 def test_current_version_id_returns_pointer_for_deployed_only():
     db = _db()
     record, version = publish_workflow_version(db, org_id=1, name="wf", config={"v": 1})

@@ -28,13 +28,19 @@ def publish_workflow_version(
     """Publish `config` as the next immutable version of a team head, moving its
     current-version pointer. Returns `(record, version)`; does NOT commit.
 
-    `workflow_id` given and found -> that existing head (rename-safe:
-    `record.name = name`). Otherwise resolve-or-create the head by
-    `(org_id, name)` -- so a stale session pointer (deleted team) recreates
-    cleanly, and two sessions deploying the same name converge on one head."""
+    `workflow_id` given and found *within `org_id`* -> that existing head
+    (rename-safe: `record.name = name`). Otherwise resolve-or-create the head by
+    `(org_id, name)` -- so a stale session pointer (deleted team), or one that
+    names another org's workflow, recreates cleanly in the caller's own org, and
+    two sessions deploying the same name converge on one head. The lookup is
+    org-scoped so this primitive can never rename/redeploy another org's record."""
     record: Optional[WorkflowRecord] = None
     if workflow_id is not None:
-        record = db.get(WorkflowRecord, workflow_id)
+        record = (
+            db.query(WorkflowRecord)
+            .filter_by(id=workflow_id, org_id=org_id)
+            .one_or_none()
+        )
     if record is not None:
         record.name = name
         record.config = config

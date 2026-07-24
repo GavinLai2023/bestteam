@@ -388,7 +388,9 @@ def publish_workflow_version(
     cleanly, and two sessions deploying the same name converge on one head."""
     record: Optional[WorkflowRecord] = None
     if workflow_id is not None:
-        record = db.get(WorkflowRecord, workflow_id)
+        # Org-scoped: a workflow_id naming another org's record (or a stale one)
+        # falls through to resolve-or-create in the caller's own org.
+        record = db.query(WorkflowRecord).filter_by(id=workflow_id, org_id=org_id).one_or_none()
     if record is not None:
         record.name = name
         record.config = config
