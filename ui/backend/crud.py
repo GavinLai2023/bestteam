@@ -500,10 +500,11 @@ def upsert_workflow_config(
 
     item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
-        item = WorkflowRecord(name=item_name, config=raw, status="draft", org_id=org_id)
+        item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
         db.add(item)
     else:
         item.config = raw
+        item.status = "deployed"
     db.commit()
     return {"name": item_name, "org": org, "status": item.status, "config": raw}
 

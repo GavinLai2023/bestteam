@@ -719,7 +719,7 @@ def test_workflow_crud_round_trip_and_validation(client):
     create = client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
     assert create.status_code == 200
     body = create.json()
-    assert body["status"] == "draft"
+    assert body["status"] == "deployed"
     assert body["config"]["name"] == "support_workflow"
 
     listed = client.get("/api/config/workflows")
@@ -730,6 +730,30 @@ def test_workflow_crud_round_trip_and_validation(client):
 
     assert client.delete("/api/config/workflows/support_workflow?org=default").status_code == 204
     assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
+
+
+def test_only_deployed_workflows_are_listed_and_runnable(client):
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord
+
+    # crud save = deploy -> runnable immediately
+    client.put("/api/config/workflows/live_wf?org=default", json=_VALID_WORKFLOW_CONFIG)
+    # a draft can only exist as a legacy/direct row now
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(WorkflowRecord(name="draft_wf",
+                              config={**_VALID_WORKFLOW_CONFIG, "name": "draft_wf"},
+                              status="draft", org_id=org_id))
+        db.commit()
+
+    headers = _org_user_headers(client)
+    workflows = client.get("/api/workflows", headers=headers).json()["workflows"]
+    assert "live_wf" in workflows
+    assert "draft_wf" not in workflows
+    assert client.post("/api/runs", json={"workflow": "live_wf", "input": "hi"},
+                       headers=headers).status_code == 200
+    assert client.post("/api/runs", json={"workflow": "draft_wf", "input": "hi"},
+                       headers=headers).status_code == 404
 
 
 def test_workflow_put_rejects_agent_model_not_in_catalog(client):

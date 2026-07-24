@@ -357,11 +357,11 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
     # result rather than repopulating the cache after the invalidation (CR-005).
     generation = _workflow_cache_generation
     if db is not None:
-        record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
+        record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed").one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
-            record = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
+            record = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed").one_or_none()
             dependency_freshness = _dependency_freshness(session) if record is not None else None
 
     if record is not None:
@@ -455,7 +455,10 @@ def list_workflows(db: Session = Depends(get_db), org: Organization = Depends(ge
     # The org's own deployed/edited workflows, plus the global YAML demos only
     # where they're deliberately enabled (see `demo_workflows_enabled`).
     db_names = {
-        row.name for row in db.query(WorkflowRecord.name).filter(WorkflowRecord.org_id == org.id)
+        row.name
+        for row in db.query(WorkflowRecord.name).filter(
+            WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed"
+        )
     }
     yaml_names = (
         {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
