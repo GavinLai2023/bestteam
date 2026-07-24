@@ -227,3 +227,13 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
             assert count == 1
     finally:
         engine.dispose()
+
+    # Idempotent: re-running upgrade head does not duplicate the v1 row.
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_versions")).scalar()
+            assert count == 1
+    finally:
+        engine.dispose()
