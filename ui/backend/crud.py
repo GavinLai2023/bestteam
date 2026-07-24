@@ -21,6 +21,7 @@ remain in `db/models.py`.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import shutil
 import threading
@@ -58,7 +59,13 @@ from .knowledge_bases import (
     kb_name_collisions,
     load_knowledge_base_tools,
 )
-from .skills import load_skills
+from .skills import DEFAULT_SKILLS, load_skills
+
+_logger = logging.getLogger(__name__)
+
+# Seeded platform built-in skills can't be deleted -- bundled YAML workflows may
+# depend on them (F4). Names only; the check applies to the platform tier.
+_BUILTIN_SKILL_NAMES = frozenset(s.name for s in DEFAULT_SKILLS)
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
 # the default workflow name -- same directory as the YAML demo workflows.
@@ -194,11 +201,30 @@ def _invalidate_workflow_cache() -> None:
         main._workflow_cache_generation += 1
 
 
+def _reject_builtin_kb_name(name: str) -> None:
+    """Refuse a knowledge-base name that shadows a built-in tool (F1).
+
+    All tools resolve through one flat name lookup, so a KB named after a
+    built-in silently replaces it at load. Blocking the name at creation is the
+    source fix -- a colliding KB can then never exist.
+    """
+    if name in REGISTRY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"A knowledge base can't reuse a built-in tool name: '{name}'. "
+                "Choose a different name."
+            ),
+        )
+
+
 def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -> list[str]:
     """Names of deployed workflows whose config references `name`.
 
     `kind="skill"` matches an agent's `skills`; `kind="knowledge_base"` matches an
-    agent's `tools` (a standalone KB is referenced by name there).
+    agent's `tools` (a standalone KB is referenced by name there). Malformed rows
+    (non-dict config, non-list agents/tools) are skipped rather than crashing the
+    scan (F6) -- such a workflow can't build anyway.
     """
     field = "skills" if kind == "skill" else "tools"
     query = db.query(WorkflowRecord).filter(WorkflowRecord.status == "deployed")
@@ -206,8 +232,15 @@ def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -
         query = query.filter(WorkflowRecord.org_id == org_id)
     hits = []
     for row in query:
-        for agent in (row.config or {}).get("agents", []) or []:
-            if isinstance(agent, dict) and name in (agent.get(field) or []):
+        config = row.config if isinstance(row.config, dict) else {}
+        agents = config.get("agents", [])
+        if not isinstance(agents, list):
+            continue
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            refs = agent.get(field)
+            if isinstance(refs, list) and name in refs:
                 hits.append(row.name)
                 break
     return sorted(hits)
@@ -278,6 +311,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
         if name == "knowledge_bases":
             _validate_kb_paths(config)
+            _reject_builtin_kb_name(item_name)
         try:
             spec = spec_cls.model_validate({**config, "name": item_name})
         except ValidationError as exc:
@@ -303,6 +337,13 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
+        # A seeded platform built-in skill can't be deleted -- bundled YAML
+        # workflows may depend on it (F4). Platform tier only (org_id None).
+        if name == "skills" and org_id is None and item_name in _BUILTIN_SKILL_NAMES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{item_name}' is a built-in skill and can't be deleted.",
+            )
         if name in ("skills", "knowledge_bases"):
             kind = "skill" if name == "skills" else "knowledge_base"
             used_by = _deployed_workflows_referencing(db, org_id, kind, item_name)
@@ -315,14 +356,26 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                         + ". Update or remove those teams first."
                     ),
                 )
+        db.delete(item)
+        db.commit()
         if name == "knowledge_bases":
-            # Same per-KB lock as upload, so a delete can't race a promotion.
+            # Remove uploads only AFTER the row is committed (F3): a commit
+            # failure then leaves the files intact for the still-present record,
+            # rather than deleting files under a rolled-back row. Hold the per-KB
+            # lock so this can't race a re-upload/promotion. A failed rmtree is
+            # logged (the record is already gone -- at worst orphaned files an
+            # operator can clean up), not silently swallowed.
             with _kb_upload_lock(f"{org_id}/{item_name}"):
                 upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
                 if upload_dir.is_dir():
-                    shutil.rmtree(upload_dir, ignore_errors=True)
-        db.delete(item)
-        db.commit()
+                    try:
+                        shutil.rmtree(upload_dir)
+                    except OSError as exc:
+                        _logger.warning(
+                            "Knowledge base '%s' (org %s) deleted, but its upload "
+                            "directory couldn't be removed: %s",
+                            item_name, org_id, exc,
+                        )
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
         return Response(status_code=204)
@@ -349,6 +402,7 @@ def upload_knowledge_base_files(
         _validate_tool_name(item_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _reject_builtin_kb_name(item_name)
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")

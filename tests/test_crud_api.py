@@ -1226,3 +1226,47 @@ def test_delete_unreferenced_skill_still_204(client):
                            config={"name": "unused", "instructions": "x", "tools": []}))
         db.commit()
     assert client.delete("/api/config/skills/unused?org=default").status_code == 204
+
+
+# --- Post-review hardening (P1-08 boundary, delete robustness, undeletable built-ins) ---
+
+def test_kb_put_rejects_builtin_name(client):
+    # F1: a KB can't be *created* with a built-in tool name (else it shadows the
+    # built-in at load, bypassing the deploy-time collision check).
+    resp = client.put("/api/config/knowledge_bases/calculator?org=default", json={"path": "docs"})
+    assert resp.status_code == 400
+    assert "built-in tool name" in resp.json()["detail"]
+
+
+def test_kb_upload_rejects_builtin_name(client):
+    # F1: same guard on the upload creation path.
+    resp = client.post(
+        "/api/config/knowledge_bases/calculator/upload?org=default",
+        files=[("files", ("d.txt", b"hi", "text/plain"))],
+    )
+    assert resp.status_code == 400
+    assert "built-in tool name" in resp.json()["detail"]
+
+
+def test_delete_scan_tolerates_malformed_deployed_workflow(client):
+    # F6: a malformed deployed workflow must not 500 an unrelated skill/KB delete.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="unused_sk", org_id=org_id,
+                           config={"name": "unused_sk", "instructions": "x", "tools": []}))
+        db.add(WorkflowRecord(name="broken", org_id=org_id, status="deployed",
+                              config={"agents": 5, "teams": [], "workflow": {"steps": []}}))
+        db.commit()
+    resp = client.delete("/api/config/skills/unused_sk?org=default")
+    assert resp.status_code == 204  # not 500 despite the malformed workflow
+
+
+def test_delete_builtin_platform_skill_is_refused(client):
+    # F4: a seeded platform built-in skill can't be deleted (would orphan bundled
+    # YAML workflows that depend on it).
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    resp = client.delete("/api/config/skills/email_triage_reply")  # platform (no ?org)
+    assert resp.status_code == 409
+    assert "built-in" in resp.json()["detail"].lower()
