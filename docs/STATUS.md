@@ -331,10 +331,15 @@
   (F4) seeded platform built-in skills are undeletable (bundled YAML demos may
   depend on them); (F6) the delete reference-scan skips malformed workflows
   instead of 500-ing; (F3) KB delete commits before `rmtree` and logs rmtree
-  failures. Deferred to the P1-04 typed-dependency-records sub-project: (F2) a
-  delete/deploy TOCTOU window (near-impossible single-worker) and (F5) raw-name
-  matching that can over-block (fail-closed) — both need resolved-identity
-  dependency tracking.
+  failures. A second review round closed further gaps: the KB delete now holds
+  the per-KB lock across delete+commit+rmtree (concurrent-upload race); the
+  delete scan matches dict-shaped `tools`/`skills` (the loader normalizes them);
+  `load_knowledge_base_tools` fails closed on a legacy KB shadowing a built-in;
+  and a process-wide `component_mutation_lock` serializes component-delete
+  against deploy (the delete/deploy TOCTOU — feasible even single-worker via the
+  threadpool — is now mitigated, not "near-impossible" as first stated).
+  Remaining, deferred to P1-04 (typed dependency records): raw-name matching can
+  over-block (fail-closed, safe), and upload-file cleanup is best-effort.
 
 ## In Progress
 

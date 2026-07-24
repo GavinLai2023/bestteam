@@ -111,17 +111,43 @@ and the delete guard had robustness gaps. Addressed in-scope:
   commit with `ignore_errors`), and rmtree failures are logged, so a commit
   failure no longer destroys files under a rolled-back record.
 
+## Second review round (concurrency + shape/legacy gaps)
+
+A follow-up review found the first round's own fixes had gaps; all correctness
+ones are now closed:
+
+- **Concurrent upload vs delete** — the round-1 F3 reorder committed the delete
+  before taking the per-KB lock, so a concurrent upload could recreate the
+  row/files in the gap and have them `rmtree`'d. The KB delete now holds
+  `_kb_upload_lock` across delete+commit+rmtree, matching upload.
+- **Dict-shaped references** — the loader normalizes `tools`/`skills` via
+  `list(...)`, so a dict (`{"mykb": true}`) is honored, but the round-1 F6 scan
+  only matched lists, letting a dict-shaped reference bypass the delete guard.
+  The scan now matches dicts too (membership checks keys).
+- **Legacy KB collisions** — round-1 blocked *creating* a colliding KB but a
+  legacy record still shadowed at load. `load_knowledge_base_tools` now fails
+  closed (raises) on a KB name in `REGISTRY`, covering `_get_workflow` and the
+  autonomous trigger; `_get_workflow` resolves tools inside its `try` so it's a
+  clean 400.
+- **Delete/deploy TOCTOU** — the round-1 "near-impossible single-worker"
+  rationale was wrong (FastAPI runs sync endpoints in a threadpool, so they race
+  even single-worker). Now mitigated by a process-wide `component_mutation_lock`
+  (`ui/backend/component_lock.py`) serializing the delete's scan+delete+commit
+  against a deploy's resolution+write+commit (`crud.upsert_workflow_config`,
+  `builder.deploy_session`): the delete either sees the new reference (409) or
+  the deploy's resolution fails (400). Interim; the durable fix (dependency rows
+  + DB `RESTRICT`) is still P1-04.
+
 ## Known limitations (deferred to P1-04 typed dependency records)
 
-- **F2 — delete/deploy TOCTOU.** The delete guard scans references, then
-  deletes; a concurrent deploy committing in that window can leave a deployed
-  workflow referencing a just-deleted resource. Near-impossible on the
-  single-worker deployment; the robust fix (persisted dependency rows + DB
-  `RESTRICT`) is exactly P1-04.
-- **F5 — name-based over-blocking.** The guard matches raw names, so it can
-  refuse a delete that resolution would not actually have used (e.g. a platform
-  skill shadowed by an org skill). This is fail-closed (safe); precise
+- **Name-based over-blocking.** The guard matches raw names, so it can refuse a
+  delete that resolution would not actually have used (e.g. a platform skill
+  shadowed by an org skill). This is fail-closed (safe); precise
   resolved-identity tracking is P1-04.
+- **Best-effort upload cleanup.** After a successful record delete, a rare
+  `rmtree` failure leaves orphaned files (logged for operator cleanup) and still
+  returns 204 — the resource is gone from the user's view. Durable cleanup
+  retry / tombstoning is disproportionate at this scale.
 
 ## Out of scope
 
