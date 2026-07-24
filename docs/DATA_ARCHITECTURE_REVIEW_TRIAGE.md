@@ -64,7 +64,7 @@ check (not a provider/API-key-dependent constructibility check). Design:
 
 ## Everything else: validated-accurate, out of scope for this pass
 
-The remaining 27 findings (all of Phase 2 except P2-01/P2-02 above, and the
+The remaining 26 findings (all of Phase 2 except P2-01/P2-02 above, and the
 rest of Phase 1: P1-01 through P1-05, P1-07, P1-08, P1-10, P1-12, P1-15,
 P1-18) were spot-checked where practical and found to be accurate
 descriptions of the current, intentionally-scoped MVP data model — not

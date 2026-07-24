@@ -202,8 +202,8 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   dict carrying its own `agents:`/`teams:` inline, validated via
   `_build_workflow()` exactly like the wizard's Specification stage, then
   `deploy_validation.validate_agent_models()` against the model catalog —
-  `raw_spec` and `crud.py`'s `PUT /workflows/{name}` both 400 listing any
-  agent model spec not in `model_catalog` (`fake:` exempt)). An operator save
+  the wizard's `deploy_session` and `crud.py`'s `PUT /workflows/{name}` both
+  400 listing any agent model spec not in `model_catalog` (`fake:` exempt)). An operator save
   via `PUT /workflows/{name}` writes `status="deployed"` on both insert and
   update — **save is deploy**: there is no separate promote step, mirroring
   the wizard's `deploy_session`, which validates the same way at the same
