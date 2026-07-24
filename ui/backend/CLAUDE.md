@@ -232,8 +232,16 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   builtin_names)` against `set(bestteam.tools.REGISTRY)`; it's name-only (no KB
   is built) so it can run before path validation. Only KB names are checked —
   the per-org email-tool override (which intentionally shadows `REGISTRY`'s
-  `email_*` entries by name) is unaffected. P1-07/P1-08, data-architecture
-  review; see `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
+  `email_*` entries by name) is unaffected. Post-review hardening: a KB also
+  can't be **created** with a built-in tool name (`_reject_builtin_kb_name` at
+  KB PUT + upload), so a colliding KB can never exist to shadow the built-in at
+  load; a seeded platform built-in skill (`_BUILTIN_SKILL_NAMES`, e.g.
+  `email_triage_reply`) is undeletable; and the KB delete commits the row before
+  `rmtree` (logging rmtree failures) so a commit failure can't destroy files
+  under a rolled-back record. Known limitations deferred to P1-04 (typed
+  dependency records): a delete/deploy TOCTOU window, and raw-name matching that
+  can over-block (fail-closed). P1-07/P1-08, data-architecture review; see
+  `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
   first, within the caller's org and filtered to `status == "deployed"`
   (cached on `updated_at`), then falls back to `WORKFLOWS_DIR/<name>.yaml`

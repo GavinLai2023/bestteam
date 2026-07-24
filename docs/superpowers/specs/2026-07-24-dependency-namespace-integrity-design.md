@@ -91,6 +91,38 @@ the deploy/CRUD surface:
   → success.
 - **Full suite** green (`BESTTEAM_DB_PATH` scratch DB); frontend unaffected.
 
+## Post-review hardening
+
+A follow-up review found the deploy-time collision check alone was bypassable
+and the delete guard had robustness gaps. Addressed in-scope:
+
+- **F1** — the collision check was only at the workflow-deploy points, so an
+  admin could *create* a KB named after a built-in (KB PUT / upload) and shadow
+  it at load. Now `_reject_builtin_kb_name` blocks a built-in name at KB
+  creation (`crud.py`), so a colliding KB can never exist — this, not load-time
+  validation, is the complete fix.
+- **F4** — a seeded platform built-in skill (e.g. `email_triage_reply`) is now
+  undeletable (`_BUILTIN_SKILL_NAMES` check in `delete_item`), since bundled
+  YAML demo workflows can depend on it and the DB-only reference scan wouldn't
+  see them.
+- **F6** — `_deployed_workflows_referencing` now skips malformed rows (non-dict
+  config, non-list agents/tools) instead of 500-ing an unrelated delete.
+- **F3** — KB delete reordered to commit-then-`rmtree` (was `rmtree`-before-
+  commit with `ignore_errors`), and rmtree failures are logged, so a commit
+  failure no longer destroys files under a rolled-back record.
+
+## Known limitations (deferred to P1-04 typed dependency records)
+
+- **F2 — delete/deploy TOCTOU.** The delete guard scans references, then
+  deletes; a concurrent deploy committing in that window can leave a deployed
+  workflow referencing a just-deleted resource. Near-impossible on the
+  single-worker deployment; the robust fix (persisted dependency rows + DB
+  `RESTRICT`) is exactly P1-04.
+- **F5 — name-based over-blocking.** The guard matches raw names, so it can
+  refuse a delete that resolution would not actually have used (e.g. a platform
+  skill shadowed by an org skill). This is fail-closed (safe); precise
+  resolved-identity tracking is P1-04.
+
 ## Out of scope
 
 - P1-10 (KB ownership consolidation) — its own next sub-project.

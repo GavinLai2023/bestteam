@@ -326,6 +326,15 @@
   / `test_workflow_put_rejects_kb_named_after_builtin`, `tests/test_org_settings.py::test_deploy_rejects_kb_named_after_builtin`.
   Spec: `docs/superpowers/specs/2026-07-24-dependency-namespace-integrity-design.md`.
   See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+  Post-review hardening (6 findings): (F1) a KB also can't be *created* with a
+  built-in tool name (KB PUT + upload), closing a post-deploy shadow bypass;
+  (F4) seeded platform built-in skills are undeletable (bundled YAML demos may
+  depend on them); (F6) the delete reference-scan skips malformed workflows
+  instead of 500-ing; (F3) KB delete commits before `rmtree` and logs rmtree
+  failures. Deferred to the P1-04 typed-dependency-records sub-project: (F2) a
+  delete/deploy TOCTOU window (near-impossible single-worker) and (F5) raw-name
+  matching that can over-block (fail-closed) — both need resolved-identity
+  dependency tracking.
 
 ## In Progress
 
