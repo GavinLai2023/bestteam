@@ -1169,3 +1169,16 @@ def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
     }
     resp2 = client.put("/api/config/workflows/unrelated_wf?org=default", json=unrelated_workflow)
     assert resp2.status_code == 200
+
+
+def test_workflow_put_rejects_kb_named_after_builtin(client):
+    # An inline KB named after a built-in tool would silently shadow it.
+    bad = {**_VALID_WORKFLOW_CONFIG,
+           "knowledge_bases": [{"name": "calculator", "path": "docs"}],
+           "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "tools": ["calculator"]}]}
+    resp = client.put("/api/config/workflows/collide_wf?org=default", json=bad)
+    assert resp.status_code == 400
+    assert "calculator" in resp.json()["detail"]
+    assert "collide_wf" not in client.get(
+        "/api/workflows", headers=_org_user_headers(client)
+    ).json()["workflows"]

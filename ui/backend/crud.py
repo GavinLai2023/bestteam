@@ -55,6 +55,7 @@ from .knowledge_bases import (
     _KB_CURRENT_POINTER,
     check_path_traversal,
     checked_contained_cache_path,
+    kb_name_collisions,
     load_knowledge_base_tools,
 )
 from .skills import load_skills
@@ -474,6 +475,16 @@ def upsert_workflow_config(
     org_id = _resolve_org_id(db, org, allow_platform=False)
     raw = {**config, "name": item_name}
     try:
+        kb_collisions = kb_name_collisions(db, org_id, raw)
+        if kb_collisions:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A knowledge base can't reuse a built-in tool name: "
+                    + ", ".join(kb_collisions)
+                    + ". Rename the knowledge base."
+                ),
+            )
         for kb_config in raw.get("knowledge_bases", []) or []:
             if isinstance(kb_config, dict):
                 _validate_kb_paths(kb_config)

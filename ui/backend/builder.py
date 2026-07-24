@@ -35,6 +35,7 @@ from .knowledge_bases import (
     contain_kb_config_for_load,
     ensure_contained_cache_path_for_source,
     ensure_workflow_cache_paths_for_source,
+    kb_name_collisions,
     load_knowledge_base_tools,
     resolve_kb_upload_path,
 )
@@ -476,6 +477,16 @@ def deploy_session(
 
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
+    kb_collisions = kb_name_collisions(db, org.id, spec.to_raw())
+    if kb_collisions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A knowledge base can't reuse a built-in tool name: "
+                + ", ".join(kb_collisions)
+                + ". Rename the knowledge base."
+            ),
+        )
     # A team that reads/drafts email can't go live without a connected mailbox.
     if spec_uses_email(db, session.specification_json, org.id) and (
         get_email_credentials(db, org.id) is None

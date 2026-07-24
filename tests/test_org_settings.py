@@ -440,3 +440,17 @@ def test_disconnect_disables_trigger(client, monkeypatch):
     client.delete("/api/org/email")
     with open_test_db() as db:
         assert get_email_trigger(db, org_id).enabled is False
+
+
+def test_deploy_rejects_kb_named_after_builtin(client):
+    bad_spec = {
+        "name": "collide_team",
+        "knowledge_bases": [{"name": "web_search", "path": "docs"}],
+        "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi",
+                    "tools": ["web_search"]}],
+        "teams": [], "workflow": {"steps": []},
+    }
+    sid = _make_session(bad_spec)
+    resp = client.post(f"/api/builder/sessions/{sid}/deploy")
+    assert resp.status_code == 400
+    assert "web_search" in resp.json()["detail"]

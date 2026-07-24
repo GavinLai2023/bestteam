@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.loader import _build_knowledge_base
+from bestteam.tools import REGISTRY
 
 from .db.models import KnowledgeBaseRecord
+from .deploy_validation import find_kb_tool_collisions
 
 # --- KB path containment (CR-001) -------------------------------------------
 # A KB `cache_path` is a server-file *write* target (the vector KB's
@@ -191,3 +193,25 @@ def load_knowledge_base_tools(
         kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
+
+
+def kb_name_collisions(db: Session, org_id: Optional[int], raw_spec: Dict[str, Any]) -> List[str]:
+    """KB names in `raw_spec` (inline + referenced standalone) that shadow a built-in tool.
+
+    Name-only (no KB is built), so it can run before path validation / build.
+    """
+    referenced = {
+        tool
+        for agent in raw_spec.get("agents", []) or []
+        for tool in (agent.get("tools") or [])
+    }
+    standalone: set = set()
+    if referenced:
+        standalone = {
+            row.name
+            for row in db.query(KnowledgeBaseRecord.name).filter(
+                KnowledgeBaseRecord.org_id == org_id,
+                KnowledgeBaseRecord.name.in_(referenced),
+            )
+        }
+    return find_kb_tool_collisions(raw_spec, standalone, REGISTRY)
