@@ -187,9 +187,13 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     import).
   - `POST /{id}/deploy` — Stage 6: validates agent models against the model
     catalog (`deploy_validation.validate_agent_models`, `fake:` exempt; 400
-    listing any model not offered), then upserts a `WorkflowRecord` (`status=
-    deployed`) from `specification.to_raw()` and marks the session
-    `deployed`.
+    listing any agent whose model is missing/empty/non-string or not offered —
+    the CRUD path builds `Agent(**spec)` directly, so this is the only guard on
+    those), then upserts a `WorkflowRecord` (`status=deployed`) from
+    `specification.to_raw()` and marks the session `deployed`. Model validation
+    is **deploy-time only** — a model later removed from the catalog, or a legacy
+    row promoted by the migration, fails at run, not load (see the spec's "Known
+    limitation").
   - All generation endpoints (`model=...`) translate `BestTeamError` (e.g.
     an invalid spec the architect couldn't self-correct) to `400`, and any
     other exception (e.g. a real provider call without an API key) to `502`

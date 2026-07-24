@@ -108,3 +108,15 @@ Verified current gaps:
   sub-project per the triage register.
 - Embedding-model validation; per-org model policies (P2-06); archived/disabled
   workflow states.
+
+## Known limitation: model validation is deploy-time only
+
+Agent models are validated against the catalog **when a workflow is deployed/
+saved**, not when it is loaded to run. A deployed workflow keeps its stored model
+spec, so if an admin later removes that model from the catalog (catalog deletion
+does not revoke existing deployments), or a legacy row was promoted to `deployed`
+by the migration without a deploy-time check, the invalid model surfaces at first
+run rather than at load. Accepted deliberately: load-time re-validation (plus
+adding catalog state to the workflow-cache freshness key) was weighed and left out
+to keep this change surgical; revisit if per-org model policies (P2-06) or a
+catalog-revocation requirement lands.
