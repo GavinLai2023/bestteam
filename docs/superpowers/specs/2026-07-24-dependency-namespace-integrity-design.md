@@ -111,6 +111,24 @@ and the delete guard had robustness gaps. Addressed in-scope:
   commit with `ignore_errors`), and rmtree failures are logged, so a commit
   failure no longer destroys files under a rolled-back record.
 
+## Third review round (comprehensive close-outs)
+
+The second round's fixes were still narrow in three spots; each is now closed at
+the *class* level rather than the specific case:
+
+- **Concurrent delete vs upload-staging** — the KB upload staged/validated the
+  new version dir *inside* the KB root but outside the lock, so a concurrent
+  delete's `rmtree` of the whole root could strand the upload's committed record.
+  The upload now holds `_kb_upload_lock` across staging → validation → promotion
+  → commit, fully serializing with delete.
+- **String-shaped references** — the round-2 scan special-cased list/dict, but
+  the loader's `list(refs)` also honors a string. The scan now uses the loader's
+  own `list(refs)` normalization, so *any* shape the loader accepts is matched.
+- **Inline KB collisions** — the round-2 load guard covered only standalone KBs;
+  an inline KB built by the loader was unchecked. `core/loader._build_workflow`
+  now fails closed on an inline KB name in the tool registry, covering every load
+  path (SDK/YAML, manual, autonomous).
+
 ## Second review round (concurrency + shape/legacy gaps)
 
 A follow-up review found the first round's own fixes had gaps; all correctness
