@@ -31,7 +31,13 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`GET /api/workflows`) — see `ui/backend/CLAUDE.md`. The migration
   backfilled every pre-existing non-`deployed` row to `deployed` so upgrading
   a deployment doesn't retroactively hide/break previously-runnable
-  workflows.
+  workflows. A deployed workflow's references now block deletion of the
+  records it depends on: a `knowledge_bases`/`skills` row can't be deleted
+  (`409`) while a `status="deployed"` `workflows` row's `config` still
+  references it (KB via an agent's `tools`, skill via an agent's `skills`);
+  and a KB may not be named after a built-in tool (rejected `400` at deploy),
+  since both resolve through one flat name lookup. See
+  `ui/backend/CLAUDE.md`.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

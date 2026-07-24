@@ -217,6 +217,23 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   **Standalone `agents`/`teams` CRUD was removed**: nothing consumed those
   records (`_build_workflow` takes only `extra_tools`/`extra_skills`), and both
   tables were empty everywhere. The models remain in `db/models.py`.
+  `DELETE /skills/{name}` and `/knowledge_bases/{name}` refuse with `409` if a
+  `status="deployed"` `WorkflowRecord` still references the item —
+  `crud._deployed_workflows_referencing(db, org_id, kind, name)` scans deployed
+  workflows' `agents[*].skills` (`kind="skill"`) or `agents[*].tools`
+  (`kind="knowledge_base"`, a standalone KB's reference point) and, for
+  platform skills (`org_id is None`), scans across all orgs; the check runs
+  before any deletion/`rmtree`, naming the referencing team(s) in the error.
+  Both deploy points also reject (`400`) a workflow whose KB name — inline or
+  a referenced standalone KB — shadows a built-in tool:
+  `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)` resolves the
+  referenced standalone KB names and delegates to the pure
+  `deploy_validation.find_kb_tool_collisions(raw_spec, standalone_kb_names,
+  builtin_names)` against `set(bestteam.tools.REGISTRY)`; it's name-only (no KB
+  is built) so it can run before path validation. Only KB names are checked —
+  the per-org email-tool override (which intentionally shadows `REGISTRY`'s
+  `email_*` entries by name) is unaffected. P1-07/P1-08, data-architecture
+  review; see `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
   first, within the caller's org and filtered to `status == "deployed"`
   (cached on `updated_at`), then falls back to `WORKFLOWS_DIR/<name>.yaml`

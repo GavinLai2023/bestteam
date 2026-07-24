@@ -302,6 +302,31 @@
   run, not load; documented as a known limitation (load-time re-validation
   deliberately out of scope).
 
+- Data architecture review triage, third pass — dependency-namespace
+  integrity (P1-07 + P1-08): P1-07, deleting a skill/KB via
+  `/api/config/{skills,knowledge_bases}` orphaned any deployed workflow still
+  referencing it — `crud._deployed_workflows_referencing(db, org_id, kind,
+  name)` now scans `status="deployed"` `WorkflowRecord`s' `agents[*].skills`
+  (skill) / `agents[*].tools` (standalone KB) and `delete_item` 409s naming
+  the referencing team(s), checked before any deletion or KB `rmtree`
+  (platform skills, `org_id is None`, are checked across all orgs).
+  P1-08, every tool resolved through one flat name lookup so a KB could
+  silently shadow a built-in tool — `deploy_validation.find_kb_tool_collisions`
+  (pure) plus `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)`
+  (resolves referenced standalone KB names, calls the pure helper with
+  `set(bestteam.tools.REGISTRY)`) are now called name-only, before any KB
+  build, at both deploy points (`builder.py::deploy_session`,
+  `crud.py::upsert_workflow_config`), 400ing on a collision; scoped to
+  collision detection, not the reviewer's full typed-namespace rename, and
+  only KB names are checked so the per-org email-tool override never
+  false-positives. TDD regressions: `tests/test_deploy_validation.py::test_inline_kb_name_shadowing_builtin_flagged`
+  / `test_standalone_kb_name_shadowing_builtin_flagged` / `test_non_colliding_kb_names_pass`
+  / `test_collisions_sorted_and_deduped` (the pure helper); `tests/test_crud_api.py::test_delete_skill_referenced_by_deployed_workflow_is_409`
+  / `test_delete_kb_referenced_by_deployed_workflow_is_409` / `test_delete_unreferenced_skill_still_204`
+  / `test_workflow_put_rejects_kb_named_after_builtin`, `tests/test_org_settings.py::test_deploy_rejects_kb_named_after_builtin`.
+  Spec: `docs/superpowers/specs/2026-07-24-dependency-namespace-integrity-design.md`.
+  See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
