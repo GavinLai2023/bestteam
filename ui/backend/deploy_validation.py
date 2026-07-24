@@ -40,3 +40,25 @@ def validate_agent_models(raw_spec: Dict[str, Any], catalog_specs: Iterable[str]
             f"agent '{name}' uses model '{model}', which isn't available on this platform"
         )
     return problems
+
+
+def find_kb_tool_collisions(
+    raw_spec: Dict[str, Any],
+    standalone_kb_names: Iterable[str],
+    builtin_names: Iterable[str],
+) -> List[str]:
+    """Return the KB names that would shadow a built-in tool.
+
+    All tools resolve through one flat name->tool lookup, so a knowledge base
+    named after a built-in silently shadows it. This returns the sorted,
+    de-duplicated KB names -- inline (`raw_spec["knowledge_bases"][*].name`) plus
+    the referenced standalone KB names -- that collide with `builtin_names`.
+    """
+    builtin = set(builtin_names)
+    inline = {
+        kb.get("name")
+        for kb in raw_spec.get("knowledge_bases", []) or []
+        if isinstance(kb, dict) and kb.get("name")
+    }
+    names = inline | set(standalone_kb_names)
+    return sorted(n for n in names if n in builtin)
