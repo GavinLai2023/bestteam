@@ -75,34 +75,6 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
-class AgentRecord(Base):
-    """An Agent's `raw` config (the technical fields from `AgentSpec.to_raw()`)."""
-
-    __tablename__ = "agents"
-    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_agents_org_id_name"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str]
-    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
-    config: Mapped[dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
-
-
-class TeamRecord(Base):
-    """A Team's `raw` config (the technical fields from `TeamSpec.to_raw()`)."""
-
-    __tablename__ = "teams"
-    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_teams_org_id_name"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str]
-    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
-    config: Mapped[dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
-
-
 class KnowledgeBaseRecord(Base):
     """A KnowledgeBase's `raw` config (the technical fields from `KnowledgeBaseSpec.to_raw()`)."""
 

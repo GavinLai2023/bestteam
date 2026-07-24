@@ -1,6 +1,5 @@
 from .database import init_db, make_engine, session_factory
 from .models import (
-    AgentRecord,
     Base,
     BuilderSession,
     KnowledgeBaseRecord,
@@ -9,7 +8,6 @@ from .models import (
     Organization,
     Run,
     SkillRecord,
-    TeamRecord,
     TraceEventRecord,
     UsageRecord,
     User,
@@ -23,8 +21,6 @@ __all__ = [
     "session_factory",
     "Organization",
     "User",
-    "AgentRecord",
-    "TeamRecord",
     "KnowledgeBaseRecord",
     "SkillRecord",
     "WorkflowRecord",

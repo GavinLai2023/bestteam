@@ -10,7 +10,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import inspect
 
-from ui.backend.db import AgentRecord, SkillRecord, WorkflowRecord, init_db, make_engine, session_factory
+from ui.backend.db import SkillRecord, WorkflowRecord, init_db, make_engine, session_factory
 from ui.backend.db.builder_sessions import (
     STATUSES,
     append_feedback,
@@ -37,8 +37,6 @@ def test_init_db_creates_all_tables():
     assert tables == {
         "organizations",
         "users",
-        "agents",
-        "teams",
         "knowledge_bases",
         "skills",
         "workflows",
@@ -52,16 +50,13 @@ def test_init_db_creates_all_tables():
     }
 
 
-def test_workflow_and_agent_records_round_trip_json_config(db_session):
-    agent = AgentRecord(name="support_agent", config={"role": "Support", "goal": "Help", "model": "fake:hi"})
+def test_workflow_record_round_trips_json_config(db_session):
     workflow = WorkflowRecord(name="support_workflow", config={"agents": [], "teams": [], "workflow": {"steps": []}})
-    db_session.add_all([agent, workflow])
+    db_session.add(workflow)
     db_session.commit()
 
-    fetched_agent = db_session.query(AgentRecord).filter_by(name="support_agent").one()
     fetched_workflow = db_session.query(WorkflowRecord).filter_by(name="support_workflow").one()
 
-    assert fetched_agent.config == {"role": "Support", "goal": "Help", "model": "fake:hi"}
     assert fetched_workflow.status == "draft"
     assert fetched_workflow.config["workflow"] == {"steps": []}
 
@@ -74,11 +69,11 @@ def test_same_name_allowed_in_two_orgs_but_not_within_one(db_session):
     org_a = create_org(db_session, "org_a")
     org_b = create_org(db_session, "org_b")
 
-    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
-    db_session.add(AgentRecord(name="helper", config={}, org_id=org_b.id))
+    db_session.add(SkillRecord(name="helper", config={}, org_id=org_a.id))
+    db_session.add(SkillRecord(name="helper", config={}, org_id=org_b.id))
     db_session.commit()  # same name in two orgs: fine
 
-    db_session.add(AgentRecord(name="helper", config={}, org_id=org_a.id))
+    db_session.add(SkillRecord(name="helper", config={}, org_id=org_a.id))
     with pytest.raises(IntegrityError):
         db_session.commit()  # duplicate within one org: rejected
     db_session.rollback()

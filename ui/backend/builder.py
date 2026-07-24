@@ -504,7 +504,6 @@ def deploy_session(
     else:
         record.config = raw
         record.status = "deployed"
-    db.commit()
 
     session = update_session(db, session_id, status="deployed")
     return _session_to_dict(session, db, org.id)

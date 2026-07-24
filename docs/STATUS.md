@@ -229,6 +229,34 @@
   at the source in `http_client.py`: the customer-supplied hostname stays in
   the message, the raw exception text and resolved IP don't.
 
+- Data architecture review triage (`docs/DATA_ARCHITECTURE_REVIEW_REPORT.md`,
+  35 findings; disposition in `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`):
+  the report proposes a full commercial-SaaS rearchitecture (~25 new entity
+  types, RBAC, a generic tool-connection framework, PostgreSQL) framed as
+  multi-week Phase 1/Phase 2 program work, not a single review cycle.
+  Implemented the two findings that were genuine, narrow, low-risk defects:
+  deployment is now a single atomic transaction (`WorkflowRecord` write and
+  the BuilderSession status update share one commit, P1-14), and the
+  vestigial `AgentRecord`/`TeamRecord` tables (no current reader or writer)
+  were dropped (migration `57b13700d5df`, P1-09).
+  A follow-up code review (PR #23) hardened both against data-safety edge
+  cases: (F1) writable `/api/config/agents`/`teams` routes existed historically
+  (`78c7a8a`..`036e1d6`), so the drop migration now **refuses** (with export
+  guidance) if either table holds rows and drops only when empty — a drop is
+  not data-reversible; (F2) `db_session` runs `create_all` at import and the
+  docs have the operator start the backend before `alembic upgrade head`, so
+  the baseline (`884e80106da7`) and add-`is_admin` (`a1b2c3d4e5f6`) migrations
+  are now inspection-guarded like the later ones, making that documented
+  sequence idempotent instead of failing with "table … already exists".
+  Covered by `tests/test_migrations.py` (real alembic upgrade runs).
+  Explicitly did **not** implement SQLite foreign-key enforcement (P1-13),
+  trace persistence / crash recovery (P1-16/P1-17), or one-member-per-org
+  removal (P2-01/P2-02) — each restates a tradeoff already made deliberately
+  elsewhere in this project, with its own documented rationale; see the
+  triage doc for citations. The remaining 29 findings were spot-checked as
+  accurate but out of scope for a narrow fix pass — each needs its own
+  brainstorm → spec → plan cycle as a future sub-project.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

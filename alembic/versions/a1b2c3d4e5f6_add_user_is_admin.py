@@ -19,11 +19,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
-    op.add_column(
-        'users',
-        sa.Column('is_admin', sa.Boolean(), nullable=False, server_default=sa.false()),
-    )
+    """Upgrade schema.
+
+    Guarded (create_all-at-import idempotency, same as the baseline): if the
+    backend booted first, `users.is_admin` already exists, so re-adding it would
+    fail. Add only when the column is missing.
+    """
+    inspector = sa.inspect(op.get_bind())
+    has_is_admin = any(col["name"] == "is_admin" for col in inspector.get_columns("users"))
+    if not has_is_admin:
+        op.add_column(
+            'users',
+            sa.Column('is_admin', sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
 
 
 def downgrade() -> None:
