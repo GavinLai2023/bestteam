@@ -454,3 +454,4 @@ def test_deploy_rejects_kb_named_after_builtin(client):
     resp = client.post(f"/api/builder/sessions/{sid}/deploy")
     assert resp.status_code == 400
     assert "web_search" in resp.json()["detail"]
+    assert "built-in tool name" in resp.json()["detail"]

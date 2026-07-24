@@ -1179,6 +1179,7 @@ def test_workflow_put_rejects_kb_named_after_builtin(client):
     resp = client.put("/api/config/workflows/collide_wf?org=default", json=bad)
     assert resp.status_code == 400
     assert "calculator" in resp.json()["detail"]
+    assert "built-in tool name" in resp.json()["detail"]
     assert "collide_wf" not in client.get(
         "/api/workflows", headers=_org_user_headers(client)
     ).json()["workflows"]
