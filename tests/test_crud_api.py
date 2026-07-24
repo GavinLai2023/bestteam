@@ -719,7 +719,7 @@ def test_workflow_crud_round_trip_and_validation(client):
     create = client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
     assert create.status_code == 200
     body = create.json()
-    assert body["status"] == "draft"
+    assert body["status"] == "deployed"
     assert body["config"]["name"] == "support_workflow"
 
     listed = client.get("/api/config/workflows")
@@ -730,6 +730,60 @@ def test_workflow_crud_round_trip_and_validation(client):
 
     assert client.delete("/api/config/workflows/support_workflow?org=default").status_code == 204
     assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
+
+
+def test_only_deployed_workflows_are_listed_and_runnable(client):
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord
+
+    # crud save = deploy -> runnable immediately
+    client.put("/api/config/workflows/live_wf?org=default", json=_VALID_WORKFLOW_CONFIG)
+    # a draft can only exist as a legacy/direct row now
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(WorkflowRecord(name="draft_wf",
+                              config={**_VALID_WORKFLOW_CONFIG, "name": "draft_wf"},
+                              status="draft", org_id=org_id))
+        db.commit()
+
+    headers = _org_user_headers(client)
+    workflows = client.get("/api/workflows", headers=headers).json()["workflows"]
+    assert "live_wf" in workflows
+    assert "draft_wf" not in workflows
+    assert client.post("/api/runs", json={"workflow": "live_wf", "input": "hi"},
+                       headers=headers).status_code == 200
+    assert client.post("/api/runs", json={"workflow": "draft_wf", "input": "hi"},
+                       headers=headers).status_code == 404
+
+
+def test_workflow_put_rejects_agent_model_not_in_catalog(client):
+    bad_config = {**_VALID_WORKFLOW_CONFIG,
+                  "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "model": "openai:gpt-nope"}]}
+    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
+    assert resp.status_code == 400
+    assert "openai:gpt-nope" in resp.json()["detail"]
+
+
+def test_workflow_put_rejects_agent_with_missing_none_empty_or_nonstring_model(client):
+    # The operator CRUD path builds Agent(**spec) directly, bypassing the
+    # AgentSpec.model:str check -- so a missing/None/empty/non-string model must
+    # be rejected at save, not persisted as deployed and failing at first run.
+    base_agent = _VALID_WORKFLOW_CONFIG["agents"][0]
+    cases = [
+        {k: v for k, v in base_agent.items() if k != "model"},  # missing
+        {**base_agent, "model": None},
+        {**base_agent, "model": ""},
+        {**base_agent, "model": 42},
+    ]
+    headers = _org_user_headers(client)
+    for i, agent in enumerate(cases):
+        bad_config = {**_VALID_WORKFLOW_CONFIG, "agents": [agent]}
+        resp = client.put(f"/api/config/workflows/no_model_{i}?org=default", json=bad_config)
+        assert resp.status_code == 400, f"case {i} should be rejected"
+        # nothing persisted -> not runnable/listed
+        assert f"no_model_{i}" not in client.get(
+            "/api/workflows", headers=headers
+        ).json()["workflows"]
 
 
 def test_workflow_put_rejects_invalid_config(client):

@@ -41,6 +41,7 @@ from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
+from .deploy_validation import validate_agent_models
 from .db.models import (
     KnowledgeBaseRecord,
     Organization,
@@ -486,12 +487,24 @@ def upsert_workflow_config(
     except (KeyError, TypeError, BestTeamError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+    if model_problems:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This team can't be deployed: "
+                + "; ".join(model_problems)
+                + ". Pick a model from the catalog."
+            ),
+        )
+
     item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
-        item = WorkflowRecord(name=item_name, config=raw, status="draft", org_id=org_id)
+        item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
         db.add(item)
     else:
         item.config = raw
+        item.status = "deployed"
     db.commit()
     return {"name": item_name, "org": org, "status": item.status, "config": raw}
 

@@ -26,6 +26,7 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
+from .deploy_validation import validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db_session import get_db
 from .knowledge_bases import (
@@ -497,6 +498,16 @@ def deploy_session(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     raw = spec.to_raw()
+    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+    if model_problems:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This team can't be deployed: "
+                + "; ".join(model_problems)
+                + ". Pick a model from the catalog."
+            ),
+        )
     record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
     if record is None:
         record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)

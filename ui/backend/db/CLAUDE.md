@@ -25,7 +25,13 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 - `knowledge_bases` / `skills` / `workflows` — each row's `config` is a JSON
   `raw` dict (the technical fields from `KnowledgeBaseSpec`/`SkillSpec`/
   `Specification.to_raw()`, see `core/specification.py`); `workflows.status`
-  tracks `draft` / `ready_for_testing` / `deployed`.
+  tracks `draft` / `ready_for_testing` / `deployed` and is CHECK-constrained
+  to that set (`ck_workflows_status`, migration `b1d7e4f2a9c8`, P1-06). Only
+  `status="deployed"` rows are runnable (`_get_workflow`) or listed
+  (`GET /api/workflows`) — see `ui/backend/CLAUDE.md`. The migration
+  backfilled every pre-existing non-`deployed` row to `deployed` so upgrading
+  a deployment doesn't retroactively hide/break previously-runnable
+  workflows.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

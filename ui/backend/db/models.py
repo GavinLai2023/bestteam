@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, ForeignKey, Index, UniqueConstraint, text
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -111,7 +111,13 @@ class WorkflowRecord(Base):
     i.e. `Specification.to_raw()`) plus its lifecycle status."""
 
     __tablename__ = "workflows"
-    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_workflows_org_id_name"),)
+    __table_args__ = (
+        UniqueConstraint("org_id", "name", name="uq_workflows_org_id_name"),
+        CheckConstraint(
+            "status IN ('draft', 'ready_for_testing', 'deployed')",
+            name="ck_workflows_status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
