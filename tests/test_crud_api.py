@@ -733,6 +733,30 @@ def test_workflow_crud_round_trip_and_validation(client):
     assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
 
 
+def test_workflow_put_appends_immutable_versions(client):
+    """Two PUTs of the same workflow -> versions 1 then 2; v1 config frozen."""
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+
+    def _config(marker):
+        return {**_VALID_WORKFLOW_CONFIG,
+                 "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "goal": marker}]}
+
+    assert client.put("/api/config/workflows/wf?org=default",
+                       json=_config("one")).status_code == 200
+    assert client.put("/api/config/workflows/wf?org=default",
+                       json=_config("two")).status_code == 200
+
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="wf").one()
+        versions = (db.query(WorkflowVersion)
+                      .filter_by(workflow_id=head.id)
+                      .order_by(WorkflowVersion.version_number).all())
+        assert [v.version_number for v in versions] == [1, 2]
+        assert versions[0].config != versions[1].config  # v1 preserved distinctly
+        assert head.current_version_id == versions[1].id  # pointer at latest
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord

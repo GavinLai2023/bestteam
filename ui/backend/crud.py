@@ -50,6 +50,7 @@ from .db.models import (
     WorkflowRecord,
 )
 from .db.orgs import get_org_by_name, list_orgs
+from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
 from .db_session import get_db
 from .knowledge_bases import (
@@ -614,13 +615,9 @@ def upsert_workflow_config(
                 ),
             )
 
-        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
-        if item is None:
-            item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
-            db.add(item)
-        else:
-            item.config = raw
-            item.status = "deployed"
+        item, _version = publish_workflow_version(
+            db, org_id=org_id, name=item_name, config=raw
+        )
         db.commit()
         status = item.status
     return {"name": item_name, "org": org, "status": status, "config": raw}
