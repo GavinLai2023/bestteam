@@ -472,8 +472,11 @@ def deploy_session(
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Stage 6 (Deployment): persist the validated Specification as a
-    `WorkflowRecord` (`status=deployed`) so `_get_workflow()` picks it up."""
+    """Stage 6 (Deployment): publish the validated Specification as a new
+    immutable version of a `WorkflowRecord` team head (`status=deployed`) so
+    `_get_workflow()` picks it up, and link the session to that head
+    (`session.workflow_id`) so a redeploy versions the same team (P1-02).
+    The version publish and the session update share a single commit (P1-14)."""
     session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
         raise HTTPException(status_code=400, detail="Generate a specification before deploying")

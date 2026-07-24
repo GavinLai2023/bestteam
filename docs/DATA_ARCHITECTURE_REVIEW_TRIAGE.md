@@ -86,10 +86,30 @@ rationale was wrong). Deferred to the P1-04 typed-dependency-records sub-project
 cross-process locking, and durable upload-file cleanup. See the design spec's
 per-round sections. Delivered via PR #27.
 
+P1-01, P1-02 and P1-03 were implemented together in a fourth pass ("versioning
+keystone") once the user chose them as the next batch: a deployed team had no
+stable identity and no version history. `WorkflowRecord` is now the stable team
+head with an immutable `workflow_versions` child table; deploy calls
+`db/workflows.py::publish_workflow_version` at both deploy points
+(`builder.py::deploy_session`, `crud.py::upsert_workflow_config`) to append a
+new version and move `current_version_id` (keeping `config` as the current
+mirror) instead of overwriting in place (P1-03). `deploy_session` links
+`BuilderSession.workflow_id` to the head in the same commit, so a redeploy
+versions the same head and two same-named sessions converge on one team, first
+config preserved as v1 (P1-01/P1-02). Each production `Run` is stamped with
+`workflow_version_id` (P1-03/P1-15-adjacent); sandbox test-runs stay NULL.
+Migration `c3f5a1b8e2d4` (guarded) backfills one v1 per existing workflow.
+Deliberately scoped to freezing the **inline config blob + run linkage** — a
+version does NOT freeze standalone Skill/KB/model resolution (still by name at
+load), so P1-05 behavioral drift and a fully-resolved dependency snapshot stay
+with P1-04 (typed dependency records); version-history/rollback UI and rollback
+execution are also deferred. Design:
+`docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`.
+
 ## Everything else: validated-accurate, out of scope for this pass
 
-The remaining 24 findings (all of Phase 2 except P2-01/P2-02 above, and the
-rest of Phase 1: P1-01 through P1-05, P1-10, P1-12, P1-15,
+The remaining 21 findings (all of Phase 2 except P2-01/P2-02 above, and the
+rest of Phase 1: P1-04, P1-05, P1-10, P1-12, P1-15,
 P1-18) were spot-checked where practical and found to be accurate
 descriptions of the current, intentionally-scoped MVP data model — not
 implemented here, since each requires new schema/entities and cross-cutting

@@ -37,7 +37,19 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   references it (KB via an agent's `tools`, skill via an agent's `skills`);
   and a KB may not be named after a built-in tool (rejected `400` at deploy),
   since both resolve through one flat name lookup. See
-  `ui/backend/CLAUDE.md`.
+  `ui/backend/CLAUDE.md`. A `workflows` row is now the **stable team head**: it
+  carries `current_version_id` pointing at the latest immutable
+  `workflow_versions` snapshot, and `config` is a mirror of that current
+  version. Deploy no longer overwrites history in place — it appends a version
+  via `db/workflows.py::publish_workflow_version` (P1-01/02/03).
+- `workflow_versions` — immutable published snapshots of a workflow's `config`
+  (`WorkflowVersion`; `id`, `workflow_id` FK, `version_number`, `config`,
+  `created_by`, `created_at`; `(workflow_id, version_number)` unique). Deploy
+  appends one row and moves the parent's `current_version_id`; a row is never
+  updated after insert. This freezes the **inline config blob only** —
+  standalone Skills/KBs/models are still resolved by name at load, so a
+  fully-resolved dependency snapshot is deferred to P1-04. Migration
+  `c3f5a1b8e2d4` creates the table and backfills one v1 per existing workflow.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and
@@ -63,11 +75,17 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/
   `specification_json` hold the Business Analyst / Solution Architect
   agents' structured outputs; `feedback_history` is an append-only JSON list
-  recording each round of customer feedback.
+  recording each round of customer feedback. `workflow_id` (nullable FK) is the
+  stable team head this session deploys to — set on first deploy so a redeploy
+  versions the same head and two same-named sessions converge on one team
+  (P1-02).
 - `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
   in-memory state (wired up in Phase 5). `runs.username` (migration
   `c9d0e1f2a3b4`) records who started the run (CR-032, audit-only —
-  ownership is org-level via `org_id`).
+  ownership is org-level via `org_id`). `runs.workflow_version_id` (nullable FK,
+  migration `c3f5a1b8e2d4`) records the exact immutable `workflow_versions`
+  snapshot a production run executed (P1-03/P1-15); NULL for sandbox test-runs
+  (they run the session spec, not a published version) and pre-migration rows.
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing

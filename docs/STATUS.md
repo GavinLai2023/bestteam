@@ -347,6 +347,34 @@
   records): raw-name matching can over-block (fail-closed, safe), and
   upload-file cleanup is best-effort. Delivered via PR #27 over four review
   rounds; spec: `2026-07-24-dependency-namespace-integrity-design.md`.
+- Data architecture review triage, fourth pass — versioning keystone
+  (P1-01 + P1-02 + P1-03): a deployed team had no stable identity and no
+  version history — `WorkflowRecord` was keyed `(org_id, name)` and every
+  deploy overwrote `config` in place, so prior configs were lost, two
+  builder sessions with the same name silently clobbered one row, and a
+  `Run` recorded only the workflow name (not the config it ran).
+  `WorkflowRecord` is now the stable team head with an immutable
+  `workflow_versions` child table (`WorkflowVersion`; `(workflow_id,
+  version_number)` unique); deploy calls
+  `db/workflows.py::publish_workflow_version` — append a new immutable
+  version, move `current_version_id`, keep `config` as the current mirror —
+  at both deploy points (`builder.py::deploy_session`,
+  `crud.py::upsert_workflow_config`), replacing the in-place overwrite.
+  `deploy_session` links `BuilderSession.workflow_id` to the head in the
+  same commit (P1-14 atomicity preserved), so a redeploy bumps a version
+  under the same head and two sessions with the same name converge on one
+  head (P1-02, first config preserved as v1). Each production `Run` is
+  stamped with `workflow_version_id` (`current_version_id(db, org_id, name)`
+  resolved in `create_run` and the email trigger); sandbox test-runs stay
+  NULL. Migration `c3f5a1b8e2d4` (guarded/idempotent) creates the table +
+  columns and backfills one v1 per existing workflow. **Scope:** freezes the
+  inline config blob + run linkage only — standalone Skills/KBs/models are
+  still resolved by name at load, so behavioral drift (P1-05) and a
+  fully-resolved dependency snapshot remain deferred to P1-04 (typed
+  dependency records); version-history/rollback UI and rollback execution
+  are also deferred. Spec:
+  `docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`. See
+  `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
 
 ## In Progress
 
