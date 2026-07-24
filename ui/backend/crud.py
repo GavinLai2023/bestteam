@@ -240,11 +240,15 @@ def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -
         for agent in agents:
             if not isinstance(agent, dict):
                 continue
-            refs = agent.get(field)
-            # The loader normalizes via list(refs), so a dict is honored (its
-            # keys become the refs). Match that so a dict-shaped reference can't
-            # slip past the scan (F2); `name in <dict>` checks keys, like list().
-            if isinstance(refs, (list, dict)) and name in refs:
+            # Normalize exactly as the loader does (`list(refs)`), so any shape
+            # it honors -- list, dict (keys), or string -- is matched and can't
+            # slip past the scan (F2). A non-iterable (int) is malformed; skip it
+            # rather than crash (F6).
+            try:
+                refs = list(agent.get(field) or [])
+            except TypeError:
+                continue
+            if name in refs:
                 hits.append(row.name)
                 break
     return sorted(hits)
@@ -460,27 +464,29 @@ def upload_knowledge_base_files(
     pointer = kb_root / _KB_CURRENT_POINTER
     version = f"v_{uuid.uuid4().hex[:12]}"
     version_dir = kb_root / version
-    version_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        for filename, data in contents.items():
-            (version_dir / filename).write_bytes(data)
-
+    # Hold the per-KB lock across staging + validation + promotion + commit, not
+    # just the pointer flip. A concurrent delete takes the same lock and rmtree's
+    # the whole KB root; if staging ran outside the lock, the delete could remove
+    # a version staged here and this upload would then commit a record whose
+    # CURRENT points at a deleted directory (F1). Same-KB uploads also serialize
+    # now (each still owns a unique version dir; the extra contention is fine).
+    with _kb_upload_lock(f"{org_id}/{item_name}"):
+        version_dir.mkdir(parents=True, exist_ok=True)
         try:
-            kb = LocalFolderKnowledgeBase(
-                name=item_name,
-                path=version_dir,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                top_k=top_k,
-            )
-        except BestTeamError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            for filename, data in contents.items():
+                (version_dir / filename).write_bytes(data)
 
-        # Serialise the pointer flip + commit + cleanup per KB so concurrent
-        # uploads of the same KB can't interleave and leave CURRENT dangling.
-        # (The file writes + validation above run outside the lock -- each
-        # uploader owns a unique version dir, so they don't conflict.)
-        with _kb_upload_lock(f"{org_id}/{item_name}"):
+            try:
+                kb = LocalFolderKnowledgeBase(
+                    name=item_name,
+                    path=version_dir,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    top_k=top_k,
+                )
+            except BestTeamError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
             previous_version = _read_pointer(pointer)
             _write_pointer(pointer, version)  # atomic promotion
 
@@ -517,17 +523,18 @@ def upload_knowledge_base_files(
             # one as a grace window for readers that just resolved to it.
             _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
 
-        return {
-            "name": item_name,
-            "config": raw,
-            "file_count": len(contents),
-            "chunk_count": len(kb._chunks),
-        }
-    except Exception:
-        # CURRENT still names the prior version (or is absent on a first upload),
-        # so removing only the uncommitted new version preserves the prior KB.
-        shutil.rmtree(version_dir, ignore_errors=True)
-        raise
+            return {
+                "name": item_name,
+                "config": raw,
+                "file_count": len(contents),
+                "chunk_count": len(kb._chunks),
+            }
+        except Exception:
+            # CURRENT still names the prior version (or is absent on a first
+            # upload), so removing only the uncommitted new version preserves the
+            # prior KB.
+            shutil.rmtree(version_dir, ignore_errors=True)
+            raise
 
 
 _workflows = APIRouter(prefix="/workflows")

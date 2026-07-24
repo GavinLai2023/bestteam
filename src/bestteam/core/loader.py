@@ -68,6 +68,16 @@ def _build_workflow(
     tool_lookup = {**_TOOL_REGISTRY, **extra_tools}
     skill_lookup = extra_skills or {}
     for spec in raw.get("knowledge_bases", []):
+        # Fail closed if an inline KB is named after a built-in tool: the flat
+        # tool namespace would otherwise let it silently shadow the built-in at
+        # load. (Standalone KBs are guarded where they're resolved; this covers
+        # inline KBs for every load path -- SDK/YAML, manual runs, and the
+        # autonomous trigger.)
+        if spec.get("name") in _TOOL_REGISTRY:
+            raise ConfigurationError(
+                f"Knowledge base '{spec.get('name')}' shadows a built-in tool of "
+                "the same name; rename the knowledge base."
+            )
         kb = _build_knowledge_base(spec, source)
         tool_lookup[kb.name] = make_knowledge_base_tool(kb)
 
