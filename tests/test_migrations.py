@@ -140,3 +140,48 @@ def test_drop_migration_drops_when_legacy_tables_empty(tmp_path, monkeypatch):
     tables = _table_names(db_path)
     assert "agents" not in tables
     assert "teams" not in tables
+
+
+# Revision just before the workflows.status CHECK migration.
+_PRE_STATUS = "57b13700d5df"
+
+
+def test_existing_non_deployed_workflow_backfilled_to_deployed(tmp_path, monkeypatch):
+    db_path = tmp_path / "status_backfill.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_STATUS)  # workflows table exists, no status CHECK yet
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at) "
+            "VALUES ('legacy', NULL, '{}', 'draft', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            status = conn.execute(sa.text("SELECT status FROM workflows WHERE name='legacy'")).scalar()
+            assert status == "deployed"
+    finally:
+        engine.dispose()
+
+
+def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
+    db_path = tmp_path / "status_check.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(Exception):  # IntegrityError/OperationalError on CHECK
+                conn.execute(sa.text(
+                    "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at) "
+                    "VALUES ('bad', NULL, '{}', 'bogus', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+    finally:
+        engine.dispose()
