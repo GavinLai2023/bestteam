@@ -374,18 +374,21 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         # miss -- not on every request. Dependencies resolve within the
         # workflow record's own org (+ platform built-in skills), so one org's
         # workflow can never pull in another org's KB or skill by name.
-        if db is not None:
-            skill_lookup = load_skills(db, record.org_id)
-            kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
-            email_tools = load_email_tools(db, record.org_id)
-        else:
-            with SessionLocal() as session:
-                skill_lookup = load_skills(session, record.org_id)
-                kb_tools = load_knowledge_base_tools(
-                    session, record.config, source, org_id=record.org_id
-                )
-                email_tools = load_email_tools(session, record.org_id)
         try:
+            # Tool loading is inside the try so a BestTeamError from resolving a
+            # standalone KB (e.g. a legacy KB shadowing a built-in, F4) becomes a
+            # clean 400 like a build error, not an uncaught 500.
+            if db is not None:
+                skill_lookup = load_skills(db, record.org_id)
+                kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
+                email_tools = load_email_tools(db, record.org_id)
+            else:
+                with SessionLocal() as session:
+                    skill_lookup = load_skills(session, record.org_id)
+                    kb_tools = load_knowledge_base_tools(
+                        session, record.config, source, org_id=record.org_id
+                    )
+                    email_tools = load_email_tools(session, record.org_id)
             config = contain_workflow_config_for_load(record.config)
             ensure_workflow_cache_paths_for_source(config, source)
             workflow = _build_workflow(

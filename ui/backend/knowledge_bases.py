@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.loader import _build_knowledge_base
+from bestteam.exceptions import ConfigurationError
+from bestteam.tools import REGISTRY
 
 from .db.models import KnowledgeBaseRecord
+from .deploy_validation import find_kb_tool_collisions
 
 # --- KB path containment (CR-001) -------------------------------------------
 # A KB `cache_path` is a server-file *write* target (the vector KB's
@@ -186,8 +189,40 @@ def load_knowledge_base_tools(
     )
     tools: Dict[str, Any] = {}
     for record in records:
+        # Fail closed on a legacy KB whose name shadows a built-in tool (F4).
+        # New collisions are blocked at KB PUT/upload, but a record predating
+        # that guard would silently replace the built-in at load; refuse instead
+        # (covers both `_get_workflow` and the autonomous trigger, which share
+        # this loader).
+        if record.name in REGISTRY:
+            raise ConfigurationError(
+                f"Knowledge base '{record.name}' shadows a built-in tool of the "
+                "same name; rename the knowledge base."
+            )
         config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
         ensure_contained_cache_path_for_source(config, source)
         kb = _build_knowledge_base(config, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
+
+
+def kb_name_collisions(db: Session, org_id: Optional[int], raw_spec: Dict[str, Any]) -> List[str]:
+    """KB names in `raw_spec` (inline + referenced standalone) that shadow a built-in tool.
+
+    Name-only (no KB is built), so it can run before path validation / build.
+    """
+    referenced = {
+        tool
+        for agent in raw_spec.get("agents", []) or []
+        for tool in (agent.get("tools") or [])
+    }
+    standalone: set = set()
+    if referenced:
+        standalone = {
+            row.name
+            for row in db.query(KnowledgeBaseRecord.name).filter(
+                KnowledgeBaseRecord.org_id == org_id,
+                KnowledgeBaseRecord.name.in_(referenced),
+            )
+        }
+    return find_kb_tool_collisions(raw_spec, standalone, REGISTRY)

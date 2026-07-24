@@ -302,6 +302,52 @@
   run, not load; documented as a known limitation (load-time re-validation
   deliberately out of scope).
 
+- Data architecture review triage, third pass — dependency-namespace
+  integrity (P1-07 + P1-08): P1-07, deleting a skill/KB via
+  `/api/config/{skills,knowledge_bases}` orphaned any deployed workflow still
+  referencing it — `crud._deployed_workflows_referencing(db, org_id, kind,
+  name)` now scans `status="deployed"` `WorkflowRecord`s' `agents[*].skills`
+  (skill) / `agents[*].tools` (standalone KB) and `delete_item` 409s naming
+  the referencing team(s), checked before any deletion or KB `rmtree`
+  (platform skills, `org_id is None`, are checked across all orgs).
+  P1-08, every tool resolved through one flat name lookup so a KB could
+  silently shadow a built-in tool — `deploy_validation.find_kb_tool_collisions`
+  (pure) plus `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)`
+  (resolves referenced standalone KB names, calls the pure helper with
+  `set(bestteam.tools.REGISTRY)`) are now called name-only, before any KB
+  build, at both deploy points (`builder.py::deploy_session`,
+  `crud.py::upsert_workflow_config`), 400ing on a collision; scoped to
+  collision detection, not the reviewer's full typed-namespace rename, and
+  only KB names are checked so the per-org email-tool override never
+  false-positives. TDD regressions: `tests/test_deploy_validation.py::test_inline_kb_name_shadowing_builtin_flagged`
+  / `test_standalone_kb_name_shadowing_builtin_flagged` / `test_non_colliding_kb_names_pass`
+  / `test_collisions_sorted_and_deduped` (the pure helper); `tests/test_crud_api.py::test_delete_skill_referenced_by_deployed_workflow_is_409`
+  / `test_delete_kb_referenced_by_deployed_workflow_is_409` / `test_delete_unreferenced_skill_still_204`
+  / `test_workflow_put_rejects_kb_named_after_builtin`, `tests/test_org_settings.py::test_deploy_rejects_kb_named_after_builtin`.
+  Spec: `docs/superpowers/specs/2026-07-24-dependency-namespace-integrity-design.md`.
+  See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+  Post-review hardening (6 findings): (F1) a KB also can't be *created* with a
+  built-in tool name (KB PUT + upload), closing a post-deploy shadow bypass;
+  (F4) seeded platform built-in skills are undeletable (bundled YAML demos may
+  depend on them); (F6) the delete reference-scan skips malformed workflows
+  instead of 500-ing; (F3) KB delete commits before `rmtree` and logs rmtree
+  failures. A second review round closed further gaps: the KB delete now holds
+  the per-KB lock across delete+commit+rmtree (concurrent-upload race); the
+  delete scan matches dict-shaped `tools`/`skills` (the loader normalizes them);
+  `load_knowledge_base_tools` fails closed on a legacy KB shadowing a built-in;
+  and a process-wide `component_mutation_lock` serializes component-delete
+  against deploy (the delete/deploy TOCTOU — feasible even single-worker via the
+  threadpool — is now mitigated, not "near-impossible" as first stated).
+  Two further review rounds closed the same classes comprehensively: the delete
+  scan now uses the loader's own `list(refs)` normalization (any list/dict/string
+  shape, not special-cases); the inline-KB path also fails closed at load
+  (`core/loader._build_workflow`, covering SDK/manual/autonomous); and the KB
+  upload holds its lock across staging→validation→promote→commit so it fully
+  serializes with delete. Remaining, deferred to P1-04 (typed dependency
+  records): raw-name matching can over-block (fail-closed, safe), and
+  upload-file cleanup is best-effort. Delivered via PR #27 over four review
+  rounds; spec: `2026-07-24-dependency-namespace-integrity-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

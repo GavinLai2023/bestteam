@@ -21,6 +21,7 @@ remain in `db/models.py`.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import shutil
 import threading
@@ -55,9 +56,17 @@ from .knowledge_bases import (
     _KB_CURRENT_POINTER,
     check_path_traversal,
     checked_contained_cache_path,
+    kb_name_collisions,
     load_knowledge_base_tools,
 )
-from .skills import load_skills
+from .component_lock import component_mutation_lock
+from .skills import DEFAULT_SKILLS, load_skills
+
+_logger = logging.getLogger(__name__)
+
+# Seeded platform built-in skills can't be deleted -- bundled YAML workflows may
+# depend on them (F4). Names only; the check applies to the platform tier.
+_BUILTIN_SKILL_NAMES = frozenset(s.name for s in DEFAULT_SKILLS)
 
 # Used as `_build_workflow`'s `source` for relative knowledge-base paths and
 # the default workflow name -- same directory as the YAML demo workflows.
@@ -193,6 +202,58 @@ def _invalidate_workflow_cache() -> None:
         main._workflow_cache_generation += 1
 
 
+def _reject_builtin_kb_name(name: str) -> None:
+    """Refuse a knowledge-base name that shadows a built-in tool (F1).
+
+    All tools resolve through one flat name lookup, so a KB named after a
+    built-in silently replaces it at load. Blocking the name at creation is the
+    source fix -- a colliding KB can then never exist.
+    """
+    if name in REGISTRY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"A knowledge base can't reuse a built-in tool name: '{name}'. "
+                "Choose a different name."
+            ),
+        )
+
+
+def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -> list[str]:
+    """Names of deployed workflows whose config references `name`.
+
+    `kind="skill"` matches an agent's `skills`; `kind="knowledge_base"` matches an
+    agent's `tools` (a standalone KB is referenced by name there). Malformed rows
+    (non-dict config, non-list agents/tools) are skipped rather than crashing the
+    scan (F6) -- such a workflow can't build anyway.
+    """
+    field = "skills" if kind == "skill" else "tools"
+    query = db.query(WorkflowRecord).filter(WorkflowRecord.status == "deployed")
+    if org_id is not None:
+        query = query.filter(WorkflowRecord.org_id == org_id)
+    hits = []
+    for row in query:
+        config = row.config if isinstance(row.config, dict) else {}
+        agents = config.get("agents", [])
+        if not isinstance(agents, list):
+            continue
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            # Normalize exactly as the loader does (`list(refs)`), so any shape
+            # it honors -- list, dict (keys), or string -- is matched and can't
+            # slip past the scan (F2). A non-iterable (int) is malformed; skip it
+            # rather than crash (F6).
+            try:
+                refs = list(agent.get(field) or [])
+            except TypeError:
+                continue
+            if name in refs:
+                hits.append(row.name)
+                break
+    return sorted(hits)
+
+
 def _resolve_org_id(db: Session, org: Optional[str], *, allow_platform: bool) -> Optional[int]:
     """Resolve an admin request's `?org=<name>` to an org id.
 
@@ -258,6 +319,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
         if name == "knowledge_bases":
             _validate_kb_paths(config)
+            _reject_builtin_kb_name(item_name)
         try:
             spec = spec_cls.model_validate({**config, "name": item_name})
         except ValidationError as exc:
@@ -280,17 +342,53 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
     ) -> Response:
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
-        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
-        if item is None:
-            raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
-        if name == "knowledge_bases":
-            # Same per-KB lock as upload, so a delete can't race a promotion.
-            with _kb_upload_lock(f"{org_id}/{item_name}"):
-                upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
-                if upload_dir.is_dir():
-                    shutil.rmtree(upload_dir, ignore_errors=True)
-        db.delete(item)
-        db.commit()
+        # Serialize the reference scan + delete against concurrent deploys so a
+        # deploy can't add a reference between the scan and the commit (F3).
+        with component_mutation_lock:
+            item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
+            # A seeded platform built-in skill can't be deleted -- bundled YAML
+            # workflows may depend on it (F4). Platform tier only (org_id None).
+            if name == "skills" and org_id is None and item_name in _BUILTIN_SKILL_NAMES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"'{item_name}' is a built-in skill and can't be deleted.",
+                )
+            if name in ("skills", "knowledge_bases"):
+                kind = "skill" if name == "skills" else "knowledge_base"
+                used_by = _deployed_workflows_referencing(db, org_id, kind, item_name)
+                if used_by:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Can't delete '{item_name}': it's used by deployed team(s): "
+                            + ", ".join(used_by)
+                            + ". Update or remove those teams first."
+                        ),
+                    )
+            if name == "knowledge_bases":
+                # Hold the per-KB lock across delete+commit+rmtree so a concurrent
+                # upload can't recreate the row/files in a gap and then have them
+                # removed here (F1). Commit before rmtree so a commit failure keeps
+                # the files for the still-present record; a failed rmtree is logged
+                # (the record is already gone), not silently swallowed (F3-prev).
+                with _kb_upload_lock(f"{org_id}/{item_name}"):
+                    db.delete(item)
+                    db.commit()
+                    upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
+                    if upload_dir.is_dir():
+                        try:
+                            shutil.rmtree(upload_dir)
+                        except OSError as exc:
+                            _logger.warning(
+                                "Knowledge base '%s' (org %s) deleted, but its upload "
+                                "directory couldn't be removed: %s",
+                                item_name, org_id, exc,
+                            )
+            else:
+                db.delete(item)
+                db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
         return Response(status_code=204)
@@ -317,6 +415,7 @@ def upload_knowledge_base_files(
         _validate_tool_name(item_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _reject_builtin_kb_name(item_name)
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -365,27 +464,29 @@ def upload_knowledge_base_files(
     pointer = kb_root / _KB_CURRENT_POINTER
     version = f"v_{uuid.uuid4().hex[:12]}"
     version_dir = kb_root / version
-    version_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        for filename, data in contents.items():
-            (version_dir / filename).write_bytes(data)
-
+    # Hold the per-KB lock across staging + validation + promotion + commit, not
+    # just the pointer flip. A concurrent delete takes the same lock and rmtree's
+    # the whole KB root; if staging ran outside the lock, the delete could remove
+    # a version staged here and this upload would then commit a record whose
+    # CURRENT points at a deleted directory (F1). Same-KB uploads also serialize
+    # now (each still owns a unique version dir; the extra contention is fine).
+    with _kb_upload_lock(f"{org_id}/{item_name}"):
+        version_dir.mkdir(parents=True, exist_ok=True)
         try:
-            kb = LocalFolderKnowledgeBase(
-                name=item_name,
-                path=version_dir,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                top_k=top_k,
-            )
-        except BestTeamError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            for filename, data in contents.items():
+                (version_dir / filename).write_bytes(data)
 
-        # Serialise the pointer flip + commit + cleanup per KB so concurrent
-        # uploads of the same KB can't interleave and leave CURRENT dangling.
-        # (The file writes + validation above run outside the lock -- each
-        # uploader owns a unique version dir, so they don't conflict.)
-        with _kb_upload_lock(f"{org_id}/{item_name}"):
+            try:
+                kb = LocalFolderKnowledgeBase(
+                    name=item_name,
+                    path=version_dir,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    top_k=top_k,
+                )
+            except BestTeamError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
             previous_version = _read_pointer(pointer)
             _write_pointer(pointer, version)  # atomic promotion
 
@@ -422,17 +523,18 @@ def upload_knowledge_base_files(
             # one as a grace window for readers that just resolved to it.
             _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
 
-        return {
-            "name": item_name,
-            "config": raw,
-            "file_count": len(contents),
-            "chunk_count": len(kb._chunks),
-        }
-    except Exception:
-        # CURRENT still names the prior version (or is absent on a first upload),
-        # so removing only the uncommitted new version preserves the prior KB.
-        shutil.rmtree(version_dir, ignore_errors=True)
-        raise
+            return {
+                "name": item_name,
+                "config": raw,
+                "file_count": len(contents),
+                "chunk_count": len(kb._chunks),
+            }
+        except Exception:
+            # CURRENT still names the prior version (or is absent on a first
+            # upload), so removing only the uncommitted new version preserves the
+            # prior KB.
+            shutil.rmtree(version_dir, ignore_errors=True)
+            raise
 
 
 _workflows = APIRouter(prefix="/workflows")
@@ -473,40 +575,55 @@ def upsert_workflow_config(
 ) -> Dict[str, Any]:
     org_id = _resolve_org_id(db, org, allow_platform=False)
     raw = {**config, "name": item_name}
-    try:
-        for kb_config in raw.get("knowledge_bases", []) or []:
-            if isinstance(kb_config, dict):
-                _validate_kb_paths(kb_config)
-        source = _WORKFLOWS_DIR / f"{item_name}.yaml"
-        # Dependencies resolve within the workflow's own org (+ built-in skills).
-        extra_tools = {
-            **load_knowledge_base_tools(db, raw, source, org_id=org_id),
-            **(load_email_tools(db, org_id) if org_id is not None else {}),
-        }
-        _build_workflow(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
-    except (KeyError, TypeError, BestTeamError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Serialize dependency resolution + the deployed write against a concurrent
+    # component delete (F3): either the delete's scan sees this workflow, or this
+    # deploy's resolution fails because the resource was already removed.
+    with component_mutation_lock:
+        try:
+            kb_collisions = kb_name_collisions(db, org_id, raw)
+            if kb_collisions:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "A knowledge base can't reuse a built-in tool name: "
+                        + ", ".join(kb_collisions)
+                        + ". Rename the knowledge base."
+                    ),
+                )
+            for kb_config in raw.get("knowledge_bases", []) or []:
+                if isinstance(kb_config, dict):
+                    _validate_kb_paths(kb_config)
+            source = _WORKFLOWS_DIR / f"{item_name}.yaml"
+            # Dependencies resolve within the workflow's own org (+ built-in skills).
+            extra_tools = {
+                **load_knowledge_base_tools(db, raw, source, org_id=org_id),
+                **(load_email_tools(db, org_id) if org_id is not None else {}),
+            }
+            _build_workflow(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
+        except (KeyError, TypeError, BestTeamError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
-    if model_problems:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This team can't be deployed: "
-                + "; ".join(model_problems)
-                + ". Pick a model from the catalog."
-            ),
-        )
+        model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+        if model_problems:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This team can't be deployed: "
+                    + "; ".join(model_problems)
+                    + ". Pick a model from the catalog."
+                ),
+            )
 
-    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
-    if item is None:
-        item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
-        db.add(item)
-    else:
-        item.config = raw
-        item.status = "deployed"
-    db.commit()
-    return {"name": item_name, "org": org, "status": item.status, "config": raw}
+        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        if item is None:
+            item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
+            db.add(item)
+        else:
+            item.config = raw
+            item.status = "deployed"
+        db.commit()
+        status = item.status
+    return {"name": item_name, "org": org, "status": status, "config": raw}
 
 
 @_workflows.delete("/{item_name}", status_code=204)

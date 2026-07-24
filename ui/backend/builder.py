@@ -29,12 +29,14 @@ from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db_session import get_db
+from .component_lock import component_mutation_lock
 from .knowledge_bases import (
     check_path_traversal,
     checked_contained_cache_path,
     contain_kb_config_for_load,
     ensure_contained_cache_path_for_source,
     ensure_workflow_cache_paths_for_source,
+    kb_name_collisions,
     load_knowledge_base_tools,
     resolve_kb_upload_path,
 )
@@ -476,6 +478,16 @@ def deploy_session(
 
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built/persisted
+    kb_collisions = kb_name_collisions(db, org.id, spec.to_raw())
+    if kb_collisions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A knowledge base can't reuse a built-in tool name: "
+                + ", ".join(kb_collisions)
+                + ". Rename the knowledge base."
+            ),
+        )
     # A team that reads/drafts email can't go live without a connected mailbox.
     if spec_uses_email(db, session.specification_json, org.id) and (
         get_email_credentials(db, org.id) is None
@@ -486,35 +498,39 @@ def deploy_session(
         )
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
-    extra_tools = {
-        **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
-        **load_email_tools(db, org.id),
-    }
-    try:
-        validate_specification(
-            spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
-        )
-    except ConfigurationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Serialize dependency resolution + the deployed write against a concurrent
+    # component delete (F3): either the delete's scan sees this workflow, or this
+    # deploy's resolution fails because the resource was already removed.
+    with component_mutation_lock:
+        extra_tools = {
+            **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
+            **load_email_tools(db, org.id),
+        }
+        try:
+            validate_specification(
+                spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
+            )
+        except ConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    raw = spec.to_raw()
-    model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
-    if model_problems:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This team can't be deployed: "
-                + "; ".join(model_problems)
-                + ". Pick a model from the catalog."
-            ),
-        )
-    record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
-    if record is None:
-        record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
-        db.add(record)
-    else:
-        record.config = raw
-        record.status = "deployed"
+        raw = spec.to_raw()
+        model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+        if model_problems:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This team can't be deployed: "
+                    + "; ".join(model_problems)
+                    + ". Pick a model from the catalog."
+                ),
+            )
+        record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
+        if record is None:
+            record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
+            db.add(record)
+        else:
+            record.config = raw
+            record.status = "deployed"
 
-    session = update_session(db, session_id, status="deployed")
+        session = update_session(db, session_id, status="deployed")
     return _session_to_dict(session, db, org.id)

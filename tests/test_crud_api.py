@@ -11,10 +11,11 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id
+from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import crud as backend_crud
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, WorkflowRecord
 from ui.backend.db_session import get_db
 
 
@@ -1169,3 +1170,176 @@ def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
     }
     resp2 = client.put("/api/config/workflows/unrelated_wf?org=default", json=unrelated_workflow)
     assert resp2.status_code == 200
+
+
+def test_workflow_put_rejects_kb_named_after_builtin(client):
+    # An inline KB named after a built-in tool would silently shadow it.
+    bad = {**_VALID_WORKFLOW_CONFIG,
+           "knowledge_bases": [{"name": "calculator", "path": "docs"}],
+           "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "tools": ["calculator"]}]}
+    resp = client.put("/api/config/workflows/collide_wf?org=default", json=bad)
+    assert resp.status_code == 400
+    assert "calculator" in resp.json()["detail"]
+    assert "built-in tool name" in resp.json()["detail"]
+    assert "collide_wf" not in client.get(
+        "/api/workflows", headers=_org_user_headers(client)
+    ).json()["workflows"]
+
+
+def _deployed_wf(config_agents):
+    return {"agents": config_agents, "teams": [], "workflow": {"steps": []}}
+
+
+def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="greeting", org_id=org_id,
+                           config={"name": "greeting", "instructions": "hi", "tools": []}))
+        db.add(WorkflowRecord(name="greeter_team", org_id=org_id, status="deployed",
+                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                                                    "model": "fake:hi", "skills": ["greeting"]}])))
+        db.commit()
+    resp = client.delete("/api/config/skills/greeting?org=default")
+    assert resp.status_code == 409
+    assert "greeter_team" in resp.json()["detail"]
+    assert client.get("/api/config/skills/greeting?org=default").status_code == 200  # not deleted
+
+
+def test_delete_kb_referenced_by_deployed_workflow_is_409(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id,
+                                   config={"name": "mykb", "path": "docs"}))
+        db.add(WorkflowRecord(name="kb_team", org_id=org_id, status="deployed",
+                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                                                    "model": "fake:hi", "tools": ["mykb"]}])))
+        db.commit()
+    resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
+    assert resp.status_code == 409
+    assert "kb_team" in resp.json()["detail"]
+
+
+def test_delete_unreferenced_skill_still_204(client):
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="unused", org_id=org_id,
+                           config={"name": "unused", "instructions": "x", "tools": []}))
+        db.commit()
+    assert client.delete("/api/config/skills/unused?org=default").status_code == 204
+
+
+# --- Post-review hardening (P1-08 boundary, delete robustness, undeletable built-ins) ---
+
+def test_kb_put_rejects_builtin_name(client):
+    # F1: a KB can't be *created* with a built-in tool name (else it shadows the
+    # built-in at load, bypassing the deploy-time collision check).
+    resp = client.put("/api/config/knowledge_bases/calculator?org=default", json={"path": "docs"})
+    assert resp.status_code == 400
+    assert "built-in tool name" in resp.json()["detail"]
+
+
+def test_kb_upload_rejects_builtin_name(client):
+    # F1: same guard on the upload creation path.
+    resp = client.post(
+        "/api/config/knowledge_bases/calculator/upload?org=default",
+        files=[("files", ("d.txt", b"hi", "text/plain"))],
+    )
+    assert resp.status_code == 400
+    assert "built-in tool name" in resp.json()["detail"]
+
+
+def test_delete_scan_tolerates_malformed_deployed_workflow(client):
+    # F6: a malformed deployed workflow must not 500 an unrelated skill/KB delete.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="unused_sk", org_id=org_id,
+                           config={"name": "unused_sk", "instructions": "x", "tools": []}))
+        db.add(WorkflowRecord(name="broken", org_id=org_id, status="deployed",
+                              config={"agents": 5, "teams": [], "workflow": {"steps": []}}))
+        db.commit()
+    resp = client.delete("/api/config/skills/unused_sk?org=default")
+    assert resp.status_code == 204  # not 500 despite the malformed workflow
+
+
+def test_delete_builtin_platform_skill_is_refused(client):
+    # F4: a seeded platform built-in skill can't be deleted (would orphan bundled
+    # YAML workflows that depend on it).
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    resp = client.delete("/api/config/skills/email_triage_reply")  # platform (no ?org)
+    assert resp.status_code == 409
+    assert "built-in" in resp.json()["detail"].lower()
+
+
+# --- Third-round review fixes (dict-shaped refs, legacy-collision fail-closed) ---
+
+def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client):
+    # F2: the loader honors a dict-shaped `tools` ({"mykb": true} -> ["mykb"]), so
+    # the delete reference-scan must too, else the reference is missed (bypass).
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id, config={"name": "mykb", "path": "docs"}))
+        db.add(WorkflowRecord(name="dict_team", org_id=org_id, status="deployed",
+                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": {"mykb": True}}],
+                                      "teams": [], "workflow": {"steps": []}}))
+        db.commit()
+    resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
+    assert resp.status_code == 409
+    assert "dict_team" in resp.json()["detail"]
+
+
+def test_run_fails_closed_on_legacy_kb_shadowing_builtin(client):
+    # F4: a legacy KB named after a built-in (predating the KB-PUT guard) must
+    # fail closed at load, not silently shadow the built-in tool.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="calculator", org_id=org_id,
+                                   config={"name": "calculator", "path": "docs"}))
+        db.add(WorkflowRecord(name="legacy_wf", org_id=org_id, status="deployed",
+                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": ["calculator"]}],
+                                      "teams": [{"name": "t", "agents": ["a"], "mode": "sequential"}],
+                                      "workflow": {"steps": ["t"]}}))
+        db.commit()
+    resp = client.post("/api/runs", json={"workflow": "legacy_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 400
+    assert "built-in" in resp.json()["detail"]
+
+
+# --- Fourth-round review fixes (string refs, inline-KB shadow) ---
+
+def test_delete_kb_referenced_via_string_shaped_tools_is_409(client):
+    # F2: the loader does list(tools), so a string "x" resolves to ["x"] and runs;
+    # the delete scan must use the same normalization or it misses the reference.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(KnowledgeBaseRecord(name="x", org_id=org_id, config={"name": "x", "path": "docs"}))
+        db.add(WorkflowRecord(name="str_team", org_id=org_id, status="deployed",
+                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": "x"}],
+                                      "teams": [], "workflow": {"steps": []}}))
+        db.commit()
+    resp = client.delete("/api/config/knowledge_bases/x?org=default")
+    assert resp.status_code == 409
+    assert "str_team" in resp.json()["detail"]
+
+
+def test_run_fails_closed_on_legacy_inline_kb_shadowing_builtin(client):
+    # F3: an inline KB (built by the loader, not load_knowledge_base_tools) named
+    # after a built-in must also fail closed at load, not silently shadow it.
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(WorkflowRecord(name="inline_wf", org_id=org_id, status="deployed",
+                              config={"knowledge_bases": [{"name": "calculator", "path": "docs"}],
+                                      "agents": [{"name": "a", "role": "r", "goal": "g",
+                                                  "model": "fake:hi", "tools": ["calculator"]}],
+                                      "teams": [{"name": "t", "agents": ["a"], "mode": "sequential"}],
+                                      "workflow": {"steps": ["t"]}}))
+        db.commit()
+    resp = client.post("/api/runs", json={"workflow": "inline_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 400
+    assert "built-in" in resp.json()["detail"]

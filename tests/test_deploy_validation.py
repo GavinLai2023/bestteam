@@ -41,3 +41,25 @@ def test_non_dict_agents_left_to_structural_validation():
     # Structural validation (_build_workflow) owns non-dict agents; not our job.
     assert validate_agent_models({"agents": [42]}, set()) == []
     assert validate_agent_models({}, set()) == []
+
+
+from ui.backend.deploy_validation import find_kb_tool_collisions
+
+
+def test_inline_kb_name_shadowing_builtin_flagged():
+    raw = {"knowledge_bases": [{"name": "calculator", "path": "x"}], "agents": []}
+    assert find_kb_tool_collisions(raw, [], {"calculator", "web_search"}) == ["calculator"]
+
+
+def test_standalone_kb_name_shadowing_builtin_flagged():
+    assert find_kb_tool_collisions({}, ["calculator"], {"calculator"}) == ["calculator"]
+
+
+def test_non_colliding_kb_names_pass():
+    raw = {"knowledge_bases": [{"name": "product_docs", "path": "x"}], "agents": []}
+    assert find_kb_tool_collisions(raw, ["returns_policy"], {"calculator", "web_search"}) == []
+
+
+def test_collisions_sorted_and_deduped():
+    raw = {"knowledge_bases": [{"name": "web_search"}], "agents": []}
+    assert find_kb_tool_collisions(raw, ["calculator", "web_search"], {"calculator", "web_search"}) == ["calculator", "web_search"]
