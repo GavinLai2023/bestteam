@@ -338,8 +338,15 @@
   and a process-wide `component_mutation_lock` serializes component-delete
   against deploy (the delete/deploy TOCTOU — feasible even single-worker via the
   threadpool — is now mitigated, not "near-impossible" as first stated).
-  Remaining, deferred to P1-04 (typed dependency records): raw-name matching can
-  over-block (fail-closed, safe), and upload-file cleanup is best-effort.
+  Two further review rounds closed the same classes comprehensively: the delete
+  scan now uses the loader's own `list(refs)` normalization (any list/dict/string
+  shape, not special-cases); the inline-KB path also fails closed at load
+  (`core/loader._build_workflow`, covering SDK/manual/autonomous); and the KB
+  upload holds its lock across staging→validation→promote→commit so it fully
+  serializes with delete. Remaining, deferred to P1-04 (typed dependency
+  records): raw-name matching can over-block (fail-closed, safe), and
+  upload-file cleanup is best-effort. Delivered via PR #27 over four review
+  rounds; spec: `2026-07-24-dependency-namespace-integrity-design.md`.
 
 ## In Progress
 
