@@ -69,6 +69,29 @@ def test_build_trigger_workflow_raises_on_missing_team(db):
         email_trigger.build_trigger_workflow("nope", db, org.id, {1}, backend)
 
 
+def test_build_trigger_workflow_refuses_non_deployed_team(db, monkeypatch):
+    # The deployed-only gate must extend to the autonomous path: a workflow that
+    # became draft/ready_for_testing must not be buildable or dispatchable by the
+    # poller, matching main._get_workflow's status filter. make_email_tools is
+    # stubbed so a *deployed* "wip" would build fine (see the scopes test) --
+    # the only reason a draft fails is the status gate, treating it as absent.
+    from ui.backend.skills import seed_default_skills
+    seed_default_skills(db)
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(db, org.id, host="h", username="u", password="pw")
+    db.add(WorkflowRecord(name="wip", org_id=org.id, config=_TEAM, status="draft"))
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger, "make_email_tools",
+        lambda backend, allowed_uids=None: {"email_find": lambda q="": "",
+                                            "email_read": lambda m: "",
+                                            "email_draft_reply": lambda m, b: ""},
+    )
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    with pytest.raises(ValueError):
+        email_trigger.build_trigger_workflow("wip", db, org.id, {1}, backend)
+
+
 def test_batch_size_default_and_override(monkeypatch):
     monkeypatch.delenv("BESTTEAM_TRIGGER_BATCH_SIZE", raising=False)
     assert email_trigger.batch_size() == 20

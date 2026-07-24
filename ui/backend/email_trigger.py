@@ -208,9 +208,16 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     rather than re-fetched, so a mailbox swap mid-cycle can't produce a run
     that detects mail on one mailbox and reads/drafts on another. Raises on a
     missing/invalid team."""
-    record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
+    # Deployed-only gate (same as main._get_workflow): a workflow that isn't
+    # deployed must not run, including via the autonomous poller. A non-deployed
+    # (or absent) record is treated identically -- no run is built.
+    record = (
+        db.query(WorkflowRecord)
+        .filter_by(name=name, org_id=org_id, status="deployed")
+        .one_or_none()
+    )
     if record is None:
-        raise ValueError(f"No team named '{name}' for org {org_id}")
+        raise ValueError(f"No deployed team named '{name}' for org {org_id}")
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
