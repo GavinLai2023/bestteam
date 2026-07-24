@@ -52,6 +52,7 @@ from .db.models import (
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
+from .db.workflows import current_version_id
 from .db_session import SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
@@ -486,6 +487,7 @@ async def create_run(
     org: Organization = Depends(get_current_org),
 ):
     workflow = _get_workflow(req.workflow, db, org.id)
+    version_id = current_version_id(db, org.id, req.workflow)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(
@@ -497,6 +499,7 @@ async def create_run(
         user_id=user.username,
         org_id=org.id,
         username=user.username,
+        workflow_version_id=version_id,
     )
 
     return {"run_id": run.id}

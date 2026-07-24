@@ -229,7 +229,12 @@ def _fake_workflow_getter(calls):
 
 
 def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
+    from ui.backend.db.workflows import current_version_id, publish_workflow_version
+
     org, trigger = _org_with_trigger(db, last_uid=41)
+    _, version = publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    db.commit()
+
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
@@ -242,9 +247,11 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     run_id, input_text = args[0], args[2]
     assert "42, 43, 45" in input_text
     assert kwargs["username"] == "email-trigger"
-    # Durable run row exists BEFORE dispatch.
+    # Durable run row exists BEFORE dispatch, stamped with the executed version.
     from ui.backend.db.models import Run
-    assert db.get(Run, run_id) is not None
+    run_row = db.get(Run, run_id)
+    assert run_row is not None
+    assert run_row.workflow_version_id == version.id == current_version_id(db, org.id, "triage")
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 

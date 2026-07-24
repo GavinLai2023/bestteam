@@ -61,6 +61,7 @@ def run_in_background(
     user_id: Optional[str] = None,
     org_id: Optional[int] = None,
     username: Optional[str] = None,
+    workflow_version_id: Optional[int] = None,
 ) -> None:
     """Drain `Workflow.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
@@ -100,6 +101,7 @@ def run_in_background(
                     input=input,
                     org_id=org_id,
                     username=username,
+                    workflow_version_id=workflow_version_id,
                 )
                 db.add(run_row)
             else:

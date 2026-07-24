@@ -38,6 +38,7 @@ from . import secret_store
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
 from .db.models import EmailTrigger, Run, WorkflowRecord
+from .db.workflows import current_version_id
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -380,6 +381,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     run_row = Run(
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
+        workflow_version_id=current_version_id(db, trigger.org_id, trigger.workflow_name),
     )
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
