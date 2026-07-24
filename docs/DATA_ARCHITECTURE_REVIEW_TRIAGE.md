@@ -72,6 +72,18 @@ than the full typed-namespace rename, which is a config-migration-sized
 change; P1-10 split out as its own future sub-project). Design:
 `docs/superpowers/specs/2026-07-24-dependency-namespace-integrity-design.md`.
 
+A follow-up review surfaced six more findings on that branch; four were fixed
+in-scope: (F1) the collision check was bypassable by *creating* a KB named after
+a built-in after deploy, now blocked at KB PUT/upload (`_reject_builtin_kb_name`)
+so a colliding KB can never exist; (F4) seeded platform built-in skills are
+undeletable (bundled YAML demos depend on them); (F6) the delete reference-scan
+skips malformed workflows instead of 500-ing; (F3, pre-existing) KB delete
+commits before `rmtree` and logs rmtree failures. Two are deferred to the P1-04
+typed-dependency-records sub-project (their proper fix): (F2) a delete/deploy
+TOCTOU window (near-impossible on the single-worker deployment) and (F5)
+raw-name matching that can over-block (fail-closed, safe). See the design spec's
+"Post-review hardening" and "Known limitations" sections.
+
 ## Everything else: validated-accurate, out of scope for this pass
 
 The remaining 24 findings (all of Phase 2 except P2-01/P2-02 above, and the
