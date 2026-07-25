@@ -54,8 +54,13 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`409`) while any `Run` records one of its versions -- deletion removes the
   version history those runs reference (FK enforcement is off, no DB cascade), so
   provenance is preserved. A never-run head deletes cleanly, cascading its
-  (unreferenced) `workflow_versions` under `component_mutation_lock` so no
-  orphaned version rows survive.
+  (unreferenced) `workflow_versions` and nulling any `builder_sessions.workflow_id`
+  that pointed at it (self-heals on next deploy), under `component_mutation_lock`,
+  so no orphaned version rows or dangling session pointers survive. Known gap
+  (deferred, design spec): an in-flight run whose `runs` row is written by the
+  worker *after* dispatch isn't seen by the delete guard, so deleting a workflow
+  at the instant a run of it starts can dangle that run's provenance pointer --
+  closed only by soft-delete/archive (deletion-lifecycle sub-project).
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

@@ -382,11 +382,14 @@
   record a version it didn't execute under a concurrent redeploy; workflow
   deletion refuses (409) while any run records one of the head's versions
   (preserving provenance) and otherwise cascades its version history under the
-  mutation lock (no orphans); and the migration creates `created_at` NOT NULL to
-  match the ORM. Remaining known limitations (design spec): rename-onto-existing-
-  name is a 500, soft-delete/archive of a run-referenced head is deferred, and FK
-  constraints on the new columns follow the project's bare-column precedent
-  (SQLite FK enforcement off, P1-13).
+  mutation lock (no orphans) and nulling any builder session that pointed at the
+  head; and the migration creates `created_at` NOT NULL to match the ORM.
+  Remaining known limitations (design spec): deleting a workflow at the instant a
+  run of it starts can dangle that in-flight run's provenance pointer (the run's
+  row is written by the worker after dispatch) -- closed only by soft-delete/
+  archive, deferred to a deletion-lifecycle sub-project; rename-onto-existing-name
+  is a 500; and FK constraints on the new columns follow the project's bare-column
+  precedent (SQLite FK enforcement off, P1-13).
 
 ## In Progress
 

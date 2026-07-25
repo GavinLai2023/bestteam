@@ -845,6 +845,26 @@ def test_delete_workflow_refused_when_a_run_references_its_version(client):
         assert db.query(WorkflowVersion).filter_by(workflow_id=head.id).count() == 1  # history intact
 
 
+def test_delete_workflow_detaches_builder_sessions(client):
+    """Deleting a never-run workflow nulls any builder session's workflow_id, so
+    none is left pointing at a deleted head (it self-heals on next deploy)."""
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord, BuilderSession
+
+    assert client.put("/api/config/workflows/sess_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="sess_wf").one()
+        db.add(BuilderSession(id="sess-detach-1", org_id=get_org_id("default"),
+                              status="deployed", workflow_id=head.id))
+        db.commit()
+
+    assert client.delete("/api/config/workflows/sess_wf?org=default").status_code == 204
+    with open_test_db() as db:
+        sess = db.get(BuilderSession, "sess-detach-1")
+        assert sess is not None and sess.workflow_id is None
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord

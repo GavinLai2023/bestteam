@@ -44,6 +44,7 @@ from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .deploy_validation import validate_agent_models
 from .db.models import (
+    BuilderSession,
     KnowledgeBaseRecord,
     Organization,
     Run,
@@ -657,6 +658,13 @@ def delete_workflow_config(
                     "of it. Deleting would orphan their provenance."
                 ),
             )
+        # Detach any builder sessions that deployed this head so none is left
+        # pointing at a deleted workflow. A nulled workflow_id self-heals: the
+        # session's next deploy resolve-or-creates a fresh head by (org_id, name)
+        # (publish_workflow_version treats a stale/absent workflow_id as a miss).
+        db.query(BuilderSession).filter_by(workflow_id=item.id).update(
+            {BuilderSession.workflow_id: None}
+        )
         db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
         db.delete(item)
         db.commit()

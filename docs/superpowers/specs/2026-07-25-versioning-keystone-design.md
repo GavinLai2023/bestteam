@@ -244,6 +244,20 @@ archive of a run-referenced head is deferred (P1-07-class lifecycle work).
 
 ## Known limitation
 
+- **Hard-deleting a workflow at the instant a run of it is starting can dangle
+  that run's provenance.** A run's durable `runs` row is written by the worker
+  (`run_in_background`) *after* `create_run` / `_start_triggered_run` dispatch
+  it, so the delete guard (which refuses when a *committed* run references the
+  head's versions) cannot see an in-flight run. If an admin deletes the workflow
+  in that window, the head + versions are removed and the worker then writes a
+  `runs` row whose `workflow_version_id` points at a deleted version. The run
+  still executes correctly; only its provenance pointer dangles. Closing this
+  requires soft-delete/archive of the head (retaining versions) or serializing
+  run-row persistence with deletion under `component_mutation_lock` across both
+  run paths -- deferred to a dedicated deletion-lifecycle sub-project
+  (P1-07-class), out of scope for this batch. Deleting a workflow with any
+  *committed* run is already refused (409), and deleting one mid-run is a rare
+  admin action against a never-run-or-just-starting workflow.
 - **FK constraints for the new columns are not added by the migration.**
   `workflows.current_version_id`, `builder_sessions.workflow_id`, and
   `runs.workflow_version_id` are declared as ORM `ForeignKey`s (so `create_all`
