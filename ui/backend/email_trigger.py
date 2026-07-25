@@ -224,12 +224,17 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     skills = load_skills(db, org_id)
     config = contain_workflow_config_for_load(record.config)
     ensure_workflow_cache_paths_for_source(config, source)
-    return _build_workflow(
+    workflow = _build_workflow(
         config,
         source=source,
         extra_tools={**kb_tools, **email_tools},
         extra_skills=skills,
     )
+    # Return the version from the SAME record read that produced the config, so
+    # the triggered run records exactly the version it executes even if a
+    # redeploy commits concurrently (a separate current_version_id re-query could
+    # observe a newer version than the one built).
+    return workflow, record.current_version_id
 
 
 def _utcnow() -> datetime:
@@ -355,12 +360,14 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     Build the workflow FIRST (a build failure must consume no message and no
     cap), then persist a durable run row and advance state in one commit, then
     dispatch. `get_workflow` is `build_trigger_workflow(name, db, org_id,
-    allowed_uids, backend) -> Workflow`.
+    allowed_uids, backend) -> (Workflow, Optional[int] version_id)`; the version
+    is captured from the same record read that built the config so the run
+    records exactly the version it executes.
     """
     batch = sorted(new_uids)[:batch_size()]
     input_text = _trigger_input(batch)
     try:
-        workflow = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
+        workflow, version_id = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
         _logger.warning("email trigger: cannot build workflow %r for org %s: %s",
                         trigger.workflow_name, trigger.org_id, exc)
@@ -380,6 +387,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     run_row = Run(
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
+        workflow_version_id=version_id,
     )
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in

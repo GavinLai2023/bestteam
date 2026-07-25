@@ -40,6 +40,7 @@ def test_init_db_creates_all_tables():
         "knowledge_bases",
         "skills",
         "workflows",
+        "workflow_versions",
         "builder_sessions",
         "email_triggers",
         "model_catalog",

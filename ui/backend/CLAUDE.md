@@ -189,11 +189,15 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     catalog (`deploy_validation.validate_agent_models`, `fake:` exempt; 400
     listing any agent whose model is missing/empty/non-string or not offered —
     the CRUD path builds `Agent(**spec)` directly, so this is the only guard on
-    those), then upserts a `WorkflowRecord` (`status=deployed`) from
-    `specification.to_raw()` and marks the session `deployed`. Model validation
-    is **deploy-time only** — a model later removed from the catalog, or a legacy
-    row promoted by the migration, fails at run, not load (see the spec's "Known
-    limitation").
+    those), then **publishes a new immutable version** of the workflow
+    (`db/workflows.py::publish_workflow_version` — append a `workflow_versions`
+    snapshot from `specification.to_raw()`, move the head's `current_version_id`,
+    keep `config` as the current mirror; `status=deployed`) and links
+    `session.workflow_id` to that head, both in the session's single commit
+    (P1-14). A redeploy versions the same head and two same-named sessions
+    converge on one team (P1-01/02/03). Model validation is **deploy-time
+    only** — a model later removed from the catalog, or a legacy row promoted by
+    the migration, fails at run, not load (see the spec's "Known limitation").
   - All generation endpoints (`model=...`) translate `BestTeamError` (e.g.
     an invalid spec the architect couldn't self-correct) to `400`, and any
     other exception (e.g. a real provider call without an API key) to `502`
@@ -211,7 +215,9 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   via `PUT /workflows/{name}` writes `status="deployed"` on both insert and
   update — **save is deploy**: there is no separate promote step, mirroring
   the wizard's `deploy_session`, which validates the same way at the same
-  point. Plus two read-only reference routes for the UI: `GET /orgs` (the org
+  point. Like the wizard, it publishes an immutable version each save
+  (`publish_workflow_version`, `workflow_id=None` → resolve-or-create the head
+  by `(org_id, name)`) rather than overwriting `config` in place. Plus two read-only reference routes for the UI: `GET /orgs` (the org
   selector) and `GET /tools` (the built-in `bestteam.tools.REGISTRY`, name +
   docstring).
   **Standalone `agents`/`teams` CRUD was removed**: nothing consumed those

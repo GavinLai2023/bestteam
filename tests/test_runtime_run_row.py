@@ -44,3 +44,27 @@ def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
         assert len(rows) == 1  # not double-inserted
         assert rows[0].status in ("completed", "failed")
         assert rows[0].username == "email-trigger"
+
+
+def test_run_in_background_stamps_workflow_version_id(tmp_path):
+    engine = _engine()
+    Session = session_factory(engine)
+    wf = _workflow(tmp_path)
+    run = registry.create("w", "in")
+
+    run_in_background(run.id, wf, "in", engine=engine, workflow_version_id=42)
+
+    with Session() as s:
+        assert s.get(Run, run.id).workflow_version_id == 42
+
+
+def test_run_in_background_leaves_version_null_when_absent(tmp_path):
+    engine = _engine()
+    Session = session_factory(engine)
+    wf = _workflow(tmp_path)
+    run = registry.create("w", "in")
+
+    run_in_background(run.id, wf, "in", engine=engine)
+
+    with Session() as s:
+        assert s.get(Run, run.id).workflow_version_id is None

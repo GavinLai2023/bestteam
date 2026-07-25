@@ -56,8 +56,9 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
 
     monkeypatch.setattr(email_trigger, "make_email_tools", fake_make)
     backend = email_tools.build_org_imap_backend(db, org_id)
-    wf = email_trigger.build_trigger_workflow("triage", db, org_id, {42, 43}, backend)
+    wf, version_id = email_trigger.build_trigger_workflow("triage", db, org_id, {42, 43}, backend)
     assert wf is not None
+    assert version_id is None  # unversioned config in this fixture (no published version)
     assert captured["allowed"] == {42, 43}  # scoped to the batch
 
 

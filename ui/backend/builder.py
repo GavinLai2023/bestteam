@@ -27,7 +27,8 @@ from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User
+from .db.workflows import publish_workflow_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
 from .knowledge_bases import (
@@ -469,9 +470,13 @@ def deploy_session(
     session_id: str,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Stage 6 (Deployment): persist the validated Specification as a
-    `WorkflowRecord` (`status=deployed`) so `_get_workflow()` picks it up."""
+    """Stage 6 (Deployment): publish the validated Specification as a new
+    immutable version of a `WorkflowRecord` team head (`status=deployed`) so
+    `_get_workflow()` picks it up, and link the session to that head
+    (`session.workflow_id`) so a redeploy versions the same team (P1-02).
+    The version publish and the session update share a single commit (P1-14)."""
     session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
         raise HTTPException(status_code=400, detail="Generate a specification before deploying")
@@ -524,13 +529,15 @@ def deploy_session(
                     + ". Pick a model from the catalog."
                 ),
             )
-        record = db.query(WorkflowRecord).filter_by(name=spec.name, org_id=org.id).one_or_none()
-        if record is None:
-            record = WorkflowRecord(name=spec.name, config=raw, status="deployed", org_id=org.id)
-            db.add(record)
-        else:
-            record.config = raw
-            record.status = "deployed"
-
-        session = update_session(db, session_id, status="deployed")
+        record, _version = publish_workflow_version(
+            db,
+            org_id=org.id,
+            name=spec.name,
+            config=raw,
+            workflow_id=session.workflow_id,
+            created_by=user.username,
+        )
+        session = update_session(
+            db, session_id, status="deployed", workflow_id=record.id
+        )
     return _session_to_dict(session, db, org.id)

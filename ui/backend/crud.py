@@ -44,12 +44,16 @@ from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
 from .deploy_validation import validate_agent_models
 from .db.models import (
+    BuilderSession,
     KnowledgeBaseRecord,
     Organization,
+    Run,
     SkillRecord,
     WorkflowRecord,
+    WorkflowVersion,
 )
 from .db.orgs import get_org_by_name, list_orgs
+from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
 from .db_session import get_db
 from .knowledge_bases import (
@@ -614,13 +618,9 @@ def upsert_workflow_config(
                 ),
             )
 
-        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
-        if item is None:
-            item = WorkflowRecord(name=item_name, config=raw, status="deployed", org_id=org_id)
-            db.add(item)
-        else:
-            item.config = raw
-            item.status = "deployed"
+        item, _version = publish_workflow_version(
+            db, org_id=org_id, name=item_name, config=raw
+        )
         db.commit()
         status = item.status
     return {"name": item_name, "org": org, "status": status, "config": raw}
@@ -631,11 +631,43 @@ def delete_workflow_config(
     item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
 ) -> Response:
     org_id = _resolve_org_id(db, org, allow_platform=False)
-    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
-    if item is None:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
-    db.delete(item)
-    db.commit()
+    # Serialize with publish (which appends versions + moves the pointer under the
+    # same lock) so a delete can't interleave with a concurrent version publish.
+    with component_mutation_lock:
+        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
+        # Preserve run provenance: refuse to delete while any Run references one
+        # of this head's versions, since deletion removes the version history
+        # (FK enforcement is off -> no DB cascade) and would leave those runs
+        # pointing at rows that no longer exist. A never-run workflow deletes
+        # cleanly, taking its (unreferenced) version history with it so no
+        # orphaned workflow_versions rows survive the deleted head.
+        run_refs = (
+            db.query(Run)
+            .filter(Run.workflow_version_id.in_(
+                db.query(WorkflowVersion.id).filter_by(workflow_id=item.id)
+            ))
+            .count()
+        )
+        if run_refs:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': {run_refs} run(s) recorded a version "
+                    "of it. Deleting would orphan their provenance."
+                ),
+            )
+        # Detach any builder sessions that deployed this head so none is left
+        # pointing at a deleted workflow. A nulled workflow_id self-heals: the
+        # session's next deploy resolve-or-creates a fresh head by (org_id, name)
+        # (publish_workflow_version treats a stale/absent workflow_id as a miss).
+        db.query(BuilderSession).filter_by(workflow_id=item.id).update(
+            {BuilderSession.workflow_id: None}
+        )
+        db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
+        db.delete(item)
+        db.commit()
     return Response(status_code=204)
 
 

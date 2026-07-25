@@ -733,6 +733,138 @@ def test_workflow_crud_round_trip_and_validation(client):
     assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
 
 
+def test_workflow_put_appends_immutable_versions(client):
+    """Two PUTs of the same workflow -> versions 1 then 2; v1 config frozen."""
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+
+    def _config(marker):
+        return {**_VALID_WORKFLOW_CONFIG,
+                 "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "goal": marker}]}
+
+    assert client.put("/api/config/workflows/wf?org=default",
+                       json=_config("one")).status_code == 200
+    assert client.put("/api/config/workflows/wf?org=default",
+                       json=_config("two")).status_code == 200
+
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="wf").one()
+        versions = (db.query(WorkflowVersion)
+                      .filter_by(workflow_id=head.id)
+                      .order_by(WorkflowVersion.version_number).all())
+        assert [v.version_number for v in versions] == [1, 2]
+        assert versions[0].config != versions[1].config  # v1 preserved distinctly
+        assert head.current_version_id == versions[1].id  # pointer at latest
+
+
+def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
+    """POST /api/runs dispatches run_in_background with workflow_version_id set to
+    the deployed workflow's current version (the /api/runs -> stamp glue). The
+    executor submit is captured so the assertion is deterministic (no threadpool
+    wait) and no background run actually executes."""
+    import ui.backend.main as main
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    assert client.put("/api/config/workflows/stamp_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        expected = db.query(WorkflowRecord).filter_by(name="stamp_wf").one().current_version_id
+    assert expected is not None
+
+    captured = {}
+
+    def _fake_submit(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(main._executor, "submit", _fake_submit)
+    resp = client.post("/api/runs", json={"workflow": "stamp_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 200
+    assert captured["workflow_version_id"] == expected
+
+
+def test_resolve_workflow_and_version_binds_version_to_the_built_record(client):
+    """_resolve_workflow_and_version returns the current_version_id of the same
+    record it built the workflow from (one read), so a run stamps the version it
+    actually executed rather than a separately-queried, possibly-newer one."""
+    import ui.backend.main as main
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord
+
+    assert client.put("/api/config/workflows/rv_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        expected = db.query(WorkflowRecord).filter_by(name="rv_wf").one().current_version_id
+        workflow, version_id = main._resolve_workflow_and_version("rv_wf", db, get_org_id("default"))
+    assert workflow is not None
+    assert version_id == expected
+
+
+def test_delete_workflow_also_deletes_its_version_history(client):
+    """Deleting a workflow head removes its immutable versions too -- no orphaned
+    workflow_versions rows survive a deleted head (FK enforcement is off)."""
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+
+    assert client.put("/api/config/workflows/del_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="del_wf").one()
+        wf_id = head.id
+        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 1
+
+    assert client.delete("/api/config/workflows/del_wf?org=default").status_code == 204
+
+    with open_test_db() as db:
+        assert db.query(WorkflowRecord).filter_by(name="del_wf").one_or_none() is None
+        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 0
+
+
+def test_delete_workflow_refused_when_a_run_references_its_version(client):
+    """A workflow whose version a run recorded can't be hard-deleted (409) --
+    deleting would orphan that run's provenance. History is preserved."""
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion, Run
+
+    assert client.put("/api/config/workflows/run_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="run_wf").one()
+        db.add(Run(id="run-ref-1", workflow="run_wf", input="hi",
+                   org_id=get_org_id("default"), workflow_version_id=head.current_version_id))
+        db.commit()
+
+    resp = client.delete("/api/config/workflows/run_wf?org=default")
+    assert resp.status_code == 409
+    assert "run" in resp.json()["detail"].lower()
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="run_wf").one_or_none()
+        assert head is not None  # head preserved
+        assert db.query(WorkflowVersion).filter_by(workflow_id=head.id).count() == 1  # history intact
+
+
+def test_delete_workflow_detaches_builder_sessions(client):
+    """Deleting a never-run workflow nulls any builder session's workflow_id, so
+    none is left pointing at a deleted head (it self-heals on next deploy)."""
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord, BuilderSession
+
+    assert client.put("/api/config/workflows/sess_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="sess_wf").one()
+        db.add(BuilderSession(id="sess-detach-1", org_id=get_org_id("default"),
+                              status="deployed", workflow_id=head.id))
+        db.commit()
+
+    assert client.delete("/api/config/workflows/sess_wf?org=default").status_code == 204
+    with open_test_db() as db:
+        sess = db.get(BuilderSession, "sess-detach-1")
+        assert sess is not None and sess.workflow_id is None
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord
