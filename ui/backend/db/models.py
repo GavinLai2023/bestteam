@@ -157,6 +157,32 @@ class WorkflowVersion(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class WorkflowDependency(Base):
+    """A typed record of one skill/KB a published workflow version depends on.
+
+    Materialized at deploy from the version's inline config (agents[*].skills and
+    the standalone KBs named in agents[*].tools) so the DB can answer "what depends
+    on this resource?" and the skill/KB delete guard can RESTRICT by a precise
+    resource_id instead of re-scanning every deployed workflow's JSON (P1-04).
+    Written once per version (a version is immutable); resource_id is the resolved
+    SkillRecord/KnowledgeBaseRecord id (NULL only for a backfilled name that no
+    longer resolves -- harmless, such a ref can't build)."""
+
+    __tablename__ = "workflow_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_version_id", "resource_kind", "resource_name",
+            name="uq_workflow_dependencies_version_kind_name",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_version_id: Mapped[int] = mapped_column(ForeignKey("workflow_versions.id"))
+    resource_kind: Mapped[str]
+    resource_name: Mapped[str]
+    resource_id: Mapped[Optional[int]] = mapped_column(nullable=True)
+
+
 class OrgEmailCredential(Base):
     """One org's mailbox connection for the email tools (per-org secrets store).
 

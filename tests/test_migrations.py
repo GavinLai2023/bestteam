@@ -43,6 +43,7 @@ _EXPECTED_HEAD_TABLES = {
     "knowledge_bases",
     "skills",
     "workflows",
+    "workflow_dependencies",
     "builder_sessions",
     "email_triggers",
     "model_catalog",
@@ -242,3 +243,137 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
             assert count == 1
     finally:
         engine.dispose()
+
+
+_PRE_DEPS = "c3f5a1b8e2d4"  # revision before workflow_dependencies
+
+
+def test_workflow_dependencies_backfill_resolves_current_version(tmp_path, monkeypatch):
+    db_path = tmp_path / "wf_deps.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_DEPS)  # workflows + workflow_versions exist; no deps table
+
+    engine = make_engine(db_path)
+    config_json = (
+        '{"name": "wf", "agents": [{"name": "a", '
+        '"skills": ["greet"], "tools": ["kb1", "http_get"]}]}'
+    )
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO skills (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (3, 'greet', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO knowledge_bases (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (4, 'kb1', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at, current_version_id) "
+            "VALUES (7, 'wf', 5, :cfg, 'deployed', '2026-01-01', '2026-01-01', 11)"
+        ), {"cfg": config_json})
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions (id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (11, 7, 1, :cfg, NULL, '2026-01-01')"
+        ), {"cfg": config_json})
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        deps = set(conn.execute(sa.text(
+            "SELECT workflow_version_id, resource_kind, resource_name, resource_id "
+            "FROM workflow_dependencies"
+        )).fetchall())
+    engine.dispose()
+    assert deps == {
+        (11, "skill", "greet", 3),
+        (11, "knowledge_base", "kb1", 4),
+    }  # http_get is a built-in tool, not a standalone KB -> no row
+
+    # Idempotent: re-running upgrade head adds nothing.
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_dependencies")).scalar()
+    engine.dispose()
+    assert count == 2
+
+
+def test_workflow_dependencies_backfill_tolerates_mixed_type_refs(tmp_path, monkeypatch):
+    # A legacy config with a non-string skill/tool ref (["greet", 1]) must not
+    # abort the whole upgrade with a str/int sorted() TypeError; the valid string
+    # refs are still recorded.
+    db_path = tmp_path / "wf_deps_mixed.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_DEPS)
+
+    engine = make_engine(db_path)
+    config_json = (
+        '{"name": "wf", "agents": [{"name": "a", '
+        '"skills": ["greet", 1], "tools": ["http_get", 2]}]}'
+    )
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO skills (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (3, 'greet', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at, current_version_id) "
+            "VALUES (7, 'wf', 5, :cfg, 'deployed', '2026-01-01', '2026-01-01', 11)"
+        ), {"cfg": config_json})
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions (id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (11, 7, 1, :cfg, NULL, '2026-01-01')"
+        ), {"cfg": config_json})
+    engine.dispose()
+
+    command.upgrade(cfg, "head")  # must not raise
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        deps = set(conn.execute(sa.text(
+            "SELECT resource_kind, resource_name, resource_id FROM workflow_dependencies"
+        )).fetchall())
+    engine.dispose()
+    # int refs dropped; http_get is a built-in tool, not a standalone KB.
+    assert deps == {("skill", "greet", 3)}
+
+
+def test_workflow_dependencies_backfill_inline_kb_shadows_standalone(tmp_path, monkeypatch):
+    # A workflow with an inline KB "faq" and a same-named standalone KB. The
+    # inline KB wins at runtime, so the backfill must NOT record the standalone
+    # KB as a dependency (else the standalone would be wrongly delete-blocked).
+    db_path = tmp_path / "wf_deps_inline.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_DEPS)
+
+    engine = make_engine(db_path)
+    config_json = (
+        '{"name": "wf", "knowledge_bases": [{"name": "faq", "path": "./faq"}], '
+        '"agents": [{"name": "a", "skills": [], "tools": ["faq"]}]}'
+    )
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO knowledge_bases (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (4, 'faq', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at, current_version_id) "
+            "VALUES (7, 'wf', 5, :cfg, 'deployed', '2026-01-01', '2026-01-01', 11)"
+        ), {"cfg": config_json})
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions (id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (11, 7, 1, :cfg, NULL, '2026-01-01')"
+        ), {"cfg": config_json})
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        count = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM workflow_dependencies WHERE resource_kind = 'knowledge_base'"
+        )).scalar()
+    engine.dispose()
+    assert count == 0  # inline KB shadows the standalone -> no dependency row

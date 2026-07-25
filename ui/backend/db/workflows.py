@@ -13,6 +13,7 @@ from typing import Any, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .dependencies import record_version_dependencies
 from .models import WorkflowRecord, WorkflowVersion
 
 
@@ -76,6 +77,7 @@ def publish_workflow_version(
     db.add(version)
     db.flush()  # need version.id
     record.current_version_id = version.id
+    record_version_dependencies(db, version_id=version.id, org_id=org_id, raw=config)
     return record, version
 
 

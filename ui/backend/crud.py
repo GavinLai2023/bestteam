@@ -26,6 +26,7 @@ import os
 import shutil
 import threading
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
@@ -49,9 +50,11 @@ from .db.models import (
     Organization,
     Run,
     SkillRecord,
+    WorkflowDependency,
     WorkflowRecord,
     WorkflowVersion,
 )
+from .db.dependencies import reconcile_skill_dependencies, workflows_referencing
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
@@ -223,41 +226,6 @@ def _reject_builtin_kb_name(name: str) -> None:
         )
 
 
-def _deployed_workflows_referencing(db: Session, org_id, kind: str, name: str) -> list[str]:
-    """Names of deployed workflows whose config references `name`.
-
-    `kind="skill"` matches an agent's `skills`; `kind="knowledge_base"` matches an
-    agent's `tools` (a standalone KB is referenced by name there). Malformed rows
-    (non-dict config, non-list agents/tools) are skipped rather than crashing the
-    scan (F6) -- such a workflow can't build anyway.
-    """
-    field = "skills" if kind == "skill" else "tools"
-    query = db.query(WorkflowRecord).filter(WorkflowRecord.status == "deployed")
-    if org_id is not None:
-        query = query.filter(WorkflowRecord.org_id == org_id)
-    hits = []
-    for row in query:
-        config = row.config if isinstance(row.config, dict) else {}
-        agents = config.get("agents", [])
-        if not isinstance(agents, list):
-            continue
-        for agent in agents:
-            if not isinstance(agent, dict):
-                continue
-            # Normalize exactly as the loader does (`list(refs)`), so any shape
-            # it honors -- list, dict (keys), or string -- is matched and can't
-            # slip past the scan (F2). A non-iterable (int) is malformed; skip it
-            # rather than crash (F6).
-            try:
-                refs = list(agent.get(field) or [])
-            except TypeError:
-                continue
-            if name in refs:
-                hits.append(row.name)
-                break
-    return sorted(hits)
-
-
 def _resolve_org_id(db: Session, org: Optional[str], *, allow_platform: bool) -> Optional[int]:
     """Resolve an admin request's `?org=<name>` to an org id.
 
@@ -330,13 +298,24 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
-        if item is None:
-            item = record_cls(name=item_name, config=raw, org_id=org_id)
-            db.add(item)
-        else:
-            item.config = raw
-        db.commit()
+        # Creating an org skill can shadow a same-named platform built-in that a
+        # workflow already deployed against, so serialize the write + dependency
+        # reconciliation against concurrent deploys/deletes under the same lock
+        # they take, and re-point stale current-version skill dep rows to the now
+        # -resolved id. Other component kinds have no such shadowing (KBs are
+        # org-scoped) and keep the plain write.
+        reconcile = name == "skills" and org_id is not None
+        with (component_mutation_lock if reconcile else nullcontext()):
+            item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
+            if item is None:
+                item = record_cls(name=item_name, config=raw, org_id=org_id)
+                db.add(item)
+            else:
+                item.config = raw
+            if reconcile:
+                db.flush()  # the new/updated skill row must be visible to the resolve
+                reconcile_skill_dependencies(db, org_id=org_id, name=item_name)
+            db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
         return {"name": item_name, "org": org, "config": raw}
@@ -361,7 +340,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 )
             if name in ("skills", "knowledge_bases"):
                 kind = "skill" if name == "skills" else "knowledge_base"
-                used_by = _deployed_workflows_referencing(db, org_id, kind, item_name)
+                used_by = workflows_referencing(db, kind=kind, resource_id=item.id)
                 if used_by:
                     raise HTTPException(
                         status_code=409,
@@ -665,6 +644,13 @@ def delete_workflow_config(
         db.query(BuilderSession).filter_by(workflow_id=item.id).update(
             {BuilderSession.workflow_id: None}
         )
+        version_ids = [
+            v for (v,) in db.query(WorkflowVersion.id).filter_by(workflow_id=item.id)
+        ]
+        if version_ids:
+            db.query(WorkflowDependency).filter(
+                WorkflowDependency.workflow_version_id.in_(version_ids)
+            ).delete(synchronize_session=False)
         db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
         db.delete(item)
         db.commit()

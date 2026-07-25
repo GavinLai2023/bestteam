@@ -1319,7 +1319,11 @@ def test_workflow_put_rejects_kb_named_after_builtin(client):
 
 
 def _deployed_wf(config_agents):
-    return {"agents": config_agents, "teams": [], "workflow": {"steps": []}}
+    return {
+        "agents": config_agents,
+        "teams": [{"name": "team", "agents": [a["name"] for a in config_agents], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
 
 
 def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
@@ -1327,25 +1331,39 @@ def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
         org_id = get_org_id("default")
         db.add(SkillRecord(name="greeting", org_id=org_id,
                            config={"name": "greeting", "instructions": "hi", "tools": []}))
-        db.add(WorkflowRecord(name="greeter_team", org_id=org_id, status="deployed",
-                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
-                                                    "model": "fake:hi", "skills": ["greeting"]}])))
         db.commit()
+    # The typed-row guard only sees dependencies recorded at deploy time
+    # (record_version_dependencies), so deploy for real via PUT rather than
+    # inserting the WorkflowRecord directly.
+    deploy = client.put(
+        "/api/config/workflows/greeter_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["greeting"]}]),
+    )
+    assert deploy.status_code == 200
     resp = client.delete("/api/config/skills/greeting?org=default")
     assert resp.status_code == 409
     assert "greeter_team" in resp.json()["detail"]
     assert client.get("/api/config/skills/greeting?org=default").status_code == 200  # not deleted
 
 
-def test_delete_kb_referenced_by_deployed_workflow_is_409(client):
-    with open_test_db() as db:
-        org_id = get_org_id("default")
-        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id,
-                                   config={"name": "mykb", "path": "docs"}))
-        db.add(WorkflowRecord(name="kb_team", org_id=org_id, status="deployed",
-                              config=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
-                                                    "model": "fake:hi", "tools": ["mykb"]}])))
-        db.commit()
+def test_delete_kb_referenced_by_deployed_workflow_is_409(client, tmp_path):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
+    assert client.put(
+        "/api/config/knowledge_bases/mykb?org=default",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    ).status_code == 200
+    # The typed-row guard only sees dependencies recorded at deploy time
+    # (record_version_dependencies), so deploy for real via PUT rather than
+    # inserting the WorkflowRecord directly.
+    deploy = client.put(
+        "/api/config/workflows/kb_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "tools": ["mykb"]}]),
+    )
+    assert deploy.status_code == 200
     resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
     assert resp.status_code == 409
     assert "kb_team" in resp.json()["detail"]
@@ -1404,19 +1422,160 @@ def test_delete_builtin_platform_skill_is_refused(client):
     assert "built-in" in resp.json()["detail"].lower()
 
 
-# --- Third-round review fixes (dict-shaped refs, legacy-collision fail-closed) ---
+# --- Typed dependency records (P1-04): cross-org matching, current-config
+# semantics, and head-delete cascade ---
 
-def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client):
-    # F2: the loader honors a dict-shaped `tools` ({"mykb": true} -> ["mykb"]), so
-    # the delete reference-scan must too, else the reference is missed (bypass).
+def test_delete_platform_builtin_skill_referenced_by_org_workflow_is_409(client):
+    # A platform built-in skill (org omitted at creation -> org_id NULL) is
+    # referenced by an org's deployed workflow; deleting it platform-wide (no
+    # ?org=) must still 409, proving the guard matches by resource_id across
+    # orgs rather than needing an all-orgs name scan.
+    assert client.put(
+        "/api/config/skills/greeting",
+        json={"instructions": "hi", "tools": []},
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/org_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["greeting"]}]),
+    ).status_code == 200
+    resp = client.delete("/api/config/skills/greeting")  # platform tier, no ?org=
+    assert resp.status_code == 409
+    assert "org_team" in resp.json()["detail"]
+
+
+def test_skill_dropped_from_current_version_becomes_deletable(client):
+    # Deploy a workflow referencing skill 's', then redeploy the same workflow
+    # name with an agent config that no longer references 's'. The superseded
+    # version still has a dep row, but the guard only reads the current
+    # version, so 's' must become deletable.
     with open_test_db() as db:
         org_id = get_org_id("default")
-        db.add(KnowledgeBaseRecord(name="mykb", org_id=org_id, config={"name": "mykb", "path": "docs"}))
-        db.add(WorkflowRecord(name="dict_team", org_id=org_id, status="deployed",
-                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
-                                                  "model": "fake:hi", "tools": {"mykb": True}}],
-                                      "teams": [], "workflow": {"steps": []}}))
+        db.add(SkillRecord(name="s", org_id=org_id,
+                           config={"name": "s", "instructions": "hi", "tools": []}))
         db.commit()
+    assert client.put(
+        "/api/config/workflows/redeploy_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:v1", "skills": ["s"]}]),
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/redeploy_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g", "model": "fake:v2"}]),
+    ).status_code == 200
+    assert client.delete("/api/config/skills/s?org=default").status_code == 204
+
+
+def test_org_skill_created_after_deploy_reconciles_delete_guard(client):
+    # Deploy an org workflow against a platform skill "helper", then create an
+    # org-local "helper". At runtime the org skill shadows the built-in, so the
+    # guard must follow: deleting the in-use org skill 409s (its id is now
+    # recorded), while the shadowed, no-longer-used platform skill becomes
+    # deletable. Without reconciliation the guard would track the stale built-in
+    # id and allow deleting the in-use org skill -- a regression of the guard's
+    # core property.
+    assert client.put(
+        "/api/config/skills/helper",  # platform tier (org omitted -> org_id NULL)
+        json={"instructions": "hi", "tools": []},
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/helper_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["helper"]}]),
+    ).status_code == 200
+    # Org creates its own "helper" after the deploy.
+    assert client.put(
+        "/api/config/skills/helper?org=default",
+        json={"instructions": "hey", "tools": []},
+    ).status_code == 200
+    # In-use org skill: blocked, naming the team.
+    resp = client.delete("/api/config/skills/helper?org=default")
+    assert resp.status_code == 409
+    assert "helper_team" in resp.json()["detail"]
+    # Shadowed platform skill: no longer referenced by any current version -> deletable.
+    assert client.delete("/api/config/skills/helper").status_code == 204
+
+
+def test_inline_kb_shadowing_standalone_leaves_standalone_deletable(client, tmp_path):
+    # A standalone KB "faq" and a workflow that defines an inline KB also named
+    # "faq". The inline KB shadows the standalone at runtime, so the workflow
+    # does not depend on the standalone -- deleting the standalone must 204, not
+    # 409 (the inline KB has no standalone row to protect).
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
+    assert client.put(
+        "/api/config/knowledge_bases/faq?org=default",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/inline_team?org=default",
+        json={"knowledge_bases": [{"name": "faq", "path": str(docs_dir), "type": "local_folder"}],
+              "agents": [{"name": "a", "role": "r", "goal": "g",
+                          "model": "fake:hi", "tools": ["faq"]}],
+              "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+              "workflow": {"steps": ["team"]}},
+    ).status_code == 200
+    assert client.delete("/api/config/knowledge_bases/faq?org=default").status_code == 204
+
+
+def test_delete_workflow_head_removes_dependency_rows(client):
+    # Deploy a never-run workflow referencing a skill, then hard-delete the
+    # head. FK enforcement is off, so no DB cascade removes WorkflowDependency
+    # rows -- delete_workflow_config must clean them up itself.
+    from ui.backend.db.models import WorkflowDependency, WorkflowVersion
+
+    with open_test_db() as db:
+        org_id = get_org_id("default")
+        db.add(SkillRecord(name="cascade_skill", org_id=org_id,
+                           config={"name": "cascade_skill", "instructions": "hi", "tools": []}))
+        db.commit()
+    assert client.put(
+        "/api/config/workflows/cascade_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["cascade_skill"]}]),
+    ).status_code == 200
+
+    with open_test_db() as db:
+        workflow_id = db.query(WorkflowRecord).filter_by(name="cascade_team", org_id=org_id).one().id
+        version_ids = [v for (v,) in db.query(WorkflowVersion.id).filter_by(workflow_id=workflow_id)]
+        assert version_ids  # sanity: a version was published
+        dep_count_before = db.query(WorkflowDependency).filter(
+            WorkflowDependency.workflow_version_id.in_(version_ids)
+        ).count()
+        assert dep_count_before > 0  # sanity: a dep row was recorded
+
+    assert client.delete("/api/config/workflows/cascade_team?org=default").status_code == 204
+
+    with open_test_db() as db:
+        remaining = db.query(WorkflowDependency).filter(
+            WorkflowDependency.workflow_version_id.in_(version_ids)
+        ).count()
+        assert remaining == 0
+
+
+# --- Third-round review fixes (dict-shaped refs, legacy-collision fail-closed) ---
+
+def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client, tmp_path):
+    # F2: the loader honors a dict-shaped `tools` ({"mykb": true} -> ["mykb"]), so
+    # record_version_dependencies (which the delete guard now reads) must too, else
+    # the reference is missed (bypass). The workflow PUT body is un-validated raw
+    # JSON (no Specification pydantic model), so this shape reaches deploy for real.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
+    assert client.put(
+        "/api/config/knowledge_bases/mykb?org=default",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    ).status_code == 200
+    deploy = client.put(
+        "/api/config/workflows/dict_team?org=default",
+        json={"agents": [{"name": "a", "role": "r", "goal": "g",
+                          "model": "fake:hi", "tools": {"mykb": True}}],
+              "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+              "workflow": {"steps": ["team"]}},
+    )
+    assert deploy.status_code == 200
     resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
     assert resp.status_code == 409
     assert "dict_team" in resp.json()["detail"]
@@ -1443,17 +1602,27 @@ def test_run_fails_closed_on_legacy_kb_shadowing_builtin(client):
 
 # --- Fourth-round review fixes (string refs, inline-KB shadow) ---
 
-def test_delete_kb_referenced_via_string_shaped_tools_is_409(client):
+def test_delete_kb_referenced_via_string_shaped_tools_is_409(client, tmp_path):
     # F2: the loader does list(tools), so a string "x" resolves to ["x"] and runs;
-    # the delete scan must use the same normalization or it misses the reference.
-    with open_test_db() as db:
-        org_id = get_org_id("default")
-        db.add(KnowledgeBaseRecord(name="x", org_id=org_id, config={"name": "x", "path": "docs"}))
-        db.add(WorkflowRecord(name="str_team", org_id=org_id, status="deployed",
-                              config={"agents": [{"name": "a", "role": "r", "goal": "g",
-                                                  "model": "fake:hi", "tools": "x"}],
-                                      "teams": [], "workflow": {"steps": []}}))
-        db.commit()
+    # record_version_dependencies (which the delete guard now reads) must use the
+    # same normalization or it misses the reference. The workflow PUT body is
+    # un-validated raw JSON (no Specification pydantic model), so this shape
+    # reaches deploy for real.
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
+    assert client.put(
+        "/api/config/knowledge_bases/x?org=default",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    ).status_code == 200
+    deploy = client.put(
+        "/api/config/workflows/str_team?org=default",
+        json={"agents": [{"name": "a", "role": "r", "goal": "g",
+                          "model": "fake:hi", "tools": "x"}],
+              "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+              "workflow": {"steps": ["team"]}},
+    )
+    assert deploy.status_code == 200
     resp = client.delete("/api/config/knowledge_bases/x?org=default")
     assert resp.status_code == 409
     assert "str_team" in resp.json()["detail"]
