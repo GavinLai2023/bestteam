@@ -26,6 +26,7 @@ import os
 import shutil
 import threading
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
@@ -53,7 +54,7 @@ from .db.models import (
     WorkflowRecord,
     WorkflowVersion,
 )
-from .db.dependencies import workflows_referencing
+from .db.dependencies import reconcile_skill_dependencies, workflows_referencing
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
@@ -297,13 +298,24 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
-        if item is None:
-            item = record_cls(name=item_name, config=raw, org_id=org_id)
-            db.add(item)
-        else:
-            item.config = raw
-        db.commit()
+        # Creating an org skill can shadow a same-named platform built-in that a
+        # workflow already deployed against, so serialize the write + dependency
+        # reconciliation against concurrent deploys/deletes under the same lock
+        # they take, and re-point stale current-version skill dep rows to the now
+        # -resolved id. Other component kinds have no such shadowing (KBs are
+        # org-scoped) and keep the plain write.
+        reconcile = name == "skills" and org_id is not None
+        with (component_mutation_lock if reconcile else nullcontext()):
+            item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
+            if item is None:
+                item = record_cls(name=item_name, config=raw, org_id=org_id)
+                db.add(item)
+            else:
+                item.config = raw
+            if reconcile:
+                db.flush()  # the new/updated skill row must be visible to the resolve
+                reconcile_skill_dependencies(db, org_id=org_id, name=item_name)
+            db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
         return {"name": item_name, "org": org, "config": raw}

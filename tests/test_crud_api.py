@@ -1466,6 +1466,59 @@ def test_skill_dropped_from_current_version_becomes_deletable(client):
     assert client.delete("/api/config/skills/s?org=default").status_code == 204
 
 
+def test_org_skill_created_after_deploy_reconciles_delete_guard(client):
+    # Deploy an org workflow against a platform skill "helper", then create an
+    # org-local "helper". At runtime the org skill shadows the built-in, so the
+    # guard must follow: deleting the in-use org skill 409s (its id is now
+    # recorded), while the shadowed, no-longer-used platform skill becomes
+    # deletable. Without reconciliation the guard would track the stale built-in
+    # id and allow deleting the in-use org skill -- a regression of the guard's
+    # core property.
+    assert client.put(
+        "/api/config/skills/helper",  # platform tier (org omitted -> org_id NULL)
+        json={"instructions": "hi", "tools": []},
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/helper_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["helper"]}]),
+    ).status_code == 200
+    # Org creates its own "helper" after the deploy.
+    assert client.put(
+        "/api/config/skills/helper?org=default",
+        json={"instructions": "hey", "tools": []},
+    ).status_code == 200
+    # In-use org skill: blocked, naming the team.
+    resp = client.delete("/api/config/skills/helper?org=default")
+    assert resp.status_code == 409
+    assert "helper_team" in resp.json()["detail"]
+    # Shadowed platform skill: no longer referenced by any current version -> deletable.
+    assert client.delete("/api/config/skills/helper").status_code == 204
+
+
+def test_inline_kb_shadowing_standalone_leaves_standalone_deletable(client, tmp_path):
+    # A standalone KB "faq" and a workflow that defines an inline KB also named
+    # "faq". The inline KB shadows the standalone at runtime, so the workflow
+    # does not depend on the standalone -- deleting the standalone must 204, not
+    # 409 (the inline KB has no standalone row to protect).
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
+    assert client.put(
+        "/api/config/knowledge_bases/faq?org=default",
+        json={"path": str(docs_dir), "type": "local_folder"},
+    ).status_code == 200
+    assert client.put(
+        "/api/config/workflows/inline_team?org=default",
+        json={"knowledge_bases": [{"name": "faq", "path": str(docs_dir), "type": "local_folder"}],
+              "agents": [{"name": "a", "role": "r", "goal": "g",
+                          "model": "fake:hi", "tools": ["faq"]}],
+              "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+              "workflow": {"steps": ["team"]}},
+    ).status_code == 200
+    assert client.delete("/api/config/knowledge_bases/faq?org=default").status_code == 204
+
+
 def test_delete_workflow_head_removes_dependency_rows(client):
     # Deploy a never-run workflow referencing a skill, then hard-delete the
     # head. FK enforcement is off, so no DB cascade removes WorkflowDependency

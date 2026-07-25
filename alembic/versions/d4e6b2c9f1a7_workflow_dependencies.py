@@ -56,7 +56,10 @@ def _resolve_kb_id(bind, name, org_id):
 
 
 def _names(config):
-    """(skill names, tool names) from a config dict, defensively."""
+    """(skill names, tool names) from a config dict, defensively. Only string
+    references are kept -- a legacy config with a non-string entry (e.g.
+    ``skills: ["ok", 1]``) must not poison the set and abort the whole upgrade
+    when `sorted()` later compares a str against an int."""
     skills, tools = set(), set()
     if not isinstance(config, dict):
         return skills, tools
@@ -68,10 +71,26 @@ def _names(config):
             continue
         for field, sink in (("skills", skills), ("tools", tools)):
             try:
-                sink.update(agent.get(field) or [])
+                sink.update(x for x in (agent.get(field) or []) if isinstance(x, str))
             except TypeError:
                 continue
     return skills, tools
+
+
+def _inline_kb_names(config):
+    """Names of knowledge bases defined inline in the config. An inline KB
+    shadows a same-named standalone KB at runtime, so a tool name satisfied by
+    an inline KB is not a standalone-KB dependency."""
+    if not isinstance(config, dict):
+        return set()
+    kbs = config.get("knowledge_bases")
+    if not isinstance(kbs, list):
+        return set()
+    return {
+        kb["name"]
+        for kb in kbs
+        if isinstance(kb, dict) and isinstance(kb.get("name"), str)
+    }
 
 
 def upgrade() -> None:
@@ -118,10 +137,11 @@ def upgrade() -> None:
             except ValueError:
                 continue
         skills, tools = _names(config)
+        kb_tools = tools - _inline_kb_names(config)
         for name in sorted(skills):
             bind.execute(insert, {"v": ver_id, "k": "skill", "n": name,
                                   "rid": _resolve_skill_id(bind, name, org_id)})
-        for name in sorted(tools):
+        for name in sorted(kb_tools):
             kid = _resolve_kb_id(bind, name, org_id)
             if kid is not None:
                 bind.execute(insert, {"v": ver_id, "k": "knowledge_base", "n": name,

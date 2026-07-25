@@ -69,10 +69,16 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   once at deploy in `db/workflows.py::publish_workflow_version` via
   `db/dependencies.py::record_version_dependencies` (resolves names exactly as the
   loader: org skill shadows platform built-in; KBs org-scoped; a built-in tool /
-  email tool / inline KB is not a KB dep). The skill/KB `DELETE` guard now queries
-  these rows by `resource_id` for the **current** version (`workflows_referencing`)
-  instead of scanning JSON — non-regressing, and the stable id makes the
-  platform-built-in-skill cross-org case fall out without an all-orgs scan.
+  email tool / inline KB is not a KB dep — an inline KB shadows a *same-named*
+  standalone KB too, so the standalone isn't recorded when the workflow defines
+  its own). The skill/KB `DELETE` guard now queries these rows by `resource_id`
+  for the **current** version (`workflows_referencing`) instead of scanning JSON —
+  non-regressing, and the stable id makes the platform-built-in-skill cross-org
+  case fall out without an all-orgs scan. Because the recorded id is resolved at
+  deploy, creating/updating an org skill re-points that org's current-version
+  skill dep rows for the same name (`reconcile_skill_dependencies`, under
+  `component_mutation_lock`) so a post-deploy override that shadows a platform
+  built-in doesn't leave the guard tracking the stale, shadowed id.
   Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's current
   version. Model/tool deps and content/version pinning are still deferred (P1-04
   recorded only skills+KBs; P1-05 for content pinning).

@@ -229,7 +229,14 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   against typed `workflow_dependencies` rows (populated at deploy by
   `record_version_dependencies`) instead of scanning deployed workflows' JSON;
   the check runs before any deletion/`rmtree`, naming the referencing team(s)
-  in the error.
+  in the error. Because the recorded id is resolved at deploy, an org skill
+  *created after* a workflow deployed against a same-named platform built-in
+  re-points that org's current-version skill dep rows to the (now shadowing)
+  org skill — `dependencies.reconcile_skill_dependencies`, run from the skills
+  `PUT` under `component_mutation_lock` — so the guard tracks the id the runtime
+  actually loads, not the shadowed built-in. A workflow's inline KB likewise
+  shadows a same-named standalone KB, so the standalone isn't recorded as a
+  dependency of that workflow.
   Both deploy points also reject (`400`) a workflow whose KB name — inline or
   a referenced standalone KB — shadows a built-in tool:
   `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)` resolves the
