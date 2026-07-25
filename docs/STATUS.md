@@ -306,10 +306,13 @@
   integrity (P1-07 + P1-08): P1-07, deleting a skill/KB via
   `/api/config/{skills,knowledge_bases}` orphaned any deployed workflow still
   referencing it — `crud._deployed_workflows_referencing(db, org_id, kind,
-  name)` now scans `status="deployed"` `WorkflowRecord`s' `agents[*].skills`
+  name)` scanned `status="deployed"` `WorkflowRecord`s' `agents[*].skills`
   (skill) / `agents[*].tools` (standalone KB) and `delete_item` 409s naming
   the referencing team(s), checked before any deletion or KB `rmtree`
   (platform skills, `org_id is None`, are checked across all orgs).
+  **Superseded by P1-04** (see the P1-04 entry below): `_deployed_workflows_referencing`
+  was removed; the guard now queries typed `workflow_dependencies` rows via
+  `db/dependencies.py::workflows_referencing(db, kind=, resource_id=)`.
   P1-08, every tool resolved through one flat name lookup so a KB could
   silently shadow a built-in tool — `deploy_validation.find_kb_tool_collisions`
   (pure) plus `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)`
