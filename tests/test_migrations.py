@@ -43,6 +43,7 @@ _EXPECTED_HEAD_TABLES = {
     "knowledge_bases",
     "skills",
     "workflows",
+    "workflow_dependencies",
     "builder_sessions",
     "email_triggers",
     "model_catalog",
@@ -242,3 +243,58 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
             assert count == 1
     finally:
         engine.dispose()
+
+
+_PRE_DEPS = "c3f5a1b8e2d4"  # revision before workflow_dependencies
+
+
+def test_workflow_dependencies_backfill_resolves_current_version(tmp_path, monkeypatch):
+    db_path = tmp_path / "wf_deps.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_DEPS)  # workflows + workflow_versions exist; no deps table
+
+    engine = make_engine(db_path)
+    config_json = (
+        '{"name": "wf", "agents": [{"name": "a", '
+        '"skills": ["greet"], "tools": ["kb1", "http_get"]}]}'
+    )
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO skills (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (3, 'greet', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO knowledge_bases (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (4, 'kb1', 5, '{}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at, current_version_id) "
+            "VALUES (7, 'wf', 5, :cfg, 'deployed', '2026-01-01', '2026-01-01', 11)"
+        ), {"cfg": config_json})
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions (id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (11, 7, 1, :cfg, NULL, '2026-01-01')"
+        ), {"cfg": config_json})
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        deps = set(conn.execute(sa.text(
+            "SELECT workflow_version_id, resource_kind, resource_name, resource_id "
+            "FROM workflow_dependencies"
+        )).fetchall())
+    engine.dispose()
+    assert deps == {
+        (11, "skill", "greet", 3),
+        (11, "knowledge_base", "kb1", 4),
+    }  # http_get is a built-in tool, not a standalone KB -> no row
+
+    # Idempotent: re-running upgrade head adds nothing.
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_dependencies")).scalar()
+    engine.dispose()
+    assert count == 2
