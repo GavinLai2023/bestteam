@@ -224,12 +224,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   records (`_build_workflow` takes only `extra_tools`/`extra_skills`), and both
   tables were empty everywhere. The models remain in `db/models.py`.
   `DELETE /skills/{name}` and `/knowledge_bases/{name}` refuse with `409` if a
-  `status="deployed"` `WorkflowRecord` still references the item —
-  `crud._deployed_workflows_referencing(db, org_id, kind, name)` scans deployed
-  workflows' `agents[*].skills` (`kind="skill"`) or `agents[*].tools`
-  (`kind="knowledge_base"`, a standalone KB's reference point) and, for
-  platform skills (`org_id is None`), scans across all orgs; the check runs
-  before any deletion/`rmtree`, naming the referencing team(s) in the error.
+  workflow's **current version** still depends on the item — the guard now
+  queries `db/dependencies.py::workflows_referencing(db, kind=, resource_id=item.id)`
+  against typed `workflow_dependencies` rows (populated at deploy by
+  `record_version_dependencies`) instead of scanning deployed workflows' JSON;
+  the check runs before any deletion/`rmtree`, naming the referencing team(s)
+  in the error.
   Both deploy points also reject (`400`) a workflow whose KB name — inline or
   a referenced standalone KB — shadows a built-in tool:
   `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)` resolves the
@@ -244,9 +244,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   load; a seeded platform built-in skill (`_BUILTIN_SKILL_NAMES`, e.g.
   `email_triage_reply`) is undeletable; and the KB delete commits the row before
   `rmtree` (logging rmtree failures) so a commit failure can't destroy files
-  under a rolled-back record. Known limitations deferred to P1-04 (typed
-  dependency records): a delete/deploy TOCTOU window, and raw-name matching that
-  can over-block (fail-closed). P1-07/P1-08, data-architecture review; see
+  under a rolled-back record. Raw-name matching is now resolved (P1-04: the
+  guard uses typed rows keyed by stable `resource_id`); still deferred: the
+  delete/deploy TOCTOU window (serialized via `component_mutation_lock`, not
+  DB-enforced), model/built-in-tool dependency rows aren't recorded (no
+  consumer yet), and skill/KB **content** pinning to freeze behavior (P1-05).
+  P1-07/P1-08, data-architecture review; see
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
   first, within the caller's org and filtered to `status == "deployed"`

@@ -390,6 +390,23 @@
   archive, deferred to a deletion-lifecycle sub-project; rename-onto-existing-name
   is a 500; and FK constraints on the new columns follow the project's bare-column
   precedent (SQLite FK enforcement off, P1-13).
+- Data architecture review triage, fifth pass — typed dependency records
+  (P1-04: skills + KBs): a new `workflow_dependencies` table (`WorkflowDependency`)
+  records one typed row per (published workflow version, skill|standalone-KB)
+  it depends on (`resource_kind`, `resource_name`, resolved `resource_id`),
+  populated once at deploy in `db/workflows.py::publish_workflow_version` via
+  `db/dependencies.py::record_version_dependencies` (resolves names exactly as
+  the loader: org skill shadows platform built-in; KBs org-scoped; built-in
+  tool / email tool / inline KB is not a KB dep). The skill/KB `DELETE` guard
+  is rewired to `workflows_referencing(db, kind=, resource_id=item.id)`,
+  querying these rows for each workflow's current version instead of scanning
+  deployed workflows' JSON — non-regressing, and the stable id makes the
+  platform-built-in-skill cross-org case fall out with no all-orgs scan.
+  Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's
+  current version. **Scope:** skills and standalone KBs only; model/tool
+  dependency rows and skill/KB content pinning to freeze behavior (P1-05) stay
+  deferred. See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this
+  pass").
 
 ## In Progress
 

@@ -106,10 +106,35 @@ with P1-04 (typed dependency records); version-history/rollback UI and rollback
 execution are also deferred. Design:
 `docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`.
 
+Data architecture review triage, fifth pass — typed dependency records
+(P1-04): the versioning keystone froze the inline config blob, but standalone
+Skill/KB references inside it were still resolved by name at load, and the
+skill/KB delete guard (P1-07) worked by scanning deployed workflows' JSON for
+those names rather than a stable identity. A new `workflow_dependencies`
+table (`WorkflowDependency`) now records one typed row per (published
+workflow version, skill|standalone-KB) it depends on — `resource_kind`,
+`resource_name`, and a resolved `resource_id` pointing at the actual
+`skills`/`knowledge_bases` row, unique per `(workflow_version_id,
+resource_kind, resource_name)`. Rows are populated once at deploy in
+`db/workflows.py::publish_workflow_version` via
+`db/dependencies.py::record_version_dependencies`, resolving names exactly as
+the loader does (org skill shadows a same-named platform built-in; KBs are
+org-scoped; a built-in tool / email tool / inline KB is not a KB dependency,
+so no row is written for it). The skill/KB `DELETE` guard is rewired to
+`workflows_referencing(db, kind=, resource_id=item.id)`, querying these typed
+rows for each workflow's **current** version instead of scanning JSON —
+behaviorally non-regressing, and the stable id makes the
+platform-built-in-skill cross-org case fall out with no all-orgs scan.
+Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's
+current version. Scope is skills and standalone KBs only; deferred: model and
+built-in-tool dependency rows (schema's `resource_kind` supports them, no
+consumer yet) and skill/KB **content** pinning to freeze behavior, which
+stays with P1-05.
+
 ## Everything else: validated-accurate, out of scope for this pass
 
-The remaining 21 findings (all of Phase 2 except P2-01/P2-02 above, and the
-rest of Phase 1: P1-04, P1-05, P1-10, P1-12, P1-15,
+The remaining 20 findings (all of Phase 2 except P2-01/P2-02 above, and the
+rest of Phase 1: P1-05, P1-10, P1-12, P1-15,
 P1-18) were spot-checked where practical and found to be accurate
 descriptions of the current, intentionally-scoped MVP data model — not
 implemented here, since each requires new schema/entities and cross-cutting
