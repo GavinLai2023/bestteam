@@ -221,10 +221,10 @@ class _SubmitRecorder:
         self.calls.append((fn, args, kwargs))
 
 
-def _fake_workflow_getter(calls):
+def _fake_workflow_getter(calls, version_id=None):
     def build(name, db, org_id, allowed_uids, backend):
         calls.append((name, org_id, set(allowed_uids)))
-        return object()
+        return object(), version_id
     return build
 
 
@@ -239,7 +239,7 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls))
+    poll_org(db, trigger, _fake_workflow_getter(calls, version_id=version.id))
 
     assert calls == [("triage", org.id, {42, 43, 45})]  # scoped to the batch
     assert len(recorder.calls) == 1
@@ -253,6 +253,31 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     assert run_row is not None
     assert run_row.workflow_version_id == version.id == current_version_id(db, org.id, "triage")
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
+
+
+def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeypatch):
+    """_start_triggered_run records the version the builder returned (bound to the
+    config it built), NOT a fresh current_version_id re-query -- so a redeploy
+    committing between build and stamp can't mislabel the run's version."""
+    from ui.backend.db.workflows import current_version_id, publish_workflow_version
+    from ui.backend.db.models import Run
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    _, version = publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    db.commit()
+    assert current_version_id(db, org.id, "triage") == version.id
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    # The builder reports a DIFFERENT version than the current pointer -- as if a
+    # redeploy landed after the build read. The run must record the built one.
+    stale = version.id + 999
+    poll_org(db, trigger, _fake_workflow_getter([], version_id=stale))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert run_row.workflow_version_id == stale  # builder's value, not the re-query
 
 
 def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch):
@@ -307,7 +332,7 @@ def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
             other = db2.query(EmailTrigger).filter_by(org_id=org_id).one()
             other.enabled = False
             db2.commit()
-        return object()
+        return object(), None
 
     poll_org(db, trigger, build)
 
@@ -375,7 +400,7 @@ def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
 
     def build(name, db_, org_id, allowed_uids, backend):
         seen_workflow_backends.append(backend)
-        return object()
+        return object(), None
 
     poll_org(db, trigger, build)
 

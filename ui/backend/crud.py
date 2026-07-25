@@ -46,6 +46,7 @@ from .deploy_validation import validate_agent_models
 from .db.models import (
     KnowledgeBaseRecord,
     Organization,
+    Run,
     SkillRecord,
     WorkflowRecord,
     WorkflowVersion,
@@ -635,9 +636,27 @@ def delete_workflow_config(
         item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
-        # Delete the head's immutable version history with it: SQLite FK
-        # enforcement is off, so nothing cascades at the DB layer and orphaned
-        # workflow_versions rows would otherwise survive a deleted head.
+        # Preserve run provenance: refuse to delete while any Run references one
+        # of this head's versions, since deletion removes the version history
+        # (FK enforcement is off -> no DB cascade) and would leave those runs
+        # pointing at rows that no longer exist. A never-run workflow deletes
+        # cleanly, taking its (unreferenced) version history with it so no
+        # orphaned workflow_versions rows survive the deleted head.
+        run_refs = (
+            db.query(Run)
+            .filter(Run.workflow_version_id.in_(
+                db.query(WorkflowVersion.id).filter_by(workflow_id=item.id)
+            ))
+            .count()
+        )
+        if run_refs:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': {run_refs} run(s) recorded a version "
+                    "of it. Deleting would orphan their provenance."
+                ),
+            )
         db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
         db.delete(item)
         db.commit()

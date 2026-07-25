@@ -822,6 +822,29 @@ def test_delete_workflow_also_deletes_its_version_history(client):
         assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 0
 
 
+def test_delete_workflow_refused_when_a_run_references_its_version(client):
+    """A workflow whose version a run recorded can't be hard-deleted (409) --
+    deleting would orphan that run's provenance. History is preserved."""
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion, Run
+
+    assert client.put("/api/config/workflows/run_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="run_wf").one()
+        db.add(Run(id="run-ref-1", workflow="run_wf", input="hi",
+                   org_id=get_org_id("default"), workflow_version_id=head.current_version_id))
+        db.commit()
+
+    resp = client.delete("/api/config/workflows/run_wf?org=default")
+    assert resp.status_code == 409
+    assert "run" in resp.json()["detail"].lower()
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="run_wf").one_or_none()
+        assert head is not None  # head preserved
+        assert db.query(WorkflowVersion).filter_by(workflow_id=head.id).count() == 1  # history intact
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord

@@ -223,19 +223,27 @@ new table/columns — every step must be inspect-guarded):
   the rest).
 - Retro-linking historical runs / sessions (forward-populated only).
 
+## Run provenance (both paths)
+
+Both run paths record the version from the SAME record read that builds the
+config, so a run always records exactly the version it executes even if a
+redeploy commits concurrently: the manual path via
+`main._resolve_workflow_and_version`, and the autonomous poller via
+`email_trigger.build_trigger_workflow`, which returns `(workflow, version_id)`
+that `_start_triggered_run` stamps on the durable run row (rather than a separate
+`current_version_id` re-query).
+
+## Workflow deletion preserves provenance
+
+`DELETE /api/config/workflows/{name}` refuses (409) while any `Run` records one
+of the head's versions — deleting would remove the version history those runs
+reference (SQLite FK enforcement is off, so there is no DB cascade). A never-run
+workflow deletes cleanly, taking its unreferenced version history with it (no
+orphaned `workflow_versions` rows), under `component_mutation_lock`. Soft-delete/
+archive of a run-referenced head is deferred (P1-07-class lifecycle work).
+
 ## Known limitation
 
-- **Autonomous-trigger run version stamp has a one-statement race.** The manual
-  run path (`create_run`) resolves the workflow and its version from a single
-  record read (`_resolve_workflow_and_version`), so a run always records the
-  version whose config it executed. The autonomous poller
-  (`email_trigger.poll_org`) still resolves the version with a separate
-  `current_version_id` read adjacent to the build; a redeploy committing in the
-  microsecond window between those two statements would mislabel that one
-  autonomous run's version (never wrong execution, never data loss). Left as-is
-  because closing it means changing the injected workflow-getter contract across
-  the poller's test doubles for the narrowest, single-process instance of the
-  race; revisit if the trigger path is reworked or the store moves to Postgres.
 - **FK constraints for the new columns are not added by the migration.**
   `workflows.current_version_id`, `builder_sessions.workflow_id`, and
   `runs.workflow_version_id` are declared as ORM `ForeignKey`s (so `create_all`

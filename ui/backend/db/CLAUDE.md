@@ -50,10 +50,12 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   standalone Skills/KBs/models are still resolved by name at load, so a
   fully-resolved dependency snapshot is deferred to P1-04. Migration
   `c3f5a1b8e2d4` creates the table and backfills one v1 per existing workflow.
-  Deleting a workflow head (`DELETE /api/config/workflows/{name}`) also deletes
-  its `workflow_versions` rows, under `component_mutation_lock` (so it can't
-  interleave with a concurrent publish) -- SQLite FK enforcement is off, so the
-  application cascades rather than leaving orphaned version rows.
+  Deleting a workflow head (`DELETE /api/config/workflows/{name}`) refuses
+  (`409`) while any `Run` records one of its versions -- deletion removes the
+  version history those runs reference (FK enforcement is off, no DB cascade), so
+  provenance is preserved. A never-run head deletes cleanly, cascading its
+  (unreferenced) `workflow_versions` under `component_mutation_lock` so no
+  orphaned version rows survive.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

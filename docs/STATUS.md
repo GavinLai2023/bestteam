@@ -375,15 +375,18 @@
   are also deferred. Spec:
   `docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`. See
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
-  Hardened via external review: the manual run path resolves the workflow and
-  its stamped version from one record read (`_resolve_workflow_and_version`), so
-  a run can't record a version it didn't execute under a concurrent redeploy;
-  deleting a workflow head cascades its `workflow_versions` under the mutation
-  lock (no orphaned history); and the migration creates `created_at` NOT NULL to
-  match the ORM. Remaining known limitations (design spec): the autonomous-
-  trigger version stamp keeps a one-statement race (single-process, audit-only),
-  rename-onto-existing-name is a 500, and FK constraints on the new columns
-  follow the project's bare-column precedent (SQLite FK enforcement off, P1-13).
+  Hardened via two external-review rounds: BOTH run paths record the version
+  from the same record read that builds the config — the manual path
+  (`_resolve_workflow_and_version`) and the autonomous poller
+  (`build_trigger_workflow` returns `(workflow, version_id)`) — so a run can't
+  record a version it didn't execute under a concurrent redeploy; workflow
+  deletion refuses (409) while any run records one of the head's versions
+  (preserving provenance) and otherwise cascades its version history under the
+  mutation lock (no orphans); and the migration creates `created_at` NOT NULL to
+  match the ORM. Remaining known limitations (design spec): rename-onto-existing-
+  name is a 500, soft-delete/archive of a run-referenced head is deferred, and FK
+  constraints on the new columns follow the project's bare-column precedent
+  (SQLite FK enforcement off, P1-13).
 
 ## In Progress
 
