@@ -375,6 +375,15 @@
   are also deferred. Spec:
   `docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`. See
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
+  Hardened via external review: the manual run path resolves the workflow and
+  its stamped version from one record read (`_resolve_workflow_and_version`), so
+  a run can't record a version it didn't execute under a concurrent redeploy;
+  deleting a workflow head cascades its `workflow_versions` under the mutation
+  lock (no orphaned history); and the migration creates `created_at` NOT NULL to
+  match the ORM. Remaining known limitations (design spec): the autonomous-
+  trigger version stamp keeps a one-statement race (single-process, audit-only),
+  rename-onto-existing-name is a 500, and FK constraints on the new columns
+  follow the project's bare-column precedent (SQLite FK enforcement off, P1-13).
 
 ## In Progress
 
