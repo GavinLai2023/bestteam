@@ -225,6 +225,25 @@ new table/columns — every step must be inspect-guarded):
 
 ## Known limitation
 
+- **Autonomous-trigger run version stamp has a one-statement race.** The manual
+  run path (`create_run`) resolves the workflow and its version from a single
+  record read (`_resolve_workflow_and_version`), so a run always records the
+  version whose config it executed. The autonomous poller
+  (`email_trigger.poll_org`) still resolves the version with a separate
+  `current_version_id` read adjacent to the build; a redeploy committing in the
+  microsecond window between those two statements would mislabel that one
+  autonomous run's version (never wrong execution, never data loss). Left as-is
+  because closing it means changing the injected workflow-getter contract across
+  the poller's test doubles for the narrowest, single-process instance of the
+  race; revisit if the trigger path is reworked or the store moves to Postgres.
+- **FK constraints for the new columns are not added by the migration.**
+  `workflows.current_version_id`, `builder_sessions.workflow_id`, and
+  `runs.workflow_version_id` are declared as ORM `ForeignKey`s (so `create_all`
+  emits them) but the migration adds them as plain integer columns -- matching
+  how every prior FK column (`org_id`, `builder_session_id`, `run_id`,
+  `last_run_id`) was migrated. SQLite FK enforcement is off project-wide (P1-13,
+  deferred), so this divergence is inert; enabling enforcement + backfilling FK
+  parity across all columns is P1-13's job, not this batch's.
 - **Rename onto an existing team name is a hard error, not a friendly one.** If a
   session pinned to head H (name "X") redeploys with its spec renamed to "Y" and
   a *different* deployed team already owns "Y" in the org, the `record.name = "Y"`

@@ -228,6 +228,11 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
     finally:
         engine.dispose()
 
+    # Schema parity with the ORM: created_at is NOT NULL on the migrated table
+    # (matching Mapped[datetime]), not the nullable column the first draft added.
+    cols = {c["name"]: c for c in sa.inspect(make_engine(db_path)).get_columns("workflow_versions")}
+    assert cols["created_at"]["nullable"] is False
+
     # Idempotent: re-running upgrade head does not duplicate the v1 row.
     command.upgrade(cfg, "head")
     engine = make_engine(db_path)

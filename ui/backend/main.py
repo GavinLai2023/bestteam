@@ -52,7 +52,6 @@ from .db.models import (
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
-from .db.workflows import current_version_id
 from .db_session import SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
@@ -334,8 +333,18 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     return (skills_count, skills_max, kb_count, kb_max, email_count, email_max)
 
 
-def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
-    """Load and cache a workflow by name for one org (Workflow already
+def _resolve_workflow_and_version(
+    name: str, db: Optional[Session] = None, org_id: Optional[int] = None
+) -> tuple[Workflow, Optional[int]]:
+    """Load a workflow by name for one org and return it together with the
+    `current_version_id` of the record it was built from (None for a YAML demo
+    or an absent record). Returning the version from the SAME record read that
+    produces the config makes a run's stamped version match the config it
+    executed even if a redeploy commits concurrently -- a separate
+    `current_version_id` re-query could observe a newer version than the one
+    built (pysqlite does not lock on SELECT).
+
+    Load and cache a workflow by name for one org (Workflow already
     memoizes its own compiled graph, so repeat runs of the same workflow
     stay cheap).
 
@@ -369,7 +378,7 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
         cached = _workflow_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
-            return cached[0]
+            return cached[0], record.current_version_id
         # Only load skills and build standalone KB tools (which may re-chunk
         # files and, for type: vector, call a paid embedding model) on a cache
         # miss -- not on every request. Dependencies resolve within the
@@ -403,7 +412,7 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-        return workflow
+        return workflow, record.current_version_id
 
     # Same 404 whether the demos are disabled or the file is absent -- hiding
     # them from the list alone would still leave them runnable by name via
@@ -432,7 +441,7 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
             email_tools = {}
         cached = _workflow_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
-            return cached[0]
+            return cached[0], None
         builtin_skills = load_skills(session, None)
         try:
             workflow = load_workflow(
@@ -446,7 +455,14 @@ def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int]
         if own_session:
             session.close()
     _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-    return workflow
+    return workflow, None
+
+
+def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
+    """Back-compat wrapper: the built workflow only (see
+    `_resolve_workflow_and_version` for the version-aware form used by run
+    creation)."""
+    return _resolve_workflow_and_version(name, db, org_id)[0]
 
 
 @app.get("/api/health")
@@ -486,13 +502,9 @@ async def create_run(
     user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
-    workflow = _get_workflow(req.workflow, db, org.id)
-    # Best-effort audit stamp: a redeploy committing between the _get_workflow
-    # build and this read could stamp a version id that lags the built config by
-    # one deploy. Single-process, narrow, and never data loss (the run still
-    # executes the config _get_workflow returned); it can only mislabel the
-    # recorded version under a concurrent redeploy.
-    version_id = current_version_id(db, org.id, req.workflow)
+    # Resolve the workflow and the version it was built from together, so the
+    # run is stamped with exactly the version whose config it executes.
+    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(

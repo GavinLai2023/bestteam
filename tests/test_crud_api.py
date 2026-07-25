@@ -785,6 +785,43 @@ def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
     assert captured["workflow_version_id"] == expected
 
 
+def test_resolve_workflow_and_version_binds_version_to_the_built_record(client):
+    """_resolve_workflow_and_version returns the current_version_id of the same
+    record it built the workflow from (one read), so a run stamps the version it
+    actually executed rather than a separately-queried, possibly-newer one."""
+    import ui.backend.main as main
+    from helpers import open_test_db, get_org_id
+    from ui.backend.db.models import WorkflowRecord
+
+    assert client.put("/api/config/workflows/rv_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        expected = db.query(WorkflowRecord).filter_by(name="rv_wf").one().current_version_id
+        workflow, version_id = main._resolve_workflow_and_version("rv_wf", db, get_org_id("default"))
+    assert workflow is not None
+    assert version_id == expected
+
+
+def test_delete_workflow_also_deletes_its_version_history(client):
+    """Deleting a workflow head removes its immutable versions too -- no orphaned
+    workflow_versions rows survive a deleted head (FK enforcement is off)."""
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+
+    assert client.put("/api/config/workflows/del_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        head = db.query(WorkflowRecord).filter_by(name="del_wf").one()
+        wf_id = head.id
+        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 1
+
+    assert client.delete("/api/config/workflows/del_wf?org=default").status_code == 204
+
+    with open_test_db() as db:
+        assert db.query(WorkflowRecord).filter_by(name="del_wf").one_or_none() is None
+        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 0
+
+
 def test_only_deployed_workflows_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
     from ui.backend.db.models import WorkflowRecord

@@ -40,7 +40,9 @@ def upgrade() -> None:
             sa.Column("version_number", sa.Integer(), nullable=False),
             sa.Column("config", sa.JSON(), nullable=False),
             sa.Column("created_by", sa.String(), nullable=True),
-            sa.Column("created_at", sa.DateTime(), nullable=True),
+            # NOT NULL to match the ORM (Mapped[datetime], non-optional): the
+            # backfill and every ORM insert always supply created_at.
+            sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.UniqueConstraint(
                 "workflow_id", "version_number",
                 name="uq_workflow_versions_workflow_id_version_number",

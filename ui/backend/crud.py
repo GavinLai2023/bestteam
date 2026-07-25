@@ -48,6 +48,7 @@ from .db.models import (
     Organization,
     SkillRecord,
     WorkflowRecord,
+    WorkflowVersion,
 )
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
@@ -628,11 +629,18 @@ def delete_workflow_config(
     item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
 ) -> Response:
     org_id = _resolve_org_id(db, org, allow_platform=False)
-    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
-    if item is None:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
-    db.delete(item)
-    db.commit()
+    # Serialize with publish (which appends versions + moves the pointer under the
+    # same lock) so a delete can't interleave with a concurrent version publish.
+    with component_mutation_lock:
+        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
+        # Delete the head's immutable version history with it: SQLite FK
+        # enforcement is off, so nothing cascades at the DB layer and orphaned
+        # workflow_versions rows would otherwise survive a deleted head.
+        db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
+        db.delete(item)
+        db.commit()
     return Response(status_code=204)
 
 
