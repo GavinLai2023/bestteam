@@ -371,10 +371,10 @@ def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
     from langchain_core.messages import AIMessage
 
     class _FailProceduralStore(SqliteBM25Memory):
-        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+        def add_if_absent(self, user_id, type, content, metadata=None, *, org_id=None):
             if type == PROCEDURAL:
                 raise RuntimeError("write failed")
-            return super().add(user_id, type, content, metadata, org_id=org_id)
+            return super().add_if_absent(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
         content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
@@ -402,11 +402,11 @@ def test_extraction_continues_after_a_failed_write():
             super().__init__(path)
             self._failed = False
 
-        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+        def add_if_absent(self, user_id, type, content, metadata=None, *, org_id=None):
             if type == SEMANTIC and not self._failed:
                 self._failed = True
                 raise RuntimeError("first fact rejected")
-            return super().add(user_id, type, content, metadata, org_id=org_id)
+            return super().add_if_absent(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
         content='{"facts": ["fact one", "fact two"], "procedural": "a note"}',
@@ -570,6 +570,81 @@ def test_record_run_no_prune_when_cap_unset():
     for i in range(5):
         mgr.record_run("alice", f"q{i}", f"a{i}")
     assert len([r for r in store.all("alice") if r.type == EPISODIC]) == 5
+
+
+def test_prune_user_type_org_none_scopes_to_null_only():
+    # Review r1 #1: org-less prune must touch ONLY NULL-org rows, never other orgs.
+    store = _store()
+    store.add("alice", EPISODIC, "org5", org_id=5)
+    store.add("alice", EPISODIC, "org6", org_id=6)
+    store.add("alice", EPISODIC, "legacy 1")  # NULL
+    store.add("alice", EPISODIC, "legacy 2")  # NULL
+
+    removed = store.prune_user_type("alice", EPISODIC, 1)  # org_id None -> org_id IS NULL
+    assert removed == 1  # one older NULL row pruned
+    assert len(store.all("alice", org_id=5)) == 1  # concrete orgs untouched
+    assert len(store.all("alice", org_id=6)) == 1
+    assert len([r for r in store.all("alice", org_id=None) if r.org_id is None]) == 1
+
+
+def test_org_less_manager_retention_spares_other_orgs():
+    # The manager path: an org-less manager's cap must not wipe org-scoped history.
+    store = _store()
+    store.add("alice", EPISODIC, "org5", org_id=5)
+    store.add("alice", EPISODIC, "org6", org_id=6)
+    MemoryManager(store, max_episodic_per_user=1).record_run("alice", "q", "a")
+    assert len(store.all("alice", org_id=5)) == 1
+    assert len(store.all("alice", org_id=6)) == 1
+
+
+def test_add_if_absent_dedups_across_connections():
+    # Review r1 #2: atomic insert-if-absent — two connections can't both insert.
+    from bestteam import SqliteBM25Memory
+
+    import tempfile, os as _os
+    fd, path = tempfile.mkstemp(suffix=".db")
+    _os.close(fd)
+    try:
+        a = SqliteBM25Memory(path)
+        b = SqliteBM25Memory(path)
+        r1 = a.add_if_absent("alice", SEMANTIC, "same fact")
+        r2 = b.add_if_absent("alice", SEMANTIC, "same fact")  # sees a's committed row
+        assert (r1 is None) != (r2 is None)  # exactly one inserted
+        assert len(a.all("alice")) == 1
+        a.close()
+        b.close()
+    finally:
+        _os.unlink(path)
+
+
+def test_dedup_is_per_type_not_cross_type():
+    # Review r1 #4: an existing procedural must not suppress a same-text semantic.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", PROCEDURAL, "handle refunds carefully")
+    canned = AIMessage(
+        content='{"facts": ["handle refunds carefully"], "procedural": "handle refunds carefully"}'
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q", "a")
+    assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1  # written (per-type)
+    assert len([r for r in store.all("alice") if r.type == PROCEDURAL]) == 1  # deduped vs existing
+
+
+def test_recall_candidate_query_avoids_temp_sort():
+    # Review r1 #3: the recall filter+sort is index-covered (no temp B-tree sort).
+    store = _store()
+    store.add("alice", EPISODIC, "x", org_id=5)
+    plan = store._conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM memories WHERE user_id = ? AND org_id = ? "
+        "ORDER BY created_at DESC LIMIT ?",
+        ("alice", 5, 100),
+    ).fetchall()
+    detail = " ".join(str(row[-1]) for row in plan).upper()
+    assert "USE TEMP B-TREE" not in detail
 
 
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():

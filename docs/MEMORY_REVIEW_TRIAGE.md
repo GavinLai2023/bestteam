@@ -129,10 +129,13 @@ Suggested order under the current "memory is opt-in, default off" posture:
   billing/provenance is unaffected. **Out of scope:** a durable usage outbox/retry
   and a framework-wide agent-call timeout.
 - **SP-4** — Implemented: memory quality & scale. M-09 recall bounded to the
-  most-recent N (`recall_max_candidates`, backend default 1000); M-08 exact
-  semantic/procedural dedup on write; M-07 opt-in episodic per-`(user, org)`
-  retention cap (`prune_user_type`). Always-on changes are non-destructive;
-  retention is opt-in (destructive). Branch `feat/memory-quality-scale`. Design:
+  most-recent N (`recall_max_candidates`, backend default 1000) + composite
+  created_at indexes so the DB filter+sort is index-covered; M-08 atomic per-type
+  exact dedup on write (`add_if_absent`, `INSERT ... WHERE NOT EXISTS` — race-safe,
+  no cross-type collision); M-07 opt-in episodic retention cap (`prune_user_type`,
+  `org_id=None` scoped to `IS NULL`, never all-orgs). Always-on changes are
+  non-destructive; retention is opt-in (destructive). Branch
+  `feat/memory-quality-scale`. Design:
   `docs/superpowers/specs/2026-07-26-memory-quality-scale-design.md`. Deferred
   (documented, disproportionate for a BM25/opt-in store): embedding/LLM near-dup
   + contradiction resolution + consolidation; age-based TTL; per-org quotas;

@@ -215,18 +215,24 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
 ### Known limitations (per-user memory)
 
 - **Quality & scale (SP-4).** Extraction dedups **exact** semantic/procedural
-  content on write (`MemoryManager._existing_extracted_contents`, M-08) — a fact
-  already stored (or repeated within one extraction) isn't re-added; near-dup /
-  contradiction resolution / consolidation (needs embeddings/LLM) is deferred.
-  Recall bounds its scan to the most-recent `recall_max_candidates` records
-  (backend default 1000 via `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09) instead
-  of the whole store. Episodic **retention** is opt-in
-  (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, M-07): when set, `record_run` prunes
-  the oldest episodic rows beyond the per-`(user, org)` cap
-  (`SqliteBM25Memory.prune_user_type`); semantic/procedural are spared, and it's
-  unbounded by default (pruning is destructive). Age-based TTL, per-org quotas,
-  and a background sweep are deferred. All three degrade gracefully for a custom
-  store (the bound/dedup/prune are best-effort concrete-store extensions).
+  content on write via `SqliteBM25Memory.add_if_absent` (M-08) — an atomic,
+  **per-type** `INSERT ... WHERE NOT EXISTS` keyed by `(user_id, type, content,
+  org-scope)`. Per-type means a semantic and a procedural row with the same text
+  don't collide; atomic under SQLite's write serialization means two concurrent
+  connections can't both insert. (Near-dup / contradiction resolution /
+  consolidation — needs embeddings/LLM — is deferred.) Recall bounds its scan to
+  the most-recent `recall_max_candidates` records (backend default 1000 via
+  `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09), and composite `(user_id,
+  created_at)` / `(org_id, user_id, created_at)` indexes make the filter+sort
+  index-covered (no temp-B-tree sort), so the bound bounds DB work too. Episodic
+  **retention** is opt-in (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, M-07): when
+  set, `record_run` prunes the oldest episodic rows beyond the cap
+  (`prune_user_type`), scoped to a **single** org — `org_id=None` means
+  `org_id IS NULL` (an org-less manager's own rows), NEVER all-orgs, so retention
+  can't delete another org's history. Semantic/procedural are spared; unbounded by
+  default (pruning is destructive). Age-based TTL, per-org quotas, and a background
+  sweep are deferred. All three degrade gracefully for a custom store (best-effort
+  concrete-store extensions: dedup falls back to a plain `add`, prune is skipped).
 - Memory is best-effort on **both** sides of a run: `record_run` (write) and
   `recall_preamble` (read, via `Workflow._safe_recall`) are each wrapped so a
   failure degrades (empty preamble / skipped write) rather than failing the run
