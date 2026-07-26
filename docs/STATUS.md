@@ -50,10 +50,12 @@
   (idempotent in-place migration), the run binds its org into `MemoryManager`,
   and org-level compliance erasure (`delete_org_and_legacy`) + account-deletion
   memory purge (`delete-user` fail-closed) + `move-user` legacy reconciliation
-  land via the operator CLI/admin API. **SP-3** (instrumentation,
-  `feat/memory-instrumentation`): extraction spend metered
-  (`agent="memory:extraction"`), run/version provenance in each record's
-  `metadata`, and `memory_recalled`/`memory_recorded` TraceEvents. Deferred to a
+  land via the operator CLI/admin API. **SP-3** (instrumentation, PR #32):
+  extraction spend metered (`agent="memory:extraction"`, billed even on total
+  write failure), run/version provenance in each record's `metadata`, and
+  `memory_recalled`/`memory_recorded`/`memory_failed` TraceEvents; recording runs
+  after the terminal event so a hung extraction can't wedge a run; `run()` reaches
+  parity via `WorkflowResult.memory`/`.recall`. Deferred to a
   deletion-lifecycle sub-project: in-flight-run drain fence, immutable-principal
   keying, durable memory-store state, historical-legacy-provenance sweep (SP-4
   dedup/retention/recall-bound remains registered).
