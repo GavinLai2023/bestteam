@@ -122,6 +122,46 @@ def test_hierarchical_subordinate_receives_preamble():
     assert "refund policy" in (sub_model.captured_system or "")
 
 
+class _FailingSearchMemory(SqliteBM25Memory):
+    """Store whose recall (`search`) always raises; writes (`add`) still work."""
+
+    def search(self, *args, **kwargs):
+        raise RuntimeError("recall backend is down")
+
+
+def test_recall_failure_degrades_gracefully_and_run_still_records():
+    # M-02: recall is best-effort like record_run — a failing recall must not
+    # turn a healthy run into a run_failed; the run proceeds with no preamble.
+    store = _FailingSearchMemory(":memory:")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok answer")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("a question", user_id="u", memory=manager))
+
+    assert any(e.type == "run_completed" for e in events)
+    assert not any(e.type == "run_failed" for e in events)
+    # Preamble degraded to empty: the agent saw its own prompt, not recalled memory.
+    assert "previous sessions" not in (model.captured_system or "")
+    # record_run still wrote the episodic record (add() is unaffected).
+    assert len([r for r in store.all("u") if r.type == EPISODIC]) == 1
+
+
+def test_recall_failure_does_not_break_workflow_run():
+    # Same guarantee on the non-streaming Workflow.run path.
+    store = _FailingSearchMemory(":memory:")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="the answer")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("a question", user_id="u", memory=manager)
+
+    assert "the answer" in result.output
+    assert len([r for r in store.all("u") if r.type == EPISODIC]) == 1
+
+
 def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])

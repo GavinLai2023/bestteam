@@ -16,6 +16,20 @@ if TYPE_CHECKING:
     from .memory import MemoryManager
 
 
+def _safe_recall(memory: "Optional[MemoryManager]", user_id: Optional[str], input: str) -> str:
+    """Recall the memory preamble, best-effort. Recall is a read on an optional,
+    opt-in subsystem; like record_run (the write), it must never break a run, so
+    any failure degrades to an empty preamble (the run proceeds without recalled
+    memory) rather than propagating and surfacing as run_failed."""
+    if not memory:
+        return ""
+    try:
+        return memory.recall_preamble(user_id, input)
+    except Exception:  # noqa: BLE001 -- memory must never break a run
+        _logger.exception("Memory recall failed; run proceeds without recalled memory")
+        return ""
+
+
 @dataclass
 class WorkflowResult:
     """Normalized output of a workflow run, independent of the underlying engine.
@@ -71,7 +85,7 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        preamble = memory.recall_preamble(user_id, input) if memory else ""
+        preamble = _safe_recall(memory, user_id, input)
         result = self._adapter.execute(self._compiled, input, memory_preamble=preamble)
         if memory:
             # Best-effort, exactly like stream(): the workflow has already
@@ -107,7 +121,7 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        preamble = memory.recall_preamble(user_id, input) if memory else ""
+        preamble = _safe_recall(memory, user_id, input)
 
         yield TraceEvent(type="run_started", workflow=self.name, data=input)
 

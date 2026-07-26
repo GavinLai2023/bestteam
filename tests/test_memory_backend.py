@@ -10,12 +10,25 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from bestteam import (
     Agent,
     CollaborationMode,
+    MemoryManager,
     SqliteBM25Memory,
     Team,
     Workflow,
 )
 from bestteam.core.memory import EPISODIC
 from ui.backend.runtime import _make_memory, registry, run_in_background
+
+
+class _CloseSpyManager(MemoryManager):
+    """MemoryManager that counts close() calls (still closes the real store)."""
+
+    def __init__(self, store):
+        super().__init__(store)
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+        super().close()
 
 
 def _workflow():
@@ -71,6 +84,59 @@ def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
     run_in_background(run.id, workflow, "hello there", engine=None)
 
     assert not db_path.exists()
+
+
+def test_run_in_background_closes_memory_store_on_success(monkeypatch):
+    # M-03: the per-run memory store is closed in run_in_background's finally.
+    spy = _CloseSpyManager(SqliteBM25Memory(":memory:"))
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+
+    run = registry.create("wf", "hello")
+    run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
+
+    assert spy.close_calls == 1
+
+
+def test_run_in_background_closes_memory_store_on_failure(monkeypatch):
+    # The close must run even when the worker path raises (it's in finally).
+    spy = _CloseSpyManager(SqliteBM25Memory(":memory:"))
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+
+    workflow = _workflow()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(workflow, "stream", boom)
+    run = registry.create("wf", "hello")
+
+    run_in_background(run.id, workflow, "hello", engine=None, user_id="alice")
+
+    assert spy.close_calls == 1
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_failed" for e in events)
+
+
+class _CloseRaisesManager(MemoryManager):
+    """MemoryManager whose close() raises (simulates a flaky custom store)."""
+
+    def close(self):
+        raise RuntimeError("close failed")
+
+
+def test_run_in_background_survives_memory_close_failure(monkeypatch):
+    # A store whose close() raises must not escape the worker; teardown is
+    # best-effort and the terminal run state is preserved.
+    spy = _CloseRaisesManager(SqliteBM25Memory(":memory:"))
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+
+    run = registry.create("wf", "hello")
+    # Returns normally despite close() raising inside the finally.
+    run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
+
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_completed" for e in events)
+    assert not any(e["type"] == "run_failed" for e in events)
 
 
 def test_run_in_background_no_memory_when_env_unset(monkeypatch):
