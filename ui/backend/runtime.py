@@ -46,6 +46,19 @@ def _safe_record_usage(db: Session, **kwargs: Any) -> None:
             pass
 
 
+def _env_int(name: str, default: Optional[int]) -> Optional[int]:
+    """Positive-int env config, or `default` when unset/blank/invalid/non-positive."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _logger.warning("Ignoring non-integer %s=%r; using %r", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
 def _make_memory(
     org_id: Optional[int] = None,
     *,
@@ -81,6 +94,10 @@ def _make_memory(
         org_id=org_id,
         run_id=run_id,
         workflow_version_id=workflow_version_id,
+        # SP-4: production recall is bounded by default (M-09); episodic retention
+        # is opt-in (M-07, destructive so default unbounded).
+        recall_max_candidates=_env_int("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", 1000),
+        max_episodic_per_user=_env_int("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", None),
     )
 
 

@@ -455,6 +455,123 @@ def test_recall_empty_when_no_hits():
     assert MemoryManager(_store()).recall("alice", "anything") == RecallResult(preamble="", count=0)
 
 
+# --- SP-4: recall bound (M-09), dedup (M-08), retention (M-07) ---------------
+
+
+def test_recall_forwards_the_configured_scan_bound():
+    # M-09: a bounded manager passes max_candidates to search.
+    store = _store()
+    store.add("u", EPISODIC, "the refund policy is 30 days")
+    captured = {}
+    real = store.search
+
+    def spy(user_id, query, **kwargs):
+        captured.update(kwargs)
+        return real(user_id, query, **kwargs)
+
+    store.search = spy
+    MemoryManager(store, recall_max_candidates=3).recall("u", "refund")
+    assert captured.get("max_candidates") == 3
+
+
+def test_recall_unbounded_omits_the_bound():
+    # No cap -> the ABC-safe call (no max_candidates kwarg), for pre-SP-4 stores.
+    store = _store()
+    store.add("u", EPISODIC, "refund policy")
+    captured = {}
+    real = store.search
+
+    def spy(user_id, query, **kwargs):
+        captured["kwargs"] = kwargs
+        return real(user_id, query, **kwargs)
+
+    store.search = spy
+    MemoryManager(store).recall("u", "refund")  # recall_max_candidates defaults None
+    assert "max_candidates" not in captured["kwargs"]
+
+
+def test_extraction_dedups_exact_facts_against_existing():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", SEMANTIC, "likes bullet points")  # already known
+    canned = AIMessage(content='{"facts": ["likes bullet points", "prefers short answers"], "procedural": ""}')
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    sem = sorted(r.content for r in store.all("alice") if r.type == SEMANTIC)
+    assert sem == ["likes bullet points", "prefers short answers"]  # the known fact not duplicated
+    assert outcome.recorded.count(SEMANTIC) == 1  # only the new fact written
+
+
+def test_extraction_dedups_within_one_extraction():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(content='{"facts": ["same fact", "same fact"], "procedural": ""}')
+    store = _store()
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q", "a")
+    assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1
+
+
+def test_prune_user_type_keeps_most_recent(monkeypatch):
+    import time
+
+    store = _store()
+    for i in range(4):
+        store.add("alice", EPISODIC, f"note {i}")
+        time.sleep(0.005)  # distinct created_at so "most recent" is unambiguous
+
+    removed = store.prune_user_type("alice", EPISODIC, 2)
+    assert removed == 2
+    assert sorted(r.content for r in store.all("alice")) == ["note 2", "note 3"]
+
+
+def test_prune_user_type_scopes_to_user_and_org():
+    store = _store()
+    for i in range(3):
+        store.add("alice", EPISODIC, f"alice {i}", org_id=5)
+    store.add("bob", EPISODIC, "bob", org_id=5)
+    store.add("alice", EPISODIC, "alice other org", org_id=6)
+
+    removed = store.prune_user_type("alice", EPISODIC, 1, org_id=5)
+    assert removed == 2  # alice/org5: 3 -> 1
+    assert len(store.all("alice", org_id=5)) == 1
+    assert len(store.all("bob", org_id=5)) == 1  # untouched
+    assert len(store.all("alice", org_id=6)) == 1  # other org untouched
+
+
+def test_prune_user_type_zero_cap_is_noop():
+    store = _store()
+    store.add("alice", EPISODIC, "x")
+    assert store.prune_user_type("alice", EPISODIC, 0) == 0
+    assert len(store.all("alice")) == 1
+
+
+def test_record_run_prunes_episodic_to_cap_and_spares_extracted():
+    store = _store()
+    store.add("alice", SEMANTIC, "a distilled fact")
+    mgr = MemoryManager(store, max_episodic_per_user=2)
+
+    for i in range(4):
+        mgr.record_run("alice", f"q{i}", f"a{i}")
+
+    assert len([r for r in store.all("alice") if r.type == EPISODIC]) == 2  # capped
+    assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1  # spared
+
+
+def test_record_run_no_prune_when_cap_unset():
+    store = _store()
+    mgr = MemoryManager(store)  # max_episodic_per_user defaults None
+    for i in range(5):
+        mgr.record_run("alice", f"q{i}", f"a{i}")
+    assert len([r for r in store.all("alice") if r.type == EPISODIC]) == 5
+
+
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():
     store = _store()
     canned = 'Here you go:\n```json\n{"facts": ["likes graphs"], "procedural": ""}\n```'

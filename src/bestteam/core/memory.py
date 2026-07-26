@@ -361,6 +361,28 @@ class SqliteBM25Memory(Memory):
         self._conn.commit()
         return cursor.rowcount
 
+    def prune_user_type(self, user_id: str, type: str, keep: int, *, org_id: Optional[int] = None) -> int:
+        """Retention (SP-4, M-07): keep only the most-recent `keep` records of
+        `type` for `(user_id, org_id)`, deleting the older ones. Returns rows
+        removed. `keep <= 0` is treated as no-op (avoids a footgun that would wipe
+        the type)."""
+        if keep <= 0:
+            return 0
+        where = "user_id = ? AND type = ?"
+        params: List[Any] = [user_id, type]
+        if org_id is not None:
+            where += " AND org_id = ?"
+            params.append(org_id)
+        # Delete rows of this (user, type[, org]) that aren't among the most-recent
+        # `keep` by created_at.
+        sql = (
+            f"DELETE FROM memories WHERE {where} AND id NOT IN "
+            f"(SELECT id FROM memories WHERE {where} ORDER BY created_at DESC LIMIT ?)"
+        )
+        cursor = self._conn.execute(sql, params + params + [keep])
+        self._conn.commit()
+        return cursor.rowcount
+
     def delete_org_and_legacy(self, org_id: int, user_ids: Sequence[str]) -> int:
         """Org-level compliance erasure in ONE transaction (SP-2): delete `org_id`'s
         scoped rows AND the given users' legacy NULL-org rows, rolling back on any
@@ -466,6 +488,8 @@ class MemoryManager:
         org_id: Optional[int] = None,
         run_id: Optional[str] = None,
         workflow_version_id: Optional[int] = None,
+        recall_max_candidates: Optional[int] = None,
+        max_episodic_per_user: Optional[int] = None,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
@@ -476,6 +500,13 @@ class MemoryManager:
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
+        # SP-4 quality/scale knobs (the backend supplies them from env):
+        #   recall_max_candidates — recall (and dedup) scans the most-recent N
+        #     records; None = unbounded (the ABC-safe default for SDK-direct use).
+        #   max_episodic_per_user — after each run, prune oldest episodic rows
+        #     beyond this per-(user, org) cap; None = unbounded (opt-in).
+        self.recall_max_candidates = recall_max_candidates
+        self.max_episodic_per_user = max_episodic_per_user
 
     def _org_kwargs(self) -> Dict[str, Any]:
         """`{"org_id": ...}` only when a concrete org is bound. When None (an
@@ -529,7 +560,15 @@ class MemoryManager:
         `memory_preamble` (empty = no-op)."""
         if not user_id:
             return RecallResult(preamble="", count=0)
-        hits = self.store.search(user_id, query, top_k=self.top_k, **self._org_kwargs())
+        # M-09: bound the scan to the most-recent N records (recency ~= relevance
+        # for per-user memory) so recall cost doesn't grow with the whole store.
+        # `max_candidates` is a concrete-store extension; only pass it when a bound
+        # is configured, so an org-less SDK caller with a pre-SP-4 custom store
+        # still invokes the plain ABC `search`.
+        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._org_kwargs()}
+        if self.recall_max_candidates is not None:
+            search_kwargs["max_candidates"] = self.recall_max_candidates
+        hits = self.store.search(user_id, query, **search_kwargs)
         if not hits:
             return RecallResult(preamble="", count=0)
         # Recalled content is untrusted: an earlier tool result or model output
@@ -583,6 +622,8 @@ class MemoryManager:
             _logger.warning("Memory: episodic write failed for '%s': %s", user_id, exc, exc_info=True)
             ok = False
 
+        self._prune_episodic(user_id)
+
         extraction_usage: Optional[Dict[str, Any]] = None
         if self.extraction_model is not None:
             try:
@@ -632,19 +673,26 @@ class MemoryManager:
             _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
             return written, usage, True
 
+        # M-08: exact-duplicate suppression. Load the user's recent semantic/
+        # procedural contents once, then skip any extracted fact whose stripped
+        # content already exists (and collapse duplicates within this extraction).
+        # No LLM/embeddings -- near-dup and contradiction resolution are deferred.
+        existing = self._existing_extracted_contents(user_id)
+
         # Each write is independent: a failed one is logged and the rest proceed.
         for fact in parsed.get("facts", []):
-            if isinstance(fact, str) and fact.strip():
+            if isinstance(fact, str) and fact.strip() and fact.strip() not in existing:
                 try:
                     self.store.add(
                         user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
                     )
                     written.append(SEMANTIC)
+                    existing.add(fact.strip())
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
                     ok = False
         procedural = parsed.get("procedural")
-        if isinstance(procedural, str) and procedural.strip():
+        if isinstance(procedural, str) and procedural.strip() and procedural.strip() not in existing:
             try:
                 self.store.add(
                     user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
@@ -654,6 +702,35 @@ class MemoryManager:
                 _logger.warning("Memory: procedural write failed for '%s': %s", user_id, exc, exc_info=True)
                 ok = False
         return written, usage, ok
+
+    def _prune_episodic(self, user_id: str) -> None:
+        """M-07: keep only the most-recent `max_episodic_per_user` episodic rows
+        for `(user, org)`, pruning older ones. No-op unless a cap is configured
+        (unbounded by default; pruning is destructive, so opt-in). Best-effort and
+        guarded: a store without `prune_user_type` (a custom store) just isn't
+        pruned. Semantic/procedural (the distilled memory) are never pruned here."""
+        if self.max_episodic_per_user is None:
+            return
+        prune = getattr(self.store, "prune_user_type", None)
+        if not callable(prune):
+            return
+        try:
+            prune(user_id, EPISODIC, self.max_episodic_per_user, **self._org_kwargs())
+        except Exception as exc:  # noqa: BLE001 -- retention is best-effort
+            _logger.warning("Memory: episodic prune failed for '%s': %s", user_id, exc, exc_info=True)
+
+    def _existing_extracted_contents(self, user_id: str) -> set:
+        """The user's recent semantic/procedural contents, for exact dedup (M-08).
+        Bounded by `recall_max_candidates` when set. Best-effort: a store that
+        doesn't support the bounded/typed `all` (a pre-SP-4 custom store) just
+        yields no dedup rather than breaking the write."""
+        all_kwargs: Dict[str, Any] = {"types": [SEMANTIC, PROCEDURAL], **self._org_kwargs()}
+        if self.recall_max_candidates is not None:
+            all_kwargs["limit"] = self.recall_max_candidates
+        try:
+            return {r.content for r in self.store.all(user_id, **all_kwargs)}
+        except Exception:  # noqa: BLE001 -- dedup is best-effort
+            return set()
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:
