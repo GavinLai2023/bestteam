@@ -214,9 +214,31 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
 
 ### Known limitations (per-user memory)
 
-- Procedural/semantic memory has no auto-scoring or dedup — every extraction
-  may add a near-duplicate note (BM25 surfaces the most relevant). Consolidation
-  is future work.
+- **Quality & scale (SP-4).** Extraction dedups **exact** semantic/procedural
+  content on write via `SqliteBM25Memory.add_if_absent` (M-08) — an atomic,
+  **per-type** `INSERT ... WHERE NOT EXISTS` keyed by `(user_id, type, content,
+  org-scope)`. Per-type means a semantic and a procedural row with the same text
+  don't collide; atomic under SQLite's write serialization means two concurrent
+  connections can't both insert. (Near-dup / contradiction resolution /
+  consolidation — needs embeddings/LLM — is deferred.) Recall bounds its scan to
+  the most-recent `recall_max_candidates` records (backend default 1000 via
+  `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09; clamped to SQLite's int range so a
+  fat-fingered value can't `OverflowError` the `LIMIT`). Composite `(user_id,
+  created_at)` / `(org_id, user_id, created_at)` indexes make the recall filter+sort
+  index-covered (no temp-B-tree sort), and `(org_id, user_id, type, content)`
+  makes the dedup existence check a seek (not a scan of the user's episodic-inflated
+  history). Extraction routes through `add_if_absent` for dedup **unless** the store
+  overrides `add()` with custom policy (encryption/audit/…) without adopting
+  `add_if_absent` — then `add()` is honored for every write (dedup steps aside), so
+  a pre-SP-4 subclass keeps intercepting semantic/procedural writes. Episodic
+  **retention** is opt-in (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, M-07): when
+  set, `record_run` prunes the oldest episodic rows beyond the cap
+  (`prune_user_type`), scoped to a **single** org — `org_id=None` means
+  `org_id IS NULL` (an org-less manager's own rows), NEVER all-orgs, so retention
+  can't delete another org's history. Semantic/procedural are spared; unbounded by
+  default (pruning is destructive). Age-based TTL, per-org quotas, and a background
+  sweep are deferred. All three degrade gracefully for a custom store (best-effort
+  concrete-store extensions: dedup falls back to a plain `add`, prune is skipped).
 - Memory is best-effort on **both** sides of a run: `record_run` (write) and
   `recall_preamble` (read, via `Workflow._safe_recall`) are each wrapped so a
   failure degrades (empty preamble / skipped write) rather than failing the run
@@ -227,13 +249,14 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   rejects a
   non-string/empty `type`, but the type **enum stays open** — a custom store may
   still model other string types (M-11). See `docs/MEMORY_REVIEW_TRIAGE.md`.
-- Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
+- Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB;
+  the scan is now bounded to the most-recent N (SP-4/M-09, above).
 - An **admin-only** Memory management page (`ui/backend/memory_api.py`,
   `/api/memory`) lets admins view/search/delete a user's records and clear a
-  user's whole memory, but there's no manual add/edit and no retention,
-  per-user quota, or automated cleanup — records accumulate until an admin
-  clears them. `record_run` caps each field at `_MAX_RECORD_CHARS` (CR-022) so
-  one run can't persist megabytes, but total growth is unbounded.
+  user's whole memory, but there's no manual add/edit. `record_run` caps each
+  field at `_MAX_RECORD_CHARS` (CR-022). Total growth is bounded only when
+  episodic retention is enabled (SP-4/M-07, above); by default episodic rows
+  accumulate until an admin clears them.
 - **Memory is org-scoped** (SP-2, M-01). Records carry an `org_id`; the run
   path binds the run's org into `MemoryManager`, so recall/record only ever
   touch that org's memory (closing the username-reuse isolation gap). In the

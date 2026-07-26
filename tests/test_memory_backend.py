@@ -57,6 +57,26 @@ def test_make_memory_enabled_with_db_path(monkeypatch, tmp_path):
     assert manager.extraction_model is None
 
 
+def test_make_memory_applies_sp4_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", "50")
+    monkeypatch.setenv("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", "10")
+
+    mgr = _make_memory()
+    assert mgr.recall_max_candidates == 50
+    assert mgr.max_episodic_per_user == 10
+
+
+def test_make_memory_defaults_recall_bound_and_opt_in_retention(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", raising=False)
+    monkeypatch.delenv("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", raising=False)
+
+    mgr = _make_memory()
+    assert mgr.recall_max_candidates == 1000  # M-09: production recall bounded by default
+    assert mgr.max_episodic_per_user is None  # M-07: retention opt-in
+
+
 def test_run_in_background_records_episodic_memory_for_user(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))

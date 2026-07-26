@@ -57,9 +57,9 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 | **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3 — Implemented** (metered as `agent="memory:extraction"` via `memory_recorded` event) |
 | **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3 — Implemented** (`metadata={run_id, workflow_version_id}`; agent N/A for run-level records) |
 | **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3 — Implemented** (`memory_recalled` / `memory_recorded` TraceEvents) |
-| **M-08** | No dedup / conflict-resolution / forgetting: semantic & procedural records accumulate near-duplicates and can contradict each other over time | Memory quality | P2 | L | **SP-4** |
-| **M-07** | No retention / quota / TTL: total record count grows unbounded; only manual admin cleanup exists | Lifecycle | P2 | M | **SP-4** |
-| **M-09** | Production recall does a full BM25 scan (no `max_candidates`); cost grows linearly with a user's record count | Performance | P2 | S | **SP-4** |
+| **M-08** | No dedup / conflict-resolution / forgetting: semantic & procedural records accumulate near-duplicates and can contradict each other over time | Memory quality | P2 | L | **SP-4 — Implemented (exact dedup on write; near-dup/conflict/consolidation deferred)** |
+| **M-07** | No retention / quota / TTL: total record count grows unbounded; only manual admin cleanup exists | Lifecycle | P2 | M | **SP-4 — Implemented (opt-in episodic per-user cap; TTL/quota/sweep deferred)** |
+| **M-09** | Production recall does a full BM25 scan (no `max_candidates`); cost grows linearly with a user's record count | Performance | P2 | S | **SP-4 — Implemented (recall bounded to most-recent N, default 1000)** |
 | **M-10** | Admin API binds the concrete `SqliteBM25Memory`, not the `Memory` ABC; swapping in Redis/Postgres/mem0 would silently break the admin surface | Leaky abstraction | P3 | M | **Defer (YAGNI)** — no second backend exists yet |
 | **M-12** | Prompt-injection defense is mitigation-only (XML delimiting + reference-only framing; no content sanitization, signing, trust scoring, or safety classification) | Security | P3 | L | **Accept & document** — proportionate for the opt-in, per-user model; revisit if memory ever ships on-by-default |
 | **M-13** | No effectiveness evaluation: no signal on whether memory actually helps (no recall hit-rate, no A/B, no offline harness) | Measurement | P3 | M | **Defer** — fold into SP-3 or later |
@@ -128,7 +128,23 @@ Suggested order under the current "memory is opt-in, default off" posture:
   stops on `run_completed` won't display the memory events — durable
   billing/provenance is unaffected. **Out of scope:** a durable usage outbox/retry
   and a framework-wide agent-call timeout.
-- SP-4 — registered, not started.
+- **SP-4** — Implemented: memory quality & scale. M-09 recall bounded to the
+  most-recent N (`recall_max_candidates`, backend default 1000, clamped to SQLite's
+  int range) + composite created_at + `(org_id, user_id, type, content)` dedup
+  indexes so both the recall filter+sort and the dedup existence check are
+  index-covered; M-08 atomic per-type exact dedup on write (`add_if_absent`,
+  `INSERT ... WHERE NOT EXISTS` — race-safe, no cross-type collision, and honoring a
+  subclass's overridden `add()` policy); M-07 opt-in episodic retention cap
+  (`prune_user_type`, `org_id=None` scoped to `IS NULL`, never all-orgs). Always-on changes are
+  non-destructive; retention is opt-in (destructive). Branch
+  `feat/memory-quality-scale`. Design:
+  `docs/superpowers/specs/2026-07-26-memory-quality-scale-design.md`. Deferred
+  (documented, disproportionate for a BM25/opt-in store): embedding/LLM near-dup
+  + contradiction resolution + consolidation; age-based TTL; per-org quotas;
+  background cleanup scheduler.
+
+All four Phase-1 memory sub-projects (SP-1…SP-4) are now implemented; the
+deletion-lifecycle sub-project (below) carries the remaining cross-process items.
 
 ## Deferred to the deletion-lifecycle sub-project
 

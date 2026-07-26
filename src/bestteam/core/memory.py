@@ -49,6 +49,18 @@ PROCEDURAL = "procedural"
 _MAX_RECORD_CHARS = 10_000
 
 
+# SQLite binds parameters as signed 64-bit integers; a larger value raises
+# OverflowError. `LIMIT` config values are clamped to this (still effectively
+# unbounded) so a nonsensical override degrades to "no limit" instead of crashing.
+_SQLITE_MAX_INT = 2**63 - 1
+
+
+def _clamp_sqlite_int(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return min(value, _SQLITE_MAX_INT)
+
+
 def _truncate(text: str) -> str:
     """Cap `text` at `_MAX_RECORD_CHARS`, marking it when truncated."""
     if len(text) <= _MAX_RECORD_CHARS:
@@ -171,6 +183,24 @@ class SqliteBM25Memory(Memory):
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user ON memories(org_id, user_id)"
         )
+        # Composite indexes covering the recall/`all` filter+sort (WHERE user[, org]
+        # ORDER BY created_at DESC LIMIT N), so bounding the scan actually bounds the
+        # DB work instead of a full scan + temp-B-tree sort (SP-4 review r1 #3).
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_user_created ON memories(user_id, created_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_org_user_created "
+            "ON memories(org_id, user_id, created_at)"
+        )
+        # Covers `add_if_absent`'s existence check (WHERE org_id[/IS NULL] AND
+        # user_id AND type AND content), so per-type dedup seeks instead of scanning
+        # the user's whole (episodic-inflated) history (SP-4 review r2 #1). The
+        # leading org_id column serves both a concrete org and `org_id IS NULL`.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_dedup "
+            "ON memories(org_id, user_id, type, content)"
+        )
         self._conn.commit()
 
     def add(
@@ -211,6 +241,55 @@ class SqliteBM25Memory(Memory):
         )
         self._conn.commit()
         return record
+
+    def add_if_absent(
+        self,
+        user_id: str,
+        type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        org_id: Optional[int] = None,
+    ) -> Optional[MemoryRecord]:
+        """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope)`
+        (SP-4 M-08 dedup). Returns the new record, or None when an identical record
+        already existed. Dedup is **per type** (a semantic and a procedural row with
+        the same text don't collide, review r1 #4) and **race-safe** across
+        connections: the existence check lives inside one `INSERT ... WHERE NOT
+        EXISTS` under SQLite's write serialization, so two workers can't both insert
+        (review r1 #2)."""
+        if not isinstance(type, str) or not type.strip():
+            raise ConfigurationError("Memory record type must be a non-empty string")
+        record = MemoryRecord(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            type=type,
+            content=content,
+            metadata=metadata or {},
+            created_at=datetime.now(timezone.utc).isoformat(),
+            org_id=org_id,
+        )
+        org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
+        exists_params: List[Any] = [user_id, type, content]
+        if org_id is not None:
+            exists_params.append(org_id)
+        cursor = self._conn.execute(
+            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at, org_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            f"SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? AND {org_clause})",
+            (
+                record.id,
+                record.user_id,
+                record.type,
+                record.content,
+                json.dumps(record.metadata),
+                record.created_at,
+                record.org_id,
+                *exists_params,
+            ),
+        )
+        self._conn.commit()
+        return record if cursor.rowcount else None
 
     def _rows_to_records(self, rows: Sequence[sqlite3.Row]) -> List[MemoryRecord]:
         records = []
@@ -361,6 +440,33 @@ class SqliteBM25Memory(Memory):
         self._conn.commit()
         return cursor.rowcount
 
+    def prune_user_type(self, user_id: str, type: str, keep: int, *, org_id: Optional[int] = None) -> int:
+        """Retention (SP-4, M-07): keep only the most-recent `keep` records of
+        `type` for a SINGLE org scope, deleting the older ones. Returns rows
+        removed. `keep <= 0` is treated as no-op (avoids a footgun that would wipe
+        the type).
+
+        `org_id=None` scopes to `org_id IS NULL` (the legacy/own rows an org-less
+        manager writes) -- NOT all organizations. Retention must never delete
+        another org's history; that's why this is org-scoped, unlike the admin
+        read APIs where `org_id=None` means across-orgs (review r1 #1)."""
+        if keep <= 0:
+            return 0
+        org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
+        where = f"user_id = ? AND type = ? AND {org_clause}"
+        params: List[Any] = [user_id, type]
+        if org_id is not None:
+            params.append(org_id)
+        # Delete rows of this (user, type[, org]) that aren't among the most-recent
+        # `keep` by created_at.
+        sql = (
+            f"DELETE FROM memories WHERE {where} AND id NOT IN "
+            f"(SELECT id FROM memories WHERE {where} ORDER BY created_at DESC LIMIT ?)"
+        )
+        cursor = self._conn.execute(sql, params + params + [keep])
+        self._conn.commit()
+        return cursor.rowcount
+
     def delete_org_and_legacy(self, org_id: int, user_ids: Sequence[str]) -> int:
         """Org-level compliance erasure in ONE transaction (SP-2): delete `org_id`'s
         scoped rows AND the given users' legacy NULL-org rows, rolling back on any
@@ -466,6 +572,8 @@ class MemoryManager:
         org_id: Optional[int] = None,
         run_id: Optional[str] = None,
         workflow_version_id: Optional[int] = None,
+        recall_max_candidates: Optional[int] = None,
+        max_episodic_per_user: Optional[int] = None,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
@@ -476,6 +584,17 @@ class MemoryManager:
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
+        # SP-4 quality/scale knobs (the backend supplies them from env):
+        #   recall_max_candidates — recall scans the most-recent N records; None =
+        #     unbounded (the ABC-safe default for SDK-direct use).
+        #   max_episodic_per_user — after each run, prune oldest episodic rows
+        #     beyond this per-(user, org) cap; None = unbounded (opt-in).
+        # Clamp to SQLite's signed-64-bit range: these bind as SQL `LIMIT` values,
+        # and a larger int (a fat-fingered env var, or 2**80) would raise
+        # `OverflowError` and break recall/prune (review r2 #3). This one point
+        # covers both the env path and direct SDK construction.
+        self.recall_max_candidates = _clamp_sqlite_int(recall_max_candidates)
+        self.max_episodic_per_user = _clamp_sqlite_int(max_episodic_per_user)
 
     def _org_kwargs(self) -> Dict[str, Any]:
         """`{"org_id": ...}` only when a concrete org is bound. When None (an
@@ -529,7 +648,15 @@ class MemoryManager:
         `memory_preamble` (empty = no-op)."""
         if not user_id:
             return RecallResult(preamble="", count=0)
-        hits = self.store.search(user_id, query, top_k=self.top_k, **self._org_kwargs())
+        # M-09: bound the scan to the most-recent N records (recency ~= relevance
+        # for per-user memory) so recall cost doesn't grow with the whole store.
+        # `max_candidates` is a concrete-store extension; only pass it when a bound
+        # is configured, so an org-less SDK caller with a pre-SP-4 custom store
+        # still invokes the plain ABC `search`.
+        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._org_kwargs()}
+        if self.recall_max_candidates is not None:
+            search_kwargs["max_candidates"] = self.recall_max_candidates
+        hits = self.store.search(user_id, query, **search_kwargs)
         if not hits:
             return RecallResult(preamble="", count=0)
         # Recalled content is untrusted: an earlier tool result or model output
@@ -583,6 +710,8 @@ class MemoryManager:
             _logger.warning("Memory: episodic write failed for '%s': %s", user_id, exc, exc_info=True)
             ok = False
 
+        self._prune_episodic(user_id)
+
         extraction_usage: Optional[Dict[str, Any]] = None
         if self.extraction_model is not None:
             try:
@@ -632,28 +761,68 @@ class MemoryManager:
             _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
             return written, usage, True
 
-        # Each write is independent: a failed one is logged and the rest proceed.
+        # M-08: exact-duplicate suppression via an atomic, per-type insert-if-absent
+        # (race-safe and complete, not a recent-window snapshot). Each write is
+        # independent: a failure is logged and the rest proceed.
         for fact in parsed.get("facts", []):
             if isinstance(fact, str) and fact.strip():
                 try:
-                    self.store.add(
-                        user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
-                    )
-                    written.append(SEMANTIC)
+                    if self._store_extracted(user_id, SEMANTIC, fact.strip()):
+                        written.append(SEMANTIC)
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
                     ok = False
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
             try:
-                self.store.add(
-                    user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
-                )
-                written.append(PROCEDURAL)
+                if self._store_extracted(user_id, PROCEDURAL, procedural.strip()):
+                    written.append(PROCEDURAL)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("Memory: procedural write failed for '%s': %s", user_id, exc, exc_info=True)
                 ok = False
         return written, usage, ok
+
+    def _store_extracted(self, user_id: str, type: str, content: str) -> bool:
+        """Write one extracted record, deduping per type. Returns True when a NEW
+        record was written (False when it was a duplicate).
+
+        Uses the store's atomic `add_if_absent` for dedup — but NOT when the store
+        overrides `add()` with custom policy (encryption/audit/authz/…) and has not
+        adopted `add_if_absent`: routing extraction writes through `add_if_absent`
+        would silently bypass that policy for semantic/procedural records. In that
+        case fall back to the store's `add()` (its policy applies; dedup is skipped)
+        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2)."""
+        kwargs = {"metadata": self._provenance(), **self._org_kwargs()}
+        add_if_absent = getattr(self.store, "add_if_absent", None)
+        if callable(add_if_absent) and self._atomic_dedup_is_safe():
+            return add_if_absent(user_id, type, content, **kwargs) is not None
+        self.store.add(user_id, type, content, **kwargs)
+        return True
+
+    def _atomic_dedup_is_safe(self) -> bool:
+        """True unless the store overrides `add()` (custom write policy) without
+        also adopting `add_if_absent` — then `add()` must be honored for every
+        write, so dedup steps aside (review r2 #2)."""
+        cls = self.store.__class__
+        overrides_add = getattr(cls, "add", None) is not SqliteBM25Memory.add
+        adopted_add_if_absent = getattr(cls, "add_if_absent", None) is not SqliteBM25Memory.add_if_absent
+        return adopted_add_if_absent or not overrides_add
+
+    def _prune_episodic(self, user_id: str) -> None:
+        """M-07: keep only the most-recent `max_episodic_per_user` episodic rows
+        for `(user, org)`, pruning older ones. No-op unless a cap is configured
+        (unbounded by default; pruning is destructive, so opt-in). Best-effort and
+        guarded: a store without `prune_user_type` (a custom store) just isn't
+        pruned. Semantic/procedural (the distilled memory) are never pruned here."""
+        if self.max_episodic_per_user is None:
+            return
+        prune = getattr(self.store, "prune_user_type", None)
+        if not callable(prune):
+            return
+        try:
+            prune(user_id, EPISODIC, self.max_episodic_per_user, **self._org_kwargs())
+        except Exception as exc:  # noqa: BLE001 -- retention is best-effort
+            _logger.warning("Memory: episodic prune failed for '%s': %s", user_id, exc, exc_info=True)
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:
