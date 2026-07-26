@@ -349,9 +349,13 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   LLM's `usage`, recorded as a `usage_records` row with `agent="memory:extraction"`
   (that call bypasses the adapter's usage path, so it arrives on the memory event
   instead). The SDK attaches the usage to exactly one event, so it's billed once
-  even on total write failure. All usage persistence goes through
-  `_safe_record_usage`, which isolates a `usage_records` write failure (logs +
-  rolls back) so metering can never flip a successful run to `run_failed`.
+  even on total write failure. These memory events arrive AFTER `run_completed`
+  (recording runs post-terminal so a hung extraction can't wedge the run), but
+  `run_in_background` drains the whole event stream so they're still metered/
+  recorded; `registry.publish` tolerates a run evicted in that window. All usage
+  persistence goes through `_safe_record_usage`, which isolates a `usage_records`
+  write failure (logs + rolls back) so metering can never flip a successful run
+  to `run_failed`.
 
 ## Per-user memory
 

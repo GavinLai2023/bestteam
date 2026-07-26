@@ -170,18 +170,24 @@ class Workflow:
             yield TraceEvent(type="run_failed", workflow=self.name, data=str(exc))
             return
 
-        # Record BEFORE the terminal event so the memory events (and the backend's
-        # usage persistence) land before a consumer stops on `run_completed`, and
-        # before the run becomes eligible for registry eviction (review r4 #2).
-        # Still best-effort: a recording failure surfaces as a sanitized
-        # `memory_failed` event, never as `run_failed`.
+        # The business run is complete: emit the terminal event NOW, before the
+        # optional memory recording. Recording (which may include a slow/hung
+        # extraction LLM call) must never delay or wedge a finished run, so it
+        # runs AFTER `run_completed` (review r7 — this dissolves the need for a
+        # timeout on the extraction). The backend still meters/records these
+        # post-terminal events because it drains the whole event stream; a live
+        # WebSocket that stops on `run_completed` won't display them, but no
+        # durable billing/provenance data depends on that. Recording stays
+        # best-effort: a failure is a sanitized `memory_failed`, never `run_failed`.
+        yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
+
         if memory:
             from .memory import MemoryOutcome
 
             try:
                 outcome = memory.record_run(user_id, input, last_output)
             except Exception:  # noqa: BLE001 -- memory must never break a run
-                _logger.exception("Memory recording failed; run stays completed")
+                _logger.exception("Memory recording failed; run already completed")
                 yield TraceEvent(type="memory_failed", workflow=self.name, data="record")
             else:
                 # A legacy manager may return None (recorded successfully, no
@@ -207,8 +213,6 @@ class Workflow:
                         yield TraceEvent(
                             type="memory_failed", workflow=self.name, data="record", usage=usage
                         )
-
-        yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
 
     def visualize(self) -> str:
         """Render the compiled graph as Mermaid markup (for the future CLI/UI)."""

@@ -199,11 +199,11 @@ def test_stream_emits_memory_recalled_and_recorded_events():
     assert recalled.data == 1  # one seeded record drawn
     recorded = next(e for e in events if e.type == "memory_recorded")
     assert "episodic" in recorded.data
-    # Ordering: recalled after run_started; recorded BEFORE run_completed so a
-    # consumer that stops on the terminal event still sees it (review r4 #2).
-    assert types.index("memory_recalled") < types.index("memory_recorded")
-    assert types.index("memory_recorded") < types.index("run_completed")
-    assert types[-1] == "run_completed"
+    # Ordering (review r7 / option A): recall runs before the agents; recording
+    # runs AFTER the terminal event so a slow/hung extraction can't wedge the run.
+    assert types.index("memory_recalled") < types.index("run_completed")
+    assert types.index("run_completed") < types.index("memory_recorded")
+    assert types[-1] == "memory_recorded"
 
 
 def test_run_surfaces_memory_outcome():
@@ -261,9 +261,11 @@ def test_stream_emits_memory_failed_on_recall_failure():
     workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
     events = list(workflow.stream("q", user_id="u", memory=manager))
-    failed = [e for e in events if e.type == "memory_failed"]
-    assert any(e.data == "recall" for e in failed)
-    assert events[-1].type == "run_completed"
+    types = [e.type for e in events]
+    assert any(e.type == "memory_failed" and e.data == "recall" for e in events)
+    # Recall failure surfaces before the agents; the run still completes.
+    assert "run_completed" in types
+    assert types.index("memory_failed") < types.index("run_completed")
 
 
 def test_stream_emits_memory_failed_on_record_failure():
@@ -278,8 +280,10 @@ def test_stream_emits_memory_failed_on_record_failure():
     workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
     events = list(workflow.stream("q", user_id="u", memory=manager))
+    types = [e.type for e in events]
     assert any(e.type == "memory_failed" and e.data == "record" for e in events)
-    assert events[-1].type == "run_completed"
+    # Recording (and its failure) happens AFTER the terminal event now.
+    assert types.index("run_completed") < types.index("memory_failed")
 
 
 def test_stream_tolerates_legacy_record_run_returning_none():

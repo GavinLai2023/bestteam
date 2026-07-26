@@ -425,36 +425,6 @@ def test_extraction_continues_after_a_failed_write():
     assert "fact two" in contents and "a note" in contents and "fact one" not in contents
 
 
-def test_extraction_timeout_abandons_extraction_without_blocking(monkeypatch):
-    # Review r6 #2: a slow/hung extraction is abandoned at the timeout so it can't
-    # wedge a completed run; the episodic record still lands.
-    import time
-
-    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-    from langchain_core.messages import AIMessage
-
-    monkeypatch.setenv("BESTTEAM_MEMORY_EXTRACTION_TIMEOUT", "0.2")
-
-    class _SlowModel(FakeMessagesListChatModel):
-        def invoke(self, *args, **kwargs):
-            time.sleep(1.0)  # far exceeds the 0.2s bound
-            return super().invoke(*args, **kwargs)
-
-    store = _store()
-    mgr = MemoryManager(
-        store, extraction_model=_SlowModel(responses=[AIMessage(content='{"facts": ["x"], "procedural": "y"}')])
-    )
-
-    started = time.monotonic()
-    outcome = mgr.record_run("alice", "q", "a")
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 0.9  # returned at the timeout, not after the 1s sleep
-    assert outcome.recorded == [EPISODIC]  # episodic persisted; extraction abandoned
-    assert outcome.ok is False and outcome.extraction_usage is None
-    assert [r.type for r in store.all("alice")] == [EPISODIC]
-
-
 def test_record_run_extraction_usage_none_for_fake_spec():
     store = _store()
     mgr = MemoryManager(store, extraction_model='fake:{"facts": [], "procedural": ""}')

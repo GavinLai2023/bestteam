@@ -17,8 +17,11 @@ class TraceEvent:
     "memory_recorded" (`data` = record types written; `usage` = the extraction
     call's token usage, if any), and "memory_failed" (`data` = "recall" | "record",
     sanitized — no exception detail; `usage` carries the extraction spend when every
-    write failed, so it's still billed). The memory events are emitted before
-    `run_completed` so a consumer that stops on the terminal event still sees them.
+    write failed, so it's still billed). `memory_recalled`/`memory_failed("recall")`
+    precede the agents; recording events (`memory_recorded`/`memory_failed("record")`)
+    are emitted AFTER `run_completed`, so a slow/hung extraction can't wedge the run
+    — a consumer that stops on the terminal event won't see them, but the backend
+    drains the full stream to meter/record them.
 
     `usage` holds zero or more per-model-call token usage entries (each
     `{"model": <spec str>, "input_tokens": int, "output_tokens": int}`)

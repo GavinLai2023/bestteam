@@ -179,10 +179,10 @@ so `Workflow.stream` can emit it on a `memory_recorded` TraceEvent and the backe
 meters it (`agent="memory:extraction"`, M-04) — the SDK never touches the backend
 DB. `Workflow.stream` also emits `memory_recalled` (`data`=count, 0 included) and,
 on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
-`"record"`) for observability (M-05). Memory recording + these events happen
-**before** `run_completed` (the final event), so a consumer that stops on the
-terminal event still sees them and the run can't be evicted first; recording stays
-best-effort (a failure yields `memory_failed`, never `run_failed`). `Workflow.run`
+`"record"`) for observability (M-05). Recall events precede the agents; **recording
+events are emitted AFTER `run_completed`** (see the ordering note below), so a
+slow/hung extraction can't wedge the run. Recording stays best-effort (a failure
+yields `memory_failed`, never `run_failed`). `Workflow.run`
 surfaces the same instrumentation on `WorkflowResult` for parity with `stream()`:
 `.memory` (recording `MemoryOutcome`; `None`=disabled, `ok=False`=recording
 failure) and `.recall` (`RecallResult`; `None`=disabled, `count`=records drawn,
@@ -193,11 +193,14 @@ bills the spend; the usage rides exactly one emitted event (`memory_recorded`, o
 `memory_failed` when *every* write failed) so it's metered once even on total
 failure. Each extracted write is isolated (`MemoryOutcome.ok=False` on any
 partial/total failure → a `memory_failed` event) so one bad write can't skip the
-rest. The extraction model call is bounded by `BESTTEAM_MEMORY_EXTRACTION_TIMEOUT`
-(default 30s): it runs on a helper thread (the store writes stay on the caller's
-thread, so the thread-local connection is safe), and on timeout the extraction is
-abandoned and the run still completes — optional post-processing can't wedge a
-finished run. On the backend, usage persistence goes through `_safe_record_usage`,
+rest. **Recording (including the extraction LLM call) runs AFTER the terminal
+`run_completed` event** (`Workflow.stream`), so a slow/hung extraction can never
+delay or wedge a finished run — no timeout machinery needed. The backend still
+meters/records these post-terminal events because `run_in_background` drains the
+whole event stream; a live WebSocket that stops on `run_completed` just won't
+*display* them (no durable billing/provenance data depends on that), and
+`registry.publish` tolerates a run evicted between the terminal event and a late
+memory event. On the backend, usage persistence goes through `_safe_record_usage`,
 which isolates a `usage_records` write failure from run status. See
 `docs/MEMORY_REVIEW_TRIAGE.md`.
 
