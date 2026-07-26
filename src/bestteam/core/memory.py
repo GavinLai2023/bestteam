@@ -49,6 +49,18 @@ PROCEDURAL = "procedural"
 _MAX_RECORD_CHARS = 10_000
 
 
+# SQLite binds parameters as signed 64-bit integers; a larger value raises
+# OverflowError. `LIMIT` config values are clamped to this (still effectively
+# unbounded) so a nonsensical override degrades to "no limit" instead of crashing.
+_SQLITE_MAX_INT = 2**63 - 1
+
+
+def _clamp_sqlite_int(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return min(value, _SQLITE_MAX_INT)
+
+
 def _truncate(text: str) -> str:
     """Cap `text` at `_MAX_RECORD_CHARS`, marking it when truncated."""
     if len(text) <= _MAX_RECORD_CHARS:
@@ -180,6 +192,14 @@ class SqliteBM25Memory(Memory):
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user_created "
             "ON memories(org_id, user_id, created_at)"
+        )
+        # Covers `add_if_absent`'s existence check (WHERE org_id[/IS NULL] AND
+        # user_id AND type AND content), so per-type dedup seeks instead of scanning
+        # the user's whole (episodic-inflated) history (SP-4 review r2 #1). The
+        # leading org_id column serves both a concrete org and `org_id IS NULL`.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_dedup "
+            "ON memories(org_id, user_id, type, content)"
         )
         self._conn.commit()
 
@@ -565,12 +585,16 @@ class MemoryManager:
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
         # SP-4 quality/scale knobs (the backend supplies them from env):
-        #   recall_max_candidates — recall (and dedup) scans the most-recent N
-        #     records; None = unbounded (the ABC-safe default for SDK-direct use).
+        #   recall_max_candidates — recall scans the most-recent N records; None =
+        #     unbounded (the ABC-safe default for SDK-direct use).
         #   max_episodic_per_user — after each run, prune oldest episodic rows
         #     beyond this per-(user, org) cap; None = unbounded (opt-in).
-        self.recall_max_candidates = recall_max_candidates
-        self.max_episodic_per_user = max_episodic_per_user
+        # Clamp to SQLite's signed-64-bit range: these bind as SQL `LIMIT` values,
+        # and a larger int (a fat-fingered env var, or 2**80) would raise
+        # `OverflowError` and break recall/prune (review r2 #3). This one point
+        # covers both the env path and direct SDK construction.
+        self.recall_max_candidates = _clamp_sqlite_int(recall_max_candidates)
+        self.max_episodic_per_user = _clamp_sqlite_int(max_episodic_per_user)
 
     def _org_kwargs(self) -> Dict[str, Any]:
         """`{"org_id": ...}` only when a concrete org is bound. When None (an
@@ -760,14 +784,29 @@ class MemoryManager:
 
     def _store_extracted(self, user_id: str, type: str, content: str) -> bool:
         """Write one extracted record, deduping per type. Returns True when a NEW
-        record was written (False when it was a duplicate). Uses the store's atomic
-        `add_if_absent` when available; a pre-SP-4 custom store without it falls
-        back to a plain `add` (no dedup — best-effort, custom-store compatible)."""
+        record was written (False when it was a duplicate).
+
+        Uses the store's atomic `add_if_absent` for dedup — but NOT when the store
+        overrides `add()` with custom policy (encryption/audit/authz/…) and has not
+        adopted `add_if_absent`: routing extraction writes through `add_if_absent`
+        would silently bypass that policy for semantic/procedural records. In that
+        case fall back to the store's `add()` (its policy applies; dedup is skipped)
+        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2)."""
+        kwargs = {"metadata": self._provenance(), **self._org_kwargs()}
         add_if_absent = getattr(self.store, "add_if_absent", None)
-        if callable(add_if_absent):
-            return add_if_absent(user_id, type, content, metadata=self._provenance(), **self._org_kwargs()) is not None
-        self.store.add(user_id, type, content, metadata=self._provenance(), **self._org_kwargs())
+        if callable(add_if_absent) and self._atomic_dedup_is_safe():
+            return add_if_absent(user_id, type, content, **kwargs) is not None
+        self.store.add(user_id, type, content, **kwargs)
         return True
+
+    def _atomic_dedup_is_safe(self) -> bool:
+        """True unless the store overrides `add()` (custom write policy) without
+        also adopting `add_if_absent` — then `add()` must be honored for every
+        write, so dedup steps aside (review r2 #2)."""
+        cls = self.store.__class__
+        overrides_add = getattr(cls, "add", None) is not SqliteBM25Memory.add
+        adopted_add_if_absent = getattr(cls, "add_if_absent", None) is not SqliteBM25Memory.add_if_absent
+        return adopted_add_if_absent or not overrides_add
 
     def _prune_episodic(self, user_id: str) -> None:
         """M-07: keep only the most-recent `max_episodic_per_user` episodic rows

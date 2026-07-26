@@ -222,9 +222,15 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   connections can't both insert. (Near-dup / contradiction resolution /
   consolidation — needs embeddings/LLM — is deferred.) Recall bounds its scan to
   the most-recent `recall_max_candidates` records (backend default 1000 via
-  `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09), and composite `(user_id,
-  created_at)` / `(org_id, user_id, created_at)` indexes make the filter+sort
-  index-covered (no temp-B-tree sort), so the bound bounds DB work too. Episodic
+  `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09; clamped to SQLite's int range so a
+  fat-fingered value can't `OverflowError` the `LIMIT`). Composite `(user_id,
+  created_at)` / `(org_id, user_id, created_at)` indexes make the recall filter+sort
+  index-covered (no temp-B-tree sort), and `(org_id, user_id, type, content)`
+  makes the dedup existence check a seek (not a scan of the user's episodic-inflated
+  history). Extraction routes through `add_if_absent` for dedup **unless** the store
+  overrides `add()` with custom policy (encryption/audit/…) without adopting
+  `add_if_absent` — then `add()` is honored for every write (dedup steps aside), so
+  a pre-SP-4 subclass keeps intercepting semantic/procedural writes. Episodic
   **retention** is opt-in (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, M-07): when
   set, `record_run` prunes the oldest episodic rows beyond the cap
   (`prune_user_type`), scoped to a **single** org — `org_id=None` means

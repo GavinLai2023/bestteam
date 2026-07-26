@@ -371,10 +371,10 @@ def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
     from langchain_core.messages import AIMessage
 
     class _FailProceduralStore(SqliteBM25Memory):
-        def add_if_absent(self, user_id, type, content, metadata=None, *, org_id=None):
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
             if type == PROCEDURAL:
                 raise RuntimeError("write failed")
-            return super().add_if_absent(user_id, type, content, metadata, org_id=org_id)
+            return super().add(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
         content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
@@ -402,11 +402,11 @@ def test_extraction_continues_after_a_failed_write():
             super().__init__(path)
             self._failed = False
 
-        def add_if_absent(self, user_id, type, content, metadata=None, *, org_id=None):
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
             if type == SEMANTIC and not self._failed:
                 self._failed = True
                 raise RuntimeError("first fact rejected")
-            return super().add_if_absent(user_id, type, content, metadata, org_id=org_id)
+            return super().add(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
         content='{"facts": ["fact one", "fact two"], "procedural": "a note"}',
@@ -645,6 +645,94 @@ def test_recall_candidate_query_avoids_temp_sort():
     ).fetchall()
     detail = " ".join(str(row[-1]) for row in plan).upper()
     assert "USE TEMP B-TREE" not in detail
+
+
+def test_dedup_existence_query_uses_index():
+    # Review r2 #1: the add_if_absent existence check seeks via idx_memories_dedup
+    # (both concrete and NULL org), not a full scan of the user's history.
+    store = _store()
+    for i in range(20):
+        store.add("alice", SEMANTIC, f"fact {i}", org_id=5)
+        store.add("alice", SEMANTIC, f"legacy fact {i}")  # NULL org
+    for org_clause, params in (
+        ("org_id = ?", ["alice", SEMANTIC, "fact 3", 5]),
+        ("org_id IS NULL", ["alice", SEMANTIC, "legacy fact 3"]),
+    ):
+        plan = store._conn.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM memories "
+            f"WHERE user_id = ? AND type = ? AND content = ? AND {org_clause}",
+            params,
+        ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan).upper()
+        assert "IDX_MEMORIES_DEDUP" in detail
+        assert "SCAN MEMORIES" not in detail  # a seek, not a full-table scan
+
+
+def test_extraction_respects_overridden_add_policy():
+    # Review r2 #2: a subclass that overrides add() (encryption/audit/…) but hasn't
+    # adopted add_if_absent must still intercept semantic/procedural writes.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _AuditStore(SqliteBM25Memory):
+        def __init__(self, path=":memory:"):
+            super().__init__(path)
+            self.seen = []
+
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+            self.seen.append(type)
+            return super().add(user_id, type, content, metadata, org_id=org_id)
+
+    store = _AuditStore()
+    canned = AIMessage(content='{"facts": ["a fact"], "procedural": "a note"}')
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q", "a")
+    assert store.seen == [EPISODIC, SEMANTIC, PROCEDURAL]  # add() saw all writes
+
+
+def test_oversized_config_is_clamped_no_overflow():
+    # Review r2 #3: a config beyond SQLite's int range clamps instead of raising
+    # OverflowError in recall/prune.
+    store = _store()
+    mgr = MemoryManager(store, recall_max_candidates=2**80, max_episodic_per_user=2**80)
+    assert mgr.recall_max_candidates == 2**63 - 1
+    assert mgr.max_episodic_per_user == 2**63 - 1
+
+    store.add("alice", EPISODIC, "the refund policy")
+    assert mgr.recall("alice", "refund").count == 1  # no OverflowError
+    assert mgr.record_run("alice", "q", "a").ok is True  # prune doesn't raise
+
+
+def test_add_if_absent_concurrent_threads_insert_once(tmp_path):
+    # Review r2 coverage gap: a synchronized two-thread barrier — SQLite's write
+    # serialization means exactly one INSERT ... WHERE NOT EXISTS wins.
+    import threading
+
+    from bestteam import SqliteBM25Memory
+
+    path = str(tmp_path / "m.db")
+    SqliteBM25Memory(path).close()  # create schema up front
+
+    barrier = threading.Barrier(2)
+    results: list = []
+
+    def worker():
+        s = SqliteBM25Memory(path)
+        barrier.wait()
+        results.append(s.add_if_absent("alice", SEMANTIC, "same fact"))
+        s.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len([r for r in results if r is not None]) == 1  # exactly one insert
+    s = SqliteBM25Memory(path)
+    assert len(s.all("alice")) == 1
+    s.close()
 
 
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():
