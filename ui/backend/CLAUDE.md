@@ -372,8 +372,12 @@ other orgs (moved user / reused username). A `get_memory_store` dependency opens
 per-request `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread
 and closes it after (`store.close()`); when memory is disabled the read endpoints
 return `enabled:false` and mutations return 409. The new SDK store primitives
-`user_ids()`/`delete_user()`/`delete_org()`/`close()` back these endpoints. Memory
-is org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
+`user_ids()`/`delete_user()`/`delete_org()`/`delete_legacy_for_users()`/`close()`
+back these endpoints. The operator `delete-user` CLI (`admin.py`) also calls
+`store.delete_user` to purge a deleted account's memory before releasing the
+username (fail closed on error), so a recreated same-named account can't recall it
+(SP-2 review #2). Memory is org-scoped (SP-2): `user_summaries()` and each record
+carry `org_id`, and the
 admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
 org — see `src/bestteam/core/CLAUDE.md`.
 

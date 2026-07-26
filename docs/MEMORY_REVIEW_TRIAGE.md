@@ -97,17 +97,21 @@ Suggested order under the current "memory is opt-in, default off" posture:
   idempotent under concurrent opens; #1 org erasure also purges current members'
   legacy NULL-org rows via a NULL-org-scoped primitive (`delete_legacy_for_users`,
   members resolved from the main DB) — never an unscoped `delete_user`, which
-  would destroy the same username's other-org history (2nd-round regression fix).
+  would destroy the same username's other-org history (2nd-round regression fix);
+  #2 the operator `delete-user` CLI now purges the user's memory (unscoped
+  `store.delete_user` — the whole principal is being removed) before releasing
+  the username, failing closed if the purge errors, so a recreated same-named
+  account can't recall the deleted account's memory.
 - SP-3 / SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project
 
-- **Account deletion doesn't purge memory** (SP-2 review #2, pre-existing): the
-  operator `delete-user` (`ui/backend/db/users.py::delete_user`, `admin.py`)
-  removes only the main-DB row. Because usernames are reusable, a new account
-  with the same `(org_id, username)` inherits the deleted account's memory. SP-2
-  narrowed this (cross-org reuse is now isolated) but same-org reuse still leaks.
-  The proper fix (purge scoped + legacy memory before releasing the username,
-  fail closed; consider an immutable user id as the memory principal) belongs
-  with the existing deletion-lifecycle work, not SP-2. Also covers orphaned
-  legacy rows whose username no longer exists (unattributable to an org).
+- **Immutable user-id as the memory principal** (from SP-2 review #2): memory is
+  keyed by `username`, a reusable identifier. `delete-user` now purges memory
+  before releasing the username (fail closed), closing the reuse leak, but a
+  durable immutable user id would be a more robust long-term principal than a
+  recyclable username. Larger change; belongs with deletion-lifecycle.
+- **Orphaned legacy NULL-org rows**: a pre-SP-2 row whose username no longer
+  exists in the `users` table can't be attributed to an org, so org erasure
+  can't reach it (and there's no account to trigger a per-user purge). A
+  sweep/repair tool for unattributable legacy rows belongs with deletion-lifecycle.

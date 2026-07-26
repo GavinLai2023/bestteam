@@ -168,6 +168,47 @@ def test_delete_unknown_user_errors(session_local):
         admin_cli.main(["delete-user", "ghost"])
 
 
+def test_delete_user_purges_memory(session_local, monkeypatch, tmp_path, capsys):
+    # Review r2 #2: account deletion clears the user's memory before releasing
+    # the username, so a recreated same-named account can't recall it.
+    from bestteam import SqliteBM25Memory
+    from bestteam.core.memory import EPISODIC
+
+    mem_path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "alice", "--platform"])
+
+    store = SqliteBM25Memory(str(mem_path))
+    store.add("alice", EPISODIC, "alice's secret", org_id=1)
+    store.close()
+
+    capsys.readouterr()
+    assert admin_cli.main(["delete-user", "alice"]) == 0
+    assert "Purged 1 memory record" in capsys.readouterr().out
+
+    store = SqliteBM25Memory(str(mem_path))
+    assert store.all("alice", org_id=None) == []
+    store.close()
+
+
+def test_delete_user_fails_closed_when_memory_purge_fails(session_local, monkeypatch):
+    # If the memory purge fails, the account must NOT be deleted (username stays
+    # claimed, so nothing leaks).
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+
+    def boom(username):
+        raise RuntimeError("store unreachable")
+
+    monkeypatch.setattr(admin_cli, "_purge_user_memory", boom)
+
+    with pytest.raises(SystemExit):
+        admin_cli.main(["delete-user", "op"])
+    with session_local() as db:
+        assert get_user_by_username(db, "op") is not None
+
+
 def test_move_user_to_platform(session_local, monkeypatch):
     admin_cli.main(["create-org", "acme"])
     _patch_password(monkeypatch)

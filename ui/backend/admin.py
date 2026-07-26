@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 from typing import Optional, Sequence
 
 from . import email_trigger
@@ -55,6 +56,27 @@ def _prompt_password(parser: argparse.ArgumentParser) -> str:
     if getpass.getpass("Repeat password: ") != password:
         parser.error("Passwords do not match")
     return password
+
+
+def _purge_user_memory(username: str) -> int:
+    """Delete all of `username`'s per-user memory, returning the rows removed.
+
+    Account deletion removes the whole principal, so the unscoped
+    `store.delete_user` (every row for the username, across all orgs + legacy) is
+    correct here -- unlike org erasure. Per-user memory is opt-in, so this is a
+    no-op (0) when `BESTTEAM_MEMORY_DB` is unset. Raises on failure so the caller
+    can fail closed and NOT release the username while its memory persists.
+    """
+    db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
+    if not db_path:
+        return 0
+    from bestteam import SqliteBM25Memory
+
+    store = SqliteBM25Memory(db_path)
+    try:
+        return store.delete_user(username)
+    finally:
+        store.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -155,11 +177,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"Created user '{args.username}' ({where}).")
             return 0
         if args.command == "delete-user":
+            # Fail closed: purge the user's memory BEFORE releasing the username,
+            # so a recreated same-named account can't recall the deleted
+            # principal's memory (review r2 #2). If the purge fails, abort without
+            # deleting the account -- the username stays claimed, so nothing leaks.
+            try:
+                purged = _purge_user_memory(args.username)
+            except Exception as exc:  # noqa: BLE001 -- fail closed on any purge error
+                parser.error(
+                    f"Aborted: could not purge memory for '{args.username}' "
+                    f"({exc}); user not deleted."
+                )
             try:
                 delete_user(db, args.username)
             except ValueError as exc:
                 parser.error(str(exc))
-            print(f"Deleted user '{args.username}'.")
+            suffix = f" Purged {purged} memory record(s)." if purged else ""
+            print(f"Deleted user '{args.username}'.{suffix}")
             return 0
         if args.command == "move-user":
             if args.platform:
