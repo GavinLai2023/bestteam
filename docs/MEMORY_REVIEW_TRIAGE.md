@@ -53,7 +53,7 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 | **M-02** | Recall failure fails the run (not best-effort, unlike writes) | Correctness | **P0** | XS | **SP-1 — Implemented** |
 | **M-03** | Run-path memory store connection is never explicitly closed — a reused worker thread opens a fresh SQLite connection per run and relies on GC to release it | Resource leak | **P0** | S | **SP-1 — Implemented** |
 | **M-11** | `type` is unconstrained in both `Memory.add()` and the SQLite table; only a convention (`episodic`/`semantic`/`procedural`) | Data integrity | P1 | XS | **SP-1 — Implemented (soft: rejects non-string/empty; enum stays open)** |
-| **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2** |
+| **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2 — Implemented** (org_id column; org-bound recall/record; `delete_org` erasure) |
 | **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3** |
 | **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3** |
 | **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3** |
@@ -86,6 +86,9 @@ Suggested order under the current "memory is opt-in, default off" posture:
 
 ## Status
 
-- **SP-1** — Implemented (this session): M-02 recall best-effort, M-03 run-path
-  store closed, M-11 soft type validation. Branch `fix/memory-hardening`.
-- SP-2 / SP-3 / SP-4 — registered, not started.
+- **SP-1** — Implemented: M-02 recall best-effort, M-03 run-path store closed,
+  M-11 soft type validation. Merged (PR #30).
+- **SP-2** — Implemented: M-01 org dimension — `org_id` column + idempotent
+  in-place migration; org-bound recall/record; `delete_org` compliance erasure;
+  admin surface exposes `org_id`. Branch `feat/memory-org-scope`.
+- SP-3 / SP-4 — registered, not started.

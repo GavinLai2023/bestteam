@@ -107,3 +107,13 @@ def clear_user_memory(
 ) -> dict:
     removed = _require_store(store).delete_user(user_id)
     return {"removed": removed}
+
+
+@router.delete("/orgs/{org_id}")
+def clear_org_memory(
+    org_id: int,
+    store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
+) -> dict:
+    """Erase all memory belonging to one organization (SP-2 compliance erasure)."""
+    removed = _require_store(store).delete_org(org_id)
+    return {"removed": removed}

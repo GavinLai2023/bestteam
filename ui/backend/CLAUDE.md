@@ -363,11 +363,15 @@ threads the JWT `user.username` through as `user_id` (the wizard's
 search via `search(top_k=limit, max_candidates=_MAX_SEARCH_SCAN)` so both the
 response and the scan work are bounded over a large store),
 `DELETE /records/{memory_id}`, `DELETE /users/{user_id}` (clear a
-user — `store.delete_user`). A `get_memory_store` dependency opens a per-request
-`SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread and closes
-it after (`store.close()`); when memory is disabled the read endpoints return
-`enabled:false` and mutations return 409. The new SDK store primitives
-`user_ids()`/`delete_user()`/`close()` back these endpoints.
+user — `store.delete_user`), and `DELETE /orgs/{org_id}` (org-level compliance
+erasure — `store.delete_org`, SP-2). A `get_memory_store` dependency opens a
+per-request `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread
+and closes it after (`store.close()`); when memory is disabled the read endpoints
+return `enabled:false` and mutations return 409. The new SDK store primitives
+`user_ids()`/`delete_user()`/`delete_org()`/`close()` back these endpoints. Memory
+is org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
+admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
+org — see `src/bestteam/core/CLAUDE.md`.
 
 ## Known limitation: general-purpose cache
 

@@ -201,6 +201,15 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   per-user quota, or automated cleanup — records accumulate until an admin
   clears them. `record_run` caps each field at `_MAX_RECORD_CHARS` (CR-022) so
   one run can't persist megabytes, but total growth is unbounded.
+- **Memory is org-scoped** (SP-2, M-01). Records carry an `org_id`; the run
+  path binds the run's org into `MemoryManager`, so recall/record only ever
+  touch that org's memory (closing the username-reuse isolation gap). In the
+  store, a **concrete** `org_id` filters `search`/`all`; **`org_id=None` means
+  "across orgs"** — used only by the admin surface. Rows written before SP-2
+  have `org_id NULL` (no cross-DB backfill: the username→org map lives in the
+  main DB, unreachable from the store's own connection); they aren't recalled by
+  an org run but stay visible/deletable via the admin API. `delete_org(org_id)`
+  (and `DELETE /api/memory/orgs/{org_id}`) is the org-level compliance erasure.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

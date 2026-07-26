@@ -20,9 +20,9 @@ def memory_db(tmp_path, monkeypatch):
     path = tmp_path / "mem.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
     store = SqliteBM25Memory(str(path))
-    store.add("alice", EPISODIC, "user asked about refunds")
-    store.add("alice", SEMANTIC, "prefers concise answers")
-    store.add("bob", EPISODIC, "user asked about shipping")
+    store.add("alice", EPISODIC, "user asked about refunds", org_id=5)
+    store.add("alice", SEMANTIC, "prefers concise answers", org_id=5)
+    store.add("bob", EPISODIC, "user asked about shipping", org_id=6)
     store.close()
     return path
 
@@ -117,6 +117,31 @@ def test_clear_user_memory(admin_client, memory_db):
     assert admin_client.get("/api/memory/users/alice/records").json()["records"] == []
     # bob's memory is untouched.
     assert admin_client.get("/api/memory/users/bob/records").json()["records"]
+
+
+def test_list_users_and_records_include_org_id(admin_client, memory_db):
+    # SP-2: the admin surface exposes each user's org and each record's org_id.
+    by_user = {u["user_id"]: u for u in admin_client.get("/api/memory/users").json()["users"]}
+    assert by_user["alice"]["org_id"] == 5
+    assert by_user["bob"]["org_id"] == 6
+
+    recs = admin_client.get("/api/memory/users/alice/records").json()["records"]
+    assert all(r["org_id"] == 5 for r in recs)
+
+
+def test_clear_org_memory_removes_only_that_org(admin_client, memory_db):
+    # SP-2 compliance erasure: delete all of org 5's memory, leaving org 6 intact.
+    resp = admin_client.delete("/api/memory/orgs/5")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2
+
+    assert admin_client.get("/api/memory/users/alice/records").json()["records"] == []
+    assert admin_client.get("/api/memory/users/bob/records").json()["records"]
+
+
+def test_clear_org_memory_409_when_disabled(admin_client, monkeypatch):
+    monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
+    assert admin_client.delete("/api/memory/orgs/5").status_code == 409
 
 
 def test_requires_admin(admin_client, memory_db):
