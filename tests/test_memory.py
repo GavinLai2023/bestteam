@@ -127,6 +127,7 @@ def test_user_summaries_counts_by_type():
     summaries = {s["user_id"]: s for s in store.user_summaries()}
     assert summaries["alice"] == {
         "user_id": "alice",
+        "org_id": None,
         "episodic": 2,
         "semantic": 1,
         "procedural": 0,
@@ -155,9 +156,9 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_all = store.all
 
-    def spy_all(user_id, types=None, limit=None):
+    def spy_all(user_id, types=None, limit=None, *, org_id=None):
         captured["limit"] = limit
-        return real_all(user_id, types, limit)
+        return real_all(user_id, types, limit, org_id=org_id)
 
     monkeypatch.setattr(store, "all", spy_all)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
@@ -350,3 +351,85 @@ def test_add_accepts_known_and_custom_string_types():
     # (the enum is deliberately open for third-party stores).
     assert store.add("alice", EPISODIC, "x").type == EPISODIC
     assert store.add("alice", "custom", "y").type == "custom"
+
+
+# --- SP-2: org scoping ------------------------------------------------------
+
+
+def test_add_persists_org_id():
+    store = _store()
+    rec = store.add("alice", EPISODIC, "content", org_id=5)
+    assert rec.org_id == 5
+    assert store.all("alice", org_id=5)[0].org_id == 5
+
+
+def test_all_scopes_by_org():
+    store = _store()
+    store.add("alice", EPISODIC, "org five note", org_id=5)
+    store.add("alice", EPISODIC, "org six note", org_id=6)
+
+    assert [r.content for r in store.all("alice", org_id=5)] == ["org five note"]
+    assert [r.content for r in store.all("alice", org_id=6)] == ["org six note"]
+    # org_id=None (admin) sees both.
+    assert len(store.all("alice", org_id=None)) == 2
+
+
+def test_search_scopes_by_org():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy for org five", org_id=5)
+    store.add("alice", EPISODIC, "the refund policy for org six", org_id=6)
+
+    hits5 = store.search("alice", "refund policy", org_id=5)
+    assert len(hits5) == 1 and hits5[0].org_id == 5
+    # Admin (org_id=None) searches across orgs.
+    assert len(store.search("alice", "refund policy", org_id=None)) == 2
+
+
+def test_user_summaries_includes_org_id():
+    store = _store()
+    store.add("alice", EPISODIC, "x", org_id=5)
+    store.add("bob", SEMANTIC, "y", org_id=6)
+
+    summaries = {s["user_id"]: s for s in store.user_summaries()}
+    assert summaries["alice"]["org_id"] == 5
+    assert summaries["bob"]["org_id"] == 6
+
+
+def test_delete_org_removes_only_that_org():
+    store = _store()
+    store.add("alice", EPISODIC, "org five", org_id=5)
+    store.add("bob", EPISODIC, "org six", org_id=6)
+
+    removed = store.delete_org(5)
+    assert removed == 1
+    assert store.all("alice", org_id=None) == []
+    assert len(store.all("bob", org_id=None)) == 1
+
+
+def test_opens_pre_org_db_and_migrates(tmp_path):
+    # A DB created before org scoping (no org_id column) must gain the column
+    # in place, keep its existing rows (org_id NULL), and work afterward.
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'episodic', 'legacy note', '{}', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path)
+    # Legacy row survives with org_id NULL and is visible to the admin (org_id=None).
+    legacy = store.all("alice", org_id=None)
+    assert len(legacy) == 1
+    assert legacy[0].org_id is None
+    # New org-scoped writes work and are isolated from the legacy NULL row.
+    store.add("alice", EPISODIC, "new org note", org_id=5)
+    assert [r.content for r in store.all("alice", org_id=5)] == ["new org note"]
+    store.close()

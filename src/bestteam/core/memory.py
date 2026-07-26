@@ -66,6 +66,9 @@ class MemoryRecord:
     content: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+    # Organization this record belongs to (multi-tenancy, SP-2). None only for
+    # rows written before org scoping, or by callers that don't pass one.
+    org_id: Optional[int] = None
 
 
 class Memory(ABC):
@@ -78,15 +81,32 @@ class Memory(ABC):
 
     @abstractmethod
     def add(
-        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        user_id: str,
+        type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> MemoryRecord:
-        """Persist one record for `user_id` and return it (with id/timestamp filled in)."""
+        """Persist one record for `user_id` and return it (with id/timestamp filled in).
+
+        `org_id` scopes the record to an organization (SP-2 multi-tenancy)."""
 
     @abstractmethod
     def search(
-        self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
+        self,
+        user_id: str,
+        query: str,
+        types: Optional[Sequence[str]] = None,
+        top_k: int = 5,
+        *,
+        org_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
-        """Return up to `top_k` of `user_id`'s records most relevant to `query`."""
+        """Return up to `top_k` of `user_id`'s records most relevant to `query`.
+
+        When `org_id` is a concrete id, only that org's records are searched;
+        `None` searches across orgs (the admin surface)."""
 
     @abstractmethod
     def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
@@ -138,15 +158,30 @@ class SqliteBM25Memory(Memory):
                 type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                org_id INTEGER
             )
             """
         )
+        # Idempotent in-place migration (this store has no Alembic): a DB created
+        # before org scoping (SP-2) lacks org_id -- add it, leaving old rows NULL.
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        if "org_id" not in cols:
+            self._conn.execute("ALTER TABLE memories ADD COLUMN org_id INTEGER")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_org_user ON memories(org_id, user_id)"
+        )
         self._conn.commit()
 
     def add(
-        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        user_id: str,
+        type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> MemoryRecord:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -160,10 +195,11 @@ class SqliteBM25Memory(Memory):
             content=content,
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc).isoformat(),
+            org_id=org_id,
         )
         self._conn.execute(
-            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at, org_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.user_id,
@@ -171,6 +207,7 @@ class SqliteBM25Memory(Memory):
                 record.content,
                 json.dumps(record.metadata),
                 record.created_at,
+                record.org_id,
             ),
         )
         self._conn.commit()
@@ -191,15 +228,24 @@ class SqliteBM25Memory(Memory):
                     content=row["content"],
                     metadata=metadata,
                     created_at=row["created_at"],
+                    org_id=row["org_id"],
                 )
             )
         return records
 
     def all(
-        self, user_id: str, types: Optional[Sequence[str]] = None, limit: Optional[int] = None
+        self,
+        user_id: str,
+        types: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
+        if org_id is not None:
+            sql += " AND org_id = ?"
+            params.append(org_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -218,6 +264,8 @@ class SqliteBM25Memory(Memory):
         types: Optional[Sequence[str]] = None,
         top_k: int = 5,
         max_candidates: Optional[int] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -227,7 +275,7 @@ class SqliteBM25Memory(Memory):
         # scan to the most-recent N records -- a bound on the DB/CPU/memory work
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
-        candidates = self.all(user_id, types, limit=max_candidates)
+        candidates = self.all(user_id, types, limit=max_candidates, org_id=org_id)
         if not candidates:
             return []
 
@@ -265,18 +313,27 @@ class SqliteBM25Memory(Memory):
     def user_summaries(self) -> List[Dict[str, Any]]:
         """Per-user record counts by type, via one aggregate query.
 
-        Returns ``[{"user_id", "episodic", "semantic", "procedural", "total"}]``
-        without loading record content -- lets the admin API list users cheaply
-        instead of scanning every record per user.
+        Returns ``[{"user_id", "org_id", "episodic", "semantic", "procedural",
+        "total"}]`` without loading record content -- lets the admin API list
+        users (and the org each belongs to) cheaply instead of scanning every
+        record per user.
         """
         rows = self._conn.execute(
-            "SELECT user_id, type, COUNT(*) AS n FROM memories GROUP BY user_id, type"
+            "SELECT org_id, user_id, type, COUNT(*) AS n "
+            "FROM memories GROUP BY org_id, user_id, type"
         ).fetchall()
         summaries: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             entry = summaries.setdefault(
                 row["user_id"],
-                {"user_id": row["user_id"], EPISODIC: 0, SEMANTIC: 0, PROCEDURAL: 0, "total": 0},
+                {
+                    "user_id": row["user_id"],
+                    "org_id": row["org_id"],
+                    EPISODIC: 0,
+                    SEMANTIC: 0,
+                    PROCEDURAL: 0,
+                    "total": 0,
+                },
             )
             if row["type"] in (EPISODIC, SEMANTIC, PROCEDURAL):
                 entry[row["type"]] = row["n"]
@@ -285,6 +342,16 @@ class SqliteBM25Memory(Memory):
 
     def delete_user(self, user_id: str) -> int:
         cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        self._conn.commit()
+        return cursor.rowcount
+
+    def delete_org(self, org_id: int) -> int:
+        """Delete every record belonging to `org_id` (org-level erasure, SP-2).
+
+        The compliance primitive: 'delete all of this organization's memory'.
+        Returns the number of rows removed.
+        """
+        cursor = self._conn.execute("DELETE FROM memories WHERE org_id = ?", (org_id,))
         self._conn.commit()
         return cursor.rowcount
 
