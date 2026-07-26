@@ -169,5 +169,11 @@ def run_in_background(
             db.close()
         if memory is not None:
             # Built per run on this worker thread; close its SQLite connection
-            # now instead of leaving it to GC (M-03).
-            memory.close()
+            # now instead of leaving it to GC (M-03). Best-effort like every
+            # other memory operation: a custom store whose close() raises must
+            # not escape the worker as an unobserved Future exception (the run
+            # already completed and published its terminal event).
+            try:
+                memory.close()
+            except Exception:  # noqa: BLE001 -- memory must never break a run
+                _logger.warning("Closing per-run memory store failed", exc_info=True)

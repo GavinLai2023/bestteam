@@ -117,6 +117,28 @@ def test_run_in_background_closes_memory_store_on_failure(monkeypatch):
     assert any(e["type"] == "run_failed" for e in events)
 
 
+class _CloseRaisesManager(MemoryManager):
+    """MemoryManager whose close() raises (simulates a flaky custom store)."""
+
+    def close(self):
+        raise RuntimeError("close failed")
+
+
+def test_run_in_background_survives_memory_close_failure(monkeypatch):
+    # A store whose close() raises must not escape the worker; teardown is
+    # best-effort and the terminal run state is preserved.
+    spy = _CloseRaisesManager(SqliteBM25Memory(":memory:"))
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+
+    run = registry.create("wf", "hello")
+    # Returns normally despite close() raising inside the finally.
+    run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
+
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_completed" for e in events)
+    assert not any(e["type"] == "run_failed" for e in events)
+
+
 def test_run_in_background_no_memory_when_env_unset(monkeypatch):
     monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
 
