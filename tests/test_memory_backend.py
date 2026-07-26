@@ -73,6 +73,25 @@ def test_run_in_background_records_episodic_memory_for_user(monkeypatch, tmp_pat
     assert "hello there" in records[0].content
 
 
+def test_run_in_background_records_with_run_org_id(monkeypatch, tmp_path):
+    # SP-2: the episodic record carries the run's org_id, and a different org
+    # recalls nothing of it.
+    db_path = tmp_path / "m.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
+    monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
+
+    run = registry.create("wf", "hello there")
+    run_in_background(run.id, _workflow(), "hello there", engine=None, user_id="alice", org_id=5)
+
+    store = SqliteBM25Memory(str(db_path))
+    records = store.all("alice", org_id=None)
+    assert len(records) == 1
+    assert records[0].org_id == 5
+    # Another org sees nothing of alice's org-5 memory.
+    assert store.all("alice", org_id=6) == []
+    store.close()
+
+
 def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
@@ -89,7 +108,7 @@ def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
 def test_run_in_background_closes_memory_store_on_success(monkeypatch):
     # M-03: the per-run memory store is closed in run_in_background's finally.
     spy = _CloseSpyManager(SqliteBM25Memory(":memory:"))
-    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: spy)
 
     run = registry.create("wf", "hello")
     run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
@@ -100,7 +119,7 @@ def test_run_in_background_closes_memory_store_on_success(monkeypatch):
 def test_run_in_background_closes_memory_store_on_failure(monkeypatch):
     # The close must run even when the worker path raises (it's in finally).
     spy = _CloseSpyManager(SqliteBM25Memory(":memory:"))
-    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: spy)
 
     workflow = _workflow()
 
@@ -128,7 +147,7 @@ def test_run_in_background_survives_memory_close_failure(monkeypatch):
     # A store whose close() raises must not escape the worker; teardown is
     # best-effort and the terminal run state is preserved.
     spy = _CloseRaisesManager(SqliteBM25Memory(":memory:"))
-    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda: spy)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: spy)
 
     run = registry.create("wf", "hello")
     # Returns normally despite close() raising inside the finally.

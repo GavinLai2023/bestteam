@@ -388,10 +388,19 @@ class MemoryManager:
     only the $0 episodic record is written.
     """
 
-    def __init__(self, store: Memory, extraction_model: Any = None, top_k: int = 5) -> None:
+    def __init__(
+        self,
+        store: Memory,
+        extraction_model: Any = None,
+        top_k: int = 5,
+        org_id: Optional[int] = None,
+    ) -> None:
         self.store = store
         self.extraction_model = extraction_model
         self.top_k = top_k
+        # The organization this run belongs to (SP-2). Every recall/record is
+        # scoped to it, so a run only ever sees and writes its own org's memory.
+        self.org_id = org_id
 
     def close(self) -> None:
         """Release the underlying store's resources, if it holds any.
@@ -413,7 +422,7 @@ class MemoryManager:
         """
         if not user_id:
             return ""
-        hits = self.store.search(user_id, query, top_k=self.top_k)
+        hits = self.store.search(user_id, query, top_k=self.top_k, org_id=self.org_id)
         if not hits:
             return ""
         # Recalled content is untrusted: an earlier tool result or model output
@@ -447,6 +456,7 @@ class MemoryManager:
             user_id,
             EPISODIC,
             f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
+            org_id=self.org_id,
         )
 
         if self.extraction_model is None:
@@ -478,10 +488,10 @@ class MemoryManager:
 
         for fact in parsed.get("facts", []):
             if isinstance(fact, str) and fact.strip():
-                self.store.add(user_id, SEMANTIC, fact.strip())
+                self.store.add(user_id, SEMANTIC, fact.strip(), org_id=self.org_id)
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
-            self.store.add(user_id, PROCEDURAL, procedural.strip())
+            self.store.add(user_id, PROCEDURAL, procedural.strip(), org_id=self.org_id)
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:
