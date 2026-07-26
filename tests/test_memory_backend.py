@@ -182,6 +182,45 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
     assert not any(e["type"] == "run_failed" for e in events)
 
 
+def test_total_write_failure_still_meters_extraction(monkeypatch):
+    # Review r6 #1: a paid extraction call must be billed even when EVERY memory
+    # write fails -- exactly one memory:extraction usage row.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from bestteam import MemoryManager
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    class _FailAddStore(SqliteBM25Memory):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    extraction = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"facts": ["x"], "procedural": "y"}',
+                usage_metadata={"input_tokens": 17, "output_tokens": 4, "total_tokens": 21},
+            )
+        ]
+    )
+    mgr = MemoryManager(_FailAddStore(":memory:"), extraction_model=extraction, org_id=5)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
+
+    run = registry.create("wf", "hi")
+    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+
+    with Session() as db:
+        mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:extraction"]
+    assert len(mem_rows) == 1  # billed despite zero successful writes
+    assert mem_rows[0].input_tokens == 17 and mem_rows[0].output_tokens == 4
+    assert mem_rows[0].org_id == 5
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_completed" for e in events)
+
+
 def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))

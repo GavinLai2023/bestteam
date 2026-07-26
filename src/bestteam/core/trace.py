@@ -16,7 +16,8 @@ class TraceEvent:
     active, SP-3) "memory_recalled" (`data` = count recalled, 0 included),
     "memory_recorded" (`data` = record types written; `usage` = the extraction
     call's token usage, if any), and "memory_failed" (`data` = "recall" | "record",
-    sanitized — no exception detail). The memory events are emitted before
+    sanitized — no exception detail; `usage` carries the extraction spend when every
+    write failed, so it's still billed). The memory events are emitted before
     `run_completed` so a consumer that stops on the terminal event still sees them.
 
     `usage` holds zero or more per-model-call token usage entries (each

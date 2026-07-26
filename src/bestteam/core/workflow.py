@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 def _safe_recall(
     memory: "Optional[MemoryManager]", user_id: Optional[str], input: str
-) -> "tuple[RecallResult, bool]":
-    """Recall memory best-effort, returning ``(result, ok)`` where ``ok`` is False
+) -> "RecallResult":
+    """Recall memory best-effort, returning a `RecallResult` whose ``ok`` is False
     only when recall raised. Recall is a read on an optional, opt-in subsystem;
     like record_run (the write), it must never break a run, so any failure
     degrades to an empty result rather than propagating as run_failed.
@@ -30,16 +30,16 @@ def _safe_recall(
     from .memory import MemoryManager, RecallResult
 
     if not memory:
-        return RecallResult(preamble="", count=0), True
+        return RecallResult(preamble="", count=0)
     try:
         overridden = getattr(type(memory), "recall_preamble", None)
         if overridden is not None and overridden is not MemoryManager.recall_preamble:
             preamble = memory.recall_preamble(user_id, input)
-            return RecallResult(preamble=preamble, count=1 if preamble else 0), True
-        return memory.recall(user_id, input), True
+            return RecallResult(preamble=preamble, count=1 if preamble else 0)
+        return memory.recall(user_id, input)
     except Exception:  # noqa: BLE001 -- memory must never break a run
         _logger.exception("Memory recall failed; run proceeds without recalled memory")
-        return RecallResult(preamble="", count=0), False
+        return RecallResult(preamble="", count=0, ok=False)
 
 
 @dataclass
@@ -53,10 +53,13 @@ class WorkflowResult:
     output: str
     steps: List[dict] = field(default_factory=list)
     raw: Any = None
-    # Per-user memory recording outcome for this run (SP-3), when memory was
-    # active; None otherwise. Gives `run()` callers the same instrumentation
-    # `stream()` exposes via `memory_recorded` events (review r4 #3).
+    # Per-user memory instrumentation for this run (SP-3), when memory was active;
+    # both None when memory was disabled. Give `run()` callers the same visibility
+    # `stream()` exposes via events: `memory` is the recording outcome
+    # (`ok=False` = a recording failure), `recall` the recall outcome
+    # (`count`=records drawn, `ok=False` = a recall failure) — reviews r4 #3 / r6 #3.
     memory: "Optional[MemoryOutcome]" = None
+    recall: "Optional[RecallResult]" = None
 
 
 class Workflow:
@@ -101,13 +104,14 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        recall_result, _ok = _safe_recall(memory, user_id, input)
+        recall_result = _safe_recall(memory, user_id, input)
         result = self._adapter.execute(self._compiled, input, memory_preamble=recall_result.preamble)
         if memory:
-            # Best-effort, exactly like stream(): the workflow has already
-            # completed, so a memory-recording failure must not raise here and
-            # make a completed, side-effecting run look failed to the caller. The
-            # outcome is surfaced on the result for instrumentation parity (#3).
+            # Surface recall + recording instrumentation for parity with stream()
+            # (reviews r4 #3 / r6 #3). Both stay None when memory is disabled.
+            result.recall = recall_result
+            # Best-effort: a recording failure must not raise here and make a
+            # completed, side-effecting run look failed to the caller.
             try:
                 result.memory = memory.record_run(user_id, input, result.output)
             except Exception:  # noqa: BLE001 -- memory must never break a run
@@ -140,7 +144,7 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        recall_result, recall_ok = _safe_recall(memory, user_id, input)
+        recall_result = _safe_recall(memory, user_id, input)
 
         yield TraceEvent(type="run_started", workflow=self.name, data=input)
 
@@ -148,7 +152,7 @@ class Workflow:
         # attempt — a count (0 when nothing matched, distinguishing it from memory
         # being disabled) or a sanitized failure marker.
         if memory:
-            if recall_ok:
+            if recall_result.ok:
                 yield TraceEvent(type="memory_recalled", workflow=self.name, data=recall_result.count)
             else:
                 yield TraceEvent(type="memory_failed", workflow=self.name, data="recall")
@@ -183,20 +187,26 @@ class Workflow:
                 # A legacy manager may return None (recorded successfully, no
                 # structured outcome) -- that is NOT a failure (review r5 #3).
                 if isinstance(outcome, MemoryOutcome):
+                    # The extraction call's usage must be metered even if every
+                    # write failed (the paid call still happened, M-04 / review
+                    # r6 #1). Carry it on whichever event is emitted, exactly once.
+                    usage = [outcome.extraction_usage] if outcome.extraction_usage else []
                     if outcome.recorded:
                         # Observability (M-05) + metering (M-04): report what was
-                        # written and carry the extraction call's token usage so
-                        # the backend can persist a usage_records row for it.
+                        # written and carry the extraction usage for the backend.
                         yield TraceEvent(
                             type="memory_recorded",
                             workflow=self.name,
                             data=", ".join(outcome.recorded),
-                            usage=[outcome.extraction_usage] if outcome.extraction_usage else [],
+                            usage=usage,
                         )
+                        usage = []  # already carried by memory_recorded
                     if not outcome.ok:
-                        # A partial/total write failure is observable alongside
-                        # any writes that did succeed (review r5 #2).
-                        yield TraceEvent(type="memory_failed", workflow=self.name, data="record")
+                        # A partial/total write failure is observable; when no
+                        # write succeeded it carries the (still-billable) usage.
+                        yield TraceEvent(
+                            type="memory_failed", workflow=self.name, data="record", usage=usage
+                        )
 
         yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
 

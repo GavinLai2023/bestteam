@@ -344,10 +344,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   its own `Session` and calls `db/usage.py::record_usage()` for each `usage`
   entry on every `agent_completed` event, computing `cost_estimate` from
   `model_catalog` when the model spec matches a catalog entry (`None` otherwise).
-  It also meters the per-user memory extraction call: a `memory_recorded` event
-  (SP-3) carries the extraction LLM's `usage`, recorded as a `usage_records` row
-  with `agent="memory:extraction"` (that call bypasses the adapter's usage path,
-  so it arrives on the memory event instead). All usage persistence goes through
+  It also meters the per-user memory extraction call: a `memory_recorded` (or,
+  when every write failed, `memory_failed`) event (SP-3) carries the extraction
+  LLM's `usage`, recorded as a `usage_records` row with `agent="memory:extraction"`
+  (that call bypasses the adapter's usage path, so it arrives on the memory event
+  instead). The SDK attaches the usage to exactly one event, so it's billed once
+  even on total write failure. All usage persistence goes through
   `_safe_record_usage`, which isolates a `usage_records` write failure (logs +
   rolls back) so metering can never flip a successful run to `run_failed`.
 

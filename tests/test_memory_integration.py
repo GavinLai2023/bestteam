@@ -322,6 +322,31 @@ def test_run_surfaces_recording_failure_distinct_from_disabled():
     assert result_no_mem.memory is None  # disabled
 
 
+def test_run_surfaces_recall_outcome():
+    # Review r6 #3: run() exposes recall count/status, distinguishing disabled /
+    # zero-match / failure.
+    store, manager = _seeded_manager()  # one seeded record for "u"
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+    assert result.recall is not None
+    assert result.recall.count == 1 and result.recall.ok is True
+
+    assert workflow.run("x").recall is None  # disabled -> None
+
+
+def test_run_recall_failure_is_distinguishable():
+    manager = MemoryManager(_FailingSearchMemory(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("q", user_id="u", memory=manager)
+    assert result.recall is not None and result.recall.ok is False  # failure, not disabled
+
+
 def test_stream_without_memory_emits_no_memory_events():
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])
     agent = Agent(name="a", role="r", goal="g", model=model)

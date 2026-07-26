@@ -115,14 +115,16 @@ Suggested order under the current "memory is opt-in, default off" posture:
   Branch `feat/memory-instrumentation`. Design:
   `docs/superpowers/specs/2026-07-26-memory-instrumentation-design.md`. Review
   rounds hardened it: memory events emitted before the terminal `run_completed`;
-  usage capture survives partial-write failure; each extracted write isolated
-  (`MemoryOutcome.ok`); usage persistence isolated from run status
-  (`_safe_record_usage`); legacy `record_run() -> None` tolerated; custom
-  `recall_preamble` honored. **Pushed back (not memory-specific):** bounding LLM
-  latency / a hung extraction blocking a run — the extraction is one synchronous
-  LLM call like the (equally unbounded) agent calls; a global model-invocation
-  timeout is the right place, out of SP-3 scope. A durable usage outbox/retry is
-  disproportionate for opt-in memory.
+  extraction usage billed even on total write failure (rides exactly one event);
+  each extracted write isolated (`MemoryOutcome.ok`); usage persistence isolated
+  from run status (`_safe_record_usage`); the extraction model call bounded by
+  `BESTTEAM_MEMORY_EXTRACTION_TIMEOUT` (default 30s; runs on a helper thread, store
+  writes stay on the caller thread, abandoned on timeout so an optional hung
+  extraction can't wedge a finished run); `run()` reaches parity via
+  `WorkflowResult.recall`/`.memory`; legacy `record_run() -> None` tolerated;
+  custom `recall_preamble` honored. **Still out of scope:** a durable usage
+  outbox/retry (disproportionate for opt-in memory) and a *global* model-invocation
+  timeout for agent calls (a separate, framework-wide concern).
 - SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project

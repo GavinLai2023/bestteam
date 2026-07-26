@@ -164,9 +164,11 @@ def run_in_background(
                         output_tokens=entry.get("output_tokens", 0),
                         org_id=org_id,
                     )
-            if db is not None and event.type == "memory_recorded":
+            if db is not None and event.type in ("memory_recorded", "memory_failed"):
                 # Meter the memory extraction LLM call (M-04); it bypasses the
-                # adapter's usage path, so it arrives here on the record event.
+                # adapter's usage path, so it arrives on the memory event. The SDK
+                # attaches the usage to exactly one event (recorded, or failed when
+                # every write failed), so this never double-counts (review r6 #1).
                 for entry in event.usage:
                     _safe_record_usage(
                         db,

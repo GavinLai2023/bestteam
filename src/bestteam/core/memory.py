@@ -23,8 +23,10 @@ model is configured, the semantic/procedural records from a single LLM call.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from abc import ABC, abstractmethod
@@ -33,6 +35,21 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..exceptions import ConfigurationError
+
+# Upper bound (seconds) on the optional extraction model call, so a slow/hung
+# provider can't wedge an otherwise-completed run (the extraction runs after the
+# business agents, before the terminal event). Override with
+# `BESTTEAM_MEMORY_EXTRACTION_TIMEOUT`; on timeout the extraction is abandoned and
+# the run completes normally (SP-3 review r6 #2).
+_DEFAULT_EXTRACTION_TIMEOUT = 30.0
+
+
+def _extraction_timeout() -> float:
+    raw = os.environ.get("BESTTEAM_MEMORY_EXTRACTION_TIMEOUT", "").strip()
+    try:
+        return float(raw) if raw else _DEFAULT_EXTRACTION_TIMEOUT
+    except ValueError:
+        return _DEFAULT_EXTRACTION_TIMEOUT
 
 _logger = logging.getLogger(__name__)
 
@@ -424,10 +441,12 @@ _EXTRACTION_SYSTEM_PROMPT = (
 
 @dataclass
 class RecallResult:
-    """Outcome of a recall: the system-prompt block and how many records it drew."""
+    """Outcome of a recall: the system-prompt block, how many records it drew, and
+    whether the recall succeeded (``ok`` is False only when recall raised)."""
 
     preamble: str
     count: int
+    ok: bool = True
 
 
 @dataclass
@@ -608,12 +627,26 @@ class MemoryManager:
         from ..adapters.langgraph_adapter import _resolve_model
 
         model = _resolve_model(self.extraction_model)
-        response = model.invoke(
-            [
-                SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
-                HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
-            ]
-        )
+        messages = [
+            SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
+            HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
+        ]
+        # Bound ONLY the model call (external I/O that can hang), running it on a
+        # helper thread; the store writes below stay on this thread so the store's
+        # thread-local SQLite connection is never touched cross-thread. On timeout
+        # the extraction is abandoned (the hung call is orphaned, not the store)
+        # and the run still completes (review r6 #2).
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            response = executor.submit(model.invoke, messages).result(timeout=_extraction_timeout())
+        except concurrent.futures.TimeoutError:
+            _logger.warning(
+                "Memory extraction timed out for '%s' after %.0fs; abandoning it",
+                user_id, _extraction_timeout(),
+            )
+            return [], None, False
+        finally:
+            executor.shutdown(wait=False)
         # Capture usage IMMEDIATELY after the call: the tokens were consumed
         # regardless of whether parsing/storage later fails (review r4 #1).
         usage = self._usage_entry(response)

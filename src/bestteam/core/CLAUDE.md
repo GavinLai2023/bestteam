@@ -183,19 +183,23 @@ on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
 **before** `run_completed` (the final event), so a consumer that stops on the
 terminal event still sees them and the run can't be evicted first; recording stays
 best-effort (a failure yields `memory_failed`, never `run_failed`). `Workflow.run`
-surfaces the same `MemoryOutcome` on `WorkflowResult.memory` (`None` = disabled;
-`ok=False` = a recording failure — distinguishable). Provenance is stamped into
-each record's `metadata={run_id, workflow_version_id}` (M-06), bound by
-`runtime._make_memory`. Extraction usage is captured immediately after the model
-call, so a failure still bills the spend; each extracted write is isolated
-(`MemoryOutcome.ok=False` on any partial/total failure, surfaced as a
-`memory_failed` event) so one bad write can't skip the rest. On the backend,
-`runtime._make_memory` meters via `_safe_record_usage`, which isolates a
-`usage_records` write failure from run status — metering can never flip a
-successful run to `run_failed`. Note: the extraction call is one synchronous LLM
-call on the run's worker thread, exactly like the agent calls (all unbounded — a
-hung provider hangs the run regardless); bounding LLM latency is a global concern,
-not memory-specific. See `docs/MEMORY_REVIEW_TRIAGE.md`.
+surfaces the same instrumentation on `WorkflowResult` for parity with `stream()`:
+`.memory` (recording `MemoryOutcome`; `None`=disabled, `ok=False`=recording
+failure) and `.recall` (`RecallResult`; `None`=disabled, `count`=records drawn,
+`ok=False`=recall failure). Provenance is stamped into each record's
+`metadata={run_id, workflow_version_id}` (M-06), bound by `runtime._make_memory`.
+Extraction usage is captured immediately after the model call, so a failure still
+bills the spend; the usage rides exactly one emitted event (`memory_recorded`, or
+`memory_failed` when *every* write failed) so it's metered once even on total
+failure. Each extracted write is isolated (`MemoryOutcome.ok=False` on any
+partial/total failure → a `memory_failed` event) so one bad write can't skip the
+rest. The extraction model call is bounded by `BESTTEAM_MEMORY_EXTRACTION_TIMEOUT`
+(default 30s): it runs on a helper thread (the store writes stay on the caller's
+thread, so the thread-local connection is safe), and on timeout the extraction is
+abandoned and the run still completes — optional post-processing can't wedge a
+finished run. On the backend, usage persistence goes through `_safe_record_usage`,
+which isolates a `usage_records` write failure from run status. See
+`docs/MEMORY_REVIEW_TRIAGE.md`.
 
 `Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`
