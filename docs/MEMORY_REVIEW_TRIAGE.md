@@ -50,9 +50,9 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 
 | ID | Finding | Theme | Priority | Effort | Disposition |
 |----|---------|-------|----------|--------|-------------|
-| **M-02** | Recall failure fails the run (not best-effort, unlike writes) | Correctness | **P0** | XS | **SP-1** |
-| **M-03** | Run-path memory store connection is never explicitly closed — a reused worker thread opens a fresh SQLite connection per run and relies on GC to release it | Resource leak | **P0** | S | **SP-1** |
-| **M-11** | `type` is unconstrained in both `Memory.add()` and the SQLite table; only a convention (`episodic`/`semantic`/`procedural`) | Data integrity | P1 | XS | **SP-1** |
+| **M-02** | Recall failure fails the run (not best-effort, unlike writes) | Correctness | **P0** | XS | **SP-1 — Implemented** |
+| **M-03** | Run-path memory store connection is never explicitly closed — a reused worker thread opens a fresh SQLite connection per run and relies on GC to release it | Resource leak | **P0** | S | **SP-1 — Implemented** |
+| **M-11** | `type` is unconstrained in both `Memory.add()` and the SQLite table; only a convention (`episodic`/`semantic`/`procedural`) | Data integrity | P1 | XS | **SP-1 — Implemented (soft: rejects non-string/empty; enum stays open)** |
 | **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2** |
 | **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3** |
 | **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3** |
@@ -86,5 +86,6 @@ Suggested order under the current "memory is opt-in, default off" posture:
 
 ## Status
 
-- **SP-1** — in design (this session).
+- **SP-1** — Implemented (this session): M-02 recall best-effort, M-03 run-path
+  store closed, M-11 soft type validation. Branch `fix/memory-hardening`.
 - SP-2 / SP-3 / SP-4 — registered, not started.
