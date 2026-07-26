@@ -321,6 +321,79 @@ def test_record_run_tolerates_unparseable_model_output():
     assert [r.type for r in records] == [EPISODIC]
 
 
+# --- SP-3: provenance, extraction usage, recall count -----------------------
+
+
+def test_record_run_returns_outcome_and_stamps_provenance():
+    from bestteam.core.memory import MemoryOutcome
+
+    store = _store()
+    mgr = MemoryManager(store, run_id="run-1", workflow_version_id=7)
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert isinstance(outcome, MemoryOutcome)
+    assert outcome.recorded == [EPISODIC]
+    assert outcome.extraction_usage is None
+    assert store.all("alice")[0].metadata == {"run_id": "run-1", "workflow_version_id": 7}
+
+
+def test_record_run_provenance_omits_unbound_ids():
+    store = _store()
+    MemoryManager(store).record_run("alice", "q", "a")  # no run_id / version bound
+    assert store.all("alice")[0].metadata == {}
+
+
+def test_record_run_captures_extraction_usage_and_types():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    canned = AIMessage(
+        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        usage_metadata={"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+    )
+    mgr = MemoryManager(
+        store, extraction_model=FakeMessagesListChatModel(responses=[canned]), run_id="r1"
+    )
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert outcome.recorded == [EPISODIC, SEMANTIC, PROCEDURAL]
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 12, "output_tokens": 4}
+    # Provenance is stamped on the extracted records too.
+    sem = [r for r in store.all("alice") if r.type == SEMANTIC][0]
+    assert sem.metadata == {"run_id": "r1"}
+
+
+def test_record_run_extraction_usage_none_for_fake_spec():
+    store = _store()
+    mgr = MemoryManager(store, extraction_model='fake:{"facts": [], "procedural": ""}')
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert outcome.extraction_usage is None  # fake models report no usage_metadata
+    assert outcome.recorded == [EPISODIC]
+
+
+def test_recall_returns_preamble_and_count():
+    from bestteam.core.memory import RecallResult
+
+    store = _store()
+    store.add("alice", EPISODIC, "the user prefers concise answers about refunds")
+    mgr = MemoryManager(store)
+
+    result = mgr.recall("alice", "refunds")
+    assert isinstance(result, RecallResult)
+    assert result.count == 1
+    assert "<recalled_user_memory>" in result.preamble
+    # The string wrapper stays backward-compatible.
+    assert mgr.recall_preamble("alice", "refunds") == result.preamble
+
+
+def test_recall_empty_when_no_hits():
+    from bestteam.core.memory import RecallResult
+
+    assert MemoryManager(_store()).recall("alice", "anything") == RecallResult(preamble="", count=0)
+
+
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():
     store = _store()
     canned = 'Here you go:\n```json\n{"facts": ["likes graphs"], "procedural": ""}\n```'

@@ -16,6 +16,8 @@ from bestteam import (
     Workflow,
 )
 from bestteam.core.memory import EPISODIC
+from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.usage import list_usage_for_run
 from ui.backend.runtime import _make_memory, registry, run_in_background
 
 
@@ -90,6 +92,59 @@ def test_run_in_background_records_with_run_org_id(monkeypatch, tmp_path):
     # Another org sees nothing of alice's org-5 memory.
     assert store.all("alice", org_id=6) == []
     store.close()
+
+
+def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
+    # SP-3 M-06: the run's id + workflow_version_id are stamped into each record's
+    # metadata (via the real _make_memory binding path).
+    db_path = tmp_path / "m.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
+    monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
+
+    run = registry.create("wf", "hello there")
+    run_in_background(
+        run.id, _workflow(), "hello there", engine=None,
+        user_id="alice", org_id=5, workflow_version_id=9,
+    )
+
+    store = SqliteBM25Memory(str(db_path))
+    rec = store.all("alice", org_id=None)[0]
+    assert rec.metadata == {"run_id": run.id, "workflow_version_id": 9}
+    assert rec.org_id == 5
+    store.close()
+
+
+def test_run_in_background_meters_memory_extraction(monkeypatch):
+    # SP-3 M-04: the extraction LLM call's usage lands in usage_records tagged
+    # agent="memory:extraction", carrying the run's org.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from bestteam import MemoryManager
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    extraction = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+                usage_metadata={"input_tokens": 20, "output_tokens": 6, "total_tokens": 26},
+            )
+        ]
+    )
+    mgr = MemoryManager(SqliteBM25Memory(":memory:"), extraction_model=extraction, org_id=5)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
+
+    run = registry.create("wf", "hello")
+    run_in_background(run.id, _workflow(), "hello", engine=engine, user_id="alice", org_id=5)
+
+    with Session() as db:
+        mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:extraction"]
+    assert len(mem_rows) == 1
+    assert mem_rows[0].input_tokens == 20 and mem_rows[0].output_tokens == 6
+    assert mem_rows[0].org_id == 5
 
 
 def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):

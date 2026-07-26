@@ -13,21 +13,24 @@ _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..adapters.base import EngineAdapter
-    from .memory import MemoryManager
+    from .memory import MemoryManager, RecallResult
 
 
-def _safe_recall(memory: "Optional[MemoryManager]", user_id: Optional[str], input: str) -> str:
-    """Recall the memory preamble, best-effort. Recall is a read on an optional,
-    opt-in subsystem; like record_run (the write), it must never break a run, so
-    any failure degrades to an empty preamble (the run proceeds without recalled
-    memory) rather than propagating and surfacing as run_failed."""
+def _safe_recall(memory: "Optional[MemoryManager]", user_id: Optional[str], input: str) -> "RecallResult":
+    """Recall memory best-effort, returning the preamble plus recalled count.
+    Recall is a read on an optional, opt-in subsystem; like record_run (the
+    write), it must never break a run, so any failure degrades to an empty
+    result (the run proceeds without recalled memory) rather than propagating
+    and surfacing as run_failed."""
+    from .memory import RecallResult
+
     if not memory:
-        return ""
+        return RecallResult(preamble="", count=0)
     try:
-        return memory.recall_preamble(user_id, input)
+        return memory.recall(user_id, input)
     except Exception:  # noqa: BLE001 -- memory must never break a run
         _logger.exception("Memory recall failed; run proceeds without recalled memory")
-        return ""
+        return RecallResult(preamble="", count=0)
 
 
 @dataclass
@@ -85,7 +88,7 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        preamble = _safe_recall(memory, user_id, input)
+        preamble = _safe_recall(memory, user_id, input).preamble
         result = self._adapter.execute(self._compiled, input, memory_preamble=preamble)
         if memory:
             # Best-effort, exactly like stream(): the workflow has already
@@ -121,9 +124,14 @@ class Workflow:
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
-        preamble = _safe_recall(memory, user_id, input)
+        recall = _safe_recall(memory, user_id, input)
+        preamble = recall.preamble
 
         yield TraceEvent(type="run_started", workflow=self.name, data=input)
+
+        # Observability (M-05): surface that recall drew N records into this run.
+        if memory and recall.count:
+            yield TraceEvent(type="memory_recalled", workflow=self.name, data=recall.count)
 
         last_output = ""
         try:
@@ -143,7 +151,17 @@ class Workflow:
             # memory-recording failure must not turn a completed run into a
             # failed one (it would otherwise raise here, after run_completed).
             try:
-                memory.record_run(user_id, input, last_output)
+                outcome = memory.record_run(user_id, input, last_output)
+                if outcome.recorded:
+                    # Observability (M-05) + metering (M-04): report what was
+                    # written and carry the extraction call's token usage so the
+                    # backend can persist a usage_records row for it.
+                    yield TraceEvent(
+                        type="memory_recorded",
+                        workflow=self.name,
+                        data=", ".join(outcome.recorded),
+                        usage=[outcome.extraction_usage] if outcome.extraction_usage else [],
+                    )
             except Exception:  # noqa: BLE001 -- memory must never break a run
                 _logger.exception("Memory recording failed after run_completed; run stays completed")
 

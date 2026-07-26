@@ -29,7 +29,12 @@ registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
 
-def _make_memory(org_id: Optional[int] = None) -> Optional[MemoryManager]:
+def _make_memory(
+    org_id: Optional[int] = None,
+    *,
+    run_id: Optional[str] = None,
+    workflow_version_id: Optional[int] = None,
+) -> Optional[MemoryManager]:
     """Build a per-user `MemoryManager` from env, or None when memory is disabled.
 
     Called on the worker thread that runs the workflow so the underlying
@@ -53,7 +58,13 @@ def _make_memory(org_id: Optional[int] = None) -> Optional[MemoryManager]:
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
-    return MemoryManager(store, extraction_model=extraction_model, org_id=org_id)
+    return MemoryManager(
+        store,
+        extraction_model=extraction_model,
+        org_id=org_id,
+        run_id=run_id,
+        workflow_version_id=workflow_version_id,
+    )
 
 
 def run_in_background(
@@ -86,7 +97,11 @@ def run_in_background(
     """
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
-    memory = _make_memory(org_id) if user_id else None
+    memory = (
+        _make_memory(org_id, run_id=run_id, workflow_version_id=workflow_version_id)
+        if user_id
+        else None
+    )
     terminal_seen = False
     try:
         if db is not None:
@@ -127,6 +142,19 @@ def run_in_background(
                         db,
                         run_id=run_id,
                         agent=event.agent,
+                        model=entry.get("model"),
+                        input_tokens=entry.get("input_tokens", 0),
+                        output_tokens=entry.get("output_tokens", 0),
+                        org_id=org_id,
+                    )
+            if db is not None and event.type == "memory_recorded":
+                # Meter the memory extraction LLM call (M-04); it bypasses the
+                # adapter's usage path, so it arrives here on the record event.
+                for entry in event.usage:
+                    record_usage(
+                        db,
+                        run_id=run_id,
+                        agent="memory:extraction",
                         model=entry.get("model"),
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),

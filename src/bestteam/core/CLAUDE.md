@@ -171,6 +171,17 @@ knowledge base — both now import `tokenize`/`significant_terms` from
 The four memory types: **working** = the live `_TeamState` (not stored here);
 **episodic**/**semantic**/**procedural** = `MemoryRecord` rows tagged by `type`.
 
+**Instrumentation (SP-3).** `record_run` returns a `MemoryOutcome(recorded,
+extraction_usage)` and `recall` a `RecallResult(preamble, count)` (`recall_preamble`
+is a thin string wrapper, unchanged). The extraction call's `usage_metadata` is
+captured as a `{model, input_tokens, output_tokens}` entry (mirroring the adapter),
+so `Workflow.stream` can emit it on a `memory_recorded` TraceEvent and the backend
+meters it (`agent="memory:extraction"`, M-04) — the SDK never touches the backend
+DB. `Workflow.stream` also emits `memory_recalled` (`data`=count) for observability
+(M-05). Every record is stamped with `metadata={run_id, workflow_version_id}`
+provenance (M-06), bound into `MemoryManager` by `runtime._make_memory`. See
+`docs/MEMORY_REVIEW_TRIAGE.md`.
+
 `Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`
 → each agent's `extra_system_prompt`, so the cached compiled graph is reused

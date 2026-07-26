@@ -50,10 +50,13 @@
   (idempotent in-place migration), the run binds its org into `MemoryManager`,
   and org-level compliance erasure (`delete_org_and_legacy`) + account-deletion
   memory purge (`delete-user` fail-closed) + `move-user` legacy reconciliation
-  land via the operator CLI/admin API. Deferred to a deletion-lifecycle
-  sub-project: in-flight-run drain fence, immutable-principal keying, durable
-  memory-store state, historical-legacy-provenance sweep (SP-3 metering/
-  observability and SP-4 dedup/retention/recall-bound remain registered).
+  land via the operator CLI/admin API. **SP-3** (instrumentation,
+  `feat/memory-instrumentation`): extraction spend metered
+  (`agent="memory:extraction"`), run/version provenance in each record's
+  `metadata`, and `memory_recalled`/`memory_recorded` TraceEvents. Deferred to a
+  deletion-lifecycle sub-project: in-flight-run drain fence, immutable-principal
+  keying, durable memory-store state, historical-legacy-provenance sweep (SP-4
+  dedup/retention/recall-bound remains registered).
 - Code-review triage remediation: all 17 findings (CR-001…CR-017) resolved
   across PRs #4 and #5 — KB path containment + atomic versioned uploads,
   startup secret-key guard, team-scoped aggregation, terminal-run guarantees,

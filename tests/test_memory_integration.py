@@ -184,6 +184,37 @@ def test_recall_is_isolated_by_org_for_same_username():
     assert len(store.all("u", org_id=6)) == 1  # unchanged
 
 
+def test_stream_emits_memory_recalled_and_recorded_events():
+    # SP-3 M-05: the trace surfaces recall (count) and record (types written).
+    store, manager = _seeded_manager()  # one seeded episodic record for "u"
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    types = [e.type for e in events]
+
+    assert "memory_recalled" in types and "memory_recorded" in types
+    recalled = next(e for e in events if e.type == "memory_recalled")
+    assert recalled.data == 1  # one seeded record drawn
+    recorded = next(e for e in events if e.type == "memory_recorded")
+    assert "episodic" in recorded.data
+    # Ordering: recalled sits after run_started; recorded after run_completed.
+    assert types.index("memory_recalled") < types.index("memory_recorded")
+    assert types.index("run_completed") < types.index("memory_recorded")
+
+
+def test_stream_without_memory_emits_no_memory_events():
+    model = _RecordingChatModel(responses=[AIMessage(content="hi")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("no memory here"))
+    types = [e.type for e in events]
+
+    assert "memory_recalled" not in types and "memory_recorded" not in types
+
+
 def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])

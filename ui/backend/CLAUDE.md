@@ -344,6 +344,10 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   its own `Session` and calls `db/usage.py::record_usage()` for each `usage`
   entry on every `agent_completed` event, computing `cost_estimate` from
   `model_catalog` when the model spec matches a catalog entry (`None` otherwise).
+  It also meters the per-user memory extraction call: a `memory_recorded` event
+  (SP-3) carries the extraction LLM's `usage`, recorded as a `usage_records` row
+  with `agent="memory:extraction"` (that call bypasses the adapter's usage path,
+  so it arrives on the memory event instead).
 
 ## Per-user memory
 
