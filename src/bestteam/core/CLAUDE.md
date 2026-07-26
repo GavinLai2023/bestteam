@@ -201,6 +201,23 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   per-user quota, or automated cleanup — records accumulate until an admin
   clears them. `record_run` caps each field at `_MAX_RECORD_CHARS` (CR-022) so
   one run can't persist megabytes, but total growth is unbounded.
+- **Memory is org-scoped** (SP-2, M-01). Records carry an `org_id`; the run
+  path binds the run's org into `MemoryManager`, so recall/record only ever
+  touch that org's memory (closing the username-reuse isolation gap). In the
+  store, a **concrete** `org_id` filters `search`/`all`; **`org_id=None` means
+  "across orgs"** — used only by the admin surface. Rows written before SP-2
+  have `org_id NULL` (no cross-DB backfill: the username→org map lives in the
+  main DB, unreachable from the store's own connection); they aren't recalled by
+  an org run but stay visible/deletable via the admin API. The API route
+  `DELETE /api/memory/orgs/{org_id}` resolves the org's **current members** (from
+  the main DB `users` table) then deletes scoped + those members' legacy NULL-org
+  rows in one store transaction (`delete_org_and_legacy`, rollback on failure), so
+  compliance erasure is atomic and complete for anyone still in the org. Legacy rows for a
+  username that no longer exists are out of scope here — that's account deletion
+  (deletion-lifecycle sub-project). The **`Memory` ABC** deliberately does *not*
+  carry `org_id`: it's a concrete-store extension (like `limit`/`max_candidates`),
+  and `MemoryManager` passes it only when a concrete org is bound, so a pre-SP-2
+  custom store still works for org-less callers.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

@@ -29,7 +29,7 @@ registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
 
-def _make_memory() -> Optional[MemoryManager]:
+def _make_memory(org_id: Optional[int] = None) -> Optional[MemoryManager]:
     """Build a per-user `MemoryManager` from env, or None when memory is disabled.
 
     Called on the worker thread that runs the workflow so the underlying
@@ -40,6 +40,9 @@ def _make_memory() -> Optional[MemoryManager]:
       exactly as before).
     - set -> a `SqliteBM25Memory` at that path; `BESTTEAM_MEMORY_MODEL`, if
       set, enables semantic/procedural extraction via one LLM call per run.
+
+    `org_id` scopes every recall/record to the run's organization (SP-2), so a
+    run only ever sees and writes its own org's memory.
     """
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
     if not db_path:
@@ -50,7 +53,7 @@ def _make_memory() -> Optional[MemoryManager]:
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
-    return MemoryManager(store, extraction_model=extraction_model)
+    return MemoryManager(store, extraction_model=extraction_model, org_id=org_id)
 
 
 def run_in_background(
@@ -83,7 +86,7 @@ def run_in_background(
     """
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
-    memory = _make_memory() if user_id else None
+    memory = _make_memory(org_id) if user_id else None
     terminal_seen = False
     try:
         if db is not None:

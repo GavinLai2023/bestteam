@@ -168,6 +168,120 @@ def test_delete_unknown_user_errors(session_local):
         admin_cli.main(["delete-user", "ghost"])
 
 
+def test_delete_user_purges_memory(session_local, monkeypatch, tmp_path, capsys):
+    # Review r2 #2: account deletion clears the user's memory before releasing
+    # the username, so a recreated same-named account can't recall it.
+    from bestteam import SqliteBM25Memory
+    from bestteam.core.memory import EPISODIC
+
+    mem_path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "alice", "--platform"])
+
+    store = SqliteBM25Memory(str(mem_path))
+    store.add("alice", EPISODIC, "alice's secret", org_id=1)
+    store.close()
+
+    capsys.readouterr()
+    assert admin_cli.main(["delete-user", "alice"]) == 0
+    assert "Purged 1 memory record" in capsys.readouterr().out
+
+    store = SqliteBM25Memory(str(mem_path))
+    assert store.all("alice", org_id=None) == []
+    store.close()
+
+
+def test_delete_user_fails_closed_when_memory_purge_fails(session_local, monkeypatch):
+    # If the memory purge fails, the account must NOT be deleted (username stays
+    # claimed, so nothing leaks).
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+
+    def boom(username):
+        raise RuntimeError("store unreachable")
+
+    monkeypatch.setattr(admin_cli, "_purge_user_memory", boom)
+
+    with pytest.raises(SystemExit):
+        admin_cli.main(["delete-user", "op"])
+    with session_local() as db:
+        assert get_user_by_username(db, "op") is not None
+
+
+def test_delete_user_warns_when_memory_not_configured(session_local, monkeypatch, capsys):
+    # Review r3 #1: unset BESTTEAM_MEMORY_DB -> account still deleted, but a loud
+    # warning (not a silent "clean") so the operator knows memory wasn't purged.
+    monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+    capsys.readouterr()
+
+    assert admin_cli.main(["delete-user", "op"]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "no per-user memory was purged".lower() in out.lower()
+    with session_local() as db:
+        assert get_user_by_username(db, "op") is None
+
+
+def test_delete_user_does_not_create_missing_memory_db(session_local, monkeypatch, tmp_path):
+    # Review r3 #1: a configured-but-absent store path must not be created (which
+    # would give a false "purged, all clean").
+    missing = tmp_path / "nope.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(missing))
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-user", "op", "--platform"])
+
+    assert admin_cli.main(["delete-user", "op"]) == 0
+    assert not missing.exists()
+
+
+def test_delete_unknown_user_does_not_purge_memory(session_local, monkeypatch, tmp_path):
+    # Review r3 #4: validate the account BEFORE purging, so deleting an unknown
+    # username can't remove orphaned memory for that name.
+    from bestteam import SqliteBM25Memory
+
+    mem_path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+    store = SqliteBM25Memory(str(mem_path))
+    store.add("ghost", "episodic", "orphaned secret", org_id=1)
+    store.close()
+
+    with pytest.raises(SystemExit):
+        admin_cli.main(["delete-user", "ghost"])  # no such user
+
+    store = SqliteBM25Memory(str(mem_path))
+    assert len(store.all("ghost", org_id=None)) == 1  # orphan memory untouched
+    store.close()
+
+
+def test_move_user_reconciles_legacy_memory_to_source_org(session_local, monkeypatch, tmp_path):
+    # Review r3 #3: moving a user first binds their legacy NULL-org rows to the
+    # source org, so pre-SP-2 data stays attributable to the org it came from.
+    from bestteam import SqliteBM25Memory
+
+    _patch_password(monkeypatch)
+    admin_cli.main(["create-org", "acme"])
+    admin_cli.main(["create-org", "beta"])
+    admin_cli.main(["create-user", "alice", "--org", "acme"])
+    with session_local() as db:
+        acme_id = get_org_by_name(db, "acme").id
+
+    mem_path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+    store = SqliteBM25Memory(str(mem_path))
+    store.add("alice", "episodic", "legacy note")  # org_id NULL
+    store.close()
+
+    assert admin_cli.main(["move-user", "alice", "--to-org", "beta"]) == 0
+
+    store = SqliteBM25Memory(str(mem_path))
+    # The legacy row is now bound to acme (the source org), not left NULL.
+    assert [r.content for r in store.all("alice", org_id=acme_id)] == ["legacy note"]
+    assert store.all("alice", org_id=None) == store.all("alice", org_id=acme_id)
+    store.close()
+
+
 def test_move_user_to_platform(session_local, monkeypatch):
     admin_cli.main(["create-org", "acme"])
     _patch_password(monkeypatch)

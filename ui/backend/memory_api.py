@@ -18,10 +18,13 @@ import os
 from typing import Iterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.orm import Session
 
 from bestteam import SqliteBM25Memory
 
 from .auth_api import get_current_admin
+from .db.models import User
+from .db_session import get_db
 
 router = APIRouter(
     prefix="/api/memory",
@@ -78,16 +81,21 @@ def get_user_records(
     user_id: str,
     query: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
+    org: Optional[int] = Query(None),
     limit: int = Query(_DEFAULT_RECORDS, ge=1, le=_MAX_RECORDS),
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
     if store is None:
         return {"enabled": False, "records": []}
     types = [type] if type else None
+    # `org` scopes to one (org_id, user_id) identity so the UI can view a single
+    # summary row (a moved user has rows under several orgs); omitted = across orgs.
     if query:
-        records = store.search(user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN)
+        records = store.search(
+            user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN, org_id=org
+        )
     else:
-        records = store.all(user_id, types=types, limit=limit)
+        records = store.all(user_id, types=types, limit=limit, org_id=org)
     return {"enabled": True, "records": [dataclasses.asdict(r) for r in records]}
 
 
@@ -106,4 +114,30 @@ def clear_user_memory(
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
     removed = _require_store(store).delete_user(user_id)
+    return {"removed": removed}
+
+
+@router.delete("/orgs/{org_id}")
+def clear_org_memory(
+    org_id: int,
+    db: Session = Depends(get_db),
+    store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
+) -> dict:
+    """Erase all memory belonging to one organization (SP-2 compliance erasure).
+
+    Deletes org-scoped rows (`org_id = :org`) AND legacy pre-SP-2 rows (`org_id
+    NULL`) for the org's current members -- those usernames are resolved from the
+    main DB, since the memory store has no org_id on legacy rows (review #1). A
+    legacy row whose username no longer exists (the member was deleted) can't be
+    attributed to an org and is out of scope here -- that belongs to account
+    deletion (deletion-lifecycle sub-project, review #2).
+    """
+    store = _require_store(store)
+    # Resolve the member set first, then delete scoped + attributable-legacy rows
+    # in a single memory-store transaction, so erasure can't half-complete
+    # (review r3 #5). Legacy rows are cleared by NULL-org + username, never an
+    # unscoped delete_user (which would destroy the same username's other-org
+    # history — a moved user or a former same-named principal).
+    usernames = [u for (u,) in db.query(User.username).filter(User.org_id == org_id)]
+    removed = store.delete_org_and_legacy(org_id, usernames)
     return {"removed": removed}

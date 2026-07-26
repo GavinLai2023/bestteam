@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 from typing import Optional, Sequence
 
 from . import email_trigger
@@ -41,6 +42,7 @@ from .db.orgs import (
 from .db.users import (
     create_user,
     delete_user,
+    get_user_by_username,
     orgs_with_multiple_members,
     set_admin_status,
     set_user_org,
@@ -55,6 +57,50 @@ def _prompt_password(parser: argparse.ArgumentParser) -> str:
     if getpass.getpass("Repeat password: ") != password:
         parser.error("Passwords do not match")
     return password
+
+
+def _open_memory_store():
+    """Open the configured memory store, or None when memory isn't usable from
+    this CLI invocation. Returns None when `BESTTEAM_MEMORY_DB` is unset OR points
+    at a path that doesn't exist yet -- opening would *create* an empty DB and
+    give a false "purged, all clean" (review r3 #1); a store that was never
+    written has nothing to purge anyway."""
+    db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
+    if not db_path or not os.path.exists(db_path):
+        return None
+    from bestteam import SqliteBM25Memory
+
+    return SqliteBM25Memory(db_path)
+
+
+def _purge_user_memory(username: str) -> Optional[int]:
+    """Delete all of `username`'s per-user memory, returning the rows removed, or
+    ``None`` when no memory store is configured for this invocation.
+
+    Account deletion removes the whole principal, so the unscoped
+    `store.delete_user` (every row for the username, across all orgs + legacy) is
+    correct here -- unlike org erasure. Raises on failure so the caller can fail
+    closed and NOT release the username while its memory persists.
+    """
+    store = _open_memory_store()
+    if store is None:
+        return None
+    try:
+        return store.delete_user(username)
+    finally:
+        store.close()
+
+
+def _reconcile_legacy_org(username: str, org_id: int) -> Optional[int]:
+    """Bind `username`'s legacy NULL-org memory to `org_id` (their current org)
+    before a move, or None when no store is configured. Raises on failure."""
+    store = _open_memory_store()
+    if store is None:
+        return None
+    try:
+        return store.assign_legacy_to_org(username, org_id)
+    finally:
+        store.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -155,13 +201,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"Created user '{args.username}' ({where}).")
             return 0
         if args.command == "delete-user":
+            # Validate BEFORE any mutation (review r3 #4): an unknown username must
+            # not purge orphaned memory and then error. (Cross-DB deletion isn't
+            # atomic; validate-first + purge-then-delete keeps a failed delete from
+            # destroying memory for a still-present account, and fails safe -- if
+            # the account row survives, its memory is gone, which is not a leak.)
+            if get_user_by_username(db, args.username) is None:
+                parser.error(f"No such user: {args.username!r}")
+            # Fail closed: purge the user's memory BEFORE releasing the username,
+            # so a recreated same-named account can't recall it (review r2 #2).
             try:
-                delete_user(db, args.username)
-            except ValueError as exc:
-                parser.error(str(exc))
-            print(f"Deleted user '{args.username}'.")
+                purged = _purge_user_memory(args.username)
+            except Exception as exc:  # noqa: BLE001 -- fail closed on any purge error
+                parser.error(
+                    f"Aborted: could not purge memory for '{args.username}' "
+                    f"({exc}); user not deleted."
+                )
+            delete_user(db, args.username)
+            if purged is None:
+                # No store configured for THIS invocation -- warn loudly rather
+                # than imply memory was cleaned (review r3 #1). If the deployment
+                # uses memory, the operator must run with the server's environment.
+                print(
+                    f"Deleted user '{args.username}'. WARNING: BESTTEAM_MEMORY_DB is not set "
+                    f"(or its file is absent) for this command, so NO per-user memory was purged. "
+                    f"If this deployment uses per-user memory, re-run delete-user with the same "
+                    f"environment as the server before the username is reused."
+                )
+            else:
+                suffix = f" Purged {purged} memory record(s)." if purged else ""
+                print(f"Deleted user '{args.username}'.{suffix}")
             return 0
         if args.command == "move-user":
+            user = get_user_by_username(db, args.username)
+            if user is None:
+                parser.error(f"No such user: {args.username!r}")
+            source_org_id = user.org_id
             if args.platform:
                 org_id = None
                 where = "platform operator"
@@ -171,6 +246,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     parser.error(f"Unknown organization '{args.to_org}'. Create it first with create-org.")
                 org_id = org.id
                 where = f"member of '{args.to_org}'"
+            # Bind any legacy NULL-org memory to the SOURCE org before moving, so
+            # pre-SP-2 rows stay attributable to the org they were created under
+            # instead of following the user to a new org (review r3 #3). Fail
+            # closed: don't move while memory is inconsistent.
+            if source_org_id is not None:
+                try:
+                    _reconcile_legacy_org(args.username, source_org_id)
+                except Exception as exc:  # noqa: BLE001 -- fail closed on reconcile error
+                    parser.error(
+                        f"Aborted: could not reconcile memory for '{args.username}' "
+                        f"({exc}); user not moved."
+                    )
             try:
                 set_user_org(db, args.username, org_id)
             except ValueError as exc:

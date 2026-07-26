@@ -162,6 +162,28 @@ def test_recall_failure_does_not_break_workflow_run():
     assert len([r for r in store.all("u") if r.type == EPISODIC]) == 1
 
 
+def test_recall_is_isolated_by_org_for_same_username():
+    # SP-2: a manager bound to org 5 recalls only org-5 records, even when the
+    # same username also has org-6 records (username-reuse isolation).
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "org five refund policy note", org_id=5)
+    store.add("u", EPISODIC, "org six refund policy note", org_id=6)
+    manager = MemoryManager(store, org_id=5)
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+
+    system = model.captured_system or ""
+    assert "org five" in system
+    assert "org six" not in system
+    # The new run's record is written under org 5, not org 6.
+    assert all(r.org_id == 5 for r in store.all("u", org_id=5))
+    assert len(store.all("u", org_id=6)) == 1  # unchanged
+
+
 def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])

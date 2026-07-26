@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from bestteam import SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, SEMANTIC
-from helpers import create_user_and_login
+from helpers import create_user_and_login, get_org_id
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db_session import get_db
@@ -20,9 +20,9 @@ def memory_db(tmp_path, monkeypatch):
     path = tmp_path / "mem.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
     store = SqliteBM25Memory(str(path))
-    store.add("alice", EPISODIC, "user asked about refunds")
-    store.add("alice", SEMANTIC, "prefers concise answers")
-    store.add("bob", EPISODIC, "user asked about shipping")
+    store.add("alice", EPISODIC, "user asked about refunds", org_id=5)
+    store.add("alice", SEMANTIC, "prefers concise answers", org_id=5)
+    store.add("bob", EPISODIC, "user asked about shipping", org_id=6)
     store.close()
     return path
 
@@ -81,15 +81,31 @@ def test_search_endpoint_bounds_scan(admin_client, memory_db, monkeypatch):
     captured = {}
     real = SqliteBM25Memory.search
 
-    def spy(self, user_id, query, types=None, top_k=5, max_candidates=None):
+    def spy(self, user_id, query, types=None, top_k=5, max_candidates=None, org_id=None):
         captured["max_candidates"] = max_candidates
-        return real(self, user_id, query, types=types, top_k=top_k, max_candidates=max_candidates)
+        return real(
+            self, user_id, query, types=types, top_k=top_k,
+            max_candidates=max_candidates, org_id=org_id,
+        )
 
     monkeypatch.setattr(SqliteBM25Memory, "search", spy)
     resp = admin_client.get("/api/memory/users/alice/records", params={"query": "refunds", "limit": 1})
 
     assert resp.status_code == 200
     assert captured["max_candidates"] is not None and captured["max_candidates"] >= 1
+
+
+def test_get_records_org_filter(admin_client, memory_db):
+    # Review r3 #6: records can be scoped to one (org_id, user_id) identity, so
+    # the UI can view a single summary row. alice's seeded rows are org 5.
+    scoped = admin_client.get(
+        "/api/memory/users/alice/records", params={"org": 5}
+    ).json()["records"]
+    assert scoped and all(r["org_id"] == 5 for r in scoped)
+    # A different org yields nothing for alice.
+    assert admin_client.get(
+        "/api/memory/users/alice/records", params={"org": 999}
+    ).json()["records"] == []
 
 
 def test_get_records_type_filter(admin_client, memory_db):
@@ -117,6 +133,82 @@ def test_clear_user_memory(admin_client, memory_db):
     assert admin_client.get("/api/memory/users/alice/records").json()["records"] == []
     # bob's memory is untouched.
     assert admin_client.get("/api/memory/users/bob/records").json()["records"]
+
+
+def test_list_users_and_records_include_org_id(admin_client, memory_db):
+    # SP-2: the admin surface exposes each user's org and each record's org_id.
+    by_user = {u["user_id"]: u for u in admin_client.get("/api/memory/users").json()["users"]}
+    assert by_user["alice"]["org_id"] == 5
+    assert by_user["bob"]["org_id"] == 6
+
+    recs = admin_client.get("/api/memory/users/alice/records").json()["records"]
+    assert all(r["org_id"] == 5 for r in recs)
+
+
+def test_clear_org_memory_removes_only_that_org(admin_client, memory_db):
+    # SP-2 compliance erasure: delete all of org 5's memory, leaving org 6 intact.
+    resp = admin_client.delete("/api/memory/orgs/5")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2
+
+    assert admin_client.get("/api/memory/users/alice/records").json()["records"] == []
+    assert admin_client.get("/api/memory/users/bob/records").json()["records"]
+
+
+def test_clear_org_memory_409_when_disabled(admin_client, monkeypatch):
+    monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
+    assert admin_client.delete("/api/memory/orgs/5").status_code == 409
+
+
+def test_clear_org_memory_also_purges_legacy_rows(admin_client, tmp_path, monkeypatch):
+    # Review #1: org erasure also removes pre-SP-2 legacy (NULL-org) rows for the
+    # org's current members, resolved from the main DB user table.
+    create_user_and_login(admin_client, username="alice", password="pw", org="acme")
+    org_id = get_org_id("acme")
+
+    path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
+    store = SqliteBM25Memory(str(path))
+    store.add("alice", EPISODIC, "scoped secret", org_id=org_id)
+    store.add("alice", EPISODIC, "legacy secret")  # org_id NULL (pre-SP-2)
+    store.close()
+
+    resp = admin_client.delete(f"/api/memory/orgs/{org_id}")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2  # scoped (delete_org) + legacy (delete_user)
+
+    store = SqliteBM25Memory(str(path))
+    assert store.all("alice", org_id=None) == []
+    store.close()
+
+
+def test_clear_org_memory_preserves_other_orgs_rows_for_same_username(
+    admin_client, tmp_path, monkeypatch
+):
+    # Regression: org erasure must NOT delete the same username's rows under a
+    # different org (moved user / reused username). Only org-5 scoped + legacy
+    # NULL rows go; the org-6 row stays.
+    create_user_and_login(admin_client, username="alice", password="pw", org="five")
+    org5 = get_org_id("five")
+    other_org = org5 + 1000  # a different org's historical rows for "alice"
+
+    path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
+    store = SqliteBM25Memory(str(path))
+    store.add("alice", EPISODIC, "org five row", org_id=org5)
+    store.add("alice", EPISODIC, "other org history", org_id=other_org)
+    store.add("alice", EPISODIC, "legacy row")  # org_id NULL
+    store.close()
+
+    resp = admin_client.delete(f"/api/memory/orgs/{org5}")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2  # org-5 scoped + legacy NULL only
+
+    store = SqliteBM25Memory(str(path))
+    remaining = store.all("alice", org_id=None)
+    assert [r.content for r in remaining] == ["other org history"]
+    assert remaining[0].org_id == other_org
+    store.close()
 
 
 def test_requires_admin(admin_client, memory_db):

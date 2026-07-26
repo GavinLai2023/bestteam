@@ -66,6 +66,9 @@ class MemoryRecord:
     content: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+    # Organization this record belongs to (multi-tenancy, SP-2). None only for
+    # rows written before org scoping, or by callers that don't pass one.
+    org_id: Optional[int] = None
 
 
 class Memory(ABC):
@@ -80,13 +83,22 @@ class Memory(ABC):
     def add(
         self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
     ) -> MemoryRecord:
-        """Persist one record for `user_id` and return it (with id/timestamp filled in)."""
+        """Persist one record for `user_id` and return it (with id/timestamp filled in).
+
+        Org scoping (SP-2) is an optional concrete-store extension, like
+        `SqliteBM25Memory`'s `org_id=`/`limit=`/`max_candidates=` -- it is
+        deliberately NOT on this ABC so a pre-SP-2 store that implements only the
+        original four methods keeps working. `MemoryManager` passes `org_id=`
+        only when it has a concrete org, so an org-less caller invokes exactly
+        this contract."""
 
     @abstractmethod
     def search(
         self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
     ) -> List[MemoryRecord]:
-        """Return up to `top_k` of `user_id`'s records most relevant to `query`."""
+        """Return up to `top_k` of `user_id`'s records most relevant to `query`.
+
+        Org scoping is a concrete-store extension (see `add`)."""
 
     @abstractmethod
     def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
@@ -138,15 +150,37 @@ class SqliteBM25Memory(Memory):
                 type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                org_id INTEGER
             )
             """
         )
+        # Idempotent in-place migration (this store has no Alembic): a DB created
+        # before org scoping (SP-2) lacks org_id -- add it, leaving old rows NULL.
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        if "org_id" not in cols:
+            try:
+                self._conn.execute("ALTER TABLE memories ADD COLUMN org_id INTEGER")
+            except sqlite3.OperationalError as exc:
+                # Another connection opening the same legacy DB may have won the
+                # ALTER race between our PRAGMA check and here -- that's fine, the
+                # column now exists; only a different error is a real failure.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_org_user ON memories(org_id, user_id)"
+        )
         self._conn.commit()
 
     def add(
-        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        user_id: str,
+        type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> MemoryRecord:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -160,10 +194,11 @@ class SqliteBM25Memory(Memory):
             content=content,
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc).isoformat(),
+            org_id=org_id,
         )
         self._conn.execute(
-            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at, org_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.user_id,
@@ -171,6 +206,7 @@ class SqliteBM25Memory(Memory):
                 record.content,
                 json.dumps(record.metadata),
                 record.created_at,
+                record.org_id,
             ),
         )
         self._conn.commit()
@@ -191,15 +227,24 @@ class SqliteBM25Memory(Memory):
                     content=row["content"],
                     metadata=metadata,
                     created_at=row["created_at"],
+                    org_id=row["org_id"],
                 )
             )
         return records
 
     def all(
-        self, user_id: str, types: Optional[Sequence[str]] = None, limit: Optional[int] = None
+        self,
+        user_id: str,
+        types: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
+        if org_id is not None:
+            sql += " AND org_id = ?"
+            params.append(org_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -218,6 +263,8 @@ class SqliteBM25Memory(Memory):
         types: Optional[Sequence[str]] = None,
         top_k: int = 5,
         max_candidates: Optional[int] = None,
+        *,
+        org_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -227,7 +274,7 @@ class SqliteBM25Memory(Memory):
         # scan to the most-recent N records -- a bound on the DB/CPU/memory work
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
-        candidates = self.all(user_id, types, limit=max_candidates)
+        candidates = self.all(user_id, types, limit=max_candidates, org_id=org_id)
         if not candidates:
             return []
 
@@ -265,26 +312,91 @@ class SqliteBM25Memory(Memory):
     def user_summaries(self) -> List[Dict[str, Any]]:
         """Per-user record counts by type, via one aggregate query.
 
-        Returns ``[{"user_id", "episodic", "semantic", "procedural", "total"}]``
-        without loading record content -- lets the admin API list users cheaply
-        instead of scanning every record per user.
+        Returns ``[{"user_id", "org_id", "episodic", "semantic", "procedural",
+        "total"}]`` without loading record content -- lets the admin API list
+        users (and the org each belongs to) cheaply instead of scanning every
+        record per user.
         """
         rows = self._conn.execute(
-            "SELECT user_id, type, COUNT(*) AS n FROM memories GROUP BY user_id, type"
+            "SELECT org_id, user_id, type, COUNT(*) AS n "
+            "FROM memories GROUP BY org_id, user_id, type"
         ).fetchall()
-        summaries: Dict[str, Dict[str, Any]] = {}
+        # Key by (org_id, user_id): a username can carry both legacy NULL-org rows
+        # and org-scoped rows, and keying by user_id alone would merge their counts
+        # and misattribute the total to one org.
+        summaries: Dict[tuple, Dict[str, Any]] = {}
         for row in rows:
             entry = summaries.setdefault(
-                row["user_id"],
-                {"user_id": row["user_id"], EPISODIC: 0, SEMANTIC: 0, PROCEDURAL: 0, "total": 0},
+                (row["org_id"], row["user_id"]),
+                {
+                    "user_id": row["user_id"],
+                    "org_id": row["org_id"],
+                    EPISODIC: 0,
+                    SEMANTIC: 0,
+                    PROCEDURAL: 0,
+                    "total": 0,
+                },
             )
             if row["type"] in (EPISODIC, SEMANTIC, PROCEDURAL):
                 entry[row["type"]] = row["n"]
             entry["total"] += row["n"]
-        return [summaries[uid] for uid in sorted(summaries)]
+        # NULL org sorts last (can't compare None with int); then by username.
+        return sorted(
+            summaries.values(),
+            key=lambda s: (s["user_id"], s["org_id"] is None, s["org_id"] or 0),
+        )
 
     def delete_user(self, user_id: str) -> int:
         cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        self._conn.commit()
+        return cursor.rowcount
+
+    def delete_org(self, org_id: int) -> int:
+        """Delete every record scoped to `org_id`. Returns the number removed.
+
+        Scoped rows only -- legacy NULL-org rows are handled by
+        `delete_org_and_legacy` (the full compliance erasure).
+        """
+        cursor = self._conn.execute("DELETE FROM memories WHERE org_id = ?", (org_id,))
+        self._conn.commit()
+        return cursor.rowcount
+
+    def delete_org_and_legacy(self, org_id: int, user_ids: Sequence[str]) -> int:
+        """Org-level compliance erasure in ONE transaction (SP-2): delete `org_id`'s
+        scoped rows AND the given users' legacy NULL-org rows, rolling back on any
+        failure so erasure can't half-complete (scoped gone, legacy left).
+
+        Legacy rows are cleared by NULL-org + username, never the globally-unscoped
+        `delete_user`, which would also destroy that username's rows under *other*
+        orgs (a moved user or a former same-named principal). Returns rows removed.
+        """
+        ids = list(user_ids)
+        try:
+            cursor = self._conn.execute("DELETE FROM memories WHERE org_id = ?", (org_id,))
+            removed = cursor.rowcount
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                cursor = self._conn.execute(
+                    f"DELETE FROM memories WHERE org_id IS NULL AND user_id IN ({placeholders})",
+                    ids,
+                )
+                removed += cursor.rowcount
+            self._conn.commit()
+            return removed
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def assign_legacy_to_org(self, user_id: str, org_id: int) -> int:
+        """Bind `user_id`'s legacy NULL-org rows to `org_id`. Called before a move
+        so pre-SP-2 rows stay attributable to the org they were created under
+        (their current org), instead of silently following the user to a new org
+        and being erased under the wrong org later. Returns rows updated.
+        """
+        cursor = self._conn.execute(
+            "UPDATE memories SET org_id = ? WHERE user_id = ? AND org_id IS NULL",
+            (org_id, user_id),
+        )
         self._conn.commit()
         return cursor.rowcount
 
@@ -321,10 +433,25 @@ class MemoryManager:
     only the $0 episodic record is written.
     """
 
-    def __init__(self, store: Memory, extraction_model: Any = None, top_k: int = 5) -> None:
+    def __init__(
+        self,
+        store: Memory,
+        extraction_model: Any = None,
+        top_k: int = 5,
+        org_id: Optional[int] = None,
+    ) -> None:
         self.store = store
         self.extraction_model = extraction_model
         self.top_k = top_k
+        # The organization this run belongs to (SP-2). Every recall/record is
+        # scoped to it, so a run only ever sees and writes its own org's memory.
+        self.org_id = org_id
+
+    def _org_kwargs(self) -> Dict[str, Any]:
+        """`{"org_id": ...}` only when a concrete org is bound. When None (an
+        org-less SDK caller), the store is called with the original ABC contract
+        so a pre-SP-2 custom store -- which never accepted `org_id` -- still works."""
+        return {"org_id": self.org_id} if self.org_id is not None else {}
 
     def close(self) -> None:
         """Release the underlying store's resources, if it holds any.
@@ -346,7 +473,7 @@ class MemoryManager:
         """
         if not user_id:
             return ""
-        hits = self.store.search(user_id, query, top_k=self.top_k)
+        hits = self.store.search(user_id, query, top_k=self.top_k, **self._org_kwargs())
         if not hits:
             return ""
         # Recalled content is untrusted: an earlier tool result or model output
@@ -380,6 +507,7 @@ class MemoryManager:
             user_id,
             EPISODIC,
             f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
+            **self._org_kwargs(),
         )
 
         if self.extraction_model is None:
@@ -411,10 +539,10 @@ class MemoryManager:
 
         for fact in parsed.get("facts", []):
             if isinstance(fact, str) and fact.strip():
-                self.store.add(user_id, SEMANTIC, fact.strip())
+                self.store.add(user_id, SEMANTIC, fact.strip(), **self._org_kwargs())
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
-            self.store.add(user_id, PROCEDURAL, procedural.strip())
+            self.store.add(user_id, PROCEDURAL, procedural.strip(), **self._org_kwargs())
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:

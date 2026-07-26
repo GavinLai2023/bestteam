@@ -53,7 +53,7 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 | **M-02** | Recall failure fails the run (not best-effort, unlike writes) | Correctness | **P0** | XS | **SP-1 — Implemented** |
 | **M-03** | Run-path memory store connection is never explicitly closed — a reused worker thread opens a fresh SQLite connection per run and relies on GC to release it | Resource leak | **P0** | S | **SP-1 — Implemented** |
 | **M-11** | `type` is unconstrained in both `Memory.add()` and the SQLite table; only a convention (`episodic`/`semantic`/`procedural`) | Data integrity | P1 | XS | **SP-1 — Implemented (soft: rejects non-string/empty; enum stays open)** |
-| **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2** |
+| **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2 — Implemented** (org_id column; org-bound recall/record; `delete_org` erasure) |
 | **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3** |
 | **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3** |
 | **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3** |
@@ -86,6 +86,54 @@ Suggested order under the current "memory is opt-in, default off" posture:
 
 ## Status
 
-- **SP-1** — Implemented (this session): M-02 recall best-effort, M-03 run-path
-  store closed, M-11 soft type validation. Branch `fix/memory-hardening`.
-- SP-2 / SP-3 / SP-4 — registered, not started.
+- **SP-1** — Implemented: M-02 recall best-effort, M-03 run-path store closed,
+  M-11 soft type validation. Merged (PR #30).
+- **SP-2** — Implemented: M-01 org dimension — `org_id` column + idempotent
+  in-place migration; org-bound recall/record; `delete_org` compliance erasure;
+  admin surface exposes `org_id`. Branch `feat/memory-org-scope`. Post-merge
+  review fixes: #3 `Memory` ABC keeps its original contract (org_id is a
+  concrete-store extension, passed only when bound) so pre-SP-2 stores still
+  work; #4 `user_summaries` keyed by `(org_id, user_id)`; #5 migration ALTER
+  idempotent under concurrent opens; #1 org erasure also purges current members'
+  legacy NULL-org rows via a NULL-org-scoped primitive (`delete_legacy_for_users`,
+  members resolved from the main DB) — never an unscoped `delete_user`, which
+  would destroy the same username's other-org history (2nd-round regression fix);
+  #2 the operator `delete-user` CLI now purges the user's memory (unscoped
+  `store.delete_user` — the whole principal is being removed) before releasing
+  the username, failing closed if the purge errors, so a recreated same-named
+  account can't recall the deleted account's memory. Third-round fixes: r3 #1
+  `delete-user` warns (doesn't silently succeed) when `BESTTEAM_MEMORY_DB` is
+  unset/absent, and never creates a missing store; r3 #3 `move-user` binds legacy
+  NULL-org rows to the source org first (`assign_legacy_to_org`); r3 #4 the
+  account is validated before any purge; r3 #5 org erasure is one store
+  transaction (`delete_org_and_legacy`, rollback on failure); r3 #6 the admin UI
+  keys/selects by `(org_id, user_id)`, shows scope, and filters records by `?org=`.
+- SP-3 / SP-4 — registered, not started.
+
+## Deferred to the deletion-lifecycle sub-project
+
+These are real but disproportionate to bolt onto SP-2 (an opt-in, single-worker,
+SQLite memory feature); they need the cross-process lifecycle machinery the
+deletion-lifecycle sub-project is for. Recorded so they aren't rediscovered.
+
+- **In-flight run writes after account/org deletion** (SP-2 review r3 #2): a run
+  already executing holds its `MemoryManager` and records on completion, which can
+  land *after* a purge; a recreated same-`(org_id, username)` account could then
+  recall it. The robust fix is cross-process — a durable "deleting" marker /
+  principal generation checked before every memory write, plus a run-drain fence —
+  which the CLI (a separate process from the run workers) can't do today. Runs are
+  short and deletion is a manual operator action, so the window is small but nonzero.
+- **Immutable user-id as the memory principal** (r2 #2 / r3 #2): memory is keyed by
+  `username`, a reusable identifier. Purge-before-release closes the common reuse
+  leak, but a durable immutable id (with generation) would be a more robust
+  principal and is the proper substrate for the run-drain fence above.
+- **Durable authoritative memory-store state** (r3 #1): the CLI infers the store
+  from its own `BESTTEAM_MEMORY_DB`; it now warns when that's unset rather than
+  refusing (refusing would break the majority memory-disabled deployments). A
+  durable record of whether/where memory is enabled would let deletion hard-fail
+  on a mismatched environment.
+- **Historically ambiguous / orphaned legacy NULL-org rows** (r3 #3, and prior):
+  `move-user` now binds legacy rows to their source org going forward, but rows
+  created before this fix (or whose username no longer exists) have no recorded
+  provenance and can't be attributed by code. A one-time operator-run migration /
+  sweep is the resolution; it belongs with deletion-lifecycle.

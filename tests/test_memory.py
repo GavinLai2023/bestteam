@@ -2,8 +2,29 @@
 
 import pytest
 
-from bestteam import MemoryManager, MemoryRecord, SqliteBM25Memory
+from bestteam import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, PROCEDURAL, SEMANTIC
+
+
+class _LegacyStore(Memory):
+    """A pre-SP-2 store: implements only the original ABC (no org_id kwarg)."""
+
+    def __init__(self):
+        self.records: list[MemoryRecord] = []
+
+    def add(self, user_id, type, content, metadata=None):
+        rec = MemoryRecord(id=str(len(self.records)), user_id=user_id, type=type, content=content)
+        self.records.append(rec)
+        return rec
+
+    def search(self, user_id, query, types=None, top_k=5):
+        return [r for r in self.records if r.user_id == user_id][:top_k]
+
+    def all(self, user_id, types=None):
+        return [r for r in self.records if r.user_id == user_id]
+
+    def delete(self, memory_id):
+        self.records = [r for r in self.records if r.id != memory_id]
 
 
 def _store():
@@ -127,6 +148,7 @@ def test_user_summaries_counts_by_type():
     summaries = {s["user_id"]: s for s in store.user_summaries()}
     assert summaries["alice"] == {
         "user_id": "alice",
+        "org_id": None,
         "episodic": 2,
         "semantic": 1,
         "procedural": 0,
@@ -155,9 +177,9 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_all = store.all
 
-    def spy_all(user_id, types=None, limit=None):
+    def spy_all(user_id, types=None, limit=None, *, org_id=None):
         captured["limit"] = limit
-        return real_all(user_id, types, limit)
+        return real_all(user_id, types, limit, org_id=org_id)
 
     monkeypatch.setattr(store, "all", spy_all)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
@@ -350,3 +372,202 @@ def test_add_accepts_known_and_custom_string_types():
     # (the enum is deliberately open for third-party stores).
     assert store.add("alice", EPISODIC, "x").type == EPISODIC
     assert store.add("alice", "custom", "y").type == "custom"
+
+
+# --- SP-2: org scoping ------------------------------------------------------
+
+
+def test_add_persists_org_id():
+    store = _store()
+    rec = store.add("alice", EPISODIC, "content", org_id=5)
+    assert rec.org_id == 5
+    assert store.all("alice", org_id=5)[0].org_id == 5
+
+
+def test_all_scopes_by_org():
+    store = _store()
+    store.add("alice", EPISODIC, "org five note", org_id=5)
+    store.add("alice", EPISODIC, "org six note", org_id=6)
+
+    assert [r.content for r in store.all("alice", org_id=5)] == ["org five note"]
+    assert [r.content for r in store.all("alice", org_id=6)] == ["org six note"]
+    # org_id=None (admin) sees both.
+    assert len(store.all("alice", org_id=None)) == 2
+
+
+def test_search_scopes_by_org():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy for org five", org_id=5)
+    store.add("alice", EPISODIC, "the refund policy for org six", org_id=6)
+
+    hits5 = store.search("alice", "refund policy", org_id=5)
+    assert len(hits5) == 1 and hits5[0].org_id == 5
+    # Admin (org_id=None) searches across orgs.
+    assert len(store.search("alice", "refund policy", org_id=None)) == 2
+
+
+def test_user_summaries_includes_org_id():
+    store = _store()
+    store.add("alice", EPISODIC, "x", org_id=5)
+    store.add("bob", SEMANTIC, "y", org_id=6)
+
+    summaries = {s["user_id"]: s for s in store.user_summaries()}
+    assert summaries["alice"]["org_id"] == 5
+    assert summaries["bob"]["org_id"] == 6
+
+
+def test_delete_org_removes_only_that_org():
+    store = _store()
+    store.add("alice", EPISODIC, "org five", org_id=5)
+    store.add("bob", EPISODIC, "org six", org_id=6)
+
+    removed = store.delete_org(5)
+    assert removed == 1
+    assert store.all("alice", org_id=None) == []
+    assert len(store.all("bob", org_id=None)) == 1
+
+
+def test_delete_org_and_legacy_scopes_correctly():
+    # Deletes org-5 scoped rows + the named users' NULL-org rows, in one txn;
+    # concrete rows under OTHER orgs (same username) survive.
+    store = _store()
+    store.add("alice", EPISODIC, "legacy")               # NULL
+    store.add("alice", EPISODIC, "org five", org_id=5)   # target org
+    store.add("alice", EPISODIC, "org six", org_id=6)    # other org (must survive)
+    store.add("bob", EPISODIC, "bob legacy")             # NULL, not a member
+
+    removed = store.delete_org_and_legacy(5, ["alice"])
+    assert removed == 2  # org-five scoped + alice's legacy NULL
+    assert {r.content for r in store.all("alice", org_id=None)} == {"org six"}
+    assert len(store.all("bob", org_id=None)) == 1  # untouched
+
+
+def test_delete_org_and_legacy_is_atomic_on_failure():
+    # If the legacy delete fails, the scoped delete must roll back too (no
+    # half-completed erasure).
+    store = _store()
+    store.add("alice", EPISODIC, "org five", org_id=5)
+    store.add("alice", EPISODIC, "legacy")
+
+    class _FlakyConn:
+        """Delegates to the real connection but raises on the legacy DELETE."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args):
+            if "org_id IS NULL" in sql:  # the second (legacy) DELETE
+                raise RuntimeError("boom")
+            return self._real.execute(sql, *args)
+
+        def commit(self):
+            return self._real.commit()
+
+        def rollback(self):
+            return self._real.rollback()
+
+    real = store._conn
+    store._conn = _FlakyConn(real)
+    with pytest.raises(RuntimeError):
+        store.delete_org_and_legacy(5, ["alice"])
+    store._conn = real  # restore for the read below
+
+    # Rolled back: both rows still present.
+    assert len(store.all("alice", org_id=None)) == 2
+
+
+def test_assign_legacy_to_org_stamps_only_null_rows():
+    store = _store()
+    store.add("alice", EPISODIC, "legacy one")            # NULL -> becomes org 5
+    store.add("alice", EPISODIC, "legacy two")            # NULL -> becomes org 5
+    store.add("alice", EPISODIC, "already scoped", org_id=6)  # untouched
+
+    updated = store.assign_legacy_to_org("alice", 5)
+    assert updated == 2
+    assert {r.content for r in store.all("alice", org_id=5)} == {"legacy one", "legacy two"}
+    assert [r.content for r in store.all("alice", org_id=6)] == ["already scoped"]
+
+
+def test_org_less_manager_works_with_pre_sp2_store():
+    # A store implementing only the original ABC (no org_id) must keep working
+    # when the manager has no concrete org: MemoryManager passes org_id only when
+    # concrete, so an org-less caller invokes the original contract. (Finding 3)
+    store = _LegacyStore()
+    manager = MemoryManager(store, org_id=None)
+
+    manager.record_run("alice", "how do refunds work?", "30 days")  # add() sans org_id
+    assert manager.recall_preamble("alice", "refunds")  # search() sans org_id
+
+
+def test_user_summaries_splits_legacy_and_scoped_same_username():
+    # A username with both a legacy NULL-org row and an org-scoped row yields two
+    # entries, each with its own total -- not one merged/misattributed row. (Finding 4)
+    store = _store()
+    store.add("alice", EPISODIC, "legacy note")  # org_id None
+    store.add("alice", EPISODIC, "scoped note", org_id=5)
+
+    alice = [s for s in store.user_summaries() if s["user_id"] == "alice"]
+    assert len(alice) == 2
+    assert {s["org_id"]: s["total"] for s in alice} == {None: 1, 5: 1}
+
+
+def test_concurrent_open_of_legacy_db_is_race_safe(tmp_path):
+    # Many threads opening the same pre-org DB at once must all migrate cleanly;
+    # the loser of the ALTER race sees "duplicate column" and continues. (Finding 5)
+    import sqlite3
+    import threading
+
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    errors: list[Exception] = []
+
+    def open_store():
+        try:
+            SqliteBM25Memory(db_path).close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_store) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+
+
+def test_opens_pre_org_db_and_migrates(tmp_path):
+    # A DB created before org scoping (no org_id column) must gain the column
+    # in place, keep its existing rows (org_id NULL), and work afterward.
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'episodic', 'legacy note', '{}', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path)
+    # Legacy row survives with org_id NULL and is visible to the admin (org_id=None).
+    legacy = store.all("alice", org_id=None)
+    assert len(legacy) == 1
+    assert legacy[0].org_id is None
+    # New org-scoped writes work and are isolated from the legacy NULL row.
+    store.add("alice", EPISODIC, "new org note", org_id=5)
+    assert [r.content for r in store.all("alice", org_id=5)] == ["new org note"]
+    store.close()

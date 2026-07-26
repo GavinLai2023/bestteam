@@ -43,6 +43,17 @@
   procedural (opt-in via `BESTTEAM_MEMORY_MODEL`). Disabled by default
   (`BESTTEAM_MEMORY_DB`); swappable behind the ABC (e.g. future mem0). See
   `src/bestteam/core/CLAUDE.md`.
+- Per-user memory review remediation (`docs/MEMORY_REVIEW_TRIAGE.md`) — 13
+  findings triaged into SP-1…SP-4. **SP-1** (hardening, PR #30): recall is
+  best-effort like record; run-path store closed; `add()` rejects malformed
+  `type`. **SP-2** (org multi-tenancy, PR #31): memory carries `org_id`
+  (idempotent in-place migration), the run binds its org into `MemoryManager`,
+  and org-level compliance erasure (`delete_org_and_legacy`) + account-deletion
+  memory purge (`delete-user` fail-closed) + `move-user` legacy reconciliation
+  land via the operator CLI/admin API. Deferred to a deletion-lifecycle
+  sub-project: in-flight-run drain fence, immutable-principal keying, durable
+  memory-store state, historical-legacy-provenance sweep (SP-3 metering/
+  observability and SP-4 dedup/retention/recall-bound remain registered).
 - Code-review triage remediation: all 17 findings (CR-001…CR-017) resolved
   across PRs #4 and #5 — KB path containment + atomic versioned uploads,
   startup secret-key guard, team-scoped aggregation, terminal-run guarantees,
@@ -427,6 +438,10 @@
   today (admin-only, opt-in, operator-provisioned accounts), but the
   shared-platform ceiling is the sum of memory-enabled users across all orgs
   — add a limit/cursor if a customer reaches ~hundreds. See `core/memory.py`.
+  Memory is now org-scoped (SP-2), but a **deletion-lifecycle** gap remains: an
+  in-flight run can record memory *after* an account/org purge (no cross-process
+  drain fence), and pre-SP-2 legacy rows with no recorded provenance need a
+  one-time operator sweep — both tracked in `docs/MEMORY_REVIEW_TRIAGE.md`.
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain
