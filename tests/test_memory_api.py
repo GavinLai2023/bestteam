@@ -81,15 +81,31 @@ def test_search_endpoint_bounds_scan(admin_client, memory_db, monkeypatch):
     captured = {}
     real = SqliteBM25Memory.search
 
-    def spy(self, user_id, query, types=None, top_k=5, max_candidates=None):
+    def spy(self, user_id, query, types=None, top_k=5, max_candidates=None, org_id=None):
         captured["max_candidates"] = max_candidates
-        return real(self, user_id, query, types=types, top_k=top_k, max_candidates=max_candidates)
+        return real(
+            self, user_id, query, types=types, top_k=top_k,
+            max_candidates=max_candidates, org_id=org_id,
+        )
 
     monkeypatch.setattr(SqliteBM25Memory, "search", spy)
     resp = admin_client.get("/api/memory/users/alice/records", params={"query": "refunds", "limit": 1})
 
     assert resp.status_code == 200
     assert captured["max_candidates"] is not None and captured["max_candidates"] >= 1
+
+
+def test_get_records_org_filter(admin_client, memory_db):
+    # Review r3 #6: records can be scoped to one (org_id, user_id) identity, so
+    # the UI can view a single summary row. alice's seeded rows are org 5.
+    scoped = admin_client.get(
+        "/api/memory/users/alice/records", params={"org": 5}
+    ).json()["records"]
+    assert scoped and all(r["org_id"] == 5 for r in scoped)
+    # A different org yields nothing for alice.
+    assert admin_client.get(
+        "/api/memory/users/alice/records", params={"org": 999}
+    ).json()["records"] == []
 
 
 def test_get_records_type_filter(admin_client, memory_db):

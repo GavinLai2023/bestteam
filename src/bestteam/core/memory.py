@@ -352,30 +352,50 @@ class SqliteBM25Memory(Memory):
         return cursor.rowcount
 
     def delete_org(self, org_id: int) -> int:
-        """Delete every record belonging to `org_id` (org-level erasure, SP-2).
+        """Delete every record scoped to `org_id`. Returns the number removed.
 
-        The compliance primitive: 'delete all of this organization's memory'.
-        Returns the number of rows removed.
+        Scoped rows only -- legacy NULL-org rows are handled by
+        `delete_org_and_legacy` (the full compliance erasure).
         """
         cursor = self._conn.execute("DELETE FROM memories WHERE org_id = ?", (org_id,))
         self._conn.commit()
         return cursor.rowcount
 
-    def delete_legacy_for_users(self, user_ids: Sequence[str]) -> int:
-        """Delete only the legacy NULL-org rows for the given usernames.
+    def delete_org_and_legacy(self, org_id: int, user_ids: Sequence[str]) -> int:
+        """Org-level compliance erasure in ONE transaction (SP-2): delete `org_id`'s
+        scoped rows AND the given users' legacy NULL-org rows, rolling back on any
+        failure so erasure can't half-complete (scoped gone, legacy left).
 
-        Org erasure uses this to clear a member's pre-SP-2 rows WITHOUT the
-        globally-unscoped `delete_user`, which would also destroy that username's
-        rows under *other* concrete orgs (a moved user, or a former same-named
-        principal's history — cross-org data loss). Returns rows removed.
+        Legacy rows are cleared by NULL-org + username, never the globally-unscoped
+        `delete_user`, which would also destroy that username's rows under *other*
+        orgs (a moved user or a former same-named principal). Returns rows removed.
         """
         ids = list(user_ids)
-        if not ids:
-            return 0
-        placeholders = ",".join("?" for _ in ids)
+        try:
+            cursor = self._conn.execute("DELETE FROM memories WHERE org_id = ?", (org_id,))
+            removed = cursor.rowcount
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                cursor = self._conn.execute(
+                    f"DELETE FROM memories WHERE org_id IS NULL AND user_id IN ({placeholders})",
+                    ids,
+                )
+                removed += cursor.rowcount
+            self._conn.commit()
+            return removed
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def assign_legacy_to_org(self, user_id: str, org_id: int) -> int:
+        """Bind `user_id`'s legacy NULL-org rows to `org_id`. Called before a move
+        so pre-SP-2 rows stay attributable to the org they were created under
+        (their current org), instead of silently following the user to a new org
+        and being erased under the wrong org later. Returns rows updated.
+        """
         cursor = self._conn.execute(
-            f"DELETE FROM memories WHERE org_id IS NULL AND user_id IN ({placeholders})",
-            ids,
+            "UPDATE memories SET org_id = ? WHERE user_id = ? AND org_id IS NULL",
+            (org_id, user_id),
         )
         self._conn.commit()
         return cursor.rowcount

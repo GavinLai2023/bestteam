@@ -371,13 +371,20 @@ unscoped `delete_user`, which would also destroy the same username's rows under
 other orgs (moved user / reused username). A `get_memory_store` dependency opens a
 per-request `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread
 and closes it after (`store.close()`); when memory is disabled the read endpoints
-return `enabled:false` and mutations return 409. The new SDK store primitives
-`user_ids()`/`delete_user()`/`delete_org()`/`delete_legacy_for_users()`/`close()`
-back these endpoints. The operator `delete-user` CLI (`admin.py`) also calls
-`store.delete_user` to purge a deleted account's memory before releasing the
-username (fail closed on error), so a recreated same-named account can't recall it
-(SP-2 review #2). Memory is org-scoped (SP-2): `user_summaries()` and each record
-carry `org_id`, and the
+return `enabled:false` and mutations return 409. `GET /users/{id}/records`
+accepts `?org=` to scope to one `(org_id, user_id)` identity (a moved user has
+rows under several orgs; the admin UI keys/selects by both). The SDK store
+primitives `user_ids()`/`delete_user()`/`delete_org()`/`delete_org_and_legacy()`/
+`assign_legacy_to_org()`/`close()` back these endpoints; org erasure resolves the
+member set then deletes scoped + attributable-legacy rows in one store transaction
+(`delete_org_and_legacy`). The operator `delete-user` CLI (`admin.py`) validates
+the account first, then purges the deleted principal's memory (`store.delete_user`)
+before releasing the username, failing closed on error (SP-2 review r2 #2 / r3
+#1,#4); it warns loudly when `BESTTEAM_MEMORY_DB` is unset/absent for the
+invocation rather than implying a clean purge, and never creates a missing store.
+`move-user` first binds the user's legacy NULL-org rows to their source org
+(`assign_legacy_to_org`) so pre-SP-2 data stays attributable (r3 #3). Memory is
+org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
 admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
 org — see `src/bestteam/core/CLAUDE.md`.
 

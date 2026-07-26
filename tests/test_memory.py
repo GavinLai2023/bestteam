@@ -427,22 +427,65 @@ def test_delete_org_removes_only_that_org():
     assert len(store.all("bob", org_id=None)) == 1
 
 
-def test_delete_legacy_for_users_touches_only_null_org_rows():
-    # Deletes only NULL-org rows for the named users; concrete-org rows (any org,
-    # including the same username's other-org history) are untouched.
+def test_delete_org_and_legacy_scopes_correctly():
+    # Deletes org-5 scoped rows + the named users' NULL-org rows, in one txn;
+    # concrete rows under OTHER orgs (same username) survive.
     store = _store()
-    store.add("alice", EPISODIC, "legacy", )              # NULL
-    store.add("alice", EPISODIC, "org five", org_id=5)    # concrete
-    store.add("alice", EPISODIC, "org six", org_id=6)     # concrete (other org)
-    store.add("bob", EPISODIC, "bob legacy")              # NULL, not selected
+    store.add("alice", EPISODIC, "legacy")               # NULL
+    store.add("alice", EPISODIC, "org five", org_id=5)   # target org
+    store.add("alice", EPISODIC, "org six", org_id=6)    # other org (must survive)
+    store.add("bob", EPISODIC, "bob legacy")             # NULL, not a member
 
-    removed = store.delete_legacy_for_users(["alice"])
-    assert removed == 1
-    contents = {r.content for r in store.all("alice", org_id=None)}
-    assert contents == {"org five", "org six"}  # both concrete rows survive
+    removed = store.delete_org_and_legacy(5, ["alice"])
+    assert removed == 2  # org-five scoped + alice's legacy NULL
+    assert {r.content for r in store.all("alice", org_id=None)} == {"org six"}
     assert len(store.all("bob", org_id=None)) == 1  # untouched
-    # Empty input is a no-op.
-    assert store.delete_legacy_for_users([]) == 0
+
+
+def test_delete_org_and_legacy_is_atomic_on_failure():
+    # If the legacy delete fails, the scoped delete must roll back too (no
+    # half-completed erasure).
+    store = _store()
+    store.add("alice", EPISODIC, "org five", org_id=5)
+    store.add("alice", EPISODIC, "legacy")
+
+    class _FlakyConn:
+        """Delegates to the real connection but raises on the legacy DELETE."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args):
+            if "org_id IS NULL" in sql:  # the second (legacy) DELETE
+                raise RuntimeError("boom")
+            return self._real.execute(sql, *args)
+
+        def commit(self):
+            return self._real.commit()
+
+        def rollback(self):
+            return self._real.rollback()
+
+    real = store._conn
+    store._conn = _FlakyConn(real)
+    with pytest.raises(RuntimeError):
+        store.delete_org_and_legacy(5, ["alice"])
+    store._conn = real  # restore for the read below
+
+    # Rolled back: both rows still present.
+    assert len(store.all("alice", org_id=None)) == 2
+
+
+def test_assign_legacy_to_org_stamps_only_null_rows():
+    store = _store()
+    store.add("alice", EPISODIC, "legacy one")            # NULL -> becomes org 5
+    store.add("alice", EPISODIC, "legacy two")            # NULL -> becomes org 5
+    store.add("alice", EPISODIC, "already scoped", org_id=6)  # untouched
+
+    updated = store.assign_legacy_to_org("alice", 5)
+    assert updated == 2
+    assert {r.content for r in store.all("alice", org_id=5)} == {"legacy one", "legacy two"}
+    assert [r.content for r in store.all("alice", org_id=6)] == ["already scoped"]
 
 
 def test_org_less_manager_works_with_pre_sp2_store():

@@ -101,17 +101,39 @@ Suggested order under the current "memory is opt-in, default off" posture:
   #2 the operator `delete-user` CLI now purges the user's memory (unscoped
   `store.delete_user` — the whole principal is being removed) before releasing
   the username, failing closed if the purge errors, so a recreated same-named
-  account can't recall the deleted account's memory.
+  account can't recall the deleted account's memory. Third-round fixes: r3 #1
+  `delete-user` warns (doesn't silently succeed) when `BESTTEAM_MEMORY_DB` is
+  unset/absent, and never creates a missing store; r3 #3 `move-user` binds legacy
+  NULL-org rows to the source org first (`assign_legacy_to_org`); r3 #4 the
+  account is validated before any purge; r3 #5 org erasure is one store
+  transaction (`delete_org_and_legacy`, rollback on failure); r3 #6 the admin UI
+  keys/selects by `(org_id, user_id)`, shows scope, and filters records by `?org=`.
 - SP-3 / SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project
 
-- **Immutable user-id as the memory principal** (from SP-2 review #2): memory is
-  keyed by `username`, a reusable identifier. `delete-user` now purges memory
-  before releasing the username (fail closed), closing the reuse leak, but a
-  durable immutable user id would be a more robust long-term principal than a
-  recyclable username. Larger change; belongs with deletion-lifecycle.
-- **Orphaned legacy NULL-org rows**: a pre-SP-2 row whose username no longer
-  exists in the `users` table can't be attributed to an org, so org erasure
-  can't reach it (and there's no account to trigger a per-user purge). A
-  sweep/repair tool for unattributable legacy rows belongs with deletion-lifecycle.
+These are real but disproportionate to bolt onto SP-2 (an opt-in, single-worker,
+SQLite memory feature); they need the cross-process lifecycle machinery the
+deletion-lifecycle sub-project is for. Recorded so they aren't rediscovered.
+
+- **In-flight run writes after account/org deletion** (SP-2 review r3 #2): a run
+  already executing holds its `MemoryManager` and records on completion, which can
+  land *after* a purge; a recreated same-`(org_id, username)` account could then
+  recall it. The robust fix is cross-process — a durable "deleting" marker /
+  principal generation checked before every memory write, plus a run-drain fence —
+  which the CLI (a separate process from the run workers) can't do today. Runs are
+  short and deletion is a manual operator action, so the window is small but nonzero.
+- **Immutable user-id as the memory principal** (r2 #2 / r3 #2): memory is keyed by
+  `username`, a reusable identifier. Purge-before-release closes the common reuse
+  leak, but a durable immutable id (with generation) would be a more robust
+  principal and is the proper substrate for the run-drain fence above.
+- **Durable authoritative memory-store state** (r3 #1): the CLI infers the store
+  from its own `BESTTEAM_MEMORY_DB`; it now warns when that's unset rather than
+  refusing (refusing would break the majority memory-disabled deployments). A
+  durable record of whether/where memory is enabled would let deletion hard-fail
+  on a mismatched environment.
+- **Historically ambiguous / orphaned legacy NULL-org rows** (r3 #3, and prior):
+  `move-user` now binds legacy rows to their source org going forward, but rows
+  created before this fix (or whose username no longer exists) have no recorded
+  provenance and can't be attributed by code. A one-time operator-run migration /
+  sweep is the resolution; it belongs with deletion-lifecycle.

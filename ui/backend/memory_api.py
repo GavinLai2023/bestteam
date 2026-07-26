@@ -81,16 +81,21 @@ def get_user_records(
     user_id: str,
     query: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
+    org: Optional[int] = Query(None),
     limit: int = Query(_DEFAULT_RECORDS, ge=1, le=_MAX_RECORDS),
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
     if store is None:
         return {"enabled": False, "records": []}
     types = [type] if type else None
+    # `org` scopes to one (org_id, user_id) identity so the UI can view a single
+    # summary row (a moved user has rows under several orgs); omitted = across orgs.
     if query:
-        records = store.search(user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN)
+        records = store.search(
+            user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN, org_id=org
+        )
     else:
-        records = store.all(user_id, types=types, limit=limit)
+        records = store.all(user_id, types=types, limit=limit, org_id=org)
     return {"enabled": True, "records": [dataclasses.asdict(r) for r in records]}
 
 
@@ -128,11 +133,11 @@ def clear_org_memory(
     deletion (deletion-lifecycle sub-project, review #2).
     """
     store = _require_store(store)
-    removed = store.delete_org(org_id)
-    # Mop up this org's members' legacy NULL-org rows. Must delete ONLY NULL-org
-    # rows for those usernames -- an unscoped delete_user would also destroy the
-    # same username's rows under other concrete orgs (a moved user, or a former
-    # same-named principal's history), i.e. cross-org data loss.
+    # Resolve the member set first, then delete scoped + attributable-legacy rows
+    # in a single memory-store transaction, so erasure can't half-complete
+    # (review r3 #5). Legacy rows are cleared by NULL-org + username, never an
+    # unscoped delete_user (which would destroy the same username's other-org
+    # history — a moved user or a former same-named principal).
     usernames = [u for (u,) in db.query(User.username).filter(User.org_id == org_id)]
-    removed += store.delete_legacy_for_users(usernames)
+    removed = store.delete_org_and_legacy(org_id, usernames)
     return {"removed": removed}
