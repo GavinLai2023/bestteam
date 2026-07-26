@@ -364,6 +364,33 @@ def test_record_run_captures_extraction_usage_and_types():
     assert sem.metadata == {"run_id": "r1"}
 
 
+def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
+    # Review r4 #1: a failed procedural write must not discard the captured usage
+    # or the semantic row that already committed.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _FailProceduralStore(SqliteBM25Memory):
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+            if type == PROCEDURAL:
+                raise RuntimeError("write failed")
+            return super().add(user_id, type, content, metadata, org_id=org_id)
+
+    canned = AIMessage(
+        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        usage_metadata={"input_tokens": 31, "output_tokens": 9, "total_tokens": 40},
+    )
+    store = _FailProceduralStore(":memory:")
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+    # Usage billed (tokens were consumed) and the successful writes are reported.
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 31, "output_tokens": 9}
+    assert outcome.recorded == [EPISODIC, SEMANTIC]  # procedural failed, not reported
+    # The outcome agrees with what's actually stored.
+    assert sorted(r.type for r in store.all("alice")) == [EPISODIC, SEMANTIC]
+
+
 def test_record_run_extraction_usage_none_for_fake_spec():
     store = _store()
     mgr = MemoryManager(store, extraction_model='fake:{"facts": [], "procedural": ""}')

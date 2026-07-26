@@ -199,9 +199,87 @@ def test_stream_emits_memory_recalled_and_recorded_events():
     assert recalled.data == 1  # one seeded record drawn
     recorded = next(e for e in events if e.type == "memory_recorded")
     assert "episodic" in recorded.data
-    # Ordering: recalled sits after run_started; recorded after run_completed.
+    # Ordering: recalled after run_started; recorded BEFORE run_completed so a
+    # consumer that stops on the terminal event still sees it (review r4 #2).
     assert types.index("memory_recalled") < types.index("memory_recorded")
-    assert types.index("run_completed") < types.index("memory_recorded")
+    assert types.index("memory_recorded") < types.index("run_completed")
+    assert types[-1] == "run_completed"
+
+
+def test_run_surfaces_memory_outcome():
+    # Review r4 #3: the non-streaming run() exposes the recording outcome too.
+    store, manager = _seeded_manager()
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+
+    assert result.memory is not None
+    assert "episodic" in result.memory.recorded
+
+
+def test_custom_recall_preamble_is_honored():
+    # Review r4 #4: a manager-like object overriding only recall_preamble must
+    # still have its preamble injected (not bypassed by recall()).
+    from bestteam.core.memory import MemoryOutcome
+
+    class _CustomManager:
+        def recall_preamble(self, user_id, query):
+            return "CUSTOM PREAMBLE"
+
+        def record_run(self, user_id, input, output):
+            return MemoryOutcome(recorded=[])
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("hi", user_id="u", memory=_CustomManager()))
+    assert "CUSTOM PREAMBLE" in (model.captured_system or "")
+
+
+def test_stream_emits_memory_recalled_zero_when_no_matches():
+    # Review r4 #5: an active-memory run with no matches still emits recalled(0),
+    # distinguishing "enabled, nothing matched" from "memory disabled".
+    manager = MemoryManager(SqliteBM25Memory(":memory:"))  # empty store
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("nothing here", user_id="u", memory=manager))
+    recalled = [e for e in events if e.type == "memory_recalled"]
+    assert len(recalled) == 1 and recalled[0].data == 0
+
+
+def test_stream_emits_memory_failed_on_recall_failure():
+    # Review r4 #5: a recall failure is visible (and distinct from zero), yet the
+    # run still completes.
+    manager = MemoryManager(_FailingSearchMemory(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("q", user_id="u", memory=manager))
+    failed = [e for e in events if e.type == "memory_failed"]
+    assert any(e.data == "recall" for e in failed)
+    assert events[-1].type == "run_completed"
+
+
+def test_stream_emits_memory_failed_on_record_failure():
+    # Review r4 #5: a recording failure is visible, run_completed stays last.
+    class _FailAddStore(SqliteBM25Memory):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    manager = MemoryManager(_FailAddStore(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("q", user_id="u", memory=manager))
+    assert any(e.type == "memory_failed" and e.data == "record" for e in events)
+    assert events[-1].type == "run_completed"
 
 
 def test_stream_without_memory_emits_no_memory_events():

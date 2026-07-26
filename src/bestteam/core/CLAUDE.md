@@ -177,10 +177,17 @@ is a thin string wrapper, unchanged). The extraction call's `usage_metadata` is
 captured as a `{model, input_tokens, output_tokens}` entry (mirroring the adapter),
 so `Workflow.stream` can emit it on a `memory_recorded` TraceEvent and the backend
 meters it (`agent="memory:extraction"`, M-04) — the SDK never touches the backend
-DB. `Workflow.stream` also emits `memory_recalled` (`data`=count) for observability
-(M-05). Every record is stamped with `metadata={run_id, workflow_version_id}`
-provenance (M-06), bound into `MemoryManager` by `runtime._make_memory`. See
-`docs/MEMORY_REVIEW_TRIAGE.md`.
+DB. `Workflow.stream` also emits `memory_recalled` (`data`=count, 0 included) and,
+on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
+`"record"`) for observability (M-05). Memory recording + these events happen
+**before** `run_completed` (the final event), so a consumer that stops on the
+terminal event still sees them and the run can't be evicted first; recording stays
+best-effort (a failure yields `memory_failed`, never `run_failed`). `Workflow.run`
+surfaces the same `MemoryOutcome` on `WorkflowResult.memory`. Provenance is stamped
+into each record's `metadata={run_id, workflow_version_id}` (M-06), bound by
+`runtime._make_memory`. Extraction usage is captured immediately after the model
+call, so a partial-write failure still bills the spend and reports the writes that
+succeeded. See `docs/MEMORY_REVIEW_TRIAGE.md`.
 
 `Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`

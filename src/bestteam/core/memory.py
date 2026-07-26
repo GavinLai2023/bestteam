@@ -596,26 +596,35 @@ class MemoryManager:
                 HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
             ]
         )
+        # Capture usage IMMEDIATELY after the call, before any parse/write: the
+        # tokens were consumed regardless of whether storage later fails, so the
+        # spend must be billed even on a partial-write failure (review r4 #1).
         usage = self._usage_entry(response)
-        content = response.content if hasattr(response, "content") else str(response)
-        parsed = _parse_extraction(content)
-        if parsed is None:
-            _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
-            return [], usage
-
+        # Parsing and each write are best-effort and never propagate, so a failed
+        # `add()` can't discard the usage or the writes that already succeeded.
         written: List[str] = []
-        for fact in parsed.get("facts", []):
-            if isinstance(fact, str) and fact.strip():
+        try:
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = _parse_extraction(content)
+            if parsed is None:
+                _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
+                return written, usage
+            for fact in parsed.get("facts", []):
+                if isinstance(fact, str) and fact.strip():
+                    self.store.add(
+                        user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
+                    )
+                    written.append(SEMANTIC)
+            procedural = parsed.get("procedural")
+            if isinstance(procedural, str) and procedural.strip():
                 self.store.add(
-                    user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
+                    user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
                 )
-                written.append(SEMANTIC)
-        procedural = parsed.get("procedural")
-        if isinstance(procedural, str) and procedural.strip():
-            self.store.add(
-                user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
+                written.append(PROCEDURAL)
+        except Exception as exc:  # noqa: BLE001 — best-effort; keep usage + prior writes
+            _logger.warning(
+                "Memory extraction: partial write failure for user '%s': %s", user_id, exc, exc_info=True
             )
-            written.append(PROCEDURAL)
         return written, usage
 
 

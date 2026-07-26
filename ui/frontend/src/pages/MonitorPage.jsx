@@ -10,6 +10,7 @@ const EVENT_LABELS = {
   run_failed: '✕ failed',
   memory_recalled: '🧠 memory recalled',
   memory_recorded: '🧠 memory recorded',
+  memory_failed: '🧠 memory failed',
 }
 
 function MonitorPage() {
