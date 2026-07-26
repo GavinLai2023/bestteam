@@ -2,8 +2,29 @@
 
 import pytest
 
-from bestteam import MemoryManager, MemoryRecord, SqliteBM25Memory
+from bestteam import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, PROCEDURAL, SEMANTIC
+
+
+class _LegacyStore(Memory):
+    """A pre-SP-2 store: implements only the original ABC (no org_id kwarg)."""
+
+    def __init__(self):
+        self.records: list[MemoryRecord] = []
+
+    def add(self, user_id, type, content, metadata=None):
+        rec = MemoryRecord(id=str(len(self.records)), user_id=user_id, type=type, content=content)
+        self.records.append(rec)
+        return rec
+
+    def search(self, user_id, query, types=None, top_k=5):
+        return [r for r in self.records if r.user_id == user_id][:top_k]
+
+    def all(self, user_id, types=None):
+        return [r for r in self.records if r.user_id == user_id]
+
+    def delete(self, memory_id):
+        self.records = [r for r in self.records if r.id != memory_id]
 
 
 def _store():
@@ -404,6 +425,62 @@ def test_delete_org_removes_only_that_org():
     assert removed == 1
     assert store.all("alice", org_id=None) == []
     assert len(store.all("bob", org_id=None)) == 1
+
+
+def test_org_less_manager_works_with_pre_sp2_store():
+    # A store implementing only the original ABC (no org_id) must keep working
+    # when the manager has no concrete org: MemoryManager passes org_id only when
+    # concrete, so an org-less caller invokes the original contract. (Finding 3)
+    store = _LegacyStore()
+    manager = MemoryManager(store, org_id=None)
+
+    manager.record_run("alice", "how do refunds work?", "30 days")  # add() sans org_id
+    assert manager.recall_preamble("alice", "refunds")  # search() sans org_id
+
+
+def test_user_summaries_splits_legacy_and_scoped_same_username():
+    # A username with both a legacy NULL-org row and an org-scoped row yields two
+    # entries, each with its own total -- not one merged/misattributed row. (Finding 4)
+    store = _store()
+    store.add("alice", EPISODIC, "legacy note")  # org_id None
+    store.add("alice", EPISODIC, "scoped note", org_id=5)
+
+    alice = [s for s in store.user_summaries() if s["user_id"] == "alice"]
+    assert len(alice) == 2
+    assert {s["org_id"]: s["total"] for s in alice} == {None: 1, 5: 1}
+
+
+def test_concurrent_open_of_legacy_db_is_race_safe(tmp_path):
+    # Many threads opening the same pre-org DB at once must all migrate cleanly;
+    # the loser of the ALTER race sees "duplicate column" and continues. (Finding 5)
+    import sqlite3
+    import threading
+
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    errors: list[Exception] = []
+
+    def open_store():
+        try:
+            SqliteBM25Memory(db_path).close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_store) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
 
 
 def test_opens_pre_org_db_and_migrates(tmp_path):

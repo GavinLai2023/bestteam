@@ -81,32 +81,24 @@ class Memory(ABC):
 
     @abstractmethod
     def add(
-        self,
-        user_id: str,
-        type: str,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        *,
-        org_id: Optional[int] = None,
+        self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
     ) -> MemoryRecord:
         """Persist one record for `user_id` and return it (with id/timestamp filled in).
 
-        `org_id` scopes the record to an organization (SP-2 multi-tenancy)."""
+        Org scoping (SP-2) is an optional concrete-store extension, like
+        `SqliteBM25Memory`'s `org_id=`/`limit=`/`max_candidates=` -- it is
+        deliberately NOT on this ABC so a pre-SP-2 store that implements only the
+        original four methods keeps working. `MemoryManager` passes `org_id=`
+        only when it has a concrete org, so an org-less caller invokes exactly
+        this contract."""
 
     @abstractmethod
     def search(
-        self,
-        user_id: str,
-        query: str,
-        types: Optional[Sequence[str]] = None,
-        top_k: int = 5,
-        *,
-        org_id: Optional[int] = None,
+        self, user_id: str, query: str, types: Optional[Sequence[str]] = None, top_k: int = 5
     ) -> List[MemoryRecord]:
         """Return up to `top_k` of `user_id`'s records most relevant to `query`.
 
-        When `org_id` is a concrete id, only that org's records are searched;
-        `None` searches across orgs (the admin surface)."""
+        Org scoping is a concrete-store extension (see `add`)."""
 
     @abstractmethod
     def all(self, user_id: str, types: Optional[Sequence[str]] = None) -> List[MemoryRecord]:
@@ -167,7 +159,14 @@ class SqliteBM25Memory(Memory):
         # before org scoping (SP-2) lacks org_id -- add it, leaving old rows NULL.
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
         if "org_id" not in cols:
-            self._conn.execute("ALTER TABLE memories ADD COLUMN org_id INTEGER")
+            try:
+                self._conn.execute("ALTER TABLE memories ADD COLUMN org_id INTEGER")
+            except sqlite3.OperationalError as exc:
+                # Another connection opening the same legacy DB may have won the
+                # ALTER race between our PRAGMA check and here -- that's fine, the
+                # column now exists; only a different error is a real failure.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user ON memories(org_id, user_id)"
@@ -322,10 +321,13 @@ class SqliteBM25Memory(Memory):
             "SELECT org_id, user_id, type, COUNT(*) AS n "
             "FROM memories GROUP BY org_id, user_id, type"
         ).fetchall()
-        summaries: Dict[str, Dict[str, Any]] = {}
+        # Key by (org_id, user_id): a username can carry both legacy NULL-org rows
+        # and org-scoped rows, and keying by user_id alone would merge their counts
+        # and misattribute the total to one org.
+        summaries: Dict[tuple, Dict[str, Any]] = {}
         for row in rows:
             entry = summaries.setdefault(
-                row["user_id"],
+                (row["org_id"], row["user_id"]),
                 {
                     "user_id": row["user_id"],
                     "org_id": row["org_id"],
@@ -338,7 +340,11 @@ class SqliteBM25Memory(Memory):
             if row["type"] in (EPISODIC, SEMANTIC, PROCEDURAL):
                 entry[row["type"]] = row["n"]
             entry["total"] += row["n"]
-        return [summaries[uid] for uid in sorted(summaries)]
+        # NULL org sorts last (can't compare None with int); then by username.
+        return sorted(
+            summaries.values(),
+            key=lambda s: (s["user_id"], s["org_id"] is None, s["org_id"] or 0),
+        )
 
     def delete_user(self, user_id: str) -> int:
         cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
@@ -402,6 +408,12 @@ class MemoryManager:
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
 
+    def _org_kwargs(self) -> Dict[str, Any]:
+        """`{"org_id": ...}` only when a concrete org is bound. When None (an
+        org-less SDK caller), the store is called with the original ABC contract
+        so a pre-SP-2 custom store -- which never accepted `org_id` -- still works."""
+        return {"org_id": self.org_id} if self.org_id is not None else {}
+
     def close(self) -> None:
         """Release the underlying store's resources, if it holds any.
 
@@ -422,7 +434,7 @@ class MemoryManager:
         """
         if not user_id:
             return ""
-        hits = self.store.search(user_id, query, top_k=self.top_k, org_id=self.org_id)
+        hits = self.store.search(user_id, query, top_k=self.top_k, **self._org_kwargs())
         if not hits:
             return ""
         # Recalled content is untrusted: an earlier tool result or model output
@@ -456,7 +468,7 @@ class MemoryManager:
             user_id,
             EPISODIC,
             f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
-            org_id=self.org_id,
+            **self._org_kwargs(),
         )
 
         if self.extraction_model is None:
@@ -488,10 +500,10 @@ class MemoryManager:
 
         for fact in parsed.get("facts", []):
             if isinstance(fact, str) and fact.strip():
-                self.store.add(user_id, SEMANTIC, fact.strip(), org_id=self.org_id)
+                self.store.add(user_id, SEMANTIC, fact.strip(), **self._org_kwargs())
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
-            self.store.add(user_id, PROCEDURAL, procedural.strip(), org_id=self.org_id)
+            self.store.add(user_id, PROCEDURAL, procedural.strip(), **self._org_kwargs())
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:
