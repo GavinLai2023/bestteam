@@ -55,11 +55,12 @@
   write failure), run/version provenance in each record's `metadata`, and
   `memory_recalled`/`memory_recorded`/`memory_failed` TraceEvents; recording runs
   after the terminal event so a hung extraction can't wedge a run; `run()` reaches
-  parity via `WorkflowResult.memory`/`.recall`. **SP-4** (quality & scale, PR TBD):
+  parity via `WorkflowResult.memory`/`.recall`. **SP-4** (quality & scale, PR #33):
   recall bounded to the most-recent N (`BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`,
-  default 1000), exact semantic/procedural dedup on write, and opt-in episodic
-  retention cap (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`,
-  `SqliteBM25Memory.prune_user_type`). All four memory sub-projects are now done.
+  default 1000) + covering indexes; atomic per-type exact dedup on write
+  (`add_if_absent`); and opt-in episodic retention cap
+  (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, `SqliteBM25Memory.prune_user_type`).
+  All four memory sub-projects are now done.
   Deferred to a deletion-lifecycle sub-project: in-flight-run drain fence,
   immutable-principal keying, durable memory-store state,
   historical-legacy-provenance sweep. Deferred within SP-4 (documented,
