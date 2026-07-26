@@ -391,6 +391,40 @@ def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
     assert sorted(r.type for r in store.all("alice")) == [EPISODIC, SEMANTIC]
 
 
+def test_extraction_continues_after_a_failed_write():
+    # Review r5 #2: one failing write must not skip later independent writes, and
+    # the partial failure is flagged (ok=False) while usage + successes are kept.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _FailFirstFactStore(SqliteBM25Memory):
+        def __init__(self, path=":memory:"):
+            super().__init__(path)
+            self._failed = False
+
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+            if type == SEMANTIC and not self._failed:
+                self._failed = True
+                raise RuntimeError("first fact rejected")
+            return super().add(user_id, type, content, metadata, org_id=org_id)
+
+    canned = AIMessage(
+        content='{"facts": ["fact one", "fact two"], "procedural": "a note"}',
+        usage_metadata={"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+    )
+    store = _FailFirstFactStore()
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    assert outcome.ok is False  # a write failed
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 10, "output_tokens": 3}
+    # episodic + fact two + procedural persisted; fact one dropped, later writes not skipped
+    assert outcome.recorded == [EPISODIC, SEMANTIC, PROCEDURAL]
+    contents = {r.content for r in store.all("alice")}
+    assert "fact two" in contents and "a note" in contents and "fact one" not in contents
+
+
 def test_record_run_extraction_usage_none_for_fake_spec():
     store = _store()
     mgr = MemoryManager(store, extraction_model='fake:{"facts": [], "procedural": ""}')

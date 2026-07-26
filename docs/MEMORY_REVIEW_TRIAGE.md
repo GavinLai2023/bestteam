@@ -110,10 +110,19 @@ Suggested order under the current "memory is opt-in, default off" posture:
   keys/selects by `(org_id, user_id)`, shows scope, and filters records by `?org=`.
 - **SP-3** — Implemented: memory instrumentation. M-04 extraction spend metered
   (`agent="memory:extraction"`), M-06 run/version provenance in record `metadata`,
-  M-05 `memory_recalled`/`memory_recorded` TraceEvents. The SDK emits results/
-  events; the backend meters + provenance stays in the record. Branch
-  `feat/memory-instrumentation`. Design:
-  `docs/superpowers/specs/2026-07-26-memory-instrumentation-design.md`.
+  M-05 `memory_recalled`/`memory_recorded`/`memory_failed` TraceEvents. The SDK
+  emits results/events; the backend meters + provenance stays in the record.
+  Branch `feat/memory-instrumentation`. Design:
+  `docs/superpowers/specs/2026-07-26-memory-instrumentation-design.md`. Review
+  rounds hardened it: memory events emitted before the terminal `run_completed`;
+  usage capture survives partial-write failure; each extracted write isolated
+  (`MemoryOutcome.ok`); usage persistence isolated from run status
+  (`_safe_record_usage`); legacy `record_run() -> None` tolerated; custom
+  `recall_preamble` honored. **Pushed back (not memory-specific):** bounding LLM
+  latency / a hung extraction blocking a run — the extraction is one synchronous
+  LLM call like the (equally unbounded) agent calls; a global model-invocation
+  timeout is the right place, out of SP-3 scope. A durable usage outbox/retry is
+  disproportionate for opt-in memory.
 - SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project

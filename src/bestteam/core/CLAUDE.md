@@ -183,11 +183,19 @@ on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
 **before** `run_completed` (the final event), so a consumer that stops on the
 terminal event still sees them and the run can't be evicted first; recording stays
 best-effort (a failure yields `memory_failed`, never `run_failed`). `Workflow.run`
-surfaces the same `MemoryOutcome` on `WorkflowResult.memory`. Provenance is stamped
-into each record's `metadata={run_id, workflow_version_id}` (M-06), bound by
+surfaces the same `MemoryOutcome` on `WorkflowResult.memory` (`None` = disabled;
+`ok=False` = a recording failure — distinguishable). Provenance is stamped into
+each record's `metadata={run_id, workflow_version_id}` (M-06), bound by
 `runtime._make_memory`. Extraction usage is captured immediately after the model
-call, so a partial-write failure still bills the spend and reports the writes that
-succeeded. See `docs/MEMORY_REVIEW_TRIAGE.md`.
+call, so a failure still bills the spend; each extracted write is isolated
+(`MemoryOutcome.ok=False` on any partial/total failure, surfaced as a
+`memory_failed` event) so one bad write can't skip the rest. On the backend,
+`runtime._make_memory` meters via `_safe_record_usage`, which isolates a
+`usage_records` write failure from run status — metering can never flip a
+successful run to `run_failed`. Note: the extraction call is one synchronous LLM
+call on the run's worker thread, exactly like the agent calls (all unbounded — a
+hung provider hangs the run regardless); bounding LLM latency is a global concern,
+not memory-specific. See `docs/MEMORY_REVIEW_TRIAGE.md`.
 
 `Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`

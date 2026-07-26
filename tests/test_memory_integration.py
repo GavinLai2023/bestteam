@@ -282,6 +282,46 @@ def test_stream_emits_memory_failed_on_record_failure():
     assert events[-1].type == "run_completed"
 
 
+def test_stream_tolerates_legacy_record_run_returning_none():
+    # Review r5 #3: a legacy manager whose record_run returns None persisted
+    # successfully — it must NOT be reported as memory_failed.
+    class _LegacyManager:
+        def recall_preamble(self, user_id, query):
+            return ""
+
+        def record_run(self, user_id, input, output):
+            return None
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("hi", user_id="u", memory=_LegacyManager()))
+    types = [e.type for e in events]
+
+    assert "memory_failed" not in types
+    assert types[-1] == "run_completed"
+
+
+def test_run_surfaces_recording_failure_distinct_from_disabled():
+    # Review r5 #4: on run(), a recording failure is distinguishable from memory
+    # being disabled (ok=False vs None).
+    class _FailAddStore(SqliteBM25Memory):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    manager = MemoryManager(_FailAddStore(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("q", user_id="u", memory=manager)
+    assert result.memory is not None and result.memory.ok is False  # failed, not disabled
+
+    result_no_mem = workflow.run("q")
+    assert result_no_mem.memory is None  # disabled
+
+
 def test_stream_without_memory_emits_no_memory_events():
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])
     agent = Agent(name="a", role="r", goal="g", model=model)

@@ -147,6 +147,41 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
     assert mem_rows[0].org_id == 5
 
 
+def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
+    # Review r5 #1: a usage_records write failing must not flip a successful run
+    # to run_failed (metering is isolated from run status).
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from bestteam import MemoryManager
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+
+    extraction = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"facts": ["x"], "procedural": "y"}',
+                usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+            )
+        ]
+    )
+    mgr = MemoryManager(SqliteBM25Memory(":memory:"), extraction_model=extraction, org_id=5)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("usage db down")
+
+    monkeypatch.setattr("ui.backend.runtime.record_usage", boom)
+
+    run = registry.create("wf", "hi")
+    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_completed" for e in events)
+    assert not any(e["type"] == "run_failed" for e in events)
+
+
 def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))

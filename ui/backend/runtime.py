@@ -11,7 +11,7 @@ import dataclasses
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
@@ -27,6 +27,23 @@ _logger = logging.getLogger(__name__)
 
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
+
+
+def _safe_record_usage(db: Session, **kwargs: Any) -> None:
+    """Persist one usage entry, isolating failures from run status (review r5 #1).
+
+    Usage metering is auxiliary: a `usage_records` write failing (DB error) must
+    NOT propagate and flip an otherwise-successful run to `run_failed`. Log,
+    roll back the poisoned transaction, and continue.
+    """
+    try:
+        record_usage(db, **kwargs)
+    except Exception:  # noqa: BLE001 -- metering must never break a run
+        _logger.warning("Usage recording failed for run %s; run unaffected", kwargs.get("run_id"), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _make_memory(
@@ -138,7 +155,7 @@ def run_in_background(
                     db.commit()
             if db is not None and event.type == "agent_completed":
                 for entry in event.usage:
-                    record_usage(
+                    _safe_record_usage(
                         db,
                         run_id=run_id,
                         agent=event.agent,
@@ -151,7 +168,7 @@ def run_in_background(
                 # Meter the memory extraction LLM call (M-04); it bypasses the
                 # adapter's usage path, so it arrives here on the record event.
                 for entry in event.usage:
-                    record_usage(
+                    _safe_record_usage(
                         db,
                         run_id=run_id,
                         agent="memory:extraction",

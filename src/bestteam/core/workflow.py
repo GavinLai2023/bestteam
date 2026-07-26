@@ -172,21 +172,31 @@ class Workflow:
         # Still best-effort: a recording failure surfaces as a sanitized
         # `memory_failed` event, never as `run_failed`.
         if memory:
+            from .memory import MemoryOutcome
+
             try:
                 outcome = memory.record_run(user_id, input, last_output)
-                if outcome.recorded:
-                    # Observability (M-05) + metering (M-04): report what was
-                    # written and carry the extraction call's token usage so the
-                    # backend can persist a usage_records row for it.
-                    yield TraceEvent(
-                        type="memory_recorded",
-                        workflow=self.name,
-                        data=", ".join(outcome.recorded),
-                        usage=[outcome.extraction_usage] if outcome.extraction_usage else [],
-                    )
             except Exception:  # noqa: BLE001 -- memory must never break a run
                 _logger.exception("Memory recording failed; run stays completed")
                 yield TraceEvent(type="memory_failed", workflow=self.name, data="record")
+            else:
+                # A legacy manager may return None (recorded successfully, no
+                # structured outcome) -- that is NOT a failure (review r5 #3).
+                if isinstance(outcome, MemoryOutcome):
+                    if outcome.recorded:
+                        # Observability (M-05) + metering (M-04): report what was
+                        # written and carry the extraction call's token usage so
+                        # the backend can persist a usage_records row for it.
+                        yield TraceEvent(
+                            type="memory_recorded",
+                            workflow=self.name,
+                            data=", ".join(outcome.recorded),
+                            usage=[outcome.extraction_usage] if outcome.extraction_usage else [],
+                        )
+                    if not outcome.ok:
+                        # A partial/total write failure is observable alongside
+                        # any writes that did succeed (review r5 #2).
+                        yield TraceEvent(type="memory_failed", workflow=self.name, data="record")
 
         yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
 

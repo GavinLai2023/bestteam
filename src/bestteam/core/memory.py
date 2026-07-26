@@ -433,10 +433,15 @@ class RecallResult:
 @dataclass
 class MemoryOutcome:
     """Outcome of `record_run`: the record types written and, when an extraction
-    model ran and reported it, that call's token usage (for metering, SP-3)."""
+    model ran and reported it, that call's token usage (for metering, SP-3).
+
+    `ok` is False when any individual write failed (a total or partial failure);
+    the successful writes and the usage are still reported, so a failure is
+    observable without discarding what succeeded (review r5 #2)."""
 
     recorded: List[str]
     extraction_usage: Optional[Dict[str, Any]] = None
+    ok: bool = True
 
 
 class MemoryManager:
@@ -558,31 +563,44 @@ class MemoryManager:
         if not user_id:
             return MemoryOutcome(recorded=[])
 
-        # Content already carries both fields; cap each so one run can't persist
-        # megabytes. `metadata` now carries run/version provenance (M-06).
-        self.store.add(
-            user_id,
-            EPISODIC,
-            f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
-            metadata=self._provenance(),
-            **self._org_kwargs(),
-        )
-        recorded: List[str] = [EPISODIC]
-        extraction_usage: Optional[Dict[str, Any]] = None
+        recorded: List[str] = []
+        ok = True
+        # Best-effort even for the episodic write: a failure is reported via `ok`
+        # (and, upstream, a `memory_failed` event) but never raised, so it can't
+        # break the run (review r5 #2).
+        try:
+            self.store.add(
+                user_id,
+                EPISODIC,
+                f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
+                metadata=self._provenance(),
+                **self._org_kwargs(),
+            )
+            recorded.append(EPISODIC)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory: episodic write failed for '%s': %s", user_id, exc, exc_info=True)
+            ok = False
 
+        extraction_usage: Optional[Dict[str, Any]] = None
         if self.extraction_model is not None:
             try:
-                extracted, extraction_usage = self._extract_and_store(user_id, input, output)
-                recorded.extend(extracted)
-            except Exception as exc:  # noqa: BLE001 — extraction is best-effort
+                written, extraction_usage, extract_ok = self._extract_and_store(user_id, input, output)
+                recorded.extend(written)
+                ok = ok and extract_ok
+            except Exception as exc:  # noqa: BLE001 — model invoke failed (no tokens billed)
                 _logger.warning(
                     "Memory extraction failed for user '%s': %s", user_id, exc, exc_info=True
                 )
-        return MemoryOutcome(recorded=recorded, extraction_usage=extraction_usage)
+                ok = False
+        return MemoryOutcome(recorded=recorded, extraction_usage=extraction_usage, ok=ok)
 
     def _extract_and_store(
         self, user_id: str, input: str, output: str
-    ) -> "tuple[List[str], Optional[Dict[str, Any]]]":
+    ) -> "tuple[List[str], Optional[Dict[str, Any]], bool]":
+        """Returns ``(written_types, usage, ok)``. Usage is captured right after
+        the model call so it's billed even if writes fail. Each extracted write
+        is isolated, so one failing `add()` doesn't skip later independent writes;
+        ``ok`` is False when any write (or parse) failed (review r5 #2)."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Reuse the adapter's model resolver so "fake:" specs stay $0 in tests
@@ -596,36 +614,44 @@ class MemoryManager:
                 HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
             ]
         )
-        # Capture usage IMMEDIATELY after the call, before any parse/write: the
-        # tokens were consumed regardless of whether storage later fails, so the
-        # spend must be billed even on a partial-write failure (review r4 #1).
+        # Capture usage IMMEDIATELY after the call: the tokens were consumed
+        # regardless of whether parsing/storage later fails (review r4 #1).
         usage = self._usage_entry(response)
-        # Parsing and each write are best-effort and never propagate, so a failed
-        # `add()` can't discard the usage or the writes that already succeeded.
         written: List[str] = []
+        ok = True
+
         try:
             content = response.content if hasattr(response, "content") else str(response)
             parsed = _parse_extraction(content)
-            if parsed is None:
-                _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
-                return written, usage
-            for fact in parsed.get("facts", []):
-                if isinstance(fact, str) and fact.strip():
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory extraction: parse failed for '%s': %s", user_id, exc, exc_info=True)
+            return written, usage, False
+        if parsed is None:
+            _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
+            return written, usage, True
+
+        # Each write is independent: a failed one is logged and the rest proceed.
+        for fact in parsed.get("facts", []):
+            if isinstance(fact, str) and fact.strip():
+                try:
                     self.store.add(
                         user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
                     )
                     written.append(SEMANTIC)
-            procedural = parsed.get("procedural")
-            if isinstance(procedural, str) and procedural.strip():
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
+                    ok = False
+        procedural = parsed.get("procedural")
+        if isinstance(procedural, str) and procedural.strip():
+            try:
                 self.store.add(
                     user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
                 )
                 written.append(PROCEDURAL)
-        except Exception as exc:  # noqa: BLE001 — best-effort; keep usage + prior writes
-            _logger.warning(
-                "Memory extraction: partial write failure for user '%s': %s", user_id, exc, exc_info=True
-            )
-        return written, usage
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("Memory: procedural write failed for '%s': %s", user_id, exc, exc_info=True)
+                ok = False
+        return written, usage, ok
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:

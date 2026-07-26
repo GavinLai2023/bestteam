@@ -347,7 +347,9 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   It also meters the per-user memory extraction call: a `memory_recorded` event
   (SP-3) carries the extraction LLM's `usage`, recorded as a `usage_records` row
   with `agent="memory:extraction"` (that call bypasses the adapter's usage path,
-  so it arrives on the memory event instead).
+  so it arrives on the memory event instead). All usage persistence goes through
+  `_safe_record_usage`, which isolates a `usage_records` write failure (logs +
+  rolls back) so metering can never flip a successful run to `run_failed`.
 
 ## Per-user memory
 
