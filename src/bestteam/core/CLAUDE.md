@@ -171,6 +171,39 @@ knowledge base — both now import `tokenize`/`significant_terms` from
 The four memory types: **working** = the live `_TeamState` (not stored here);
 **episodic**/**semantic**/**procedural** = `MemoryRecord` rows tagged by `type`.
 
+**Instrumentation (SP-3).** `record_run` returns a `MemoryOutcome(recorded,
+extraction_usage)` and `recall` a `RecallResult(preamble, count)` (`recall_preamble`
+is a thin string wrapper, unchanged). The extraction call's `usage_metadata` is
+captured as a `{model, input_tokens, output_tokens}` entry (mirroring the adapter),
+so `Workflow.stream` can emit it on a `memory_recorded` TraceEvent and the backend
+meters it (`agent="memory:extraction"`, M-04) — the SDK never touches the backend
+DB. `Workflow.stream` also emits `memory_recalled` (`data`=count, 0 included) and,
+on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
+`"record"`) for observability (M-05). Recall events precede the agents; **recording
+events are emitted AFTER `run_completed`** (see the ordering note below), so a
+slow/hung extraction can't wedge the run. Recording stays best-effort (a failure
+yields `memory_failed`, never `run_failed`). `Workflow.run`
+surfaces the same instrumentation on `WorkflowResult` for parity with `stream()`:
+`.memory` (recording `MemoryOutcome`; `None`=disabled, `ok=False`=recording
+failure) and `.recall` (`RecallResult`; `None`=disabled, `count`=records drawn,
+`ok=False`=recall failure). Provenance is stamped into each record's
+`metadata={run_id, workflow_version_id}` (M-06), bound by `runtime._make_memory`.
+Extraction usage is captured immediately after the model call, so a failure still
+bills the spend; the usage rides exactly one emitted event (`memory_recorded`, or
+`memory_failed` when *every* write failed) so it's metered once even on total
+failure. Each extracted write is isolated (`MemoryOutcome.ok=False` on any
+partial/total failure → a `memory_failed` event) so one bad write can't skip the
+rest. **Recording (including the extraction LLM call) runs AFTER the terminal
+`run_completed` event** (`Workflow.stream`), so a slow/hung extraction can never
+delay or wedge a finished run — no timeout machinery needed. The backend still
+meters/records these post-terminal events because `run_in_background` drains the
+whole event stream; a live WebSocket that stops on `run_completed` just won't
+*display* them (no durable billing/provenance data depends on that), and
+`registry.publish` tolerates a run evicted between the terminal event and a late
+memory event. On the backend, usage persistence goes through `_safe_record_usage`,
+which isolates a `usage_records` write failure from run status. See
+`docs/MEMORY_REVIEW_TRIAGE.md`.
+
 `Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`
 → each agent's `extra_system_prompt`, so the cached compiled graph is reused

@@ -54,9 +54,9 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 | **M-03** | Run-path memory store connection is never explicitly closed — a reused worker thread opens a fresh SQLite connection per run and relies on GC to release it | Resource leak | **P0** | S | **SP-1 — Implemented** |
 | **M-11** | `type` is unconstrained in both `Memory.add()` and the SQLite table; only a convention (`episodic`/`semantic`/`procedural`) | Data integrity | P1 | XS | **SP-1 — Implemented (soft: rejects non-string/empty; enum stays open)** |
 | **M-01** | No organization dimension: keyed by `username`, not `(org_id, user_id)`. A username reused/reassigned across orgs would carry the old org's memory; org-scoped export/erasure (compliance) is impossible | Multi-tenancy / compliance | **P1** | M–L | **SP-2 — Implemented** (org_id column; org-bound recall/record; `delete_org` erasure) |
-| **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3** |
-| **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3** |
-| **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3** |
+| **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3 — Implemented** (metered as `agent="memory:extraction"` via `memory_recorded` event) |
+| **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3 — Implemented** (`metadata={run_id, workflow_version_id}`; agent N/A for run-level records) |
+| **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3 — Implemented** (`memory_recalled` / `memory_recorded` TraceEvents) |
 | **M-08** | No dedup / conflict-resolution / forgetting: semantic & procedural records accumulate near-duplicates and can contradict each other over time | Memory quality | P2 | L | **SP-4** |
 | **M-07** | No retention / quota / TTL: total record count grows unbounded; only manual admin cleanup exists | Lifecycle | P2 | M | **SP-4** |
 | **M-09** | Production recall does a full BM25 scan (no `max_candidates`); cost grows linearly with a user's record count | Performance | P2 | S | **SP-4** |
@@ -108,7 +108,27 @@ Suggested order under the current "memory is opt-in, default off" posture:
   account is validated before any purge; r3 #5 org erasure is one store
   transaction (`delete_org_and_legacy`, rollback on failure); r3 #6 the admin UI
   keys/selects by `(org_id, user_id)`, shows scope, and filters records by `?org=`.
-- SP-3 / SP-4 — registered, not started.
+- **SP-3** — Implemented: memory instrumentation. M-04 extraction spend metered
+  (`agent="memory:extraction"`), M-06 run/version provenance in record `metadata`,
+  M-05 `memory_recalled`/`memory_recorded`/`memory_failed` TraceEvents. The SDK
+  emits results/events; the backend meters + provenance stays in the record.
+  Branch `feat/memory-instrumentation`. Design:
+  `docs/superpowers/specs/2026-07-26-memory-instrumentation-design.md`. Review
+  rounds hardened it: extraction usage billed even on total write failure (rides
+  exactly one event); each extracted write isolated (`MemoryOutcome.ok`); usage
+  persistence isolated from run status (`_safe_record_usage`); `run()` reaches
+  parity via `WorkflowResult.recall`/`.memory`; legacy `record_run() -> None`
+  tolerated; custom `recall_preamble` honored. **Ordering decision (r7):** memory
+  recording (incl. the extraction LLM call) runs AFTER the terminal `run_completed`
+  event, so a slow/hung extraction can't delay or wedge a finished run — no timeout
+  machinery (an earlier before-terminal + thread-timeout design was reverted after
+  it introduced its own thread-lifecycle/contextvar problems). The backend still
+  meters/records the post-terminal events (it drains the full stream);
+  `registry.publish` tolerates an evicted run. Trade-off: a live WebSocket that
+  stops on `run_completed` won't display the memory events — durable
+  billing/provenance is unaffected. **Out of scope:** a durable usage outbox/retry
+  and a framework-wide agent-call timeout.
+- SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project
 

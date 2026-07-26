@@ -8,6 +8,9 @@ const EVENT_LABELS = {
   agent_completed: '✓ agent done',
   run_completed: '● completed',
   run_failed: '✕ failed',
+  memory_recalled: '🧠 memory recalled',
+  memory_recorded: '🧠 memory recorded',
+  memory_failed: '🧠 memory failed',
 }
 
 function MonitorPage() {

@@ -11,7 +11,17 @@ class TraceEvent:
     This is the unit a monitoring UI subscribes to — engine-agnostic, so
     whatever engine produced it, the UI only ever sees this shape.
 
-    `type` is one of: "run_started", "agent_completed", "run_completed", "run_failed"
+    `type` is one of: "run_started", "agent_completed", "run_completed"
+    (always the FINAL event of a run), "run_failed", and (when per-user memory is
+    active, SP-3) "memory_recalled" (`data` = count recalled, 0 included),
+    "memory_recorded" (`data` = record types written; `usage` = the extraction
+    call's token usage, if any), and "memory_failed" (`data` = "recall" | "record",
+    sanitized — no exception detail; `usage` carries the extraction spend when every
+    write failed, so it's still billed). `memory_recalled`/`memory_failed("recall")`
+    precede the agents; recording events (`memory_recorded`/`memory_failed("record")`)
+    are emitted AFTER `run_completed`, so a slow/hung extraction can't wedge the run
+    — a consumer that stops on the terminal event won't see them, but the backend
+    drains the full stream to meter/record them.
 
     `usage` holds zero or more per-model-call token usage entries (each
     `{"model": <spec str>, "input_tokens": int, "output_tokens": int}`)

@@ -184,6 +184,184 @@ def test_recall_is_isolated_by_org_for_same_username():
     assert len(store.all("u", org_id=6)) == 1  # unchanged
 
 
+def test_stream_emits_memory_recalled_and_recorded_events():
+    # SP-3 M-05: the trace surfaces recall (count) and record (types written).
+    store, manager = _seeded_manager()  # one seeded episodic record for "u"
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    types = [e.type for e in events]
+
+    assert "memory_recalled" in types and "memory_recorded" in types
+    recalled = next(e for e in events if e.type == "memory_recalled")
+    assert recalled.data == 1  # one seeded record drawn
+    recorded = next(e for e in events if e.type == "memory_recorded")
+    assert "episodic" in recorded.data
+    # Ordering (review r7 / option A): recall runs before the agents; recording
+    # runs AFTER the terminal event so a slow/hung extraction can't wedge the run.
+    assert types.index("memory_recalled") < types.index("run_completed")
+    assert types.index("run_completed") < types.index("memory_recorded")
+    assert types[-1] == "memory_recorded"
+
+
+def test_run_surfaces_memory_outcome():
+    # Review r4 #3: the non-streaming run() exposes the recording outcome too.
+    store, manager = _seeded_manager()
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+
+    assert result.memory is not None
+    assert "episodic" in result.memory.recorded
+
+
+def test_custom_recall_preamble_is_honored():
+    # Review r4 #4: a manager-like object overriding only recall_preamble must
+    # still have its preamble injected (not bypassed by recall()).
+    from bestteam.core.memory import MemoryOutcome
+
+    class _CustomManager:
+        def recall_preamble(self, user_id, query):
+            return "CUSTOM PREAMBLE"
+
+        def record_run(self, user_id, input, output):
+            return MemoryOutcome(recorded=[])
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("hi", user_id="u", memory=_CustomManager()))
+    assert "CUSTOM PREAMBLE" in (model.captured_system or "")
+
+
+def test_stream_emits_memory_recalled_zero_when_no_matches():
+    # Review r4 #5: an active-memory run with no matches still emits recalled(0),
+    # distinguishing "enabled, nothing matched" from "memory disabled".
+    manager = MemoryManager(SqliteBM25Memory(":memory:"))  # empty store
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("nothing here", user_id="u", memory=manager))
+    recalled = [e for e in events if e.type == "memory_recalled"]
+    assert len(recalled) == 1 and recalled[0].data == 0
+
+
+def test_stream_emits_memory_failed_on_recall_failure():
+    # Review r4 #5: a recall failure is visible (and distinct from zero), yet the
+    # run still completes.
+    manager = MemoryManager(_FailingSearchMemory(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("q", user_id="u", memory=manager))
+    types = [e.type for e in events]
+    assert any(e.type == "memory_failed" and e.data == "recall" for e in events)
+    # Recall failure surfaces before the agents; the run still completes.
+    assert "run_completed" in types
+    assert types.index("memory_failed") < types.index("run_completed")
+
+
+def test_stream_emits_memory_failed_on_record_failure():
+    # Review r4 #5: a recording failure is visible, run_completed stays last.
+    class _FailAddStore(SqliteBM25Memory):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    manager = MemoryManager(_FailAddStore(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("q", user_id="u", memory=manager))
+    types = [e.type for e in events]
+    assert any(e.type == "memory_failed" and e.data == "record" for e in events)
+    # Recording (and its failure) happens AFTER the terminal event now.
+    assert types.index("run_completed") < types.index("memory_failed")
+
+
+def test_stream_tolerates_legacy_record_run_returning_none():
+    # Review r5 #3: a legacy manager whose record_run returns None persisted
+    # successfully — it must NOT be reported as memory_failed.
+    class _LegacyManager:
+        def recall_preamble(self, user_id, query):
+            return ""
+
+        def record_run(self, user_id, input, output):
+            return None
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("hi", user_id="u", memory=_LegacyManager()))
+    types = [e.type for e in events]
+
+    assert "memory_failed" not in types
+    assert types[-1] == "run_completed"
+
+
+def test_run_surfaces_recording_failure_distinct_from_disabled():
+    # Review r5 #4: on run(), a recording failure is distinguishable from memory
+    # being disabled (ok=False vs None).
+    class _FailAddStore(SqliteBM25Memory):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    manager = MemoryManager(_FailAddStore(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("q", user_id="u", memory=manager)
+    assert result.memory is not None and result.memory.ok is False  # failed, not disabled
+
+    result_no_mem = workflow.run("q")
+    assert result_no_mem.memory is None  # disabled
+
+
+def test_run_surfaces_recall_outcome():
+    # Review r6 #3: run() exposes recall count/status, distinguishing disabled /
+    # zero-match / failure.
+    store, manager = _seeded_manager()  # one seeded record for "u"
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+    assert result.recall is not None
+    assert result.recall.count == 1 and result.recall.ok is True
+
+    assert workflow.run("x").recall is None  # disabled -> None
+
+
+def test_run_recall_failure_is_distinguishable():
+    manager = MemoryManager(_FailingSearchMemory(":memory:"))
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    result = workflow.run("q", user_id="u", memory=manager)
+    assert result.recall is not None and result.recall.ok is False  # failure, not disabled
+
+
+def test_stream_without_memory_emits_no_memory_events():
+    model = _RecordingChatModel(responses=[AIMessage(content="hi")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("no memory here"))
+    types = [e.type for e in events]
+
+    assert "memory_recalled" not in types and "memory_recorded" not in types
+
+
 def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])

@@ -90,3 +90,18 @@ def test_subscribe_returns_none_for_an_evicted_run(monkeypatch):
     assert reg.get(run1.id) is None  # confirm it was actually evicted
 
     assert reg.subscribe(run1.id) is None
+
+
+def test_publish_tolerates_an_evicted_run(monkeypatch):
+    # A post-terminal event (e.g. `memory_recorded`, published after
+    # `run_completed`, SP-3) can arrive after the run was evicted by a concurrent
+    # create(). publish() must drop it silently, not KeyError.
+    monkeypatch.setattr(registry_module, "_MAX_RETAINED_RUNS", 1)
+    reg = RunRegistry()
+    run1 = reg.create("wf", "input 0")
+    _complete(reg, run1.id)
+    reg.create("wf", "input 1")  # evicts run1
+    assert reg.get(run1.id) is None
+
+    # No exception; a no-op for the missing run.
+    reg.publish(run1.id, {"type": "memory_recorded", "data": "episodic"})

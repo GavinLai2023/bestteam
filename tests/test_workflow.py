@@ -100,8 +100,11 @@ def test_memory_recording_failure_keeps_run_completed():
     events = list(workflow.stream("hi", user_id="u", memory=_FailingMemory()))
 
     types = [e.type for e in events]
-    assert types[-1] == "run_completed"
+    # Recording runs after run_completed; a failure surfaces as memory_failed
+    # (after the terminal event) but never turns the run into run_failed.
+    assert "run_completed" in types
     assert "run_failed" not in types
+    assert types.index("run_completed") < types.index("memory_failed")
 
 
 def test_run_memory_recording_failure_keeps_run_completed():

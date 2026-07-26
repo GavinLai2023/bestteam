@@ -422,15 +422,40 @@ _EXTRACTION_SYSTEM_PROMPT = (
 )
 
 
+@dataclass
+class RecallResult:
+    """Outcome of a recall: the system-prompt block, how many records it drew, and
+    whether the recall succeeded (``ok`` is False only when recall raised)."""
+
+    preamble: str
+    count: int
+    ok: bool = True
+
+
+@dataclass
+class MemoryOutcome:
+    """Outcome of `record_run`: the record types written and, when an extraction
+    model ran and reported it, that call's token usage (for metering, SP-3).
+
+    `ok` is False when any individual write failed (a total or partial failure);
+    the successful writes and the usage are still reported, so a failure is
+    observable without discarding what succeeded (review r5 #2)."""
+
+    recorded: List[str]
+    extraction_usage: Optional[Dict[str, Any]] = None
+    ok: bool = True
+
+
 class MemoryManager:
     """Ties a `Memory` store into a workflow run.
 
-    `recall_preamble` is called before a run to seed recalled memory into every
-    agent's system prompt; `record_run` is called after a successful run to
-    persist what happened. When `extraction_model` is set (a model spec string
-    like ``"fake:..."``/``"openai:..."`` or a `BaseChatModel`), `record_run`
-    makes one extra LLM call to derive semantic/procedural records; otherwise
-    only the $0 episodic record is written.
+    `recall`/`recall_preamble` seed recalled memory into every agent's system
+    prompt before a run; `record_run` persists what happened after. When
+    `extraction_model` is set (a model spec string like ``"fake:..."``/
+    ``"openai:..."`` or a `BaseChatModel`), `record_run` makes one extra LLM call
+    to derive semantic/procedural records; otherwise only the $0 episodic record
+    is written. `run_id`/`workflow_version_id` (bound by the backend) are stamped
+    into every record's `metadata` for provenance (SP-3, M-06).
     """
 
     def __init__(
@@ -439,6 +464,8 @@ class MemoryManager:
         extraction_model: Any = None,
         top_k: int = 5,
         org_id: Optional[int] = None,
+        run_id: Optional[str] = None,
+        workflow_version_id: Optional[int] = None,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
@@ -446,12 +473,41 @@ class MemoryManager:
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
+        # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
+        self.run_id = run_id
+        self.workflow_version_id = workflow_version_id
 
     def _org_kwargs(self) -> Dict[str, Any]:
         """`{"org_id": ...}` only when a concrete org is bound. When None (an
         org-less SDK caller), the store is called with the original ABC contract
         so a pre-SP-2 custom store -- which never accepted `org_id` -- still works."""
         return {"org_id": self.org_id} if self.org_id is not None else {}
+
+    def _provenance(self) -> Dict[str, Any]:
+        """Run-level provenance stamped into a record's metadata (M-06); omits
+        keys that aren't bound (SDK-direct callers may set neither)."""
+        meta: Dict[str, Any] = {}
+        if self.run_id is not None:
+            meta["run_id"] = self.run_id
+        if self.workflow_version_id is not None:
+            meta["workflow_version_id"] = self.workflow_version_id
+        return meta
+
+    def _usage_entry(self, response: Any) -> Optional[Dict[str, Any]]:
+        """The extraction call's token usage as a `{model, input_tokens,
+        output_tokens}` entry (mirrors the adapter's `_record_usage`), or None
+        when the model didn't report `usage_metadata` (e.g. `fake:` models)."""
+        usage = getattr(response, "usage_metadata", None)
+        if not usage:
+            return None
+        # Only a string spec can resolve to a catalog price; a BaseChatModel
+        # instance records tokens with model=None (cost stays null).
+        model_spec = self.extraction_model if isinstance(self.extraction_model, str) else None
+        return {
+            "model": model_spec,
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        }
 
     def close(self) -> None:
         """Release the underlying store's resources, if it holds any.
@@ -465,17 +521,17 @@ class MemoryManager:
         if callable(close):
             close()
 
-    def recall_preamble(self, user_id: Optional[str], query: str) -> str:
-        """Format the top recalled records for `user_id` into a system-prompt block.
-
-        Returns ``""`` when there's no user or nothing relevant, so callers can
-        pass the result straight through as `memory_preamble` (empty = no-op).
-        """
+    def recall(self, user_id: Optional[str], query: str) -> RecallResult:
+        """Recall the top records for `user_id` and format them into a system-prompt
+        block. Returns the block plus the number of records drawn (for observability,
+        M-05). ``preamble`` is ``""`` and ``count`` 0 when there's no user or nothing
+        relevant, so callers can pass ``preamble`` straight through as
+        `memory_preamble` (empty = no-op)."""
         if not user_id:
-            return ""
+            return RecallResult(preamble="", count=0)
         hits = self.store.search(user_id, query, top_k=self.top_k, **self._org_kwargs())
         if not hits:
-            return ""
+            return RecallResult(preamble="", count=0)
         # Recalled content is untrusted: an earlier tool result or model output
         # may have been stored and could contain injected instructions. Delimit
         # it and frame it as reference-only data so it can't act as commands in
@@ -494,30 +550,59 @@ class MemoryManager:
             "Use them to personalize your response where relevant; do not mention "
             "these notes explicitly."
         )
-        return "\n".join(lines)
+        return RecallResult(preamble="\n".join(lines), count=len(hits))
 
-    def record_run(self, user_id: Optional[str], input: str, output: str) -> None:
-        """Persist an episodic record for the run, plus extracted facts if enabled."""
+    def recall_preamble(self, user_id: Optional[str], query: str) -> str:
+        """Backward-compatible wrapper over `recall` returning only the preamble."""
+        return self.recall(user_id, query).preamble
+
+    def record_run(self, user_id: Optional[str], input: str, output: str) -> MemoryOutcome:
+        """Persist an episodic record for the run, plus extracted facts if enabled.
+
+        Returns a `MemoryOutcome` describing the record types written and the
+        extraction call's token usage (when one ran and reported it), so the
+        caller can emit observability events and meter the spend (SP-3)."""
         if not user_id:
-            return
+            return MemoryOutcome(recorded=[])
 
-        # Content already carries both fields; don't duplicate them into
-        # metadata (no reader), and cap each so one run can't persist megabytes.
-        self.store.add(
-            user_id,
-            EPISODIC,
-            f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
-            **self._org_kwargs(),
-        )
-
-        if self.extraction_model is None:
-            return
+        recorded: List[str] = []
+        ok = True
+        # Best-effort even for the episodic write: a failure is reported via `ok`
+        # (and, upstream, a `memory_failed` event) but never raised, so it can't
+        # break the run (review r5 #2).
         try:
-            self._extract_and_store(user_id, input, output)
-        except Exception as exc:  # noqa: BLE001 — extraction is best-effort
-            _logger.warning("Memory extraction failed for user '%s': %s", user_id, exc, exc_info=True)
+            self.store.add(
+                user_id,
+                EPISODIC,
+                f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
+                metadata=self._provenance(),
+                **self._org_kwargs(),
+            )
+            recorded.append(EPISODIC)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory: episodic write failed for '%s': %s", user_id, exc, exc_info=True)
+            ok = False
 
-    def _extract_and_store(self, user_id: str, input: str, output: str) -> None:
+        extraction_usage: Optional[Dict[str, Any]] = None
+        if self.extraction_model is not None:
+            try:
+                written, extraction_usage, extract_ok = self._extract_and_store(user_id, input, output)
+                recorded.extend(written)
+                ok = ok and extract_ok
+            except Exception as exc:  # noqa: BLE001 — model invoke failed (no tokens billed)
+                _logger.warning(
+                    "Memory extraction failed for user '%s': %s", user_id, exc, exc_info=True
+                )
+                ok = False
+        return MemoryOutcome(recorded=recorded, extraction_usage=extraction_usage, ok=ok)
+
+    def _extract_and_store(
+        self, user_id: str, input: str, output: str
+    ) -> "tuple[List[str], Optional[Dict[str, Any]], bool]":
+        """Returns ``(written_types, usage, ok)``. Usage is captured right after
+        the model call so it's billed even if writes fail. Each extracted write
+        is isolated, so one failing `add()` doesn't skip later independent writes;
+        ``ok`` is False when any write (or parse) failed (review r5 #2)."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Reuse the adapter's model resolver so "fake:" specs stay $0 in tests
@@ -531,18 +616,44 @@ class MemoryManager:
                 HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
             ]
         )
-        content = response.content if hasattr(response, "content") else str(response)
-        parsed = _parse_extraction(content)
+        # Capture usage IMMEDIATELY after the call: the tokens were consumed
+        # regardless of whether parsing/storage later fails (review r4 #1).
+        usage = self._usage_entry(response)
+        written: List[str] = []
+        ok = True
+
+        try:
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = _parse_extraction(content)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory extraction: parse failed for '%s': %s", user_id, exc, exc_info=True)
+            return written, usage, False
         if parsed is None:
             _logger.debug("Memory extraction returned no parseable JSON for user '%s'", user_id)
-            return
+            return written, usage, True
 
+        # Each write is independent: a failed one is logged and the rest proceed.
         for fact in parsed.get("facts", []):
             if isinstance(fact, str) and fact.strip():
-                self.store.add(user_id, SEMANTIC, fact.strip(), **self._org_kwargs())
+                try:
+                    self.store.add(
+                        user_id, SEMANTIC, fact.strip(), metadata=self._provenance(), **self._org_kwargs()
+                    )
+                    written.append(SEMANTIC)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
+                    ok = False
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
-            self.store.add(user_id, PROCEDURAL, procedural.strip(), **self._org_kwargs())
+            try:
+                self.store.add(
+                    user_id, PROCEDURAL, procedural.strip(), metadata=self._provenance(), **self._org_kwargs()
+                )
+                written.append(PROCEDURAL)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("Memory: procedural write failed for '%s': %s", user_id, exc, exc_info=True)
+                ok = False
+        return written, usage, ok
 
 
 def _parse_extraction(content: str) -> Optional[Dict[str, Any]]:

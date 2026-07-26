@@ -11,7 +11,7 @@ import dataclasses
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
@@ -29,7 +29,29 @@ registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
 
-def _make_memory(org_id: Optional[int] = None) -> Optional[MemoryManager]:
+def _safe_record_usage(db: Session, **kwargs: Any) -> None:
+    """Persist one usage entry, isolating failures from run status (review r5 #1).
+
+    Usage metering is auxiliary: a `usage_records` write failing (DB error) must
+    NOT propagate and flip an otherwise-successful run to `run_failed`. Log,
+    roll back the poisoned transaction, and continue.
+    """
+    try:
+        record_usage(db, **kwargs)
+    except Exception:  # noqa: BLE001 -- metering must never break a run
+        _logger.warning("Usage recording failed for run %s; run unaffected", kwargs.get("run_id"), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _make_memory(
+    org_id: Optional[int] = None,
+    *,
+    run_id: Optional[str] = None,
+    workflow_version_id: Optional[int] = None,
+) -> Optional[MemoryManager]:
     """Build a per-user `MemoryManager` from env, or None when memory is disabled.
 
     Called on the worker thread that runs the workflow so the underlying
@@ -53,7 +75,13 @@ def _make_memory(org_id: Optional[int] = None) -> Optional[MemoryManager]:
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
-    return MemoryManager(store, extraction_model=extraction_model, org_id=org_id)
+    return MemoryManager(
+        store,
+        extraction_model=extraction_model,
+        org_id=org_id,
+        run_id=run_id,
+        workflow_version_id=workflow_version_id,
+    )
 
 
 def run_in_background(
@@ -86,7 +114,11 @@ def run_in_background(
     """
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
-    memory = _make_memory(org_id) if user_id else None
+    memory = (
+        _make_memory(org_id, run_id=run_id, workflow_version_id=workflow_version_id)
+        if user_id
+        else None
+    )
     terminal_seen = False
     try:
         if db is not None:
@@ -123,10 +155,25 @@ def run_in_background(
                     db.commit()
             if db is not None and event.type == "agent_completed":
                 for entry in event.usage:
-                    record_usage(
+                    _safe_record_usage(
                         db,
                         run_id=run_id,
                         agent=event.agent,
+                        model=entry.get("model"),
+                        input_tokens=entry.get("input_tokens", 0),
+                        output_tokens=entry.get("output_tokens", 0),
+                        org_id=org_id,
+                    )
+            if db is not None and event.type in ("memory_recorded", "memory_failed"):
+                # Meter the memory extraction LLM call (M-04); it bypasses the
+                # adapter's usage path, so it arrives on the memory event. The SDK
+                # attaches the usage to exactly one event (recorded, or failed when
+                # every write failed), so this never double-counts (review r6 #1).
+                for entry in event.usage:
+                    _safe_record_usage(
+                        db,
+                        run_id=run_id,
+                        agent="memory:extraction",
                         model=entry.get("model"),
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),

@@ -321,6 +321,140 @@ def test_record_run_tolerates_unparseable_model_output():
     assert [r.type for r in records] == [EPISODIC]
 
 
+# --- SP-3: provenance, extraction usage, recall count -----------------------
+
+
+def test_record_run_returns_outcome_and_stamps_provenance():
+    from bestteam.core.memory import MemoryOutcome
+
+    store = _store()
+    mgr = MemoryManager(store, run_id="run-1", workflow_version_id=7)
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert isinstance(outcome, MemoryOutcome)
+    assert outcome.recorded == [EPISODIC]
+    assert outcome.extraction_usage is None
+    assert store.all("alice")[0].metadata == {"run_id": "run-1", "workflow_version_id": 7}
+
+
+def test_record_run_provenance_omits_unbound_ids():
+    store = _store()
+    MemoryManager(store).record_run("alice", "q", "a")  # no run_id / version bound
+    assert store.all("alice")[0].metadata == {}
+
+
+def test_record_run_captures_extraction_usage_and_types():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    canned = AIMessage(
+        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        usage_metadata={"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+    )
+    mgr = MemoryManager(
+        store, extraction_model=FakeMessagesListChatModel(responses=[canned]), run_id="r1"
+    )
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert outcome.recorded == [EPISODIC, SEMANTIC, PROCEDURAL]
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 12, "output_tokens": 4}
+    # Provenance is stamped on the extracted records too.
+    sem = [r for r in store.all("alice") if r.type == SEMANTIC][0]
+    assert sem.metadata == {"run_id": "r1"}
+
+
+def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
+    # Review r4 #1: a failed procedural write must not discard the captured usage
+    # or the semantic row that already committed.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _FailProceduralStore(SqliteBM25Memory):
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+            if type == PROCEDURAL:
+                raise RuntimeError("write failed")
+            return super().add(user_id, type, content, metadata, org_id=org_id)
+
+    canned = AIMessage(
+        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        usage_metadata={"input_tokens": 31, "output_tokens": 9, "total_tokens": 40},
+    )
+    store = _FailProceduralStore(":memory:")
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+    # Usage billed (tokens were consumed) and the successful writes are reported.
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 31, "output_tokens": 9}
+    assert outcome.recorded == [EPISODIC, SEMANTIC]  # procedural failed, not reported
+    # The outcome agrees with what's actually stored.
+    assert sorted(r.type for r in store.all("alice")) == [EPISODIC, SEMANTIC]
+
+
+def test_extraction_continues_after_a_failed_write():
+    # Review r5 #2: one failing write must not skip later independent writes, and
+    # the partial failure is flagged (ok=False) while usage + successes are kept.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _FailFirstFactStore(SqliteBM25Memory):
+        def __init__(self, path=":memory:"):
+            super().__init__(path)
+            self._failed = False
+
+        def add(self, user_id, type, content, metadata=None, *, org_id=None):
+            if type == SEMANTIC and not self._failed:
+                self._failed = True
+                raise RuntimeError("first fact rejected")
+            return super().add(user_id, type, content, metadata, org_id=org_id)
+
+    canned = AIMessage(
+        content='{"facts": ["fact one", "fact two"], "procedural": "a note"}',
+        usage_metadata={"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+    )
+    store = _FailFirstFactStore()
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    assert outcome.ok is False  # a write failed
+    assert outcome.extraction_usage == {"model": None, "input_tokens": 10, "output_tokens": 3}
+    # episodic + fact two + procedural persisted; fact one dropped, later writes not skipped
+    assert outcome.recorded == [EPISODIC, SEMANTIC, PROCEDURAL]
+    contents = {r.content for r in store.all("alice")}
+    assert "fact two" in contents and "a note" in contents and "fact one" not in contents
+
+
+def test_record_run_extraction_usage_none_for_fake_spec():
+    store = _store()
+    mgr = MemoryManager(store, extraction_model='fake:{"facts": [], "procedural": ""}')
+
+    outcome = mgr.record_run("alice", "q", "a")
+    assert outcome.extraction_usage is None  # fake models report no usage_metadata
+    assert outcome.recorded == [EPISODIC]
+
+
+def test_recall_returns_preamble_and_count():
+    from bestteam.core.memory import RecallResult
+
+    store = _store()
+    store.add("alice", EPISODIC, "the user prefers concise answers about refunds")
+    mgr = MemoryManager(store)
+
+    result = mgr.recall("alice", "refunds")
+    assert isinstance(result, RecallResult)
+    assert result.count == 1
+    assert "<recalled_user_memory>" in result.preamble
+    # The string wrapper stays backward-compatible.
+    assert mgr.recall_preamble("alice", "refunds") == result.preamble
+
+
+def test_recall_empty_when_no_hits():
+    from bestteam.core.memory import RecallResult
+
+    assert MemoryManager(_store()).recall("alice", "anything") == RecallResult(preamble="", count=0)
+
+
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():
     store = _store()
     canned = 'Here you go:\n```json\n{"facts": ["likes graphs"], "procedural": ""}\n```'

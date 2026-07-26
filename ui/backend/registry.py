@@ -107,7 +107,14 @@ class RunRegistry:
         subscribed (not the loop of the request that started the run, which
         may already be gone by the time this fires)."""
         with self._lock:
-            run = self._runs[run_id]
+            run = self._runs.get(run_id)
+            if run is None:
+                # The run was evicted (bounded retention) after it went terminal
+                # but before a late post-terminal event (e.g. `memory_recorded`,
+                # which is published after `run_completed`) arrived. Nothing to
+                # append or notify; durable usage/provenance persistence does not
+                # depend on this publish. Silently drop rather than KeyError.
+                return
             run.events.append(event)
             if event["type"] == "run_completed":
                 run.status = "completed"
