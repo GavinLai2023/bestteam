@@ -114,10 +114,11 @@ export const api = {
 
   // Admin: per-user memory management
   memoryUsers: () => request('/api/memory/users'),
-  memoryRecords: (userId, { query, type } = {}) => {
+  memoryRecords: (userId, { query, type, org } = {}) => {
     const params = new URLSearchParams()
     if (query) params.set('query', query)
     if (type) params.set('type', type)
+    if (org !== null && org !== undefined) params.set('org', org)
     const qs = params.toString()
     return request(`/api/memory/users/${encodeURIComponent(userId)}/records${qs ? `?${qs}` : ''}`)
   },

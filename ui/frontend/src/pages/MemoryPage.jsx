@@ -12,7 +12,10 @@ const TYPES = ['episodic', 'semantic', 'procedural']
 export default function MemoryPage() {
   const [enabled, setEnabled] = useState(true)
   const [users, setUsers] = useState([])
-  const [selectedUser, setSelectedUser] = useState(null)
+  // A selected summary is an identity: {user_id, org_id} (org_id null = legacy).
+  // A username can appear under several orgs (a moved user), so selection and
+  // React keys must use both fields, not user_id alone.
+  const [selected, setSelected] = useState(null)
   const [records, setRecords] = useState([])
   const [query, setQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
@@ -38,32 +41,40 @@ export default function MemoryPage() {
     loadUsers()
   }, [])
 
-  const loadRecords = (userId, opts = {}) => {
+  const loadRecords = (identity, opts = {}) => {
+    if (!identity) return
     setError(null)
     api
-      .memoryRecords(userId, { query: opts.query ?? query, type: opts.type ?? typeFilter })
+      .memoryRecords(identity.user_id, {
+        query: opts.query ?? query,
+        type: opts.type ?? typeFilter,
+        org: identity.org_id,
+      })
       .then((data) => setRecords(data.records))
       .catch((e) => setError(e.message))
   }
 
-  const selectUser = (userId) => {
-    setSelectedUser(userId)
+  const selectIdentity = (identity) => {
+    setSelected(identity)
     setMessage(null)
     setError(null)
     setQuery('')
     setTypeFilter('')
-    loadRecords(userId, { query: '', type: '' })
+    loadRecords(identity, { query: '', type: '' })
   }
 
   const filterByType = (type) => {
     setTypeFilter(type)
-    loadRecords(selectedUser, { type })
+    loadRecords(selected, { type })
   }
 
   const submitSearch = (e) => {
     e.preventDefault()
-    loadRecords(selectedUser)
+    loadRecords(selected)
   }
+
+  const sameIdentity = (a, b) => a && b && a.user_id === b.user_id && a.org_id === b.org_id
+  const scopeLabel = (orgId) => (orgId == null ? 'legacy (no org)' : `org ${orgId}`)
 
   const deleteRecord = async (id) => {
     if (!window.confirm('Delete this memory record? This cannot be undone.')) return
@@ -80,14 +91,17 @@ export default function MemoryPage() {
   }
 
   const clearUser = async () => {
-    if (!selectedUser) return
-    if (!window.confirm(`Clear ALL memory for "${selectedUser}"? This cannot be undone.`)) return
+    if (!selected) return
+    const name = selected.user_id
+    if (!window.confirm(`Clear ALL memory for "${name}" (every organization)? This cannot be undone.`))
+      return
     setError(null)
     setMessage(null)
     try {
-      const result = await api.clearUserMemory(selectedUser)
+      const result = await api.clearUserMemory(name)
       setRecords([])
-      setMessage(`Cleared ${result.removed} record(s) for ${selectedUser}.`)
+      setMessage(`Cleared ${result.removed} record(s) for ${name}.`)
+      setSelected(null)
       loadUsers()
     } catch (e) {
       setError(e.message)
@@ -123,22 +137,31 @@ export default function MemoryPage() {
             <p className="hint">No users have any memory yet.</p>
           ) : (
             <ul>
-              {users.map((u) => (
-                <li key={u.user_id}>
-                  <button className={u.user_id === selectedUser ? 'active' : ''} onClick={() => selectUser(u.user_id)}>
-                    {u.user_id}
-                    <span className="status-badge">{u.total}</span>
-                  </button>
-                </li>
-              ))}
+              {users.map((u) => {
+                const identity = { user_id: u.user_id, org_id: u.org_id }
+                return (
+                  <li key={`${u.org_id}:${u.user_id}`}>
+                    <button
+                      className={sameIdentity(identity, selected) ? 'active' : ''}
+                      onClick={() => selectIdentity(identity)}
+                    >
+                      {u.user_id}
+                      <span className="hint"> · {scopeLabel(u.org_id)}</span>
+                      <span className="status-badge">{u.total}</span>
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>
 
         <div className="advanced-editor">
-          {selectedUser ? (
+          {selected ? (
             <>
-              <h2>{selectedUser}</h2>
+              <h2>
+                {selected.user_id} <span className="hint">· {scopeLabel(selected.org_id)}</span>
+              </h2>
               {error && <p className="banner banner-error">{error}</p>}
               {message && <p className="banner banner-success">{message}</p>}
 
@@ -186,7 +209,7 @@ export default function MemoryPage() {
 
               <div className="wizard-actions">
                 <button className="btn btn-secondary" onClick={clearUser}>
-                  Clear all memory for {selectedUser}
+                  Clear all memory for {selected.user_id} (every org)
                 </button>
               </div>
             </>
