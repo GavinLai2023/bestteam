@@ -148,6 +148,11 @@ class SqliteBM25Memory(Memory):
     def add(
         self, user_id: str, type: str, content: str, metadata: Optional[Dict[str, Any]] = None
     ) -> MemoryRecord:
+        # Soft type check (M-11): the framework enum stays open (a custom store
+        # may model other types), but a non-string / empty type is a caller bug
+        # that would otherwise persist an unqueryable row.
+        if not isinstance(type, str) or not type.strip():
+            raise ConfigurationError("Memory record type must be a non-empty string")
         record = MemoryRecord(
             id=str(uuid.uuid4()),
             user_id=user_id,
@@ -320,6 +325,18 @@ class MemoryManager:
         self.store = store
         self.extraction_model = extraction_model
         self.top_k = top_k
+
+    def close(self) -> None:
+        """Release the underlying store's resources, if it holds any.
+
+        The run path builds one manager per run; without this its store's SQLite
+        connection would linger until GC. `close` is concrete on
+        `SqliteBM25Memory`, not on the `Memory` ABC, so it's called defensively —
+        a store that has no `close` is a no-op.
+        """
+        close = getattr(self.store, "close", None)
+        if callable(close):
+            close()
 
     def recall_preamble(self, user_id: Optional[str], query: str) -> str:
         """Format the top recalled records for `user_id` into a system-prompt block.

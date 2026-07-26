@@ -167,3 +167,7 @@ def run_in_background(
     finally:
         if db is not None:
             db.close()
+        if memory is not None:
+            # Built per run on this worker thread; close its SQLite connection
+            # now instead of leaving it to GC (M-03).
+            memory.close()

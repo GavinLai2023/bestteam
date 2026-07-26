@@ -308,3 +308,45 @@ def test_record_run_extraction_tolerates_json_with_surrounding_prose():
 
     types = sorted(r.type for r in store.all("alice"))
     assert types == [EPISODIC, SEMANTIC]
+
+
+# --- M-03: MemoryManager.close ---------------------------------------------
+
+
+def test_memory_manager_close_closes_sqlite_store():
+    import sqlite3
+
+    store = _store()
+    MemoryManager(store).close()
+
+    # The connection is closed, so any further store operation raises.
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.add("u", EPISODIC, "after close")
+
+
+def test_memory_manager_close_noop_when_store_has_no_close():
+    class _NoCloseStore:
+        pass
+
+    # A store without a close() must not raise (the Memory ABC has no close()).
+    MemoryManager(_NoCloseStore()).close()
+
+
+# --- M-11: soft type validation on add() -----------------------------------
+
+
+@pytest.mark.parametrize("bad_type", [None, "", "   ", 5, ["episodic"]])
+def test_add_rejects_non_string_or_empty_type(bad_type):
+    from bestteam.exceptions import ConfigurationError
+
+    store = _store()
+    with pytest.raises(ConfigurationError, match="non-empty string"):
+        store.add("alice", bad_type, "some content")
+
+
+def test_add_accepts_known_and_custom_string_types():
+    store = _store()
+    # Framework enum still works, and a custom string type is still allowed
+    # (the enum is deliberately open for third-party stores).
+    assert store.add("alice", EPISODIC, "x").type == EPISODIC
+    assert store.add("alice", "custom", "y").type == "custom"
