@@ -188,7 +188,10 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   `recall_preamble` (read, via `Workflow._safe_recall`) are each wrapped so a
   failure degrades (empty preamble / skipped write) rather than failing the run
   (M-02). On the backend run path the per-run store is closed in
-  `run_in_background`'s `finally` (M-03). `SqliteBM25Memory.add` rejects a
+  `run_in_background`'s `finally` (M-03), and that close is itself best-effort —
+  a store whose `close()` raises is logged, not propagated, so teardown can't
+  escape the worker as an unobserved Future exception. `SqliteBM25Memory.add`
+  rejects a
   non-string/empty `type`, but the type **enum stays open** — a custom store may
   still model other string types (M-11). See `docs/MEMORY_REVIEW_TRIAGE.md`.
 - Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB.
