@@ -364,7 +364,9 @@ search via `search(top_k=limit, max_candidates=_MAX_SEARCH_SCAN)` so both the
 response and the scan work are bounded over a large store),
 `DELETE /records/{memory_id}`, `DELETE /users/{user_id}` (clear a
 user — `store.delete_user`), and `DELETE /orgs/{org_id}` (org-level compliance
-erasure — `store.delete_org`, SP-2). A `get_memory_store` dependency opens a
+erasure — `store.delete_org` for org-scoped rows plus, resolved from the main DB
+`users` table, `store.delete_user` for each current member's legacy NULL-org
+rows, SP-2). A `get_memory_store` dependency opens a
 per-request `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool thread
 and closes it after (`store.close()`); when memory is disabled the read endpoints
 return `enabled:false` and mutations return 409. The new SDK store primitives

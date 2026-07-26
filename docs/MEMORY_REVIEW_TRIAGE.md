@@ -90,5 +90,22 @@ Suggested order under the current "memory is opt-in, default off" posture:
   M-11 soft type validation. Merged (PR #30).
 - **SP-2** — Implemented: M-01 org dimension — `org_id` column + idempotent
   in-place migration; org-bound recall/record; `delete_org` compliance erasure;
-  admin surface exposes `org_id`. Branch `feat/memory-org-scope`.
+  admin surface exposes `org_id`. Branch `feat/memory-org-scope`. Post-merge
+  review fixes: #3 `Memory` ABC keeps its original contract (org_id is a
+  concrete-store extension, passed only when bound) so pre-SP-2 stores still
+  work; #4 `user_summaries` keyed by `(org_id, user_id)`; #5 migration ALTER
+  idempotent under concurrent opens; #1 org erasure also purges current members'
+  legacy NULL-org rows (API layer, via the main DB user table).
 - SP-3 / SP-4 — registered, not started.
+
+## Deferred to the deletion-lifecycle sub-project
+
+- **Account deletion doesn't purge memory** (SP-2 review #2, pre-existing): the
+  operator `delete-user` (`ui/backend/db/users.py::delete_user`, `admin.py`)
+  removes only the main-DB row. Because usernames are reusable, a new account
+  with the same `(org_id, username)` inherits the deleted account's memory. SP-2
+  narrowed this (cross-org reuse is now isolated) but same-org reuse still leaks.
+  The proper fix (purge scoped + legacy memory before releasing the username,
+  fail closed; consider an immutable user id as the memory principal) belongs
+  with the existing deletion-lifecycle work, not SP-2. Also covers orphaned
+  legacy rows whose username no longer exists (unattributable to an org).

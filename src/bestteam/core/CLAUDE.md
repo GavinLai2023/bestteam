@@ -209,7 +209,15 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   have `org_id NULL` (no cross-DB backfill: the username→org map lives in the
   main DB, unreachable from the store's own connection); they aren't recalled by
   an org run but stay visible/deletable via the admin API. `delete_org(org_id)`
-  (and `DELETE /api/memory/orgs/{org_id}`) is the org-level compliance erasure.
+  is the store-level erasure (`WHERE org_id = ?`); the API route
+  `DELETE /api/memory/orgs/{org_id}` additionally purges legacy NULL-org rows for
+  the org's **current members** (resolved from the main DB `users` table), so
+  compliance erasure is complete for anyone still in the org. Legacy rows for a
+  username that no longer exists are out of scope here — that's account deletion
+  (deletion-lifecycle sub-project). The **`Memory` ABC** deliberately does *not*
+  carry `org_id`: it's a concrete-store extension (like `limit`/`max_candidates`),
+  and `MemoryManager` passes it only when a concrete org is bound, so a pre-SP-2
+  custom store still works for org-less callers.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

@@ -18,10 +18,13 @@ import os
 from typing import Iterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.orm import Session
 
 from bestteam import SqliteBM25Memory
 
 from .auth_api import get_current_admin
+from .db.models import User
+from .db_session import get_db
 
 router = APIRouter(
     prefix="/api/memory",
@@ -112,8 +115,24 @@ def clear_user_memory(
 @router.delete("/orgs/{org_id}")
 def clear_org_memory(
     org_id: int,
+    db: Session = Depends(get_db),
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
-    """Erase all memory belonging to one organization (SP-2 compliance erasure)."""
-    removed = _require_store(store).delete_org(org_id)
+    """Erase all memory belonging to one organization (SP-2 compliance erasure).
+
+    Deletes org-scoped rows (`org_id = :org`) AND legacy pre-SP-2 rows (`org_id
+    NULL`) for the org's current members -- those usernames are resolved from the
+    main DB, since the memory store has no org_id on legacy rows (review #1). A
+    legacy row whose username no longer exists (the member was deleted) can't be
+    attributed to an org and is out of scope here -- that belongs to account
+    deletion (deletion-lifecycle sub-project, review #2).
+    """
+    store = _require_store(store)
+    removed = store.delete_org(org_id)
+    # Mop up this org's members' legacy NULL-org rows (delete_user removes all of
+    # a username's rows; the org-scoped ones are already gone, so this nets the
+    # legacy remainder). Username is globally unique + one-member-per-org, so a
+    # member's rows only ever belong to this org.
+    for (username,) in db.query(User.username).filter(User.org_id == org_id):
+        removed += store.delete_user(username)
     return {"removed": removed}

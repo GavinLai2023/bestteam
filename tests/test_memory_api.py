@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from bestteam import SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, SEMANTIC
-from helpers import create_user_and_login
+from helpers import create_user_and_login, get_org_id
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db_session import get_db
@@ -142,6 +142,28 @@ def test_clear_org_memory_removes_only_that_org(admin_client, memory_db):
 def test_clear_org_memory_409_when_disabled(admin_client, monkeypatch):
     monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
     assert admin_client.delete("/api/memory/orgs/5").status_code == 409
+
+
+def test_clear_org_memory_also_purges_legacy_rows(admin_client, tmp_path, monkeypatch):
+    # Review #1: org erasure also removes pre-SP-2 legacy (NULL-org) rows for the
+    # org's current members, resolved from the main DB user table.
+    create_user_and_login(admin_client, username="alice", password="pw", org="acme")
+    org_id = get_org_id("acme")
+
+    path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
+    store = SqliteBM25Memory(str(path))
+    store.add("alice", EPISODIC, "scoped secret", org_id=org_id)
+    store.add("alice", EPISODIC, "legacy secret")  # org_id NULL (pre-SP-2)
+    store.close()
+
+    resp = admin_client.delete(f"/api/memory/orgs/{org_id}")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2  # scoped (delete_org) + legacy (delete_user)
+
+    store = SqliteBM25Memory(str(path))
+    assert store.all("alice", org_id=None) == []
+    store.close()
 
 
 def test_requires_admin(admin_client, memory_db):
