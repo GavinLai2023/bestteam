@@ -166,6 +166,35 @@ def test_clear_org_memory_also_purges_legacy_rows(admin_client, tmp_path, monkey
     store.close()
 
 
+def test_clear_org_memory_preserves_other_orgs_rows_for_same_username(
+    admin_client, tmp_path, monkeypatch
+):
+    # Regression: org erasure must NOT delete the same username's rows under a
+    # different org (moved user / reused username). Only org-5 scoped + legacy
+    # NULL rows go; the org-6 row stays.
+    create_user_and_login(admin_client, username="alice", password="pw", org="five")
+    org5 = get_org_id("five")
+    other_org = org5 + 1000  # a different org's historical rows for "alice"
+
+    path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
+    store = SqliteBM25Memory(str(path))
+    store.add("alice", EPISODIC, "org five row", org_id=org5)
+    store.add("alice", EPISODIC, "other org history", org_id=other_org)
+    store.add("alice", EPISODIC, "legacy row")  # org_id NULL
+    store.close()
+
+    resp = admin_client.delete(f"/api/memory/orgs/{org5}")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 2  # org-5 scoped + legacy NULL only
+
+    store = SqliteBM25Memory(str(path))
+    remaining = store.all("alice", org_id=None)
+    assert [r.content for r in remaining] == ["other org history"]
+    assert remaining[0].org_id == other_org
+    store.close()
+
+
 def test_requires_admin(admin_client, memory_db):
     token = create_user_and_login(admin_client, username="regular", password="pw")
     headers = {"Authorization": f"Bearer {token}"}

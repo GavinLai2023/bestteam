@@ -129,10 +129,10 @@ def clear_org_memory(
     """
     store = _require_store(store)
     removed = store.delete_org(org_id)
-    # Mop up this org's members' legacy NULL-org rows (delete_user removes all of
-    # a username's rows; the org-scoped ones are already gone, so this nets the
-    # legacy remainder). Username is globally unique + one-member-per-org, so a
-    # member's rows only ever belong to this org.
-    for (username,) in db.query(User.username).filter(User.org_id == org_id):
-        removed += store.delete_user(username)
+    # Mop up this org's members' legacy NULL-org rows. Must delete ONLY NULL-org
+    # rows for those usernames -- an unscoped delete_user would also destroy the
+    # same username's rows under other concrete orgs (a moved user, or a former
+    # same-named principal's history), i.e. cross-org data loss.
+    usernames = [u for (u,) in db.query(User.username).filter(User.org_id == org_id)]
+    removed += store.delete_legacy_for_users(usernames)
     return {"removed": removed}

@@ -361,6 +361,25 @@ class SqliteBM25Memory(Memory):
         self._conn.commit()
         return cursor.rowcount
 
+    def delete_legacy_for_users(self, user_ids: Sequence[str]) -> int:
+        """Delete only the legacy NULL-org rows for the given usernames.
+
+        Org erasure uses this to clear a member's pre-SP-2 rows WITHOUT the
+        globally-unscoped `delete_user`, which would also destroy that username's
+        rows under *other* concrete orgs (a moved user, or a former same-named
+        principal's history — cross-org data loss). Returns rows removed.
+        """
+        ids = list(user_ids)
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor = self._conn.execute(
+            f"DELETE FROM memories WHERE org_id IS NULL AND user_id IN ({placeholders})",
+            ids,
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     def close(self) -> None:
         """Close the underlying SQLite connection.
 

@@ -427,6 +427,24 @@ def test_delete_org_removes_only_that_org():
     assert len(store.all("bob", org_id=None)) == 1
 
 
+def test_delete_legacy_for_users_touches_only_null_org_rows():
+    # Deletes only NULL-org rows for the named users; concrete-org rows (any org,
+    # including the same username's other-org history) are untouched.
+    store = _store()
+    store.add("alice", EPISODIC, "legacy", )              # NULL
+    store.add("alice", EPISODIC, "org five", org_id=5)    # concrete
+    store.add("alice", EPISODIC, "org six", org_id=6)     # concrete (other org)
+    store.add("bob", EPISODIC, "bob legacy")              # NULL, not selected
+
+    removed = store.delete_legacy_for_users(["alice"])
+    assert removed == 1
+    contents = {r.content for r in store.all("alice", org_id=None)}
+    assert contents == {"org five", "org six"}  # both concrete rows survive
+    assert len(store.all("bob", org_id=None)) == 1  # untouched
+    # Empty input is a no-op.
+    assert store.delete_legacy_for_users([]) == 0
+
+
 def test_org_less_manager_works_with_pre_sp2_store():
     # A store implementing only the original ABC (no org_id) must keep working
     # when the manager has no concrete org: MemoryManager passes org_id only when

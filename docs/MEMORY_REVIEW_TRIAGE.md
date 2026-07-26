@@ -95,7 +95,9 @@ Suggested order under the current "memory is opt-in, default off" posture:
   concrete-store extension, passed only when bound) so pre-SP-2 stores still
   work; #4 `user_summaries` keyed by `(org_id, user_id)`; #5 migration ALTER
   idempotent under concurrent opens; #1 org erasure also purges current members'
-  legacy NULL-org rows (API layer, via the main DB user table).
+  legacy NULL-org rows via a NULL-org-scoped primitive (`delete_legacy_for_users`,
+  members resolved from the main DB) — never an unscoped `delete_user`, which
+  would destroy the same username's other-org history (2nd-round regression fix).
 - SP-3 / SP-4 — registered, not started.
 
 ## Deferred to the deletion-lifecycle sub-project
