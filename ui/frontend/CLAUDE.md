@@ -73,14 +73,26 @@ and redirects to `/login`. `pages/LoginPage.jsx` is the username/password
 form; `App.jsx`'s `RequireAuth` route guard redirects to `/login` when no
 token is present, and `components/Layout.jsx` has a "Log out" button.
 
-**Admin pages.** `/advanced` and `/memory` sit behind a `RequireAdmin` wrapper
-(`App.jsx`) that reads `lib/useMe.js` (one `GET /api/auth/me` → `{username,
-is_admin}`) and redirects non-admins to `/`; `Layout.jsx` shows the **Advanced**
-and **Memory** nav links only when `isAdmin`. `pages/MemoryPage.jsx` is the
-admin per-user memory manager (user list with counts + search/type-filter +
-per-record delete + clear-all, and a "memory not enabled" state). This gating is
-cosmetic — the backend enforces admin on every `/api/config` and `/api/memory`
-call, so a tampered client still gets 403.
+**Role-aware routing.** A platform operator (`is_admin`, `org_id IS NULL`) and
+an org member see disjoint UIs, partitioned by two symmetric `App.jsx` guards
+that both read `lib/useMe.js` (one `GET /api/auth/me` → `{username, is_admin,
+org}`) and render `null` while it loads:
+
+- `RequireAdmin` wraps `/advanced` + `/memory`; non-admins are sent to `/`.
+- `RequireOrgMember` wraps the customer routes (`/`, `/teams`, `/wizard/*`);
+  operators are sent to `/advanced`, since every org-scoped surface 403s an
+  org-less operator. The `*` catch-all stays **outside** both guards so an
+  unknown path routes to `/`, where `RequireOrgMember` picks the destination.
+
+Because `is_admin` and org membership are mutually exclusive (CR-030), the two
+guards can't bounce a user between them — each redirect terminates in one hop.
+`Layout.jsx` mirrors this: the **Advanced**/**Memory** links show only when
+`isAdmin`, the **Build a team**/**My teams**/**Talk to your team** links only
+when `!isAdmin`. `pages/MemoryPage.jsx` is the admin per-user memory manager
+(user list with counts + search/type-filter + per-record delete + clear-all,
+and a "memory not enabled" state). All of this gating is cosmetic — the backend
+enforces admin on every `/api/config` and `/api/memory` call and org scoping on
+every customer surface, so a tampered client still gets 403.
 `API_BASE`/`WS_BASE` are configurable via `VITE_API_BASE`/`VITE_WS_BASE`
 (see `ui/frontend/.env.example`), falling back to the `127.0.0.1:8000`
 defaults above for local dev.
