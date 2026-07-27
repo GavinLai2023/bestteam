@@ -433,6 +433,29 @@
   dependency rows and skill/KB content pinning to freeze behavior (P1-05) stay
   deferred. See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this
   pass").
+- Frontend hardening + role-aware routing (PR #34 `fix/monitor-403-mislabel`,
+  PR #37 `feat/operator-role-routing`): `lib/api.js` now carries the HTTP status
+  on thrown errors so a 403 no longer renders as "backend unreachable"; added the
+  frontend's first JS test harness (vitest + jsdom + testing-library). A new
+  `RequireOrgMember` guard (mirror of `RequireAdmin`) routes platform operators
+  (`is_admin`, `org_id NULL`) to their admin home `/advanced` instead of the
+  org-scoped customer pages that 403 them, and `Layout` shows customer vs admin
+  nav links by role. Specs:
+  `docs/superpowers/specs/2026-07-27-platform-operator-routing-design.md`.
+- Admin org/user management UI + org deactivation (PR #36
+  `feat/admin-org-user-mgmt`): new `/api/admin` router + `/accounts` page for
+  everyday provisioning — list/create orgs, deactivate/reactivate (reversible
+  full suspend), and create/reset-password/move/delete each org's member;
+  platform accounts shown read-only (promote/demote + operator/admin lifecycle
+  stay CLI-only). **Org deactivation** (`organizations.active`) is enforced at
+  login, in `get_current_user` (every authenticated route), and in the
+  email-trigger enumeration **and** dispatch CAS. **Session security**: a random
+  per-account `security_stamp` in every token + WS ticket (regenerated on
+  password reset, fresh on account creation) so resets revoke sessions and a
+  recreated username can't inherit the deleted account's credentials. Identifier
+  grammar (URL-safe, no `.`/`..`) enforced server-side. Hardened across three
+  external-review rounds. Spec:
+  `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
 
 ## In Progress
 
