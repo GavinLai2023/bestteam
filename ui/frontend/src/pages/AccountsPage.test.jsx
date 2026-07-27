@@ -84,6 +84,19 @@ describe('AccountsPage', () => {
     expect(screen.getByLabelText(/organization name/i)).toHaveValue('gamma')
   })
 
+  it('clears the form and warns (not fails) when creation succeeds but refresh fails', async () => {
+    api.createAdminOrg.mockResolvedValue({})
+    // mount reload succeeds; the post-create reload fails
+    api.adminOrgs.mockResolvedValueOnce(ORGS).mockRejectedValueOnce(new Error('net'))
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    expect(await screen.findByText(/could not be refreshed/i)).toBeInTheDocument()
+    // form cleared despite the refresh failure, so no duplicate retry
+    expect(screen.getByLabelText(/organization name/i)).toHaveValue('')
+  })
+
   it('deactivates an active org after confirm', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<AccountsPage />)

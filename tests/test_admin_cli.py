@@ -487,3 +487,11 @@ def test_create_org_rejects_blank(session_local):
     with session_local() as db:
         with pytest.raises(ValueError):
             create_org(db, "   ")
+
+
+def test_create_org_rejects_dot_segments(session_local):
+    from ui.backend.db.orgs import create_org
+    with session_local() as db:
+        for name in (".", ".."):
+            with pytest.raises(ValueError):
+                create_org(db, name)

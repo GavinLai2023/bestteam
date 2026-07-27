@@ -32,21 +32,31 @@ export default function AccountsPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  // Resolves to true on success, false on failure -- callers clear their form
-  // only on true, so a failed create keeps the entered values (review r-ext2 #5).
+  // Resolves to true iff the MUTATION succeeded (callers clear their form only
+  // then). A failed mutation keeps the entered values (review r-ext2 #5); a
+  // mutation that succeeds but whose list-refresh fails still counts as success
+  // -- clearing the form and showing a distinct refresh warning rather than a
+  // "creation failed" that invites a duplicate retry (review r-ext3).
   const run = (promise, okMessage) => {
     setError(null)
     setMessage(null)
-    return promise
-      .then(() => reload())
-      .then(() => {
-        if (okMessage) setMessage(okMessage)
-        return true
-      })
-      .catch((e) => {
+    return promise.then(
+      () =>
+        reload().then(
+          () => {
+            if (okMessage) setMessage(okMessage)
+            return true
+          },
+          () => {
+            setError('The change was saved, but the list could not be refreshed — reload the page to see it.')
+            return true
+          },
+        ),
+      (e) => {
         setError(e.message)
         return false
-      })
+      },
+    )
   }
 
   const createOrg = (e) => {

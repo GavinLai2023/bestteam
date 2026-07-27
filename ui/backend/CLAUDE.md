@@ -443,9 +443,10 @@ tokens/tickets — and a deleted-then-recreated username gets a fresh stamp, so 
 old account's credentials can't reach the new same-named account (an immutable
 random value, not a timestamp, so there's no ordering race). **Identifier
 validation:** `db/validators.py::clean_identifier` (used by the `admin_api`
-request models and by `create_user`/`create_org`) trims and rejects blank,
-`/`-containing, and over-length (>64) org/user names server-side, so a direct
-API call can't create an unmanageable or path-unaddressable record.
+request models and by `create_user`/`create_org`) trims and enforces a URL-safe
+grammar on org/user names (`[A-Za-z0-9._-]`, ≤64, and not the `.`/`..`
+dot-segments proxies collapse), server-side, so a direct API call can't create an
+unmanageable or path-unaddressable record.
 Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
 
 ## Known limitation: general-purpose cache

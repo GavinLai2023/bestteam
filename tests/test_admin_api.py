@@ -337,3 +337,21 @@ def test_admin_api_rejects_slash_in_identifiers(rig):
 def test_admin_api_rejects_overlong_identifiers(rig):
     client, admin = rig
     assert client.post("/api/admin/orgs", json={"name": "a" * 65}, headers=admin).status_code in (400, 422)
+
+
+# --- r-ext3 F1: dot-segment / non-URL-safe identifiers are rejected ---
+
+def test_admin_api_rejects_dot_segment_identifiers(rig):
+    client, admin = rig
+    for name in (".", ".."):
+        assert client.post("/api/admin/orgs", json={"name": name}, headers=admin).status_code in (400, 422)
+    client.post("/api/admin/orgs", json={"name": "acme"}, headers=admin)
+    assert client.post(
+        "/api/admin/users", json={"username": "..", "org": "acme", "password": "pw"}, headers=admin
+    ).status_code in (400, 422)
+
+
+def test_admin_api_rejects_backslash_and_space_identifiers(rig):
+    client, admin = rig
+    for name in ("a\b", "a b"):
+        assert client.post("/api/admin/orgs", json={"name": name}, headers=admin).status_code in (400, 422)
