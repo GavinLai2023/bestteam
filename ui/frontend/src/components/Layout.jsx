@@ -16,15 +16,21 @@ export default function Layout() {
       <nav className="top-nav">
         <span className="brand">bestteam</span>
         <div className="top-nav-links">
-          <NavLink to="/wizard" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Build a team
-          </NavLink>
-          <NavLink to="/teams" className={({ isActive }) => (isActive ? 'active' : '')}>
-            My teams
-          </NavLink>
-          <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
-            Talk to your team
-          </NavLink>
+          {/* Customer pages are org-scoped; a platform operator (no org) can't
+              use them, so show them only to org members. */}
+          {!isAdmin && (
+            <>
+              <NavLink to="/wizard" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Build a team
+              </NavLink>
+              <NavLink to="/teams" className={({ isActive }) => (isActive ? 'active' : '')}>
+                My teams
+              </NavLink>
+              <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
+                Talk to your team
+              </NavLink>
+            </>
+          )}
           {isAdmin && (
             <>
               <NavLink to="/advanced" className={({ isActive }) => (isActive ? 'active' : '')}>

@@ -18,10 +18,20 @@ function RequireAuth() {
 
 // Cosmetic gate for admin-only pages; the backend enforces admin on every
 // /api/config and /api/memory call regardless. Non-admins are sent home.
-function RequireAdmin() {
+export function RequireAdmin() {
   const { loading, isAdmin } = useMe()
   if (loading) return null
   return isAdmin ? <Outlet /> : <Navigate to="/" replace />
+}
+
+// Mirror of RequireAdmin for the customer-facing pages. A platform operator
+// (is_admin, org_id NULL) has no org, so every org-scoped surface 403s for
+// them -- send them to their admin home instead of a dead-end customer page.
+// Cosmetic, like RequireAdmin: the backend is the real authority.
+export function RequireOrgMember() {
+  const { loading, isAdmin } = useMe()
+  if (loading) return null
+  return isAdmin ? <Navigate to="/advanced" replace /> : <Outlet />
 }
 
 function App() {
@@ -31,21 +41,25 @@ function App() {
 
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
-          <Route path="/" element={<MonitorPage />} />
-          <Route path="/teams" element={<SessionsPage />} />
+          <Route element={<RequireOrgMember />}>
+            <Route path="/" element={<MonitorPage />} />
+            <Route path="/teams" element={<SessionsPage />} />
+
+            <Route path="/wizard" element={<WizardLayout />}>
+              <Route index element={<IntentPage />} />
+              <Route path=":sessionId/preview" element={<PreviewPage />} />
+              <Route path=":sessionId/confirm" element={<ConfirmPage />} />
+              <Route path=":sessionId/deploy" element={<DeployPage />} />
+            </Route>
+          </Route>
 
           <Route element={<RequireAdmin />}>
             <Route path="/advanced" element={<AdvancedPage />} />
             <Route path="/memory" element={<MemoryPage />} />
           </Route>
 
-          <Route path="/wizard" element={<WizardLayout />}>
-            <Route index element={<IntentPage />} />
-            <Route path=":sessionId/preview" element={<PreviewPage />} />
-            <Route path=":sessionId/confirm" element={<ConfirmPage />} />
-            <Route path=":sessionId/deploy" element={<DeployPage />} />
-          </Route>
-
+          {/* Kept outside both guards so an unknown path routes to `/`, where
+              RequireOrgMember decides the destination (operator -> /advanced). */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>
