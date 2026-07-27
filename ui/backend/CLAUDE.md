@@ -418,12 +418,25 @@ purge-before-release / reconcile-legacy-to-source — through the shared
 out of `admin.py`, which still calls them under its old `_`-prefixed names).
 
 **Org deactivation** (`organizations.active`, migration `f3a4b5c6d7e8`) is a
-reversible full suspend: a deactivated org's member is refused at `login` and
-`get_current_org` `403`s every org-scoped surface (catching tokens minted before
-deactivation), and `db/email_triggers.py::list_enabled_triggers` filters it out
-so its autonomous trigger pauses. Admin cross-org surfaces (`/api/config?org=`,
+reversible full suspend, enforced in three ways (external-review hardening,
+r-ext): (1) `login` refuses a deactivated org's member a token, and
+**`get_current_user` rejects (`403`) an inactive-org member on *every*
+authenticated route** — centralized there rather than only in `get_current_org`,
+so `/me`, `/model-catalog`, run reads, the ws-ticket mint, and the transcription
+path are all covered; (2) `db/email_triggers.py::list_enabled_triggers` filters
+inactive orgs so the autonomous trigger pauses; (3) the run-stream WebSocket
+re-authorizes before **every** event (`main.py::_stream_access`) so a mid-stream
+deactivate/move/delete/password-reset stops delivery immediately (no
+cross-tenant leak on a move). Admin cross-org surfaces (`/api/config?org=`,
 `/api/memory`) are **not** blocked, so an admin can still manage/reactivate a
 suspended org. CLI parity: `admin.py` gains `activate-org`/`deactivate-org`.
+
+**Session revocation** (r-ext): access tokens carry an `iat` (issued-at, float);
+a password reset stamps `users.password_changed_at` (migration `a7b8c9d0e1f2`),
+and `get_current_user` rejects any token issued before it — so a reset
+invalidates all existing sessions. `admin_api` request models and the
+`create_user`/`create_org` helpers reject blank/whitespace identities and
+passwords server-side (client trimming isn't a control).
 Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
 
 ## Known limitation: general-purpose cache

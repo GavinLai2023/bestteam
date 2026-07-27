@@ -58,8 +58,20 @@ describe('AccountsPage', () => {
     await screen.findByText('Acme Corp')
     fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
+    fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
     fireEvent.click(screen.getByRole('button', { name: /create user/i }))
     await waitFor(() => expect(api.createAdminUser).toHaveBeenCalledWith('bob', 'beta', 'pw'))
+  })
+
+  it('does not create a user when the passwords do not match', async () => {
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
+    fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
+    fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'nope' } })
+    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument()
+    expect(api.createAdminUser).not.toHaveBeenCalled()
   })
 
   it('deactivates an active org after confirm', async () => {

@@ -469,3 +469,21 @@ def test_deactivate_and_activate_org(session_local):
 def test_deactivate_unknown_org_errors(session_local):
     with pytest.raises(SystemExit):
         admin_cli.main(["deactivate-org", "ghost"])
+
+
+# --- F4: db helpers reject blank identities/passwords (CLI path) ---
+
+def test_create_user_rejects_blank(session_local):
+    from ui.backend.db.users import create_user
+    with session_local() as db:
+        with pytest.raises(ValueError):
+            create_user(db, "   ", "pw")
+        with pytest.raises(ValueError):
+            create_user(db, "bob", "   ")
+
+
+def test_create_org_rejects_blank(session_local):
+    from ui.backend.db.orgs import create_org
+    with session_local() as db:
+        with pytest.raises(ValueError):
+            create_org(db, "   ")

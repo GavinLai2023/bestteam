@@ -45,6 +45,9 @@ def ensure_email_single_org(db: Session, creating: int = 0) -> None:
 
 
 def create_org(db: Session, name: str, display_name: str = "") -> Organization:
+    name = name.strip()
+    if not name:
+        raise ValueError("Organization name must not be blank")
     if get_org_by_name(db, name) is not None:
         raise ValueError(f"Organization '{name}' already exists")
     org = Organization(name=name, display_name=display_name)

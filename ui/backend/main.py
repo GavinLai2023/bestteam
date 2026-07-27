@@ -15,6 +15,7 @@ import dataclasses
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -545,6 +546,30 @@ def create_ws_ticket(user: User = Depends(get_current_user)) -> Dict[str, str]:
     return {"ticket": issue_ticket(user.username)}
 
 
+def _stream_access(db: Session, username: str, run: Any, connect_time: float) -> bool:
+    """True if `username` may still receive `run`'s events.
+
+    Re-checked before every send so a mid-stream lifecycle change stops
+    delivery immediately (review r-ext #2/#3): the user was deleted, moved to
+    another org (would be cross-tenant disclosure), their org was deactivated,
+    or their password was reset after this connection opened. Org-less platform
+    admins pass through for operator debugging (an org-bound is_admin flag does
+    NOT qualify, CR-030)."""
+    user = get_user_by_username(db, username)
+    if user is None:
+        return False
+    is_platform_admin = user.is_admin and user.org_id is None
+    if not is_platform_admin:
+        if run.org_id != user.org_id:
+            return False
+        org = db.get(Organization, user.org_id) if user.org_id is not None else None
+        if org is None or not org.active:
+            return False
+    if user.password_changed_at is not None and user.password_changed_at > connect_time:
+        return False
+    return True
+
+
 @app.websocket("/api/runs/{run_id}/stream")
 async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = None, db: Session = Depends(get_db)):
     """Replays any events already produced, then relays new ones live until
@@ -558,26 +583,22 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
     if username is None:
         await websocket.close(code=4401)
         return
-    ws_user = get_user_by_username(db, username)
-    if ws_user is None:
-        db.close()
-        await websocket.close(code=4401)
-        return
+
+    engine = db.get_bind()
+    connect_time = time.time()
 
     run = registry.get(run_id)
-    # Same close code for "unknown run" and "another org's run" so a probing
-    # client can't distinguish existence (no cross-org oracle). Org-less
-    # platform admins pass through for operator debugging (an org-bound
-    # is_admin flag does NOT qualify, CR-030).
-    is_platform_admin = ws_user.is_admin and ws_user.org_id is None
-    if run is None or (run.org_id != ws_user.org_id and not is_platform_admin):
+    # Same close code (4404) for unknown run and for any authorization failure
+    # (cross-org, deactivated org, deleted user), so a probing client gets no
+    # existence oracle. An invalid ticket already closed 4401 above.
+    if run is None or not _stream_access(db, username, run, connect_time):
         db.close()
         await websocket.close(code=4404)
         return
 
-    # Release the DB connection now -- it's only needed for the checks
-    # above, but `Depends(get_db)` would otherwise hold it open for the
-    # entire streaming connection below, which can run for a long time.
+    # Release the request DB connection now -- `Depends(get_db)` would otherwise
+    # hold it open for the whole (possibly long) streaming connection. Per-event
+    # re-authorization below opens its own short-lived session on `engine`.
     db.close()
 
     await websocket.accept()
@@ -592,6 +613,13 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
     try:
         while True:
             event = await subscriber_queue.get()
+            # Re-authorize before delivering: a lifecycle change since connect
+            # (move/deactivate/delete/password-reset) must stop the stream
+            # rather than leak further events (review r-ext #2).
+            with Session(engine) as check_db:
+                if not _stream_access(check_db, username, run, connect_time):
+                    await websocket.close(code=4404)
+                    return
             await websocket.send_json(event)
             if event["type"] in ("run_completed", "run_failed"):
                 break

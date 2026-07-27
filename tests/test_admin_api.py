@@ -241,3 +241,66 @@ def test_admin_routes_require_admin(rig):
     assert client.get("/api/admin/orgs").status_code == 401
     assert client.get("/api/admin/orgs", headers=member).status_code == 403
     assert client.get("/api/admin/users", headers=member).status_code == 403
+
+
+# --- F1: org deactivation suspends ALL authenticated routes (review r-ext #1) ---
+
+def test_deactivated_org_suspends_get_current_user_routes(rig):
+    client, _ = rig
+    token = _make_org_member(client).json()["access_token"]
+    h = {"Authorization": f"Bearer {token}"}
+    # all fine while active
+    assert client.get("/api/auth/me", headers=h).status_code == 200
+    assert client.get("/api/model-catalog", headers=h).status_code == 200
+    assert client.post("/api/runs/ws-ticket", headers=h).status_code == 200
+
+    with open_test_db() as db:
+        set_org_active(db, "acme", False)
+
+    # suspended: every get_current_user-guarded route now 403s
+    assert client.get("/api/auth/me", headers=h).status_code == 403
+    assert client.get("/api/model-catalog", headers=h).status_code == 403
+    assert client.post("/api/runs/ws-ticket", headers=h).status_code == 403
+
+
+# --- F3: password reset invalidates existing tokens (review r-ext #3) ---
+
+def test_password_reset_invalidates_old_tokens(rig):
+    client, admin = rig
+    old = _make_org_member(client).json()["access_token"]
+    h = {"Authorization": f"Bearer {old}"}
+    assert client.get("/api/auth/me", headers=h).status_code == 200
+
+    assert client.post("/api/admin/users/alice/password", json={"password": "newpw"}, headers=admin).status_code == 200
+
+    # the token minted before the reset is now rejected
+    assert client.get("/api/auth/me", headers=h).status_code == 401
+    # a fresh login with the new password works
+    new = client.post("/api/auth/login", json={"username": "alice", "password": "newpw"}).json()["access_token"]
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {new}"}).status_code == 200
+
+
+# --- F4: server-side non-blank validation (review r-ext #4) ---
+
+def test_admin_api_rejects_blank_org_name(rig):
+    client, admin = rig
+    assert client.post("/api/admin/orgs", json={"name": "   "}, headers=admin).status_code in (400, 422)
+
+
+def test_admin_api_rejects_blank_username_and_password(rig):
+    client, admin = rig
+    client.post("/api/admin/orgs", json={"name": "acme"}, headers=admin)
+    assert client.post(
+        "/api/admin/users", json={"username": "  ", "org": "acme", "password": "pw"}, headers=admin
+    ).status_code in (400, 422)
+    assert client.post(
+        "/api/admin/users", json={"username": "bob", "org": "acme", "password": "  "}, headers=admin
+    ).status_code in (400, 422)
+
+
+def test_admin_api_rejects_blank_password_reset(rig):
+    client, admin = rig
+    _make_org_member(client, "alice", "acme")
+    assert client.post(
+        "/api/admin/users/alice/password", json={"password": "   "}, headers=admin
+    ).status_code in (400, 422)

@@ -13,8 +13,10 @@ docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from .account_memory import purge_user_memory, reconcile_legacy_org
@@ -30,9 +32,28 @@ router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(ge
 _PLATFORM_ACCOUNT_MSG = "This is a platform operator/admin account; manage it via the CLI."
 
 
+def _require_nonblank_stripped(value: str) -> str:
+    """Trim and reject blank identity strings (org/user names) server-side.
+    Client-side trimming isn't security -- a direct API call must be rejected
+    too (review r-ext #4)."""
+    if not value or not value.strip():
+        raise ValueError("must not be blank")
+    return value.strip()
+
+
+def _require_nonblank_password(value: str) -> str:
+    """Reject a blank/whitespace password without mutating it (passwords may
+    legitimately contain surrounding spaces)."""
+    if not value or not value.strip():
+        raise ValueError("Password must not be blank")
+    return value
+
+
 class OrgCreate(BaseModel):
     name: str
     display_name: str = ""
+
+    _v_name = field_validator("name")(_require_nonblank_stripped)
 
 
 class OrgActive(BaseModel):
@@ -44,13 +65,20 @@ class UserCreate(BaseModel):
     org: str
     password: str
 
+    _v_ident = field_validator("username", "org")(_require_nonblank_stripped)
+    _v_pw = field_validator("password")(_require_nonblank_password)
+
 
 class PasswordReset(BaseModel):
     password: str
 
+    _v_pw = field_validator("password")(_require_nonblank_password)
+
 
 class UserMove(BaseModel):
     to_org: str
+
+    _v_to = field_validator("to_org")(_require_nonblank_stripped)
 
 
 def _org_dict(org) -> dict:
@@ -125,6 +153,8 @@ def create_user_endpoint(body: UserCreate, db: Session = Depends(get_db)) -> dic
 def reset_password_endpoint(username: str, body: PasswordReset, db: Session = Depends(get_db)) -> dict:
     user = _require_org_member(db, username)
     user.password_hash = hash_password(body.password)
+    # Revoke every token issued before now (review r-ext #3).
+    user.password_changed_at = time.time()
     db.commit()
     return {"username": user.username}
 

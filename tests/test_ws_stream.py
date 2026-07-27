@@ -206,3 +206,73 @@ def test_ticket_operations_are_thread_safe():
         t.join()
 
     assert errors == []
+
+
+# --- F2: open streams must not survive tenant/account lifecycle changes
+#         (review r-ext #2) ---
+
+def _running_run(org_id):
+    """A run with one non-terminal event queued, so the stream stays open."""
+    run = runtime.registry.create("wf", "in", org_id=org_id)
+    runtime.registry.publish(
+        run.id,
+        {"type": "agent_completed", "workflow": "wf", "agent": "a", "data": "x", "usage": []},
+    )
+    return run
+
+
+def _terminal_event():
+    return {"type": "run_completed", "workflow": "wf", "agent": None, "data": "done", "usage": []}
+
+
+def test_stream_closes_when_org_deactivated_midstream(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.orgs import set_org_active
+
+    run = _running_run(get_org_id())
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
+            assert ws.receive_json()["type"] == "agent_completed"
+            with open_test_db() as db:
+                set_org_active(db, "default", False)
+            runtime.registry.publish(run.id, _terminal_event())
+            ws.receive_json()  # revalidation must close before delivering this
+    assert exc.value.code == 4404
+
+
+def test_stream_closes_when_user_moved_midstream(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.users import set_user_org
+
+    run = _running_run(get_org_id())  # owned by 'default'
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
+            assert ws.receive_json()["type"] == "agent_completed"
+            with open_test_db() as db:
+                other = get_or_create_org(db, "orgb").id
+                set_user_org(db, "test", other)  # move the fixture user off 'default'
+            runtime.registry.publish(run.id, _terminal_event())
+            ws.receive_json()  # must not deliver org-'default' events to a now-org-B user
+    assert exc.value.code == 4404
+
+
+def test_stream_closes_when_user_deleted_midstream(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.users import delete_user
+
+    run = _running_run(get_org_id())
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
+            assert ws.receive_json()["type"] == "agent_completed"
+            with open_test_db() as db:
+                delete_user(db, "test")
+            runtime.registry.publish(run.id, _terminal_event())
+            ws.receive_json()
+    assert exc.value.code == 4404

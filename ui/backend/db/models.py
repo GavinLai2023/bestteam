@@ -76,6 +76,10 @@ class User(Base):
     # NULL = platform operator (not part of any customer org).
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # Revocation anchor (unix seconds, float): set when an admin resets this
+    # user's password, so any access token issued before then is rejected
+    # (auth_api.get_current_user). NULL = never reset, no tokens to revoke.
+    password_changed_at: Mapped[Optional[float]] = mapped_column(nullable=True)
 
 
 class KnowledgeBaseRecord(Base):

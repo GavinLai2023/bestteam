@@ -57,16 +57,22 @@ export default function AccountsPage() {
     run(api.setOrgActive(org.name, !org.active))
   }
 
-  const draftFor = (org) => drafts[org] || { username: '', password: '' }
+  const emptyDraft = { username: '', password: '', confirm: '' }
+  const draftFor = (org) => drafts[org] || emptyDraft
   const setDraft = (org, patch) =>
     setDrafts((d) => ({ ...d, [org]: { ...draftFor(org), ...patch } }))
 
   const createUser = (e, org) => {
     e.preventDefault()
-    const { username, password } = draftFor(org)
+    const { username, password, confirm } = draftFor(org)
     if (!username.trim() || !password) return
+    if (password !== confirm) {
+      setMessage(null)
+      setError('Passwords do not match.')
+      return
+    }
     run(api.createAdminUser(username.trim(), org, password)).then(() =>
-      setDrafts((d) => ({ ...d, [org]: { username: '', password: '' } })),
+      setDrafts((d) => ({ ...d, [org]: emptyDraft })),
     )
   }
 
@@ -161,6 +167,13 @@ export default function AccountsPage() {
                     value={draftFor(org.name).password}
                     onChange={(e) => setDraft(org.name, { password: e.target.value })}
                     placeholder="password"
+                  />
+                  <input
+                    aria-label={`Confirm password for ${org.name}`}
+                    type="password"
+                    value={draftFor(org.name).confirm}
+                    onChange={(e) => setDraft(org.name, { confirm: e.target.value })}
+                    placeholder="confirm password"
                   />
                   <button type="submit" className="btn btn-primary">
                     Create user

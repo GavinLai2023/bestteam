@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .auth import AuthError, create_access_token, decode_access_token
+from .auth import AuthError, create_access_token, decode_access_token_claims
 from .db.models import Organization, User
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
@@ -61,13 +61,29 @@ def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        username = decode_access_token(credentials.credentials)
+        claims = decode_access_token_claims(credentials.credentials)
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-    user = get_user_by_username(db, username)
+    user = get_user_by_username(db, claims["sub"])
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
+    # Revocation: a token issued before this user's last password reset is
+    # rejected (review r-ext #3). A tokenless/iat-less token can't prove it
+    # postdates the reset, so it's rejected too.
+    if user.password_changed_at is not None:
+        iat = claims.get("iat")
+        if iat is None or iat < user.password_changed_at:
+            raise HTTPException(status_code=401, detail="Session expired; please log in again.")
+    # Full-suspend enforcement, centralized here so EVERY authenticated route
+    # (not just the org-scoped ones behind get_current_org) rejects a member
+    # whose org has been deactivated -- /me, /model-catalog, run reads, the
+    # ws-ticket mint, and the transcription path all depend on get_current_user
+    # (review r-ext #1). Platform operators/admins (org_id NULL) are exempt.
+    if user.org_id is not None:
+        org = db.get(Organization, user.org_id)
+        if org is not None and not org.active:
+            raise HTTPException(status_code=403, detail="This organization has been deactivated.")
     return user
 
 
@@ -103,10 +119,8 @@ def get_current_org(
     org = db.get(Organization, user.org_id)
     if org is None:
         raise HTTPException(status_code=403, detail="User's organization no longer exists")
-    # Full-suspend enforcement: catches a token minted before deactivation, so
-    # every org-scoped surface guarded by this dependency stops for the member.
-    if not org.active:
-        raise HTTPException(status_code=403, detail="This organization has been deactivated.")
+    # Deactivation is enforced upstream in get_current_user (this dependency
+    # runs after it), so an inactive org never reaches here.
     return org
 
 
