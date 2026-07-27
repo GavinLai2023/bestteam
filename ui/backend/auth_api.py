@@ -47,7 +47,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
         org = db.get(Organization, user.org_id)
         if org is not None and not org.active:
             raise HTTPException(status_code=403, detail="This organization has been deactivated.")
-    return TokenResponse(access_token=create_access_token(user.username))
+    return TokenResponse(access_token=create_access_token(user.username, user.security_stamp))
 
 
 def get_current_user(
@@ -68,13 +68,12 @@ def get_current_user(
     user = get_user_by_username(db, claims["sub"])
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
-    # Revocation: a token issued before this user's last password reset is
-    # rejected (review r-ext #3). A tokenless/iat-less token can't prove it
-    # postdates the reset, so it's rejected too.
-    if user.password_changed_at is not None:
-        iat = claims.get("iat")
-        if iat is None or iat < user.password_changed_at:
-            raise HTTPException(status_code=401, detail="Session expired; please log in again.")
+    # Security-stamp check: the token's stamp must equal the account's current
+    # one. A password reset regenerates it (revoking old tokens), and a
+    # recreated username gets a fresh random stamp, so a deleted account's old
+    # token can't reach the new same-named account (review r-ext2 #1/#3).
+    if user.security_stamp != claims.get("sec"):
+        raise HTTPException(status_code=401, detail="Session no longer valid; please log in again.")
     # Full-suspend enforcement, centralized here so EVERY authenticated route
     # (not just the org-scoped ones behind get_current_org) rejects a member
     # whose org has been deactivated -- /me, /model-catalog, run reads, the

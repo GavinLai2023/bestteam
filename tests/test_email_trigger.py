@@ -656,3 +656,26 @@ def test_validate_trigger_env_rejects_poll_seconds_below_minimum(monkeypatch):
     monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "1")
     with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_POLL_SECONDS"):
         email_trigger.validate_trigger_env()
+
+
+# --- r-ext2 F2: a deactivation racing the dispatch CAS must not dispatch ---
+
+def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypatch):
+    from ui.backend.db.orgs import set_org_active
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    db.commit()
+    # deactivation landed after trigger enumeration (poll_org already holds it)
+    set_org_active(db, "acme", False)
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert recorder.calls == []          # no run dispatched
+    assert trigger.last_uid == 41        # UID baseline NOT advanced
+    assert trigger.runs_today == 0
+    assert trigger.last_run_id is None

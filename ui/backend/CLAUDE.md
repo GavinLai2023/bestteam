@@ -424,19 +424,28 @@ r-ext): (1) `login` refuses a deactivated org's member a token, and
 authenticated route** — centralized there rather than only in `get_current_org`,
 so `/me`, `/model-catalog`, run reads, the ws-ticket mint, and the transcription
 path are all covered; (2) `db/email_triggers.py::list_enabled_triggers` filters
-inactive orgs so the autonomous trigger pauses; (3) the run-stream WebSocket
-re-authorizes before **every** event (`main.py::_stream_access`) so a mid-stream
-deactivate/move/delete/password-reset stops delivery immediately (no
-cross-tenant leak on a move). Admin cross-org surfaces (`/api/config?org=`,
-`/api/memory`) are **not** blocked, so an admin can still manage/reactivate a
-suspended org. CLI parity: `admin.py` gains `activate-org`/`deactivate-org`.
+inactive orgs so the autonomous trigger pauses **and** the final dispatch CAS
+(`email_trigger.py::_start_triggered_run`) requires an active org in its atomic
+predicate, closing the deactivate-after-enumeration race (r-ext2 #2); (3) the
+run-stream WebSocket re-authorizes before **every** event
+(`main.py::_stream_access`) so a mid-stream deactivate/move/delete/
+password-reset/username-reuse stops delivery immediately (no cross-tenant leak
+on a move). Admin cross-org surfaces (`/api/config?org=`, `/api/memory`) are
+**not** blocked, so an admin can still manage/reactivate a suspended org. CLI
+parity: `admin.py` gains `activate-org`/`deactivate-org`.
 
-**Session revocation** (r-ext): access tokens carry an `iat` (issued-at, float);
-a password reset stamps `users.password_changed_at` (migration `a7b8c9d0e1f2`),
-and `get_current_user` rejects any token issued before it — so a reset
-invalidates all existing sessions. `admin_api` request models and the
-`create_user`/`create_org` helpers reject blank/whitespace identities and
-passwords server-side (client trimming isn't a control).
+**Session revocation via security stamp** (r-ext / r-ext2 #1/#3):
+`users.security_stamp` (migration `a7b8c9d0e1f2`) is a random per-account
+credential generation embedded in every access token (`sec` claim) and WS ticket
+and verified against the current row on use (`get_current_user`, `_stream_access`
+per event). A password reset regenerates it — revoking all existing
+tokens/tickets — and a deleted-then-recreated username gets a fresh stamp, so the
+old account's credentials can't reach the new same-named account (an immutable
+random value, not a timestamp, so there's no ordering race). **Identifier
+validation:** `db/validators.py::clean_identifier` (used by the `admin_api`
+request models and by `create_user`/`create_org`) trims and rejects blank,
+`/`-containing, and over-length (>64) org/user names server-side, so a direct
+API call can't create an unmanageable or path-unaddressable record.
 Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
 
 ## Known limitation: general-purpose cache

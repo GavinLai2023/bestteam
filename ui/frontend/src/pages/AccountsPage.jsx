@@ -32,22 +32,32 @@ export default function AccountsPage() {
       .finally(() => setLoading(false))
   }, [])
 
+  // Resolves to true on success, false on failure -- callers clear their form
+  // only on true, so a failed create keeps the entered values (review r-ext2 #5).
   const run = (promise, okMessage) => {
     setError(null)
     setMessage(null)
     return promise
       .then(() => reload())
-      .then(() => okMessage && setMessage(okMessage))
-      .catch((e) => setError(e.message))
+      .then(() => {
+        if (okMessage) setMessage(okMessage)
+        return true
+      })
+      .catch((e) => {
+        setError(e.message)
+        return false
+      })
   }
 
   const createOrg = (e) => {
     e.preventDefault()
     if (!newOrgName.trim()) return
     run(api.createAdminOrg(newOrgName.trim(), newOrgDisplay.trim()), `Created '${newOrgName.trim()}'.`).then(
-      () => {
-        setNewOrgName('')
-        setNewOrgDisplay('')
+      (ok) => {
+        if (ok) {
+          setNewOrgName('')
+          setNewOrgDisplay('')
+        }
       },
     )
   }
@@ -71,9 +81,9 @@ export default function AccountsPage() {
       setError('Passwords do not match.')
       return
     }
-    run(api.createAdminUser(username.trim(), org, password)).then(() =>
-      setDrafts((d) => ({ ...d, [org]: emptyDraft })),
-    )
+    run(api.createAdminUser(username.trim(), org, password)).then((ok) => {
+      if (ok) setDrafts((d) => ({ ...d, [org]: emptyDraft }))
+    })
   }
 
   const resetPassword = (username) => {

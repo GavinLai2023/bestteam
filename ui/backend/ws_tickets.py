@@ -20,7 +20,11 @@ import time
 from typing import Dict, Optional, Tuple
 
 _TICKET_TTL_SECONDS = 30
-_tickets: Dict[str, Tuple[str, float]] = {}  # ticket -> (username, expires_at)
+# ticket -> (username, security_stamp, expires_at). The stamp is the account's
+# credential generation at issuance; the stream rejects the ticket if the
+# account's current stamp differs (password reset / username reuse since the
+# ticket was minted) -- review r-ext2 #1/#3.
+_tickets: Dict[str, Tuple[str, Optional[str], float]] = {}
 # Tickets are issued from request threads and redeemed/purged from the WS
 # handler's event-loop thread, so all access is serialised -- otherwise a
 # concurrent purge iterating `_tickets` while another op mutates it can raise
@@ -28,31 +32,30 @@ _tickets: Dict[str, Tuple[str, float]] = {}  # ticket -> (username, expires_at)
 _lock = threading.Lock()
 
 
-def issue_ticket(username: str) -> str:
-    """Mint a single-use ticket bound to `username`, valid for a few seconds."""
+def issue_ticket(username: str, security_stamp: Optional[str]) -> str:
+    """Mint a single-use ticket bound to `username` + its security stamp."""
     ticket = secrets.token_urlsafe(32)
     with _lock:
         _purge_expired()
-        _tickets[ticket] = (username, time.time() + _TICKET_TTL_SECONDS)
+        _tickets[ticket] = (username, security_stamp, time.time() + _TICKET_TTL_SECONDS)
     return ticket
 
 
-def consume_ticket(ticket: str) -> Optional[str]:
-    """Redeem `ticket` once, returning its username, or None if unknown/expired.
-
-    The ticket is removed on the first lookup, so a replayed URL fails."""
+def consume_ticket(ticket: str) -> Optional[Tuple[str, Optional[str]]]:
+    """Redeem `ticket` once, returning `(username, security_stamp)`, or None if
+    unknown/expired. The ticket is removed on first lookup, so a replay fails."""
     with _lock:
         entry = _tickets.pop(ticket, None)
     if entry is None:
         return None
-    username, expires_at = entry
+    username, security_stamp, expires_at = entry
     if time.time() > expires_at:
         return None
-    return username
+    return (username, security_stamp)
 
 
 def _purge_expired() -> None:
     """Drop expired tickets. Caller must hold `_lock`."""
     now = time.time()
-    for ticket in [t for t, (_, expires_at) in _tickets.items() if expires_at < now]:
+    for ticket in [t for t, (_, _, expires_at) in _tickets.items() if expires_at < now]:
         _tickets.pop(ticket, None)

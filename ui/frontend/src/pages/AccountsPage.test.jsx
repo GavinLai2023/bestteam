@@ -74,6 +74,16 @@ describe('AccountsPage', () => {
     expect(api.createAdminUser).not.toHaveBeenCalled()
   })
 
+  it('keeps the entered values when creation fails', async () => {
+    api.createAdminOrg.mockRejectedValue(new Error('boom'))
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    expect(await screen.findByText('boom')).toBeInTheDocument()
+    expect(screen.getByLabelText(/organization name/i)).toHaveValue('gamma')
+  })
+
   it('deactivates an active org after confirm', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<AccountsPage />)

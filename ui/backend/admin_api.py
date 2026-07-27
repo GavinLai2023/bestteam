@@ -13,8 +13,6 @@ docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md.
 
 from __future__ import annotations
 
-import time
-
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
@@ -22,9 +20,10 @@ from sqlalchemy.orm import Session
 from .account_memory import purge_user_memory, reconcile_legacy_org
 from .auth import hash_password
 from .auth_api import get_current_admin
-from .db.models import User
+from .db.models import User, new_security_stamp
 from .db.orgs import create_org, ensure_email_single_org, get_org_by_name, list_orgs, set_org_active
 from .db.users import create_user, delete_user, get_user_by_username, set_user_org
+from .db.validators import clean_identifier
 from .db_session import get_db
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
@@ -32,13 +31,11 @@ router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(ge
 _PLATFORM_ACCOUNT_MSG = "This is a platform operator/admin account; manage it via the CLI."
 
 
-def _require_nonblank_stripped(value: str) -> str:
-    """Trim and reject blank identity strings (org/user names) server-side.
-    Client-side trimming isn't security -- a direct API call must be rejected
-    too (review r-ext #4)."""
-    if not value or not value.strip():
-        raise ValueError("must not be blank")
-    return value.strip()
+def _require_valid_identifier(value: str) -> str:
+    """Trim + reject blank / `/`-containing / over-length org and user names
+    server-side, so a direct API call can't create an unmanageable record
+    (review r-ext #4 / r-ext2 #4)."""
+    return clean_identifier(value)
 
 
 def _require_nonblank_password(value: str) -> str:
@@ -53,7 +50,7 @@ class OrgCreate(BaseModel):
     name: str
     display_name: str = ""
 
-    _v_name = field_validator("name")(_require_nonblank_stripped)
+    _v_name = field_validator("name")(_require_valid_identifier)
 
 
 class OrgActive(BaseModel):
@@ -65,7 +62,7 @@ class UserCreate(BaseModel):
     org: str
     password: str
 
-    _v_ident = field_validator("username", "org")(_require_nonblank_stripped)
+    _v_ident = field_validator("username", "org")(_require_valid_identifier)
     _v_pw = field_validator("password")(_require_nonblank_password)
 
 
@@ -78,7 +75,7 @@ class PasswordReset(BaseModel):
 class UserMove(BaseModel):
     to_org: str
 
-    _v_to = field_validator("to_org")(_require_nonblank_stripped)
+    _v_to = field_validator("to_org")(_require_valid_identifier)
 
 
 def _org_dict(org) -> dict:
@@ -153,8 +150,9 @@ def create_user_endpoint(body: UserCreate, db: Session = Depends(get_db)) -> dic
 def reset_password_endpoint(username: str, body: PasswordReset, db: Session = Depends(get_db)) -> dict:
     user = _require_org_member(db, username)
     user.password_hash = hash_password(body.password)
-    # Revoke every token issued before now (review r-ext #3).
-    user.password_changed_at = time.time()
+    # Regenerate the security stamp: revokes every existing token/ticket for
+    # this account (review r-ext #3 / r-ext2 #3).
+    user.security_stamp = new_security_stamp()
     db.commit()
     return {"username": user.username}
 

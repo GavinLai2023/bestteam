@@ -304,3 +304,36 @@ def test_admin_api_rejects_blank_password_reset(rig):
     assert client.post(
         "/api/admin/users/alice/password", json={"password": "   "}, headers=admin
     ).status_code in (400, 422)
+
+
+# --- r-ext2 F1: recreated username must not inherit old sessions ---
+
+def test_recreated_username_does_not_inherit_old_sessions(rig):
+    client, admin = rig
+    old = _make_org_member(client, "alice", "acme").json()["access_token"]
+    h = {"Authorization": f"Bearer {old}"}
+    assert client.get("/api/auth/me", headers=h).status_code == 200
+
+    assert client.delete("/api/admin/users/alice", headers=admin).status_code == 204
+    assert client.post(
+        "/api/admin/users", json={"username": "alice", "org": "acme", "password": "different"}, headers=admin
+    ).status_code == 201
+
+    # the deleted account's old token must NOT resolve to the new same-named account
+    assert client.get("/api/auth/me", headers=h).status_code == 401
+
+
+# --- r-ext2 F4: URL-unsafe / over-length identifiers are rejected ---
+
+def test_admin_api_rejects_slash_in_identifiers(rig):
+    client, admin = rig
+    assert client.post("/api/admin/orgs", json={"name": "a/b"}, headers=admin).status_code in (400, 422)
+    client.post("/api/admin/orgs", json={"name": "acme"}, headers=admin)
+    assert client.post(
+        "/api/admin/users", json={"username": "x/y", "org": "acme", "password": "pw"}, headers=admin
+    ).status_code in (400, 422)
+
+
+def test_admin_api_rejects_overlong_identifiers(rig):
+    client, admin = rig
+    assert client.post("/api/admin/orgs", json={"name": "a" * 65}, headers=admin).status_code in (400, 422)

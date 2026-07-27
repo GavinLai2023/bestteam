@@ -65,16 +65,18 @@ def _b64decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def create_access_token(username: str, *, expires_minutes: Optional[int] = None) -> str:
+def create_access_token(
+    username: str, security_stamp: Optional[str] = None, *, expires_minutes: Optional[int] = None
+) -> str:
     minutes = ACCESS_TOKEN_EXPIRE_MINUTES if expires_minutes is None else expires_minutes
-    now = time.time()
     header = _b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode("utf-8"))
-    # `iat` (issued-at, float seconds) is the revocation anchor: a password
-    # reset stamps `users.password_changed_at`, and a token whose iat predates
-    # it is rejected (see auth_api.get_current_user). Float, not int seconds, so
-    # a reset in the same wall-clock second as a mint still invalidates it.
+    # `sec` is the account's security stamp (see User.security_stamp): verified
+    # against the current row on every request, so a password reset or a
+    # deleted-then-recreated username invalidates this token (review r-ext2).
     payload = _b64encode(
-        json.dumps({"sub": username, "iat": now, "exp": int(now) + minutes * 60}).encode("utf-8")
+        json.dumps(
+            {"sub": username, "sec": security_stamp, "exp": int(time.time()) + minutes * 60}
+        ).encode("utf-8")
     )
     signing_input = f"{header}.{payload}"
     signature = hmac.new(SECRET_KEY.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()

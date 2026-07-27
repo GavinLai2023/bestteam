@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, List, Tuple
 
 from cryptography.fernet import InvalidToken
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from bestteam.core.loader import _build_workflow
@@ -37,7 +37,7 @@ from bestteam.tools.email_client import _ImapBackend, make_email_tools
 from . import secret_store
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
-from .db.models import EmailTrigger, Run, WorkflowRecord
+from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -400,7 +400,15 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     # never dispatch against a mailbox they just disconnected/replaced.
     advanced = db.execute(
         update(EmailTrigger)
-        .where(EmailTrigger.id == trigger.id, EmailTrigger.enabled.is_(True))
+        .where(
+            EmailTrigger.id == trigger.id,
+            EmailTrigger.enabled.is_(True),
+            # ...and the org is still active. Deactivation can land AFTER trigger
+            # enumeration but before this atomic advance; requiring active here
+            # (not just at enumeration) is what makes "full suspend" hold for the
+            # autonomous path (review r-ext2 #2).
+            EmailTrigger.org_id.in_(select(Organization.id).where(Organization.active.is_(True))),
+        )
         .values(
             last_uid=max(batch),
             runs_today=EmailTrigger.runs_today + 1,

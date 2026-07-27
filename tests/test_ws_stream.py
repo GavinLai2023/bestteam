@@ -41,6 +41,18 @@ def client(tmp_path, monkeypatch):
         backend_main.app.dependency_overrides.pop(get_db, None)
 
 
+def _ticket_for(username):
+    """Mint a ws ticket carrying the user's current security stamp (as the
+    real /api/runs/ws-ticket endpoint does)."""
+    from helpers import open_test_db
+    from ui.backend.db.users import get_user_by_username
+
+    with open_test_db() as db:
+        user = get_user_by_username(db, username)
+        stamp = user.security_stamp if user else None
+    return ws_tickets.issue_ticket(username, stamp)
+
+
 def _completed_run(org_id=None):
     # Run ownership is org-level: stream tests must stamp the fixture user's
     # org (default = first org, id 1) or the stream is refused with 4404.
@@ -93,7 +105,7 @@ def test_ws_stream_refuses_cross_org_run_with_unknown_run_code(client):
     # probing client can't tell "exists in another org" from "doesn't exist".
     run = _completed_run()  # owned by the fixture user's 'default' org
     create_user_and_login(client, username="bob", org="orgb")
-    ticket = ws_tickets.issue_ticket("bob")
+    ticket = _ticket_for("bob")
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
@@ -131,7 +143,7 @@ def test_ws_stream_closes_gracefully_if_run_evicted_between_check_and_subscribe(
 def test_ws_stream_allows_platform_admin_passthrough(client):
     run = _completed_run()
     create_user_and_login(client, username="op", org=None, admin=True)
-    ticket = ws_tickets.issue_ticket("op")
+    ticket = _ticket_for("op")
 
     with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
         event = ws.receive_json()
@@ -155,7 +167,7 @@ def test_org_bound_admin_flag_gets_no_cross_org_run_passthrough(client):
     bob_headers = {"Authorization": f"Bearer {bob_token}"}
     assert client.get(f"/api/runs/{run.id}", headers=bob_headers).status_code == 404
 
-    ticket = ws_tickets.issue_ticket("bob")
+    ticket = _ticket_for("bob")
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
             ws.receive_json()
@@ -179,8 +191,8 @@ def test_get_run_is_org_scoped(client):
 
 
 def test_ws_ticket_is_single_use():
-    ticket = ws_tickets.issue_ticket("alice")
-    assert ws_tickets.consume_ticket(ticket) == "alice"
+    ticket = ws_tickets.issue_ticket("alice", "stamp1")
+    assert ws_tickets.consume_ticket(ticket) == ("alice", "stamp1")
     assert ws_tickets.consume_ticket(ticket) is None
 
 
@@ -194,7 +206,7 @@ def test_ticket_operations_are_thread_safe():
     def worker():
         try:
             for _ in range(300):
-                ticket = ws_tickets.issue_ticket("u")
+                ticket = ws_tickets.issue_ticket("u", None)
                 ws_tickets.consume_ticket(ticket)
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
@@ -274,5 +286,24 @@ def test_stream_closes_when_user_deleted_midstream(client):
             with open_test_db() as db:
                 delete_user(db, "test")
             runtime.registry.publish(run.id, _terminal_event())
+            ws.receive_json()
+    assert exc.value.code == 4404
+
+
+def test_stream_rejects_ticket_minted_before_password_reset(client):
+    # r-ext2 F3: a ticket carries the account's stamp at issuance; a reset (here
+    # simulated by rotating the stamp) must make that ticket unusable.
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import new_security_stamp
+    from ui.backend.db.users import get_user_by_username
+
+    run = _completed_run(get_org_id())
+    ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
+    with open_test_db() as db:
+        get_user_by_username(db, "test").security_stamp = new_security_stamp()
+        db.commit()
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/runs/{run.id}/stream?ticket={ticket}") as ws:
             ws.receive_json()
     assert exc.value.code == 4404
