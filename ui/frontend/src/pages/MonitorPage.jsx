@@ -34,7 +34,17 @@ function MonitorPage() {
           setSelected(data.workflows[0])
         }
       })
-      .catch(() => setStatus('unreachable'))
+      .catch((err) => {
+        // A rejection with an HTTP status means the backend answered (e.g. a
+        // 403 for a platform operator with no org) -- it is reachable, so show
+        // the real reason rather than the misleading "is uvicorn running?".
+        // Only a statusless failure (fetch rejected) is a true unreachable.
+        if (err?.status !== undefined) {
+          setError(err.message)
+        } else {
+          setStatus('unreachable')
+        }
+      })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
