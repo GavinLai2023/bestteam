@@ -400,6 +400,32 @@ org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
 admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
 org — see `src/bestteam/core/CLAUDE.md`.
 
+## Admin org/user management API (`admin_api.py`)
+
+`/api/admin`, `get_current_admin`-guarded — everyday provisioning for platform
+admins (the web counterpart of the `ui.backend.admin` CLI). Endpoints: `GET/POST
+/orgs` (list with each org's member; create — `create_org` + the `ensure_email_
+single_org` CR-031 guard), `PATCH /orgs/{name}` (deactivate/reactivate via
+`db/orgs.py::set_org_active`), `GET/POST /users` (list all logins incl.
+read-only platform accounts; create an **org member**), `POST
+/users/{username}/password` (reset), `POST /users/{username}/move` (org→org),
+`DELETE /users/{username}`. **No route can escalate privilege or mutate a
+platform account:** `promote`/`demote` and the whole operator/admin lifecycle
+stay CLI-only, and every user route refuses (`409`) a non-org-member target.
+`delete`/`move` run the same fail-closed per-user-memory work as the CLI —
+purge-before-release / reconcile-legacy-to-source — through the shared
+`account_memory.py` helpers (`purge_user_memory`/`reconcile_legacy_org`, factored
+out of `admin.py`, which still calls them under its old `_`-prefixed names).
+
+**Org deactivation** (`organizations.active`, migration `f3a4b5c6d7e8`) is a
+reversible full suspend: a deactivated org's member is refused at `login` and
+`get_current_org` `403`s every org-scoped surface (catching tokens minted before
+deactivation), and `db/email_triggers.py::list_enabled_triggers` filters it out
+so its autonomous trigger pauses. Admin cross-org surfaces (`/api/config?org=`,
+`/api/memory`) are **not** blocked, so an admin can still manage/reactivate a
+suspended org. CLI parity: `admin.py` gains `activate-org`/`deactivate-org`.
+Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
+
 ## Known limitation: general-purpose cache
 
 Only local caches exist (`_workflow_cache` in `ui/backend/main.py`,

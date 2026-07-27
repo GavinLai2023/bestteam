@@ -58,6 +58,18 @@ def get_org_by_name(db: Session, name: str) -> Optional[Organization]:
     return db.query(Organization).filter_by(name=name).one_or_none()
 
 
+def set_org_active(db: Session, name: str, active: bool) -> Organization:
+    """Activate/deactivate an org (reversible full suspend). Raises `ValueError`
+    if the org is unknown. Idempotent -- setting the current value is a no-op."""
+    org = get_org_by_name(db, name)
+    if org is None:
+        raise ValueError(f"Unknown organization '{name}'")
+    org.active = active
+    db.commit()
+    db.refresh(org)
+    return org
+
+
 def get_or_create_org(db: Session, name: str, display_name: str = "") -> Organization:
     org = get_org_by_name(db, name)
     if org is not None:

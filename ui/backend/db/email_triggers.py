@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from .models import EmailTrigger
+from .models import EmailTrigger, Organization
 
 
 def get_email_trigger(db: Session, org_id: int) -> Optional[EmailTrigger]:
@@ -46,4 +46,12 @@ def upsert_email_trigger(
 
 
 def list_enabled_triggers(db: Session) -> List[EmailTrigger]:
-    return db.query(EmailTrigger).filter_by(enabled=True).order_by(EmailTrigger.org_id).all()
+    # A deactivated org's trigger must not auto-run (full-suspend enforcement),
+    # so join organizations and keep only active ones.
+    return (
+        db.query(EmailTrigger)
+        .join(Organization, Organization.id == EmailTrigger.org_id)
+        .filter(EmailTrigger.enabled.is_(True), Organization.active.is_(True))
+        .order_by(EmailTrigger.org_id)
+        .all()
+    )

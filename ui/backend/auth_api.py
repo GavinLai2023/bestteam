@@ -41,6 +41,12 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = authenticate_user(db, req.username, req.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    # A deactivated org's member can't log in (full-suspend enforcement).
+    # Platform operators/admins (org_id NULL) are never affected.
+    if user.org_id is not None:
+        org = db.get(Organization, user.org_id)
+        if org is not None and not org.active:
+            raise HTTPException(status_code=403, detail="This organization has been deactivated.")
     return TokenResponse(access_token=create_access_token(user.username))
 
 
@@ -97,6 +103,10 @@ def get_current_org(
     org = db.get(Organization, user.org_id)
     if org is None:
         raise HTTPException(status_code=403, detail="User's organization no longer exists")
+    # Full-suspend enforcement: catches a token minted before deactivation, so
+    # every org-scoped surface guarded by this dependency stops for the member.
+    if not org.active:
+        raise HTTPException(status_code=403, detail="This organization has been deactivated.")
     return org
 
 

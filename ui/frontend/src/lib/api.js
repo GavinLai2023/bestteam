@@ -131,6 +131,32 @@ export const api = {
   deleteMemoryRecord: (id) => request(`/api/memory/records/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   clearUserMemory: (userId) => request(`/api/memory/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
 
+  // Admin: org & user management (everyday provisioning; promote/demote and
+  // platform-account lifecycle stay CLI-only).
+  adminOrgs: () => request('/api/admin/orgs'),
+  createAdminOrg: (name, display_name) =>
+    request('/api/admin/orgs', { method: 'POST', body: JSON.stringify({ name, display_name }) }),
+  setOrgActive: (name, active) =>
+    request(`/api/admin/orgs/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ active }),
+    }),
+  adminUsers: () => request('/api/admin/users'),
+  createAdminUser: (username, org, password) =>
+    request('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, org, password }) }),
+  resetAdminUserPassword: (username, password) =>
+    request(`/api/admin/users/${encodeURIComponent(username)}/password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  moveAdminUser: (username, to_org) =>
+    request(`/api/admin/users/${encodeURIComponent(username)}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ to_org }),
+    }),
+  deleteAdminUser: (username) =>
+    request(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+
   // Monitoring
   listWorkflows: () => request('/api/workflows'),
   workflowGraph: (name) => request(`/api/workflows/${encodeURIComponent(name)}/graph`),

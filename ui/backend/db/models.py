@@ -40,6 +40,9 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(unique=True)
     display_name: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # False = deactivated (full suspend): the org's member can't log in and
+    # every org-scoped surface 403s, but all data is kept and it's reversible.
+    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
 
 
 class User(Base):

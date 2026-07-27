@@ -40,6 +40,7 @@ from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
 from .interview import router as interview_router
+from .admin_api import router as admin_router
 from .memory_api import router as memory_router
 from .org_settings import router as org_settings_router
 from .db.models import (
@@ -260,6 +261,7 @@ app.include_router(interview_router)
 app.include_router(crud_router)
 app.include_router(catalog_read_router)
 app.include_router(memory_router)
+app.include_router(admin_router)
 app.include_router(org_settings_router)
 app.include_router(email_trigger_router)
 

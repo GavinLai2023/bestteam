@@ -14,7 +14,7 @@ const renderLayout = () =>
   )
 
 const CUSTOMER_LINKS = ['Build a team', 'My teams', 'Talk to your team']
-const ADMIN_LINKS = ['Advanced', 'Memory']
+const ADMIN_LINKS = ['Accounts', 'Advanced', 'Memory']
 
 beforeEach(() => {
   vi.clearAllMocks()

@@ -26,10 +26,14 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import os
 from typing import Optional, Sequence
 
 from . import email_trigger
+# Shared with the admin API (admin_api.py); kept under these module-level names
+# so the CLI's call sites and tests that monkeypatch them are unchanged.
+from .account_memory import open_memory_store as _open_memory_store
+from .account_memory import purge_user_memory as _purge_user_memory
+from .account_memory import reconcile_legacy_org as _reconcile_legacy_org
 from .db.email_credentials import clear_email_credentials, get_email_credentials, set_email_credentials
 from .db.models import User
 from .db.orgs import (
@@ -38,6 +42,7 @@ from .db.orgs import (
     ensure_email_single_org,
     get_org_by_name,
     list_orgs,
+    set_org_active,
 )
 from .db.users import (
     create_user,
@@ -59,50 +64,6 @@ def _prompt_password(parser: argparse.ArgumentParser) -> str:
     return password
 
 
-def _open_memory_store():
-    """Open the configured memory store, or None when memory isn't usable from
-    this CLI invocation. Returns None when `BESTTEAM_MEMORY_DB` is unset OR points
-    at a path that doesn't exist yet -- opening would *create* an empty DB and
-    give a false "purged, all clean" (review r3 #1); a store that was never
-    written has nothing to purge anyway."""
-    db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
-    if not db_path or not os.path.exists(db_path):
-        return None
-    from bestteam import SqliteBM25Memory
-
-    return SqliteBM25Memory(db_path)
-
-
-def _purge_user_memory(username: str) -> Optional[int]:
-    """Delete all of `username`'s per-user memory, returning the rows removed, or
-    ``None`` when no memory store is configured for this invocation.
-
-    Account deletion removes the whole principal, so the unscoped
-    `store.delete_user` (every row for the username, across all orgs + legacy) is
-    correct here -- unlike org erasure. Raises on failure so the caller can fail
-    closed and NOT release the username while its memory persists.
-    """
-    store = _open_memory_store()
-    if store is None:
-        return None
-    try:
-        return store.delete_user(username)
-    finally:
-        store.close()
-
-
-def _reconcile_legacy_org(username: str, org_id: int) -> Optional[int]:
-    """Bind `username`'s legacy NULL-org memory to `org_id` (their current org)
-    before a move, or None when no store is configured. Raises on failure."""
-    store = _open_memory_store()
-    if store is None:
-        return None
-    try:
-        return store.assign_legacy_to_org(username, org_id)
-    finally:
-        store.close()
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ui.backend.admin", description="Provision orgs, users, and admins."
@@ -118,6 +79,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     create_org_p.add_argument("name")
     create_org_p.add_argument("--display-name", default="")
     sub.add_parser("list-orgs", help="list organizations")
+
+    deactivate_org_p = sub.add_parser(
+        "deactivate-org", help="deactivate an org (reversible full suspend)"
+    )
+    deactivate_org_p.add_argument("name")
+    activate_org_p = sub.add_parser("activate-org", help="reactivate a deactivated org")
+    activate_org_p.add_argument("name")
 
     create_user_p = sub.add_parser("create-user", help="create a user (prompts for password)")
     create_user_p.add_argument("username")
@@ -181,6 +149,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except (RuntimeError, ValueError) as exc:
                 parser.error(str(exc))
             print(f"Created organization '{org.name}'.")
+            return 0
+        if args.command in ("activate-org", "deactivate-org"):
+            active = args.command == "activate-org"
+            try:
+                set_org_active(db, args.name, active)
+            except ValueError as exc:
+                parser.error(str(exc))
+            print(f"Organization '{args.name}' is now {'active' if active else 'deactivated'}.")
             return 0
         if args.command == "create-user":
             if args.platform:
