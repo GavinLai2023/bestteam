@@ -33,7 +33,13 @@ async function request(path, options = {}) {
     } catch {
       // response had no JSON body
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    // Carry the HTTP status so callers can tell an error *response* (backend
+    // reachable, e.g. a 403) apart from a network failure (fetch rejects with
+    // no status). A network failure surfaces as a TypeError from fetch above
+    // and never reaches this branch.
+    const error = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    error.status = res.status
+    throw error
   }
 
   if (res.status === 204) return null
