@@ -13,6 +13,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from .models import Organization
+from .validators import clean_identifier
 
 DEFAULT_ORG_NAME = "default"
 
@@ -45,6 +46,7 @@ def ensure_email_single_org(db: Session, creating: int = 0) -> None:
 
 
 def create_org(db: Session, name: str, display_name: str = "") -> Organization:
+    name = clean_identifier(name, field="Organization name")
     if get_org_by_name(db, name) is not None:
         raise ValueError(f"Organization '{name}' already exists")
     org = Organization(name=name, display_name=display_name)
@@ -56,6 +58,18 @@ def create_org(db: Session, name: str, display_name: str = "") -> Organization:
 
 def get_org_by_name(db: Session, name: str) -> Optional[Organization]:
     return db.query(Organization).filter_by(name=name).one_or_none()
+
+
+def set_org_active(db: Session, name: str, active: bool) -> Organization:
+    """Activate/deactivate an org (reversible full suspend). Raises `ValueError`
+    if the org is unknown. Idempotent -- setting the current value is a no-op."""
+    org = get_org_by_name(db, name)
+    if org is None:
+        raise ValueError(f"Unknown organization '{name}'")
+    org.active = active
+    db.commit()
+    db.refresh(org)
+    return org
 
 
 def get_or_create_org(db: Session, name: str, display_name: str = "") -> Organization:

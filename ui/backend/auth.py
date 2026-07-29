@@ -65,17 +65,26 @@ def _b64decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def create_access_token(username: str, *, expires_minutes: Optional[int] = None) -> str:
+def create_access_token(
+    username: str, security_stamp: Optional[str] = None, *, expires_minutes: Optional[int] = None
+) -> str:
     minutes = ACCESS_TOKEN_EXPIRE_MINUTES if expires_minutes is None else expires_minutes
     header = _b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode("utf-8"))
-    payload = _b64encode(json.dumps({"sub": username, "exp": int(time.time()) + minutes * 60}).encode("utf-8"))
+    # `sec` is the account's security stamp (see User.security_stamp): verified
+    # against the current row on every request, so a password reset or a
+    # deleted-then-recreated username invalidates this token (review r-ext2).
+    payload = _b64encode(
+        json.dumps(
+            {"sub": username, "sec": security_stamp, "exp": int(time.time()) + minutes * 60}
+        ).encode("utf-8")
+    )
     signing_input = f"{header}.{payload}"
     signature = hmac.new(SECRET_KEY.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
     return f"{signing_input}.{_b64encode(signature)}"
 
 
-def decode_access_token(token: str) -> str:
-    """Return the username (`sub` claim) encoded in `token`.
+def decode_access_token_claims(token: str) -> dict:
+    """Validate `token` (signature + expiry) and return its claims dict.
 
     Raises `AuthError` if the token is malformed, has an invalid signature,
     or has expired.
@@ -102,7 +111,15 @@ def decode_access_token(token: str) -> str:
     if claims.get("exp", 0) < time.time():
         raise AuthError("Token has expired")
 
-    username = claims.get("sub")
-    if not username:
+    if not claims.get("sub"):
         raise AuthError("Token missing subject")
-    return username
+    return claims
+
+
+def decode_access_token(token: str) -> str:
+    """Return the username (`sub` claim) encoded in `token`.
+
+    Raises `AuthError` if the token is malformed, has an invalid signature,
+    or has expired.
+    """
+    return decode_access_token_claims(token)["sub"]

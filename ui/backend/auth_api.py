@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .auth import AuthError, create_access_token, decode_access_token
+from .auth import AuthError, create_access_token, decode_access_token_claims
 from .db.models import Organization, User
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
@@ -41,7 +41,13 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = authenticate_user(db, req.username, req.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    return TokenResponse(access_token=create_access_token(user.username))
+    # A deactivated org's member can't log in (full-suspend enforcement).
+    # Platform operators/admins (org_id NULL) are never affected.
+    if user.org_id is not None:
+        org = db.get(Organization, user.org_id)
+        if org is not None and not org.active:
+            raise HTTPException(status_code=403, detail="This organization has been deactivated.")
+    return TokenResponse(access_token=create_access_token(user.username, user.security_stamp))
 
 
 def get_current_user(
@@ -55,13 +61,28 @@ def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        username = decode_access_token(credentials.credentials)
+        claims = decode_access_token_claims(credentials.credentials)
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-    user = get_user_by_username(db, username)
+    user = get_user_by_username(db, claims["sub"])
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
+    # Security-stamp check: the token's stamp must equal the account's current
+    # one. A password reset regenerates it (revoking old tokens), and a
+    # recreated username gets a fresh random stamp, so a deleted account's old
+    # token can't reach the new same-named account (review r-ext2 #1/#3).
+    if user.security_stamp != claims.get("sec"):
+        raise HTTPException(status_code=401, detail="Session no longer valid; please log in again.")
+    # Full-suspend enforcement, centralized here so EVERY authenticated route
+    # (not just the org-scoped ones behind get_current_org) rejects a member
+    # whose org has been deactivated -- /me, /model-catalog, run reads, the
+    # ws-ticket mint, and the transcription path all depend on get_current_user
+    # (review r-ext #1). Platform operators/admins (org_id NULL) are exempt.
+    if user.org_id is not None:
+        org = db.get(Organization, user.org_id)
+        if org is not None and not org.active:
+            raise HTTPException(status_code=403, detail="This organization has been deactivated.")
     return user
 
 
@@ -97,6 +118,8 @@ def get_current_org(
     org = db.get(Organization, user.org_id)
     if org is None:
         raise HTTPException(status_code=403, detail="User's organization no longer exists")
+    # Deactivation is enforced upstream in get_current_user (this dependency
+    # runs after it), so an inactive org never reaches here.
     return org
 
 

@@ -9,6 +9,7 @@ machine (intent -> requirements -> spec -> solution -> testing -> deployed).
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -18,6 +19,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_security_stamp() -> str:
+    """A fresh random per-account credential generation (see User.security_stamp)."""
+    return secrets.token_hex(16)
 
 
 class Base(DeclarativeBase):
@@ -40,6 +46,9 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(unique=True)
     display_name: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # False = deactivated (full suspend): the org's member can't log in and
+    # every org-scoped surface 403s, but all data is kept and it's reversible.
+    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
 
 
 class User(Base):
@@ -73,6 +82,13 @@ class User(Base):
     # NULL = platform operator (not part of any customer org).
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # Random per-account credential generation embedded in every access token
+    # and WS ticket and verified on use. Regenerated on password reset (revokes
+    # existing sessions) and fresh at creation -- so a recreated username (new
+    # random stamp) can't be reached by the deleted account's old credentials
+    # (review r-ext2 #1/#3). An immutable random value, not a timestamp, so
+    # there's no ordering/resolution race.
+    security_stamp: Mapped[Optional[str]] = mapped_column(default=new_security_stamp, nullable=True)
 
 
 class KnowledgeBaseRecord(Base):

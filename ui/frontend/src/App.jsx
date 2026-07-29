@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage'
 import MonitorPage from './pages/MonitorPage'
 import AdvancedPage from './pages/AdvancedPage'
 import MemoryPage from './pages/MemoryPage'
+import AccountsPage from './pages/AccountsPage'
 import IntentPage from './pages/wizard/IntentPage'
 import PreviewPage from './pages/wizard/PreviewPage'
 import ConfirmPage from './pages/wizard/ConfirmPage'
@@ -54,6 +55,7 @@ function App() {
           </Route>
 
           <Route element={<RequireAdmin />}>
+            <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/advanced" element={<AdvancedPage />} />
             <Route path="/memory" element={<MemoryPage />} />
           </Route>

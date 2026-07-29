@@ -78,7 +78,7 @@ an org member see disjoint UIs, partitioned by two symmetric `App.jsx` guards
 that both read `lib/useMe.js` (one `GET /api/auth/me` → `{username, is_admin,
 org}`) and render `null` while it loads:
 
-- `RequireAdmin` wraps `/advanced` + `/memory`; non-admins are sent to `/`.
+- `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory`; non-admins are sent to `/`.
 - `RequireOrgMember` wraps the customer routes (`/`, `/teams`, `/wizard/*`);
   operators are sent to `/advanced`, since every org-scoped surface 403s an
   org-less operator. The `*` catch-all stays **outside** both guards so an
@@ -86,9 +86,13 @@ org}`) and render `null` while it loads:
 
 Because `is_admin` and org membership are mutually exclusive (CR-030), the two
 guards can't bounce a user between them — each redirect terminates in one hop.
-`Layout.jsx` mirrors this: the **Advanced**/**Memory** links show only when
-`isAdmin`, the **Build a team**/**My teams**/**Talk to your team** links only
-when `!isAdmin`. `pages/MemoryPage.jsx` is the admin per-user memory manager
+`Layout.jsx` mirrors this: the **Accounts**/**Advanced**/**Memory** links show
+only when `isAdmin`, the **Build a team**/**My teams**/**Talk to your team**
+links only when `!isAdmin`. `pages/AccountsPage.jsx` is the admin org/user
+manager (create orgs, deactivate/reactivate them, and create/reset-password/
+move/delete each org's member; platform accounts are shown read-only — the
+`/api/admin` surface keeps promote/demote and platform-account lifecycle in the
+CLI). `pages/MemoryPage.jsx` is the admin per-user memory manager
 (user list with counts + search/type-filter + per-record delete + clear-all,
 and a "memory not enabled" state). All of this gating is cosmetic — the backend
 enforces admin on every `/api/config` and `/api/memory` call and org scoping on

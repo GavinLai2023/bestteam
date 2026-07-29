@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import hash_password, verify_password
 from .models import User
+from .validators import clean_identifier
 
 
 def create_user(db: Session, username: str, password: str, org_id: Optional[int] = None) -> User:
@@ -25,6 +26,10 @@ def create_user(db: Session, username: str, password: str, org_id: Optional[int]
     second member would mean unprivileged co-management of the org's mailbox.
     Platform operators (`org_id is None`) are exempt -- there can be several.
     """
+    username = clean_identifier(username, field="Username")
+    if not password or not password.strip():
+        raise ValueError("Password must not be blank")
+
     if username == "email-trigger":
         raise ValueError("'email-trigger' is reserved for autonomous runs.")
 

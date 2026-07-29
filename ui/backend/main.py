@@ -40,6 +40,7 @@ from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
 from .interview import router as interview_router
+from .admin_api import router as admin_router
 from .memory_api import router as memory_router
 from .org_settings import router as org_settings_router
 from .db.models import (
@@ -260,6 +261,7 @@ app.include_router(interview_router)
 app.include_router(crud_router)
 app.include_router(catalog_read_router)
 app.include_router(memory_router)
+app.include_router(admin_router)
 app.include_router(org_settings_router)
 app.include_router(email_trigger_router)
 
@@ -540,7 +542,33 @@ def create_ws_ticket(user: User = Depends(get_current_user)) -> Dict[str, str]:
     """Exchange the caller's bearer token for a short-lived, single-use ticket
     to authenticate a WebSocket stream connection (CR-013). Only the ticket --
     never the long-lived bearer -- goes in the stream URL."""
-    return {"ticket": issue_ticket(user.username)}
+    return {"ticket": issue_ticket(user.username, user.security_stamp)}
+
+
+def _stream_access(db: Session, username: str, ticket_stamp: Optional[str], run: Any) -> bool:
+    """True if the ticket's principal may still receive `run`'s events.
+
+    Re-checked before every send so a mid-stream lifecycle change stops
+    delivery immediately (review r-ext #2, r-ext2 #3): the user was deleted,
+    their password was reset or the username was recreated (security stamp no
+    longer matches the ticket's), they were moved to another org (would be
+    cross-tenant disclosure), or their org was deactivated. Org-less platform
+    admins pass through for operator debugging (an org-bound is_admin flag does
+    NOT qualify, CR-030)."""
+    user = get_user_by_username(db, username)
+    if user is None:
+        return False
+    # Stamp bound at ticket issuance must still match the account's current one.
+    if user.security_stamp != ticket_stamp:
+        return False
+    is_platform_admin = user.is_admin and user.org_id is None
+    if not is_platform_admin:
+        if run.org_id != user.org_id:
+            return False
+        org = db.get(Organization, user.org_id) if user.org_id is not None else None
+        if org is None or not org.active:
+            return False
+    return True
 
 
 @app.websocket("/api/runs/{run_id}/stream")
@@ -552,30 +580,26 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
     `POST /api/runs/ws-ticket` -- browsers can't set custom headers when
     opening a WebSocket, and putting the long-lived bearer in the URL leaks it
     to logs/history (CR-013)."""
-    username = consume_ticket(ticket) if ticket else None
-    if username is None:
+    resolved = consume_ticket(ticket) if ticket else None
+    if resolved is None:
         await websocket.close(code=4401)
         return
-    ws_user = get_user_by_username(db, username)
-    if ws_user is None:
-        db.close()
-        await websocket.close(code=4401)
-        return
+    username, ticket_stamp = resolved
+
+    engine = db.get_bind()
 
     run = registry.get(run_id)
-    # Same close code for "unknown run" and "another org's run" so a probing
-    # client can't distinguish existence (no cross-org oracle). Org-less
-    # platform admins pass through for operator debugging (an org-bound
-    # is_admin flag does NOT qualify, CR-030).
-    is_platform_admin = ws_user.is_admin and ws_user.org_id is None
-    if run is None or (run.org_id != ws_user.org_id and not is_platform_admin):
+    # Same close code (4404) for unknown run and for any authorization failure
+    # (cross-org, deactivated org, deleted user, stale ticket), so a probing
+    # client gets no existence oracle. An invalid ticket already closed 4401.
+    if run is None or not _stream_access(db, username, ticket_stamp, run):
         db.close()
         await websocket.close(code=4404)
         return
 
-    # Release the DB connection now -- it's only needed for the checks
-    # above, but `Depends(get_db)` would otherwise hold it open for the
-    # entire streaming connection below, which can run for a long time.
+    # Release the request DB connection now -- `Depends(get_db)` would otherwise
+    # hold it open for the whole (possibly long) streaming connection. Per-event
+    # re-authorization below opens its own short-lived session on `engine`.
     db.close()
 
     await websocket.accept()
@@ -590,6 +614,13 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
     try:
         while True:
             event = await subscriber_queue.get()
+            # Re-authorize before delivering: a lifecycle change since connect
+            # (move/deactivate/delete/password-reset/username-reuse) must stop
+            # the stream rather than leak further events (review r-ext #2).
+            with Session(engine) as check_db:
+                if not _stream_access(check_db, username, ticket_stamp, run):
+                    await websocket.close(code=4404)
+                    return
             await websocket.send_json(event)
             if event["type"] in ("run_completed", "run_failed"):
                 break

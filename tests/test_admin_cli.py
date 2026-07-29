@@ -450,3 +450,48 @@ def test_clear_email_disables_trigger(session_local, secrets_key, monkeypatch):
     with session_local() as db:
         org = get_org_by_name(db, "acme")
         assert get_email_trigger(db, org.id).enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Org activation (activate-org / deactivate-org)
+# ---------------------------------------------------------------------------
+
+def test_deactivate_and_activate_org(session_local):
+    admin_cli.main(["create-org", "acme"])
+    assert admin_cli.main(["deactivate-org", "acme"]) == 0
+    with session_local() as db:
+        assert get_org_by_name(db, "acme").active is False
+    assert admin_cli.main(["activate-org", "acme"]) == 0
+    with session_local() as db:
+        assert get_org_by_name(db, "acme").active is True
+
+
+def test_deactivate_unknown_org_errors(session_local):
+    with pytest.raises(SystemExit):
+        admin_cli.main(["deactivate-org", "ghost"])
+
+
+# --- F4: db helpers reject blank identities/passwords (CLI path) ---
+
+def test_create_user_rejects_blank(session_local):
+    from ui.backend.db.users import create_user
+    with session_local() as db:
+        with pytest.raises(ValueError):
+            create_user(db, "   ", "pw")
+        with pytest.raises(ValueError):
+            create_user(db, "bob", "   ")
+
+
+def test_create_org_rejects_blank(session_local):
+    from ui.backend.db.orgs import create_org
+    with session_local() as db:
+        with pytest.raises(ValueError):
+            create_org(db, "   ")
+
+
+def test_create_org_rejects_dot_segments(session_local):
+    from ui.backend.db.orgs import create_org
+    with session_local() as db:
+        for name in (".", ".."):
+            with pytest.raises(ValueError):
+                create_org(db, name)

@@ -400,6 +400,55 @@ org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
 admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
 org — see `src/bestteam/core/CLAUDE.md`.
 
+## Admin org/user management API (`admin_api.py`)
+
+`/api/admin`, `get_current_admin`-guarded — everyday provisioning for platform
+admins (the web counterpart of the `ui.backend.admin` CLI). Endpoints: `GET/POST
+/orgs` (list with each org's member; create — `create_org` + the `ensure_email_
+single_org` CR-031 guard), `PATCH /orgs/{name}` (deactivate/reactivate via
+`db/orgs.py::set_org_active`), `GET/POST /users` (list all logins incl.
+read-only platform accounts; create an **org member**), `POST
+/users/{username}/password` (reset), `POST /users/{username}/move` (org→org),
+`DELETE /users/{username}`. **No route can escalate privilege or mutate a
+platform account:** `promote`/`demote` and the whole operator/admin lifecycle
+stay CLI-only, and every user route refuses (`409`) a non-org-member target.
+`delete`/`move` run the same fail-closed per-user-memory work as the CLI —
+purge-before-release / reconcile-legacy-to-source — through the shared
+`account_memory.py` helpers (`purge_user_memory`/`reconcile_legacy_org`, factored
+out of `admin.py`, which still calls them under its old `_`-prefixed names).
+
+**Org deactivation** (`organizations.active`, migration `f3a4b5c6d7e8`) is a
+reversible full suspend, enforced in three ways (external-review hardening,
+r-ext): (1) `login` refuses a deactivated org's member a token, and
+**`get_current_user` rejects (`403`) an inactive-org member on *every*
+authenticated route** — centralized there rather than only in `get_current_org`,
+so `/me`, `/model-catalog`, run reads, the ws-ticket mint, and the transcription
+path are all covered; (2) `db/email_triggers.py::list_enabled_triggers` filters
+inactive orgs so the autonomous trigger pauses **and** the final dispatch CAS
+(`email_trigger.py::_start_triggered_run`) requires an active org in its atomic
+predicate, closing the deactivate-after-enumeration race (r-ext2 #2); (3) the
+run-stream WebSocket re-authorizes before **every** event
+(`main.py::_stream_access`) so a mid-stream deactivate/move/delete/
+password-reset/username-reuse stops delivery immediately (no cross-tenant leak
+on a move). Admin cross-org surfaces (`/api/config?org=`, `/api/memory`) are
+**not** blocked, so an admin can still manage/reactivate a suspended org. CLI
+parity: `admin.py` gains `activate-org`/`deactivate-org`.
+
+**Session revocation via security stamp** (r-ext / r-ext2 #1/#3):
+`users.security_stamp` (migration `a7b8c9d0e1f2`) is a random per-account
+credential generation embedded in every access token (`sec` claim) and WS ticket
+and verified against the current row on use (`get_current_user`, `_stream_access`
+per event). A password reset regenerates it — revoking all existing
+tokens/tickets — and a deleted-then-recreated username gets a fresh stamp, so the
+old account's credentials can't reach the new same-named account (an immutable
+random value, not a timestamp, so there's no ordering race). **Identifier
+validation:** `db/validators.py::clean_identifier` (used by the `admin_api`
+request models and by `create_user`/`create_org`) trims and enforces a URL-safe
+grammar on org/user names (`[A-Za-z0-9._-]`, ≤64, and not the `.`/`..`
+dot-segments proxies collapse), server-side, so a direct API call can't create an
+unmanageable or path-unaddressable record.
+Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
+
 ## Known limitation: general-purpose cache
 
 Only local caches exist (`_workflow_cache` in `ui/backend/main.py`,
