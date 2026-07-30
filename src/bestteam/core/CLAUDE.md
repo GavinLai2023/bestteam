@@ -261,7 +261,10 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   path binds the run's org into `MemoryManager`, so recall/record only ever
   touch that org's memory (closing the username-reuse isolation gap). In the
   store, a **concrete** `org_id` filters `search`/`all`; **`org_id=None` means
-  "across orgs"** — used only by the admin surface. Rows written before SP-2
+  "across orgs"** — used only by the admin surface — and the **`LEGACY_ORG`
+  sentinel (`"legacy"`) filters to `org_id IS NULL` only** (the third read scope,
+  so the admin API can view just the legacy rows of a NULL-org identity without
+  falling back to the cross-org meaning of `None`). Rows written before SP-2
   have `org_id NULL` (no cross-DB backfill: the username→org map lives in the
   main DB, unreachable from the store's own connection); they aren't recalled by
   an org run but stay visible/deletable via the admin API. The API route

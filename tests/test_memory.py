@@ -3,7 +3,7 @@
 import pytest
 
 from bestteam import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
-from bestteam.core.memory import EPISODIC, PROCEDURAL, SEMANTIC
+from bestteam.core.memory import EPISODIC, LEGACY_ORG, PROCEDURAL, SEMANTIC
 
 
 class _LegacyStore(Memory):
@@ -818,6 +818,30 @@ def test_search_scopes_by_org():
     assert len(hits5) == 1 and hits5[0].org_id == 5
     # Admin (org_id=None) searches across orgs.
     assert len(store.search("alice", "refund policy", org_id=None)) == 2
+
+
+def test_all_legacy_scope_returns_only_null_org_rows():
+    # Finding 3: a caller must be able to request ONLY legacy (pre-SP-2, org_id
+    # IS NULL) rows -- distinct from org_id=None, which means "across all orgs".
+    store = _store()
+    store.add("alice", EPISODIC, "org five row", org_id=5)
+    store.add("alice", EPISODIC, "legacy row")  # org_id NULL
+
+    legacy = store.all("alice", org_id=LEGACY_ORG)
+    assert [r.content for r in legacy] == ["legacy row"]
+    assert all(r.org_id is None for r in legacy)
+    # Regression: None still spans orgs; a concrete org still scopes to itself.
+    assert len(store.all("alice", org_id=None)) == 2
+    assert [r.content for r in store.all("alice", org_id=5)] == ["org five row"]
+
+
+def test_search_legacy_scope_returns_only_null_org_rows():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy in org five", org_id=5)
+    store.add("alice", EPISODIC, "the refund policy from before orgs")  # NULL
+
+    hits = store.search("alice", "refund policy", org_id=LEGACY_ORG)
+    assert [r.content for r in hits] == ["the refund policy from before orgs"]
 
 
 def test_user_summaries_includes_org_id():

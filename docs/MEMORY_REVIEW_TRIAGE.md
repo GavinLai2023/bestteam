@@ -146,6 +146,29 @@ Suggested order under the current "memory is opt-in, default off" posture:
 All four Phase-1 memory sub-projects (SP-1…SP-4) are now implemented; the
 deletion-lifecycle sub-project (below) carries the remaining cross-process items.
 
+## Follow-up review (2026-07-30)
+
+A second read of the shipped memory subsystem raised five points. Four map onto
+existing register entries (three already deferred to the deletion-lifecycle
+sub-project, one YAGNI); one was a genuine new bug and is fixed.
+
+| # | Point | Disposition |
+|---|-------|-------------|
+| 1 | Memory principal is the reusable `username`, not an immutable id + generation | Already deferred → deletion-lifecycle ("Immutable user-id as the memory principal") |
+| 2 | An in-flight run can write back to memory after a purge (needs deleting marker / generation / write-time check / run-drain fence) | Already deferred → deletion-lifecycle ("In-flight run writes after account/org deletion") |
+| 3 | **Admin "legacy (no org)" scope was ambiguous** — the UI selects a NULL-org identity but omitted `?org=`, and the API read omitted-org as *all orgs*, so viewing a legacy identity over-fetched that username across every org | **Fixed** — `MEM-14` below |
+| 4 | Admin API binds `SqliteBM25Memory`, not an abstract `MemoryAdminStore` | Already **M-10 — Defer (YAGNI)**: no second backend exists; the runtime `Memory` ABC covers `search`/`all`, and the management surface is inherently store-specific |
+| 5 | `trace_events` isn't durably persisted, so `memory_recorded` (post-terminal) never shows on the live WS | Known limitation — SP-3 "out of scope: durable usage outbox/retry" + root `CLAUDE.md`; belongs to a durable-trace/outbox sub-project |
+
+- **MEM-14** — Admin memory read now expresses three org scopes explicitly:
+  `?org=` omitted = across all orgs (admin), `?org=<int>` = that org, and the new
+  `?org=legacy` sentinel = only pre-SP-2 NULL-org rows (`core/memory.py::LEGACY_ORG`,
+  `_org_read_clause`; `memory_api.py::_parse_org_read`, 422 on garbage). The Memory
+  page sends `org=legacy` for a null-org identity instead of omitting it, so
+  selecting the "legacy (no org)" row no longer reads the username across every
+  org. Store `all`/`search`, the `/users/{id}/records` endpoint, and `MemoryPage`
+  covered by tests. Branch `fix/memory-legacy-scope`.
+
 ## Deferred to the deletion-lifecycle sub-project
 
 These are real but disproportionate to bolt onto SP-2 (an opt-in, single-worker,

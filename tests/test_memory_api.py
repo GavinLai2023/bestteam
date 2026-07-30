@@ -108,6 +108,32 @@ def test_get_records_org_filter(admin_client, memory_db):
     ).json()["records"] == []
 
 
+def test_get_records_legacy_scope(admin_client, tmp_path, monkeypatch):
+    # Finding 3: selecting the "legacy (no org)" identity must return ONLY the
+    # username's legacy (org_id NULL) rows -- not its rows across every org.
+    path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(path))
+    store = SqliteBM25Memory(str(path))
+    store.add("alice", EPISODIC, "org five row", org_id=5)
+    store.add("alice", EPISODIC, "legacy row")  # org_id NULL
+    store.close()
+
+    legacy = admin_client.get(
+        "/api/memory/users/alice/records", params={"org": "legacy"}
+    ).json()["records"]
+    assert [r["content"] for r in legacy] == ["legacy row"]
+    assert all(r["org_id"] is None for r in legacy)
+
+    # Omitted org still means across-orgs (admin view).
+    assert len(admin_client.get("/api/memory/users/alice/records").json()["records"]) == 2
+
+
+def test_get_records_org_param_rejects_garbage(admin_client, memory_db):
+    # `org` accepts an int org id or the literal "legacy"; anything else is a 422.
+    resp = admin_client.get("/api/memory/users/alice/records", params={"org": "notanint"})
+    assert resp.status_code == 422
+
+
 def test_get_records_type_filter(admin_client, memory_db):
     only_semantic = admin_client.get(
         "/api/memory/users/alice/records", params={"type": SEMANTIC}

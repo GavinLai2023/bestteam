@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from bestteam import SqliteBM25Memory
+from bestteam.core.memory import LEGACY_ORG
 
 from .auth_api import get_current_admin
 from .db.models import User
@@ -57,6 +58,22 @@ def _require_store(store: Optional[SqliteBM25Memory]) -> SqliteBM25Memory:
     return store
 
 
+def _parse_org_read(org: Optional[str]) -> Union[int, str, None]:
+    """Map a `?org=` value to a store read scope (finding 3).
+
+    Omitted (None) -> across all orgs; ``"legacy"`` -> legacy NULL-org rows
+    only; a digit string -> that org id. Anything else is a 422. Without the
+    explicit ``"legacy"`` sentinel, selecting a legacy (org_id NULL) identity in
+    the UI would omit `org` and silently read the username across *every* org.
+    """
+    if org is None or org == LEGACY_ORG:
+        return org
+    try:
+        return int(org)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="org must be an integer org id or 'legacy'")
+
+
 # Upper bound on records returned per request. Memory retention is unbounded, so
 # the list/search endpoints cap their response rather than dumping a whole store.
 _MAX_RECORDS = 1000
@@ -81,7 +98,7 @@ def get_user_records(
     user_id: str,
     query: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
-    org: Optional[int] = Query(None),
+    org: Optional[str] = Query(None),
     limit: int = Query(_DEFAULT_RECORDS, ge=1, le=_MAX_RECORDS),
     store: Optional[SqliteBM25Memory] = Depends(get_memory_store),
 ) -> dict:
@@ -89,13 +106,16 @@ def get_user_records(
         return {"enabled": False, "records": []}
     types = [type] if type else None
     # `org` scopes to one (org_id, user_id) identity so the UI can view a single
-    # summary row (a moved user has rows under several orgs); omitted = across orgs.
+    # summary row (a moved user has rows under several orgs). Omitted = across
+    # orgs; "legacy" = only the pre-SP-2 NULL-org rows; an int = that org.
+    org_scope = _parse_org_read(org)
     if query:
         records = store.search(
-            user_id, query, types=types, top_k=limit, max_candidates=_MAX_SEARCH_SCAN, org_id=org
+            user_id, query, types=types, top_k=limit,
+            max_candidates=_MAX_SEARCH_SCAN, org_id=org_scope,
         )
     else:
-        records = store.all(user_id, types=types, limit=limit, org_id=org)
+        records = store.all(user_id, types=types, limit=limit, org_id=org_scope)
     return {"enabled": True, "records": [dataclasses.asdict(r) for r in records]}
 
 

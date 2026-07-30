@@ -30,7 +30,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
 
@@ -41,6 +41,29 @@ _logger = logging.getLogger(__name__)
 EPISODIC = "episodic"
 SEMANTIC = "semantic"
 PROCEDURAL = "procedural"
+
+# Read-scope sentinel for `all`/`search`'s `org_id`: request ONLY legacy
+# (pre-SP-2) rows, i.e. `org_id IS NULL`. Distinct from `org_id=None`, which
+# means "across all orgs" (the admin cross-org view). A concrete int scopes to
+# that org. See `_org_read_clause`.
+LEGACY_ORG = "legacy"
+
+
+def _org_read_clause(org_id: Union[int, str, None]) -> "tuple[str, List[Any]]":
+    """SQL fragment + params for an org filter on a memory *read*.
+
+    - ``None`` -> no filter (all orgs)
+    - ``LEGACY_ORG`` -> ``org_id IS NULL`` (legacy rows only)
+    - ``int`` -> ``org_id = ?`` (that org)
+
+    Reads only: writes/prune use ``org_id=None`` to mean ``IS NULL`` instead.
+    """
+    if org_id is None:
+        return "", []
+    if org_id == LEGACY_ORG:
+        return " AND org_id IS NULL", []
+    return " AND org_id = ?", [org_id]
+
 
 # Upper bound on how much of a run's input/output is persisted per episodic
 # record. `RunRequest.input` is unbounded (the backend's general request ceiling
@@ -317,13 +340,13 @@ class SqliteBM25Memory(Memory):
         types: Optional[Sequence[str]] = None,
         limit: Optional[int] = None,
         *,
-        org_id: Optional[int] = None,
+        org_id: Union[int, str, None] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
-        if org_id is not None:
-            sql += " AND org_id = ?"
-            params.append(org_id)
+        org_sql, org_params = _org_read_clause(org_id)
+        sql += org_sql
+        params.extend(org_params)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -343,7 +366,7 @@ class SqliteBM25Memory(Memory):
         top_k: int = 5,
         max_candidates: Optional[int] = None,
         *,
-        org_id: Optional[int] = None,
+        org_id: Union[int, str, None] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 

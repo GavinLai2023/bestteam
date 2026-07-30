@@ -385,7 +385,13 @@ per-request `SqliteBM25Memory` from `BESTTEAM_MEMORY_DB` on the threadpool threa
 and closes it after (`store.close()`); when memory is disabled the read endpoints
 return `enabled:false` and mutations return 409. `GET /users/{id}/records`
 accepts `?org=` to scope to one `(org_id, user_id)` identity (a moved user has
-rows under several orgs; the admin UI keys/selects by both). The SDK store
+rows under several orgs; the admin UI keys/selects by both): **omitted = across
+all orgs, an int = that org, and the literal `?org=legacy` = only pre-SP-2
+NULL-org rows** (`_parse_org_read`; 422 otherwise). The `legacy` sentinel exists
+because a legacy identity's `org_id` is null — without it, selecting the
+"legacy (no org)" row would omit `org` and read the username across *every* org
+(cross-tenant over-fetch); the store's `all`/`search` map the sentinel to
+`org_id IS NULL` via `core/memory.py::LEGACY_ORG`. The SDK store
 primitives `user_ids()`/`delete_user()`/`delete_org()`/`delete_org_and_legacy()`/
 `assign_legacy_to_org()`/`close()` back these endpoints; org erasure resolves the
 member set then deletes scoped + attributable-legacy rows in one store transaction
