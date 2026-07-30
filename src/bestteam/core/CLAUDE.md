@@ -270,10 +270,29 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   rows in one store transaction (`delete_org_and_legacy`, rollback on failure), so
   compliance erasure is atomic and complete for anyone still in the org. Legacy rows for a
   username that no longer exists are out of scope here — that's account deletion
-  (deletion-lifecycle sub-project). The **`Memory` ABC** deliberately does *not*
-  carry `org_id`: it's a concrete-store extension (like `limit`/`max_candidates`),
-  and `MemoryManager` passes it only when a concrete org is bound, so a pre-SP-2
-  custom store still works for org-less callers.
+  (deletion-lifecycle sub-project — now implemented, below). The **`Memory` ABC**
+  deliberately does *not* carry `org_id`: it's a concrete-store extension (like
+  `limit`/`max_candidates`), and `MemoryManager` passes it only when a concrete
+  org is bound, so a pre-SP-2 custom store still works for org-less callers.
+- **Memory is principal-scoped** (deletion-lifecycle). Records also carry a
+  `principal_id` — the backend's immutable, never-rotated `users.principal_id` —
+  a second concrete-store scoping dimension shaped exactly like `org_id` (column
+  + idempotent ALTER + `idx_memories_principal`; `add`/`add_if_absent` persist it
+  and include it in the dedup key; `search`/`all`/`prune` filter when concrete,
+  `None` = unfiltered; the ABC stays unchanged, `MemoryManager` binds it via
+  `_scope_kwargs` only when set). The run path binds the run's `principal_id`, so
+  recall/writes only touch that account instance — a deleted-then-recreated
+  same-`(org, username)` account gets a new principal and **can't recall the
+  deleted account's rows** (finding 1). A **`retired_principals`** table + the
+  `add`/`add_if_absent` **write-fence** drop any write carrying a retired
+  principal, so a run finishing after its account was deleted can't re-create
+  rows behind the purge (finding 2 — `retire_principal`/`is_retired`, called from
+  the backend's account-deletion path; the shared SQLite file is the
+  cross-process coordination point, so no drain fence/lock is needed). Legacy
+  NULL-principal rows aren't recalled by a stamped run (SP-2 accept-legacy
+  precedent); `assign_null_principal` (the opt-in `backfill-memory-principals`
+  operator CLI) reconciles them. Design:
+  `docs/superpowers/specs/2026-07-30-memory-principal-lifecycle-design.md`.
 - **Recalled memory is treated as untrusted reference, not escaped.**
   `recall_preamble` delimits recalled content (`<recalled_user_memory>`) and
   frames it reference-only to resist prompt injection from a prior tool result

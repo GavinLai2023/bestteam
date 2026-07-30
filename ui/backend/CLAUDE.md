@@ -399,6 +399,19 @@ invocation rather than implying a clean purge, and never creates a missing store
 org-scoped (SP-2): `user_summaries()` and each record carry `org_id`, and the
 admin surface reads across orgs (`org_id=None`) while a run only ever sees its own
 org — see `src/bestteam/core/CLAUDE.md`.
+Memory is also **principal-scoped** (deletion-lifecycle): each record carries the
+run's immutable `users.principal_id`, so recall/writes touch only that account
+instance and a recreated same-username account can't recall the deleted account's
+rows (finding 1). Account deletion (`delete-user` CLI and `DELETE /api/admin/users/{u}`)
+now **retires the principal** (`store.retire_principal`) alongside the
+`store.delete_user` purge, so an in-flight run's late write is dropped by the store
+fence (finding 2); purge/retire run before the username is released, still
+fail-closed. `account_memory.purge_user_memory(username, principal_id=)` does both.
+Pre-stamping (NULL-principal) rows aren't recalled by a stamped run; the opt-in
+`python -m ui.backend.admin backfill-memory-principals` binds each current user's
+NULL-principal rows to their principal (`store.assign_null_principal`). See
+`src/bestteam/core/CLAUDE.md` and
+`docs/superpowers/specs/2026-07-30-memory-principal-lifecycle-design.md`.
 
 ## Admin org/user management API (`admin_api.py`)
 
@@ -413,9 +426,12 @@ read-only platform accounts; create an **org member**), `POST
 platform account:** `promote`/`demote` and the whole operator/admin lifecycle
 stay CLI-only, and every user route refuses (`409`) a non-org-member target.
 `delete`/`move` run the same fail-closed per-user-memory work as the CLI —
-purge-before-release / reconcile-legacy-to-source — through the shared
-`account_memory.py` helpers (`purge_user_memory`/`reconcile_legacy_org`, factored
-out of `admin.py`, which still calls them under its old `_`-prefixed names).
+delete: purge-and-retire-principal-before-release; move: reconcile-legacy-to-source
+— through the shared `account_memory.py` helpers (`purge_user_memory(username,
+principal_id=)` / `reconcile_legacy_org`, factored out of `admin.py`, which still
+calls them under its old `_`-prefixed names). Retiring the deleted account's
+`principal_id` engages the memory store's write-fence so an in-flight run's late
+write is dropped (deletion-lifecycle finding 2).
 
 **Org deactivation** (`organizations.active`, migration `f3a4b5c6d7e8`) is a
 reversible full suspend, enforced in three ways (external-review hardening,

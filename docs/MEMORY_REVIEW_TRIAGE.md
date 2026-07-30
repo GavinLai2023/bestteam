@@ -146,23 +146,30 @@ Suggested order under the current "memory is opt-in, default off" posture:
 All four Phase-1 memory sub-projects (SP-1…SP-4) are now implemented; the
 deletion-lifecycle sub-project (below) carries the remaining cross-process items.
 
-## Deferred to the deletion-lifecycle sub-project
+## Deletion-lifecycle sub-project
 
-These are real but disproportionate to bolt onto SP-2 (an opt-in, single-worker,
-SQLite memory feature); they need the cross-process lifecycle machinery the
-deletion-lifecycle sub-project is for. Recorded so they aren't rediscovered.
+Design: `docs/superpowers/specs/2026-07-30-memory-principal-lifecycle-design.md`.
+Branch `feat/memory-principal-lifecycle`.
 
-- **In-flight run writes after account/org deletion** (SP-2 review r3 #2): a run
-  already executing holds its `MemoryManager` and records on completion, which can
-  land *after* a purge; a recreated same-`(org_id, username)` account could then
-  recall it. The robust fix is cross-process — a durable "deleting" marker /
-  principal generation checked before every memory write, plus a run-drain fence —
-  which the CLI (a separate process from the run workers) can't do today. Runs are
-  short and deletion is a manual operator action, so the window is small but nonzero.
-- **Immutable user-id as the memory principal** (r2 #2 / r3 #2): memory is keyed by
-  `username`, a reusable identifier. Purge-before-release closes the common reuse
-  leak, but a durable immutable id (with generation) would be a more robust
-  principal and is the proper substrate for the run-drain fence above.
+- **Immutable user-id as the memory principal** (r2 #2 / r3 #2) — **Implemented.**
+  `users.principal_id` (random, set once at creation, **never rotated** — unlike
+  `security_stamp`, which rotates on password reset and so would wipe memory on
+  every reset; migration `b8c9d0e1f2a3` adds it + per-row backfill). Memory
+  recall/writes are scoped by principal (a store `principal_id` dimension mirroring
+  SP-2's `org_id`: column + idempotent ALTER + index; filter when concrete, `None` =
+  unfiltered), so a recreated same-`(org, username)` account (new principal) can't
+  recall the deleted account's rows. Legacy NULL-principal rows aren't recalled by a
+  stamped run (SP-2 accept-legacy precedent); the opt-in `backfill-memory-principals`
+  CLI reconciles them.
+- **In-flight run writes after account/org deletion** (SP-2 review r3 #2) —
+  **Implemented.** A `retired_principals` table in the shared memory store; account
+  deletion retires the principal, and `add`/`add_if_absent` **drop** a write carrying
+  a retired principal. So a run finishing after the purge can't re-create rows. The
+  shared SQLite file is the cross-process coordination point (the CLI/API deleter and
+  the run workers open the same file), so **no run-drain fence or distributed lock is
+  needed** — the stamp makes a late write unrecallable and the fence drops it. The
+  run-drain fence and multi-worker leader coordination remain **deferred as
+  unnecessary** (documented in the design's "Deferred" section).
 - **Durable authoritative memory-store state** (r3 #1): the CLI infers the store
   from its own `BESTTEAM_MEMORY_DB`; it now warns when that's unset rather than
   refusing (refusing would break the majority memory-disabled deployments). A
