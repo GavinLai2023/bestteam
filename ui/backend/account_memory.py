@@ -47,7 +47,11 @@ def purge_user_memory(username: str, principal_id: Optional[str] = None) -> Opti
         return None
     try:
         if principal_id is not None:
-            store.retire_principal(principal_id)
+            # Retire + purge atomically (finding 3): a failed purge must not leave
+            # an active account whose principal is retired (all future writes then
+            # silently dropped). Rolls both back on failure so the caller can abort
+            # the account delete with everything consistent.
+            return store.retire_and_delete_user(principal_id, username)
         return store.delete_user(username)
     finally:
         store.close()

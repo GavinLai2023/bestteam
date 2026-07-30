@@ -900,6 +900,124 @@ def test_retire_principal_is_idempotent():
     assert store.is_retired("P-unknown") is False
 
 
+class _RetireBeforeInsertConn:
+    """Wraps a SQLite connection so that, right before an INSERT into `memories`,
+    `deleter` (a second connection to the same file) retires `principal_id` and
+    commits. Reproduces the TOCTOU: the retire lands between a would-be pre-check
+    and the actual insert. A correct fence checks retirement atomically inside the
+    insert statement and so still drops the write. (`sqlite3.Connection.execute`
+    is read-only, so we wrap rather than monkeypatch it.)"""
+
+    def __init__(self, real, deleter, principal_id):
+        self._real = real
+        self._deleter = deleter
+        self._principal_id = principal_id
+
+    def execute(self, sql, *args):
+        if sql.lstrip().upper().startswith("INSERT INTO MEMORIES"):
+            self._deleter.retire_principal(self._principal_id)
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _retire_before_memories_insert(writer, deleter, principal_id):
+    writer._conn = _RetireBeforeInsertConn(writer._conn, deleter, principal_id)
+
+
+def test_add_fence_is_atomic_with_insert(tmp_path):
+    # Finding 1 (TOCTOU): a retire committed by another connection just before the
+    # insert must still drop the write -- retirement and insert must be one
+    # SQLite-serialized operation, not a separate pre-SELECT then insert.
+    path = str(tmp_path / "m.db")
+    writer, deleter = SqliteBM25Memory(path), SqliteBM25Memory(path)
+    _retire_before_memories_insert(writer, deleter, "P1")
+
+    writer.add("alice", EPISODIC, "late-after-check", org_id=5, principal_id="P1")
+    assert deleter.all("alice", org_id=5, principal_id=None) == []
+    writer.close()
+    deleter.close()
+
+
+def test_add_if_absent_fence_is_atomic_with_insert(tmp_path):
+    path = str(tmp_path / "m.db")
+    writer, deleter = SqliteBM25Memory(path), SqliteBM25Memory(path)
+    _retire_before_memories_insert(writer, deleter, "P1")
+
+    writer.add_if_absent("alice", SEMANTIC, "fact", org_id=5, principal_id="P1")
+    assert deleter.all("alice", org_id=5, principal_id=None) == []
+    writer.close()
+    deleter.close()
+
+
+def test_add_returns_none_when_fenced():
+    # Finding 4: a fenced write returns None (not an unpersisted record), so callers
+    # can tell it wasn't recorded.
+    store = _store()
+    store.retire_principal("P1")
+    assert store.add("alice", EPISODIC, "late", org_id=5, principal_id="P1") is None
+
+
+def test_record_run_does_not_report_fenced_write_as_recorded():
+    # Finding 4: record_run must not report a fenced write as recorded (no false
+    # memory_recorded / audit trace).
+    store = _store()
+    store.retire_principal("P1")
+    outcome = MemoryManager(store, org_id=5, principal_id="P1").record_run("alice", "in", "out")
+    assert outcome.recorded == []
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+
+class _RaiseOnSqlConn:
+    """Wraps a connection, raising OperationalError on a statement whose SQL starts
+    with `prefix` (uppercased). Used to inject a mid-transaction failure."""
+
+    def __init__(self, real, prefix):
+        self._real = real
+        self._prefix = prefix.upper()
+
+    def execute(self, sql, *args):
+        import sqlite3
+
+        if sql.lstrip().upper().startswith(self._prefix):
+            raise sqlite3.OperationalError("injected failure")
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_retire_and_delete_user_is_atomic_on_delete_failure():
+    # Finding 3: retiring the principal and purging its memory must be one
+    # transaction. If the delete fails, the retirement must roll back too -- else
+    # the account stays active but every future memory write is silently dropped.
+    import sqlite3
+
+    store = _store()
+    store.add("alice", EPISODIC, "existing secret", org_id=5, principal_id="P1")
+    store._conn = _RaiseOnSqlConn(store._conn, "DELETE FROM MEMORIES")
+
+    with pytest.raises(sqlite3.OperationalError):
+        store.retire_and_delete_user("P1", "alice")
+
+    # Rolled back: principal NOT retired, memory intact -- consistent with the SQL
+    # account still existing (the caller aborts the account delete on this error).
+    assert store.is_retired("P1") is False
+    assert len(store.all("alice", org_id=5, principal_id=None)) == 1
+
+
+def test_retire_and_delete_user_retires_and_purges_on_success():
+    store = _store()
+    store.add("alice", EPISODIC, "secret", org_id=5, principal_id="P1")
+
+    removed = store.retire_and_delete_user("P1", "alice")
+
+    assert removed == 1
+    assert store.is_retired("P1") is True
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+
 def test_manager_stamps_writes_and_scopes_recall_by_principal():
     # The manager binds a principal at construction, stamps every write with it,
     # and scopes recall to it -- so a recreated account can't recall old rows.

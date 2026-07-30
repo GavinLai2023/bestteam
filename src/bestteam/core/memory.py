@@ -230,7 +230,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
-    ) -> MemoryRecord:
+    ) -> Optional[MemoryRecord]:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
         # that would otherwise persist an unqueryable row.
@@ -247,14 +247,16 @@ class SqliteBM25Memory(Memory):
             principal_id=principal_id,
         )
         # Deletion-lifecycle fence: drop a write for a retired principal (an
-        # in-flight run finishing after its account was deleted). Return the
-        # record for signature compatibility, but persist nothing.
-        if self._is_retired(principal_id):
-            return record
-        self._conn.execute(
+        # in-flight run finishing after its account was deleted). The check is
+        # folded INTO the insert (`... WHERE NOT EXISTS (retired)`) so it is atomic
+        # with it under SQLite's write serialization -- a separate pre-check would
+        # race a concurrent deleter that retires between the check and the insert
+        # (finding 1). A None principal can't be retired, so no clause is needed.
+        retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
+        cursor = self._conn.execute(
             "INSERT INTO memories "
             "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -264,10 +266,13 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
+                *retired_params,
             ),
         )
         self._conn.commit()
-        return record
+        # None (not the unpersisted record) when the fence dropped the write, so
+        # callers don't report a discarded write as recorded (finding 4).
+        return record if cursor.rowcount else None
 
     def add_if_absent(
         self,
@@ -299,10 +304,6 @@ class SqliteBM25Memory(Memory):
             org_id=org_id,
             principal_id=principal_id,
         )
-        # Deletion-lifecycle fence: a retired principal's late write is dropped
-        # (reported as "nothing written", like a duplicate).
-        if self._is_retired(principal_id):
-            return None
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
         principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
         exists_params: List[Any] = [user_id, type, content]
@@ -310,12 +311,16 @@ class SqliteBM25Memory(Memory):
             exists_params.append(org_id)
         if principal_id is not None:
             exists_params.append(principal_id)
+        # Deletion-lifecycle fence, ANDed into the same insert as the dedup check so
+        # both are atomic with the write (finding 1): a retired principal's late
+        # write is dropped (reported as "nothing written", like a duplicate).
+        retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
             "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
             "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
-            f"AND {org_clause} AND {principal_clause})",
+            f"AND {org_clause} AND {principal_clause})" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -326,6 +331,7 @@ class SqliteBM25Memory(Memory):
                 record.org_id,
                 record.principal_id,
                 *exists_params,
+                *retired_params,
             ),
         )
         self._conn.commit()
@@ -554,6 +560,22 @@ class SqliteBM25Memory(Memory):
             self._conn.rollback()
             raise
 
+    def _retired_fence_clause(
+        self, principal_id: Optional[str], *, connector: str
+    ) -> "tuple[str, List[Any]]":
+        """SQL predicate + params that make an insert a no-op when `principal_id`
+        is retired, for ANDing into the insert's own WHERE (deletion-lifecycle
+        finding 1 -- atomic with the write, no separate pre-check to race).
+        `connector` is ``"WHERE"`` (insert has no WHERE yet) or ``"AND"`` (append to
+        an existing one). Empty for a None principal (can't be retired)."""
+        if principal_id is None:
+            return "", []
+        return (
+            f" {connector} NOT EXISTS "
+            "(SELECT 1 FROM retired_principals WHERE principal_id = ?)",
+            [principal_id],
+        )
+
     def _is_retired(self, principal_id: Optional[str]) -> bool:
         """True when a concrete principal has been retired (its account deleted).
 
@@ -569,6 +591,25 @@ class SqliteBM25Memory(Memory):
     def is_retired(self, principal_id: str) -> bool:
         """Whether `principal_id` has been retired (public wrapper over the fence check)."""
         return self._is_retired(principal_id)
+
+    def retire_and_delete_user(self, principal_id: str, user_id: str) -> int:
+        """Retire `principal_id` AND purge `user_id`'s memory in ONE transaction
+        (deletion-lifecycle finding 3). Returns rows removed. Rolls both back on any
+        failure, so a failed purge can't leave an active account whose principal is
+        retired (which would silently drop all its future memory writes). The caller
+        (account deletion) aborts the SQL-account delete on this error, keeping the
+        account, its memory, and its writable principal consistent."""
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO retired_principals (principal_id, retired_at) VALUES (?, ?)",
+                (principal_id, datetime.now(timezone.utc).isoformat()),
+            )
+            cursor = self._conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+            self._conn.commit()
+            return cursor.rowcount
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def retire_principal(self, principal_id: str) -> None:
         """Mark `principal_id` retired so the write path drops its future writes
@@ -823,14 +864,19 @@ class MemoryManager:
         # (and, upstream, a `memory_failed` event) but never raised, so it can't
         # break the run (review r5 #2).
         try:
-            self.store.add(
+            written = self.store.add(
                 user_id,
                 EPISODIC,
                 f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
                 metadata=self._provenance(),
                 **self._scope_kwargs(),
             )
-            recorded.append(EPISODIC)
+            # `add` returns None when the deletion-lifecycle fence dropped the write
+            # (a retired principal); don't report a discarded write as recorded
+            # (finding 4). A legacy store whose `add` returns None on success is
+            # indistinguishable here, but no such store recorded episodic before.
+            if written is not None:
+                recorded.append(EPISODIC)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Memory: episodic write failed for '%s': %s", user_id, exc, exc_info=True)
             ok = False
@@ -921,8 +967,10 @@ class MemoryManager:
         add_if_absent = getattr(self.store, "add_if_absent", None)
         if callable(add_if_absent) and self._atomic_dedup_is_safe():
             return add_if_absent(user_id, type, content, **kwargs) is not None
-        self.store.add(user_id, type, content, **kwargs)
-        return True
+        # `add` returns None when the fence dropped the write (retired principal);
+        # a store implementing the ABC contract returns the record. Report recorded
+        # only on real persistence (finding 4).
+        return self.store.add(user_id, type, content, **kwargs) is not None
 
     def _atomic_dedup_is_safe(self) -> bool:
         """True unless the store overrides `add()` (custom write policy) without

@@ -54,10 +54,14 @@ lightweight column — no PK re-key, stable across password resets and org moves
 
 - `models.py`: column + `new_principal_id()` default (mirrors
   `new_security_stamp`), `nullable=True` so a pre-migration row is tolerated.
-- Alembic migration off head `a7b8c9d0e1f2`: add the column and **backfill each
-  existing user row with a fresh random value** (mirrors the `security_stamp`
-  migration's per-row random backfill), so every current account has a
-  non-null immutable principal immediately.
+- Alembic migration off head `a7b8c9d0e1f2`: add the column (guarded) and then
+  **backfill every `principal_id IS NULL` row unconditionally** — not only on the
+  run that added the column — because an interrupted upgrade (or a create_all
+  bootstrap) can commit the column-add and die before backfilling; gating the
+  backfill on "did we just add it" would permanently leave those rows NULL,
+  disabling the fence for them (review round 2, finding 2). The migration then
+  **fails loudly if any NULL principal remains**. Idempotent: a re-run finds no
+  NULLs and does nothing.
 - `create_user` needs no change (the column default supplies it); `db.refresh`
   already returns the populated value.
 
@@ -108,15 +112,23 @@ late write is dropped:
   `retire_principal(principal_id) -> None` (idempotent `INSERT OR IGNORE`) and
   `is_retired(principal_id) -> bool`.
 - `add` / `add_if_absent`: when a **concrete** `principal_id` is given and it is
-  retired, **skip the write** (`add` returns the unpersisted `MemoryRecord` for
-  signature compatibility but inserts nothing; `add_if_absent` returns `None`).
+  retired, **skip the write**. The retirement predicate is folded INTO the insert
+  (`INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM retired_principals ...)`,
+  ANDed with the dedup predicate for `add_if_absent`), so it is **atomic with the
+  write** under SQLite's write serialization — a separate pre-`SELECT` would race a
+  concurrent deleter that retires between the check and the insert (review round 2,
+  finding 1). Both return **`None`** when the fence (or dedup) dropped the write, so
+  a caller never reports a discarded write as recorded (review round 2, finding 4).
   A `None` principal (SDK-direct) is never fenced.
 - Deletion path passes the principal to the purge: `account_memory.purge_user_
-  memory(username, principal_id=None)` also calls `store.retire_principal(
-  principal_id)` when given one. `admin_api.delete_user_endpoint` and
-  `admin.py`'s `delete-user` read `user.principal_id` **before** deleting the
-  row and pass it. Fail-closed semantics are unchanged (a retire/purge error
-  aborts the deletion).
+  memory(username, principal_id=None)` calls `store.retire_and_delete_user(
+  principal_id, username)` when given one — retiring the principal AND purging the
+  memory in **one memory-store transaction**, rolling both back on any failure, so
+  a failed purge can't leave an active account whose principal is retired (which
+  would silently drop all its future writes — review round 2, finding 3).
+  `admin_api.delete_user_endpoint` and `admin.py`'s `delete-user` read
+  `user.principal_id` **before** deleting the row and pass it. Fail-closed
+  semantics are unchanged (a retire/purge error aborts the deletion).
 
 **Effect (finding 2):** a run that captured the deleted principal at dispatch
 writes rows carrying that principal; the fence drops them, so nothing is
@@ -199,6 +211,37 @@ principal_id IS NULL`).
   `BESTTEAM_DB_PATH="$PWD/.superpowers/sdd/scratch.db" ./.venv/Scripts/python.exe -m pytest -q`.
 - Frontend unaffected (no API/UI shape change; admin responses already carry
   `org_id`, principal_id stays internal).
+
+## Review round 2 (external, at `6f7e072`)
+
+Four confirmed findings, all fixed with TDD:
+
+1. **High — retirement-fence TOCTOU** (`add`/`add_if_absent`): the retirement
+   check was a separate `SELECT` before the insert, so a deleter that retired
+   between the check and the insert let a late write survive the purge. Fixed by
+   folding the retirement predicate into the insert statement (atomic under
+   SQLite write serialization); added a synchronized two-connection regression
+   test (`_RetireBeforeInsertConn`).
+2. **High — interrupted migration leaves NULL principals**: backfill was gated on
+   the column-add. Fixed to always backfill `WHERE principal_id IS NULL` and fail
+   if any remain; added an interrupted-upgrade regression test.
+3. **Medium — non-atomic retire-then-purge**: `retire_principal` committed before
+   `delete_user`, so a failed purge left an active account with a write-dead
+   principal. Fixed with `retire_and_delete_user` (one transaction, rollback on
+   failure); the deletion path routes through it.
+4. **Low — fenced write reported as recorded**: `add` returned an unpersisted
+   record, and `record_run` counted it as recorded. Fixed: `add` returns `None`
+   on a dropped write, and `record_run`/`_store_extracted` report a type only on
+   confirmed persistence.
+
+**Accepted / not changed (proportionate for an opt-in, single-worker, bounded
+BM25 store):** `users.principal_id` stays nullable in the model (the migration
+guarantees no NULLs and fails loudly otherwise; a NOT-NULL/UNIQUE batch-alter
+would fight the create_all bootstrap for no correctness gain now); no new
+principal-aware composite index (recall is bounded and opt-in, same call as SP-2
+org indexing); no org-level late-write fence (a deactivated org's members are
+already 403'd from running, so there is no in-flight-write-after-erasure vector
+equivalent to account deletion).
 
 ## Out of scope
 
