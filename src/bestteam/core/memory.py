@@ -81,6 +81,11 @@ class MemoryRecord:
     # Organization this record belongs to (multi-tenancy, SP-2). None only for
     # rows written before org scoping, or by callers that don't pass one.
     org_id: Optional[int] = None
+    # Immutable per-account principal (deletion-lifecycle). Opaque string
+    # (the backend's `users.principal_id`); scopes recall/writes so a recreated
+    # same-username account can't recall the deleted account's rows. None for
+    # rows written before principal stamping, or by SDK-direct callers.
+    principal_id: Optional[str] = None
 
 
 class Memory(ABC):
@@ -163,23 +168,36 @@ class SqliteBM25Memory(Memory):
                 content TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                org_id INTEGER
+                org_id INTEGER,
+                principal_id TEXT
             )
             """
         )
-        # Idempotent in-place migration (this store has no Alembic): a DB created
-        # before org scoping (SP-2) lacks org_id -- add it, leaving old rows NULL.
+        # Idempotent in-place migrations (this store has no Alembic): a DB created
+        # before a scoping dimension lacks its column -- add it, leaving old rows
+        # NULL. The ALTER can race with another connection opening the same legacy
+        # DB between our PRAGMA check and here; a "duplicate column" error means it
+        # won and the column now exists, which is fine -- only a different error is
+        # a real failure.
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
-        if "org_id" not in cols:
-            try:
-                self._conn.execute("ALTER TABLE memories ADD COLUMN org_id INTEGER")
-            except sqlite3.OperationalError as exc:
-                # Another connection opening the same legacy DB may have won the
-                # ALTER race between our PRAGMA check and here -- that's fine, the
-                # column now exists; only a different error is a real failure.
-                if "duplicate column name" not in str(exc).lower():
-                    raise
+        for column, ddl in (("org_id", "INTEGER"), ("principal_id", "TEXT")):
+            if column not in cols:
+                try:
+                    self._conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {ddl}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+        # Retired principals (deletion-lifecycle): a principal listed here has had
+        # its account deleted; the write path drops any late (in-flight-run) write
+        # carrying it, so nothing is re-created after the purge (finding 2).
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS retired_principals ("
+            "principal_id TEXT PRIMARY KEY, retired_at TEXT NOT NULL)"
+        )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_principal ON memories(principal_id)"
+        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user ON memories(org_id, user_id)"
         )
@@ -211,6 +229,7 @@ class SqliteBM25Memory(Memory):
         metadata: Optional[Dict[str, Any]] = None,
         *,
         org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
     ) -> MemoryRecord:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -225,10 +244,17 @@ class SqliteBM25Memory(Memory):
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
+            principal_id=principal_id,
         )
+        # Deletion-lifecycle fence: drop a write for a retired principal (an
+        # in-flight run finishing after its account was deleted). Return the
+        # record for signature compatibility, but persist nothing.
+        if self._is_retired(principal_id):
+            return record
         self._conn.execute(
-            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at, org_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories "
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.user_id,
@@ -237,6 +263,7 @@ class SqliteBM25Memory(Memory):
                 json.dumps(record.metadata),
                 record.created_at,
                 record.org_id,
+                record.principal_id,
             ),
         )
         self._conn.commit()
@@ -250,14 +277,16 @@ class SqliteBM25Memory(Memory):
         metadata: Optional[Dict[str, Any]] = None,
         *,
         org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
     ) -> Optional[MemoryRecord]:
-        """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope)`
-        (SP-4 M-08 dedup). Returns the new record, or None when an identical record
-        already existed. Dedup is **per type** (a semantic and a procedural row with
-        the same text don't collide, review r1 #4) and **race-safe** across
-        connections: the existence check lives inside one `INSERT ... WHERE NOT
-        EXISTS` under SQLite's write serialization, so two workers can't both insert
-        (review r1 #2)."""
+        """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope,
+        principal-scope)` (SP-4 M-08 dedup + deletion-lifecycle). Returns the new
+        record, or None when an identical record already existed (or the principal is
+        retired). Dedup is **per type** (a semantic and a procedural row with the same
+        text don't collide, review r1 #4), **per principal** (the same text under a
+        recreated account is not a duplicate), and **race-safe** across connections:
+        the existence check lives inside one `INSERT ... WHERE NOT EXISTS` under
+        SQLite's write serialization, so two workers can't both insert (review r1 #2)."""
         if not isinstance(type, str) or not type.strip():
             raise ConfigurationError("Memory record type must be a non-empty string")
         record = MemoryRecord(
@@ -268,15 +297,25 @@ class SqliteBM25Memory(Memory):
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
+            principal_id=principal_id,
         )
+        # Deletion-lifecycle fence: a retired principal's late write is dropped
+        # (reported as "nothing written", like a duplicate).
+        if self._is_retired(principal_id):
+            return None
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
+        principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
         exists_params: List[Any] = [user_id, type, content]
         if org_id is not None:
             exists_params.append(org_id)
+        if principal_id is not None:
+            exists_params.append(principal_id)
         cursor = self._conn.execute(
-            "INSERT INTO memories (id, user_id, type, content, metadata_json, created_at, org_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
-            f"SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? AND {org_clause})",
+            "INSERT INTO memories "
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
+            f"AND {org_clause} AND {principal_clause})",
             (
                 record.id,
                 record.user_id,
@@ -285,6 +324,7 @@ class SqliteBM25Memory(Memory):
                 json.dumps(record.metadata),
                 record.created_at,
                 record.org_id,
+                record.principal_id,
                 *exists_params,
             ),
         )
@@ -307,6 +347,7 @@ class SqliteBM25Memory(Memory):
                     metadata=metadata,
                     created_at=row["created_at"],
                     org_id=row["org_id"],
+                    principal_id=row["principal_id"],
                 )
             )
         return records
@@ -318,12 +359,18 @@ class SqliteBM25Memory(Memory):
         limit: Optional[int] = None,
         *,
         org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
         if org_id is not None:
             sql += " AND org_id = ?"
             params.append(org_id)
+        # A concrete principal scopes to that account instance (deletion-lifecycle);
+        # None is unfiltered (admin cross-view + SDK-direct back-compat).
+        if principal_id is not None:
+            sql += " AND principal_id = ?"
+            params.append(principal_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -344,6 +391,7 @@ class SqliteBM25Memory(Memory):
         max_candidates: Optional[int] = None,
         *,
         org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -353,7 +401,9 @@ class SqliteBM25Memory(Memory):
         # scan to the most-recent N records -- a bound on the DB/CPU/memory work
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
-        candidates = self.all(user_id, types, limit=max_candidates, org_id=org_id)
+        candidates = self.all(
+            user_id, types, limit=max_candidates, org_id=org_id, principal_id=principal_id
+        )
         if not candidates:
             return []
 
@@ -440,7 +490,15 @@ class SqliteBM25Memory(Memory):
         self._conn.commit()
         return cursor.rowcount
 
-    def prune_user_type(self, user_id: str, type: str, keep: int, *, org_id: Optional[int] = None) -> int:
+    def prune_user_type(
+        self,
+        user_id: str,
+        type: str,
+        keep: int,
+        *,
+        org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
+    ) -> int:
         """Retention (SP-4, M-07): keep only the most-recent `keep` records of
         `type` for a SINGLE org scope, deleting the older ones. Returns rows
         removed. `keep <= 0` is treated as no-op (avoids a footgun that would wipe
@@ -453,10 +511,13 @@ class SqliteBM25Memory(Memory):
         if keep <= 0:
             return 0
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
-        where = f"user_id = ? AND type = ? AND {org_clause}"
+        principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
+        where = f"user_id = ? AND type = ? AND {org_clause} AND {principal_clause}"
         params: List[Any] = [user_id, type]
         if org_id is not None:
             params.append(org_id)
+        if principal_id is not None:
+            params.append(principal_id)
         # Delete rows of this (user, type[, org]) that aren't among the most-recent
         # `keep` by created_at.
         sql = (
@@ -492,6 +553,55 @@ class SqliteBM25Memory(Memory):
         except Exception:
             self._conn.rollback()
             raise
+
+    def _is_retired(self, principal_id: Optional[str]) -> bool:
+        """True when a concrete principal has been retired (its account deleted).
+
+        A None principal (SDK-direct / legacy write) is never fenced.
+        """
+        if principal_id is None:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM retired_principals WHERE principal_id = ?", (principal_id,)
+        ).fetchone()
+        return row is not None
+
+    def is_retired(self, principal_id: str) -> bool:
+        """Whether `principal_id` has been retired (public wrapper over the fence check)."""
+        return self._is_retired(principal_id)
+
+    def retire_principal(self, principal_id: str) -> None:
+        """Mark `principal_id` retired so the write path drops its future writes
+        (deletion-lifecycle finding 2). Idempotent. Called when an account is
+        deleted, alongside the row purge, so an in-flight run finishing after the
+        purge can't re-create rows for the deleted account."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO retired_principals (principal_id, retired_at) VALUES (?, ?)",
+            (principal_id, datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def assign_null_principal(self, user_id: str, org_id: Optional[int], principal_id: str) -> int:
+        """Bind `user_id`'s NULL-principal rows in one org scope to `principal_id`.
+
+        The opt-in legacy-reconciliation primitive (operator `backfill-memory-
+        principals`): rows written before principal stamping have `principal_id
+        NULL` and so aren't recalled by a stamped run; this claims them for the
+        account's current principal so its existing memory keeps being recalled.
+        Scoped to a single `(user_id, org_id)` and to NULL-principal rows only, so
+        it can never re-attribute another principal's or another org's rows.
+        Returns rows updated."""
+        org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
+        params: List[Any] = [principal_id, user_id]
+        if org_id is not None:
+            params.append(org_id)
+        cursor = self._conn.execute(
+            f"UPDATE memories SET principal_id = ? WHERE user_id = ? AND {org_clause} "
+            "AND principal_id IS NULL",
+            params,
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     def assign_legacy_to_org(self, user_id: str, org_id: int) -> int:
         """Bind `user_id`'s legacy NULL-org rows to `org_id`. Called before a move
@@ -570,6 +680,7 @@ class MemoryManager:
         extraction_model: Any = None,
         top_k: int = 5,
         org_id: Optional[int] = None,
+        principal_id: Optional[str] = None,
         run_id: Optional[str] = None,
         workflow_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
@@ -581,6 +692,11 @@ class MemoryManager:
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
+        # The immutable account principal (deletion-lifecycle). Recall/record are
+        # scoped to it so a recreated same-username account can't recall the deleted
+        # account's rows; bound only when a concrete principal exists (an org-less /
+        # SDK-direct caller passes None, keeping the pre-SP-2 store contract).
+        self.principal_id = principal_id
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
@@ -601,6 +717,15 @@ class MemoryManager:
         org-less SDK caller), the store is called with the original ABC contract
         so a pre-SP-2 custom store -- which never accepted `org_id` -- still works."""
         return {"org_id": self.org_id} if self.org_id is not None else {}
+
+    def _scope_kwargs(self) -> Dict[str, Any]:
+        """Store scoping kwargs for a run: `org_id` (SP-2) and `principal_id`
+        (deletion-lifecycle), each included only when bound -- so an SDK-direct
+        caller (neither bound) invokes the plain pre-SP-2 store contract."""
+        kwargs = self._org_kwargs()
+        if self.principal_id is not None:
+            kwargs["principal_id"] = self.principal_id
+        return kwargs
 
     def _provenance(self) -> Dict[str, Any]:
         """Run-level provenance stamped into a record's metadata (M-06); omits
@@ -653,7 +778,7 @@ class MemoryManager:
         # `max_candidates` is a concrete-store extension; only pass it when a bound
         # is configured, so an org-less SDK caller with a pre-SP-4 custom store
         # still invokes the plain ABC `search`.
-        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._org_kwargs()}
+        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._scope_kwargs()}
         if self.recall_max_candidates is not None:
             search_kwargs["max_candidates"] = self.recall_max_candidates
         hits = self.store.search(user_id, query, **search_kwargs)
@@ -703,7 +828,7 @@ class MemoryManager:
                 EPISODIC,
                 f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
                 metadata=self._provenance(),
-                **self._org_kwargs(),
+                **self._scope_kwargs(),
             )
             recorded.append(EPISODIC)
         except Exception as exc:  # noqa: BLE001
@@ -792,7 +917,7 @@ class MemoryManager:
         would silently bypass that policy for semantic/procedural records. In that
         case fall back to the store's `add()` (its policy applies; dedup is skipped)
         so a pre-SP-4 subclass keeps intercepting every write (review r2 #2)."""
-        kwargs = {"metadata": self._provenance(), **self._org_kwargs()}
+        kwargs = {"metadata": self._provenance(), **self._scope_kwargs()}
         add_if_absent = getattr(self.store, "add_if_absent", None)
         if callable(add_if_absent) and self._atomic_dedup_is_safe():
             return add_if_absent(user_id, type, content, **kwargs) is not None
@@ -820,7 +945,7 @@ class MemoryManager:
         if not callable(prune):
             return
         try:
-            prune(user_id, EPISODIC, self.max_episodic_per_user, **self._org_kwargs())
+            prune(user_id, EPISODIC, self.max_episodic_per_user, **self._scope_kwargs())
         except Exception as exc:  # noqa: BLE001 -- retention is best-effort
             _logger.warning("Memory: episodic prune failed for '%s': %s", user_id, exc, exc_info=True)
 

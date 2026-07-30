@@ -177,9 +177,9 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_all = store.all
 
-    def spy_all(user_id, types=None, limit=None, *, org_id=None):
+    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None):
         captured["limit"] = limit
-        return real_all(user_id, types, limit, org_id=org_id)
+        return real_all(user_id, types, limit, org_id=org_id, principal_id=principal_id)
 
     monkeypatch.setattr(store, "all", spy_all)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
@@ -839,6 +839,119 @@ def test_delete_org_removes_only_that_org():
     assert removed == 1
     assert store.all("alice", org_id=None) == []
     assert len(store.all("bob", org_id=None)) == 1
+
+
+# --- Deletion-lifecycle: principal-stamped memory (findings 1 & 2) ---
+
+
+def test_add_persists_principal_id():
+    store = _store()
+    rec = store.add("alice", EPISODIC, "content", org_id=5, principal_id="P1")
+    assert rec.principal_id == "P1"
+    assert store.all("alice", org_id=5, principal_id="P1")[0].principal_id == "P1"
+
+
+def test_all_and_search_scope_by_principal():
+    store = _store()
+    store.add("alice", EPISODIC, "note from principal one", org_id=5, principal_id="P1")
+    store.add("alice", EPISODIC, "note from principal two", org_id=5, principal_id="P2")
+
+    # A recreated account (new principal) recalls only its own rows (finding 1).
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P2")] == [
+        "note from principal two"
+    ]
+    hits = store.search("alice", "note principal", org_id=5, principal_id="P1")
+    assert [r.content for r in hits] == ["note from principal one"]
+    # principal_id=None (admin / SDK-direct) is unfiltered — sees both.
+    assert len(store.all("alice", org_id=5, principal_id=None)) == 2
+
+
+def test_dedup_is_per_principal():
+    store = _store()
+    a = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P1")
+    # Same text under a DIFFERENT principal is not a duplicate.
+    b = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P2")
+    # Same (text, principal) IS a duplicate.
+    c = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P1")
+    assert a is not None and b is not None and c is None
+
+
+def test_retired_principal_write_is_fenced():
+    # Finding 2: after a principal is retired (account deleted), an in-flight
+    # run's late write for that principal must be dropped, not persisted.
+    store = _store()
+    store.retire_principal("P1")
+    assert store.is_retired("P1") is True
+
+    store.add("alice", EPISODIC, "late episodic", org_id=5, principal_id="P1")
+    assert store.add_if_absent("alice", SEMANTIC, "late fact", org_id=5, principal_id="P1") is None
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+    # A different (recreated) principal is unaffected.
+    store.add("alice", EPISODIC, "new life", org_id=5, principal_id="P2")
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P2")] == ["new life"]
+
+
+def test_retire_principal_is_idempotent():
+    store = _store()
+    store.retire_principal("P1")
+    store.retire_principal("P1")  # no error, still retired
+    assert store.is_retired("P1") is True
+    assert store.is_retired("P-unknown") is False
+
+
+def test_manager_stamps_writes_and_scopes_recall_by_principal():
+    # The manager binds a principal at construction, stamps every write with it,
+    # and scopes recall to it -- so a recreated account can't recall old rows.
+    store = _store()
+    MemoryManager(store, org_id=5, principal_id="P1").record_run(
+        "alice", "about refunds", "our refund policy is 30 days"
+    )
+    rows = store.all("alice", org_id=5, principal_id="P1")
+    assert rows and all(r.principal_id == "P1" for r in rows)
+
+    assert MemoryManager(store, org_id=5, principal_id="P2").recall("alice", "refund").count == 0
+    assert MemoryManager(store, org_id=5, principal_id="P1").recall("alice", "refund").count >= 1
+
+
+def test_assign_null_principal_binds_only_matching_null_rows():
+    store = _store()
+    store.add("alice", EPISODIC, "legacy note", org_id=5)  # principal NULL
+    store.add("alice", EPISODIC, "already owned", org_id=5, principal_id="P0")
+    store.add("alice", EPISODIC, "other org legacy", org_id=6)  # different org
+
+    updated = store.assign_null_principal("alice", 5, "P1")
+    assert updated == 1
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P1")] == ["legacy note"]
+    # The already-owned row and the other-org legacy row are untouched.
+    assert store.all("alice", org_id=6, principal_id="P1") == []
+
+
+def test_opens_pre_principal_db_and_migrates(tmp_path):
+    # A DB created before principal stamping (no principal_id column) must gain the
+    # column in place, keep its rows (principal_id NULL), and work afterward.
+    import sqlite3
+
+    db_path = str(tmp_path / "pre_principal.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, org_id INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'episodic', 'legacy note', '{}', "
+        "'2026-01-01T00:00:00+00:00', 5)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path)
+    legacy = store.all("alice", org_id=5, principal_id=None)
+    assert len(legacy) == 1 and legacy[0].principal_id is None
+    store.add("alice", EPISODIC, "stamped note", org_id=5, principal_id="P1")
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P1")] == ["stamped note"]
+    store.close()
 
 
 def test_delete_org_and_legacy_scopes_correctly():
