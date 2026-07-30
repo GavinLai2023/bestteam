@@ -29,19 +29,25 @@ def open_memory_store():
     return SqliteBM25Memory(db_path)
 
 
-def purge_user_memory(username: str) -> Optional[int]:
+def purge_user_memory(username: str, principal_id: Optional[str] = None) -> Optional[int]:
     """Delete all of `username`'s per-user memory, returning the rows removed, or
     ``None`` when no memory store is configured for this invocation.
 
     Account deletion removes the whole principal, so the unscoped
     `store.delete_user` (every row for the username, across all orgs + legacy) is
-    correct here -- unlike org erasure. Raises on failure so the caller can fail
-    closed and NOT release the username while its memory persists.
+    correct here -- unlike org erasure. When `principal_id` is given, the deleted
+    account's principal is also **retired** (deletion-lifecycle finding 2): an
+    in-flight run finishing after this purge carries that principal, and the store
+    write-fence drops its late write so nothing is re-created behind the purge.
+    Raises on failure so the caller can fail closed and NOT release the username
+    while its memory persists (or its principal stays writable).
     """
     store = open_memory_store()
     if store is None:
         return None
     try:
+        if principal_id is not None:
+            store.retire_principal(principal_id)
         return store.delete_user(username)
     finally:
         store.close()

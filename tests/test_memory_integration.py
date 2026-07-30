@@ -184,6 +184,45 @@ def test_recall_is_isolated_by_org_for_same_username():
     assert len(store.all("u", org_id=6)) == 1  # unchanged
 
 
+def test_recall_is_isolated_by_principal_for_reused_username():
+    # Deletion-lifecycle finding 1: a recreated same-(org, username) account (a
+    # new principal) recalls nothing of the deleted account's memory.
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "old account refund policy note", org_id=5, principal_id="P1")
+    manager = MemoryManager(store, org_id=5, principal_id="P2")  # the recreated account
+
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+
+    # The recreated account's agent never saw the deleted account's note.
+    assert "old account" not in (model.captured_system or "")
+    # P1's row is untouched; the new run's record is stamped with P2.
+    assert [r.content for r in store.all("u", org_id=5, principal_id="P1")] == [
+        "old account refund policy note"
+    ]
+    assert any(r.principal_id == "P2" for r in store.all("u", org_id=5, principal_id="P2"))
+
+
+def test_in_flight_write_after_retire_is_dropped():
+    # Deletion-lifecycle finding 2: a run whose principal is retired mid-flight
+    # (account deleted) records nothing on completion — the write-fence drops it.
+    store = SqliteBM25Memory(":memory:")
+    manager = MemoryManager(store, org_id=5, principal_id="P1")
+    store.retire_principal("P1")  # account deleted while the run is in flight
+
+    model = _RecordingChatModel(responses=[AIMessage(content="answer")])
+    agent = Agent(name="a", role="r", goal="g", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("a question", user_id="u", memory=manager))
+
+    assert any(e.type == "run_completed" for e in events)
+    assert store.all("u", org_id=5, principal_id=None) == []  # nothing persisted
+
+
 def test_stream_emits_memory_recalled_and_recorded_events():
     # SP-3 M-05: the trace surfaces recall (count) and record (types written).
     store, manager = _seeded_manager()  # one seeded episodic record for "u"

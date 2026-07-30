@@ -26,6 +26,11 @@ def new_security_stamp() -> str:
     return secrets.token_hex(16)
 
 
+def new_principal_id() -> str:
+    """A fresh random immutable per-account principal (see User.principal_id)."""
+    return secrets.token_hex(16)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -89,6 +94,13 @@ class User(Base):
     # (review r-ext2 #1/#3). An immutable random value, not a timestamp, so
     # there's no ordering/resolution race.
     security_stamp: Mapped[Optional[str]] = mapped_column(default=new_security_stamp, nullable=True)
+    # Immutable per-account principal for the memory deletion-lifecycle. Unlike
+    # security_stamp it is NEVER rotated (not on password reset), so it's a stable
+    # memory principal: a run's recall/writes are scoped to it, and a deleted-then-
+    # recreated username gets a fresh value it can't reach the old account's memory
+    # with. Random (no ordering race), set once at creation. nullable=True tolerates
+    # a pre-migration row until the backfill runs.
+    principal_id: Mapped[Optional[str]] = mapped_column(default=new_principal_id, nullable=True)
 
 
 class KnowledgeBaseRecord(Base):

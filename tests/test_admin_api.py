@@ -201,6 +201,31 @@ def test_delete_org_user_purges_memory(rig, tmp_path, monkeypatch):
     assert client.post("/api/admin/users", json={"username": "alice", "org": "acme", "password": "pw"}, headers=admin).status_code == 201
 
 
+def test_delete_org_user_retires_principal(rig, tmp_path, monkeypatch):
+    # Deletion-lifecycle finding 2: deleting an account retires its principal so an
+    # in-flight run's late write (carrying that principal) is dropped, not persisted.
+    from bestteam import SqliteBM25Memory
+    from ui.backend.db.users import get_user_by_username
+
+    mem_path = tmp_path / "mem.db"
+    SqliteBM25Memory(str(mem_path)).close()  # create the store file
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+
+    client, admin = rig
+    _make_org_member(client, "alice", "acme")
+    with open_test_db() as db:
+        principal = get_user_by_username(db, "alice").principal_id
+
+    assert client.delete("/api/admin/users/alice", headers=admin).status_code == 204
+
+    store = SqliteBM25Memory(str(mem_path))
+    assert store.is_retired(principal) is True
+    # A late in-flight write for the retired principal is dropped.
+    store.add("alice", "episodic", "late write", org_id=1, principal_id=principal)
+    assert store.all("alice", org_id=None) == []
+    store.close()
+
+
 def test_delete_rejects_platform_account(rig):
     client, admin = rig
     assert client.delete("/api/admin/users/op", headers=admin).status_code == 409

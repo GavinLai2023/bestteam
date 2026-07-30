@@ -114,6 +114,27 @@ def test_run_in_background_records_with_run_org_id(monkeypatch, tmp_path):
     store.close()
 
 
+def test_run_in_background_records_with_run_principal_id(monkeypatch, tmp_path):
+    # Deletion-lifecycle: the episodic record carries the run's principal_id, and a
+    # different principal (recreated account) recalls nothing of it (finding 1).
+    db_path = tmp_path / "m.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
+    monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
+
+    run = registry.create("wf", "hello there")
+    run_in_background(
+        run.id, _workflow(), "hello there", engine=None,
+        user_id="alice", org_id=5, principal_id="P1",
+    )
+
+    store = SqliteBM25Memory(str(db_path))
+    records = store.all("alice", org_id=5, principal_id=None)
+    assert len(records) == 1 and records[0].principal_id == "P1"
+    # A recreated account (new principal) recalls nothing of the old one's memory.
+    assert store.all("alice", org_id=5, principal_id="P2") == []
+    store.close()
+
+
 def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
     # SP-3 M-06: the run's id + workflow_version_id are stamped into each record's
     # metadata (via the real _make_memory binding path).
