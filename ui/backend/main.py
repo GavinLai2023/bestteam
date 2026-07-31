@@ -517,6 +517,7 @@ async def create_run(
         engine=db.get_bind(),
         user_id=user.username,
         org_id=org.id,
+        principal_id=user.principal_id,
         username=user.username,
         workflow_version_id=version_id,
     )

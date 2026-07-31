@@ -103,6 +103,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     delete_user_p.add_argument("username")
 
+    sub.add_parser(
+        "backfill-memory-principals",
+        help="bind current users' legacy (NULL-principal) memory rows to their "
+        "principal, so existing memory keeps being recalled after upgrade (opt-in)",
+    )
+
     move_user_p = sub.add_parser(
         "move-user", help="move a user to another org or to a platform operator"
     )
@@ -176,18 +182,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             where = "platform operator" if args.platform else f"member of '{args.org}'"
             print(f"Created user '{args.username}' ({where}).")
             return 0
+        if args.command == "backfill-memory-principals":
+            # Opt-in reconciliation (deletion-lifecycle): rows written before
+            # principal stamping have principal_id NULL and aren't recalled by a
+            # stamped run. Bind each current user's NULL-principal rows (in their
+            # own org scope) to their principal, so their existing memory keeps
+            # being recalled. NULL-principal-only + per-(user, org)-scoped, so it
+            # can never re-attribute another principal's or another org's rows.
+            store = _open_memory_store()
+            if store is None:
+                print(
+                    "BESTTEAM_MEMORY_DB is not set (or its file is absent) for this "
+                    "command; nothing to backfill. Re-run with the server's environment."
+                )
+                return 0
+            try:
+                total = 0
+                for user in db.query(User).all():
+                    if user.principal_id is None:
+                        continue
+                    total += store.assign_null_principal(
+                        user.username, user.org_id, user.principal_id
+                    )
+            finally:
+                store.close()
+            print(f"Backfilled {total} legacy memory record(s) to their account principal.")
+            return 0
         if args.command == "delete-user":
             # Validate BEFORE any mutation (review r3 #4): an unknown username must
             # not purge orphaned memory and then error. (Cross-DB deletion isn't
             # atomic; validate-first + purge-then-delete keeps a failed delete from
             # destroying memory for a still-present account, and fails safe -- if
             # the account row survives, its memory is gone, which is not a leak.)
-            if get_user_by_username(db, args.username) is None:
+            target = get_user_by_username(db, args.username)
+            if target is None:
                 parser.error(f"No such user: {args.username!r}")
-            # Fail closed: purge the user's memory BEFORE releasing the username,
-            # so a recreated same-named account can't recall it (review r2 #2).
+            # Fail closed: purge the user's memory AND retire its principal BEFORE
+            # releasing the username, so a recreated same-named account can't recall
+            # it and an in-flight run's late write is dropped (review r2 #2 +
+            # deletion-lifecycle findings 1 & 2).
             try:
-                purged = _purge_user_memory(args.username)
+                purged = _purge_user_memory(args.username, principal_id=target.principal_id)
             except Exception as exc:  # noqa: BLE001 -- fail closed on any purge error
                 parser.error(
                     f"Aborted: could not purge memory for '{args.username}' "

@@ -182,11 +182,12 @@ def move_user_endpoint(username: str, body: UserMove, db: Session = Depends(get_
 
 @router.delete("/users/{username}", status_code=204)
 def delete_user_endpoint(username: str, db: Session = Depends(get_db)) -> Response:
-    _require_org_member(db, username)
-    # Purge the principal's memory BEFORE releasing the username (fail closed),
-    # so a recreated same-named account can't recall it.
+    user = _require_org_member(db, username)
+    # Purge the principal's memory AND retire its principal BEFORE releasing the
+    # username (fail closed), so a recreated same-named account can't recall it and
+    # an in-flight run's late write is dropped (deletion-lifecycle findings 1 & 2).
     try:
-        purge_user_memory(username)
+        purge_user_memory(username, principal_id=user.principal_id)
     except Exception as exc:  # noqa: BLE001 -- fail closed: don't delete with memory left behind
         raise HTTPException(
             status_code=409,

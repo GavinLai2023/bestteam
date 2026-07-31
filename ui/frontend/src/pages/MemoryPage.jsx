@@ -48,7 +48,9 @@ export default function MemoryPage() {
       .memoryRecords(identity.user_id, {
         query: opts.query ?? query,
         type: opts.type ?? typeFilter,
-        org: identity.org_id,
+        // A legacy identity (org_id null) must request only NULL-org rows via the
+        // 'legacy' sentinel; omitting org would read the username across all orgs.
+        org: identity.org_id == null ? 'legacy' : identity.org_id,
       })
       .then((data) => setRecords(data.records))
       .catch((e) => setError(e.message))

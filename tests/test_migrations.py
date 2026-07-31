@@ -90,6 +90,46 @@ def test_create_all_then_upgrade_head_is_idempotent(tmp_path, monkeypatch):
     assert "teams" not in tables
 
 
+# Revision just before principal_id, and the principal_id revision itself.
+_PRE_PRINCIPAL = "a7b8c9d0e1f2"
+_PRINCIPAL = "b8c9d0e1f2a3"
+
+
+def test_interrupted_principal_migration_backfills_on_retry(tmp_path, monkeypatch):
+    """Finding 2: if the principal_id column was added but the process died before
+    the backfill (and the revision wasn't recorded), re-running to head must
+    backfill the NULL principal -- not skip it because the column already exists.
+    """
+    db_path = tmp_path / "interrupted.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_PRINCIPAL)  # users has no principal_id yet
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO users (username, password_hash, is_admin, created_at) "
+                "VALUES ('alice', 'x', 0, '2026-01-01T00:00:00+00:00')"
+            )
+        )
+        # Simulate the crash: the column-add committed, the backfill did not, and
+        # the revision was never stamped (still at _PRE_PRINCIPAL).
+        conn.execute(sa.text("ALTER TABLE users ADD COLUMN principal_id VARCHAR"))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")  # re-run must backfill the NULL principal
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            principal = conn.execute(
+                sa.text("SELECT principal_id FROM users WHERE username = 'alice'")
+            ).scalar()
+    finally:
+        engine.dispose()
+    assert principal is not None and principal != ""
+
+
 def test_upgrade_head_on_empty_db_succeeds(tmp_path, monkeypatch):
     """Pure-migration path (no create_all first) still builds head cleanly."""
     db_path = tmp_path / "empty_then_migrate.db"
