@@ -20,6 +20,11 @@ __pycache__/
 ui/frontend/node_modules/
 ui/frontend/dist/
 
+# Stray root-level node_modules (e.g. a frontend tool run from the repo root
+# instead of ui/frontend/) -- no root package.json, so this should never be
+# tracked (review finding: a machine/run-specific vitest cache landed here).
+/node_modules/
+
 # Vector knowledge base embedding caches (generated, machine/run-specific)
 .bestteam_cache/
 

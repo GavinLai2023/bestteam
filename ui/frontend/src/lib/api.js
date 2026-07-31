@@ -166,6 +166,17 @@ export const api = {
   // Short-lived, single-use ticket for authenticating the stream WebSocket
   // (CR-013) -- only the ticket goes in the ws URL, never the bearer token.
   createWsTicket: () => request('/api/runs/ws-ticket', { method: 'POST' }),
+  // Cooperative cancellation -- takes effect between yielded events, not
+  // instantly (see ui/backend/CLAUDE.md).
+  cancelRun: (id) => request(`/api/runs/${id}/cancel`, { method: 'POST' }),
+  listRuns: (filters = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== '')),
+    )
+    const qs = params.toString()
+    return request(`/api/runs${qs ? `?${qs}` : ''}`)
+  },
+  getRunTrace: (id) => request(`/api/runs/${id}/trace`),
 
   // Model catalog
   modelCatalog: () => request('/api/model-catalog'),

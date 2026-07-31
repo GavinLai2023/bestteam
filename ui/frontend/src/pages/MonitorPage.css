@@ -73,6 +73,68 @@ header p {
   cursor: progress;
 }
 
+.controls-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.cancel-button {
+  padding: 10px 22px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: 1px solid #dc2626;
+  border-radius: 8px;
+  background: #fff;
+  color: #dc2626;
+  cursor: pointer;
+}
+
+.cancel-button:disabled {
+  border-color: #fca5a5;
+  color: #fca5a5;
+  cursor: progress;
+}
+
+.run-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #374151;
+}
+
+.run-status-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #c7d2fe;
+  border-top-color: #4f46e5;
+  border-radius: 50%;
+  animation: run-status-spin 0.8s linear infinite;
+}
+
+@keyframes run-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.run-status-connection {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.run-status-stale {
+  width: 100%;
+  margin: 4px 0 0;
+}
+
 .trace h2,
 .result h2 {
   font-size: 1rem;
@@ -118,6 +180,27 @@ header p {
   border-left-color: #dc2626;
 }
 
+.event-run_cancelled {
+  border-left-color: #9ca3af;
+}
+
+.event-agent_started,
+.event-subagent_started {
+  border-left-color: #10b981;
+}
+
+.event-tool_started,
+.event-tool_completed {
+  border-left-color: #f59e0b;
+}
+
+.event-delegation_started,
+.event-delegation_completed,
+.event-subagent_completed,
+.event-agent_progress {
+  border-left-color: #8b5cf6;
+}
+
 .event-type {
   font-size: 0.72rem;
   font-weight: 700;
@@ -157,6 +240,11 @@ header p {
 .result-run_failed {
   background: #fef2f2;
   border-color: #fecaca;
+}
+
+.result-run_cancelled {
+  background: #f3f4f6;
+  border-color: #d1d5db;
 }
 
 .result p {

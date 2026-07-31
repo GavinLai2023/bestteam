@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import operator
+import time
 from typing import Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -47,6 +48,11 @@ class _TeamState(TypedDict):
     # per-model-call usage_metadata dicts recorded while that agent ran (see
     # `_record_usage`). Empty for `fake:` models, which don't report usage.
     usage: Annotated[Dict[str, List[Dict[str, Any]]], operator.or_]
+    # Same shape/reducer as `contributions`/`usage`: each entry is the list of
+    # granular TraceEvents (agent_started/tool_started/.../delegation_*)
+    # recorded while that agent (or manager) ran, in order. Flushed by
+    # `LangGraphAdapter.stream()` just before the node's `agent_completed`.
+    trace_events: Annotated[Dict[str, List[TraceEvent]], operator.or_]
     output: str
     # Recalled per-user memory for this run, injected into each agent's system
     # prompt (see core/memory.py). Plain (no reducer): nodes only read it, and
@@ -99,6 +105,18 @@ def _model_spec(agent: Agent) -> str:
     return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
 
 
+def _summarize(value: Any, limit: int = 200) -> str:
+    """Business-safe, length-bounded stringification for trace event `data`.
+
+    Used for tool results, delegated tasks, and subordinate outputs -- things
+    that can be arbitrarily long or (for a real tool) carry more detail than a
+    monitoring UI should render. Never used for chain-of-thought or raw
+    exception text, which never enter trace events at all.
+    """
+    text = str(value)
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
     """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
     if usage_sink is None:
@@ -123,6 +141,7 @@ def _run_agent(
     extra_system_prompt: str = "",
     require_tool_use_on_first_call: bool = False,
     usage_sink: Optional[List[Dict[str, Any]]] = None,
+    on_event: Optional[Callable[[TraceEvent], None]] = None,
 ) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
 
@@ -143,7 +162,16 @@ def _run_agent(
     binding, so the agent can still settle on a final text answer once it has
     gathered what it needs. If `usage_sink` is given, each model invocation's
     `usage_metadata` (when reported) is appended to it for usage metering.
+    If `on_event` is given, it's called with each granular `TraceEvent`
+    (agent_started/tool_started/tool_completed/agent_progress) as this turn
+    progresses -- `LangGraphAdapter.stream()` buffers these per-node and
+    flushes them just before that node's `agent_completed`.
     """
+
+    def _emit(event_type: str, data: Any = None) -> None:
+        if on_event is not None:
+            on_event(TraceEvent(type=event_type, workflow="", agent=agent.name, data=data))
+
     model = _resolve_model(agent.model)
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
@@ -165,10 +193,11 @@ def _run_agent(
         SystemMessage(content=system_prompt),
         HumanMessage(content=input_text),
     ]
+    _emit("agent_started", {"role": agent.role, "goal": agent.goal})
     response = first_call_model.invoke(messages)
     _record_usage(agent, response, usage_sink)
 
-    for _ in range(_MAX_TOOL_ITERATIONS):
+    for i in range(_MAX_TOOL_ITERATIONS):
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
             break
@@ -178,6 +207,8 @@ def _run_agent(
             if tool_fn is None:
                 result = f"Error: unknown tool '{call['name']}'"
             else:
+                _emit("tool_started", {"tool": call["name"]})
+                start = time.monotonic()
                 try:
                     result = tool_fn(**call["args"])
                 except Exception as exc:
@@ -185,7 +216,27 @@ def _run_agent(
                         "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
                     )
                     result = f"Error calling tool '{call['name']}': {exc}"
+                    _emit(
+                        "tool_completed",
+                        {
+                            "tool": call["name"],
+                            "success": False,
+                            "duration_ms": int((time.monotonic() - start) * 1000),
+                            "summary": "Tool call failed",
+                        },
+                    )
+                else:
+                    _emit(
+                        "tool_completed",
+                        {
+                            "tool": call["name"],
+                            "success": True,
+                            "duration_ms": int((time.monotonic() - start) * 1000),
+                            "summary": _summarize(result),
+                        },
+                    )
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+        _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = model.invoke(messages)
         _record_usage(agent, response, usage_sink)
 
@@ -201,6 +252,8 @@ def _make_delegate_tool(
     *,
     usage_sink: Optional[List[Dict[str, Any]]] = None,
     extra_system_prompt: str = "",
+    on_event: Optional[Callable[[TraceEvent], None]] = None,
+    manager_name: str = "",
 ) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
@@ -216,17 +269,57 @@ def _make_delegate_tool(
     `extra_system_prompt` (e.g. recalled user memory) is forwarded to the
     subordinate's run so delegates get the same memory preamble as
     sequential/parallel agents.
+    `on_event`, if given, receives delegation_started/subagent_started (before)
+    and subagent_completed/delegation_completed (after) around the subordinate's
+    own run, tagging the manager-side events with `manager_name` and the
+    subordinate-side events with the subordinate's own name.
     """
 
     def delegate(task: str) -> str:
         _logger.info("Manager delegated to '%s': %s", agent.name, task[:200])
-        return _run_agent(
+        if on_event is not None:
+            on_event(
+                TraceEvent(
+                    type="delegation_started",
+                    workflow="",
+                    agent=manager_name,
+                    data={"to": agent.name, "task_summary": _summarize(task)},
+                )
+            )
+            on_event(
+                TraceEvent(
+                    type="subagent_started",
+                    workflow="",
+                    agent=agent.name,
+                    data={"task_summary": _summarize(task)},
+                )
+            )
+        result = _run_agent(
             agent,
             task,
             extra_system_prompt=extra_system_prompt,
             require_tool_use_on_first_call=bool(agent.tools),
             usage_sink=usage_sink,
+            on_event=on_event,
         )
+        if on_event is not None:
+            on_event(
+                TraceEvent(
+                    type="subagent_completed",
+                    workflow="",
+                    agent=agent.name,
+                    data={"success": True, "summary": _summarize(result)},
+                )
+            )
+            on_event(
+                TraceEvent(
+                    type="delegation_completed",
+                    workflow="",
+                    agent=manager_name,
+                    data={"to": agent.name, "summary": _summarize(result)},
+                )
+            )
+        return result
 
     delegate.__name__ = f"delegate_to_{agent.name}"
     delegate.__doc__ = (
@@ -249,14 +342,20 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
 
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
+        sub_events: List[TraceEvent] = []
         text = _run_agent(
             agent,
             state["context"] or state["input"],
             extra_system_prompt=state.get("memory_preamble", ""),
             usage_sink=usage_sink,
+            on_event=sub_events.append,
         )
 
-        update: Dict[str, Any] = {"contributions": {agent.name: text}, "usage": {agent.name: usage_sink}}
+        update: Dict[str, Any] = {
+            "contributions": {agent.name: text},
+            "usage": {agent.name: usage_sink},
+            "trace_events": {agent.name: sub_events},
+        }
         if propagate_context:
             update["context"] = text
             update["output"] = text
@@ -308,11 +407,18 @@ def _hierarchical_node(team: Team):
 
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
+        sub_events: List[TraceEvent] = []
         preamble = state.get("memory_preamble", "")
         # Subordinates get the recalled user memory (like sequential/parallel
         # agents) but not the manager's delegation guidance, which is manager-only.
         delegate_tools = [
-            _make_delegate_tool(agent, usage_sink=usage_sink, extra_system_prompt=preamble)
+            _make_delegate_tool(
+                agent,
+                usage_sink=usage_sink,
+                extra_system_prompt=preamble,
+                on_event=sub_events.append,
+                manager_name=manager.name,
+            )
             for agent in team.agents
         ]
         extra_system_prompt = f"{preamble}\n\n{delegation_guidance}" if preamble else delegation_guidance
@@ -323,8 +429,15 @@ def _hierarchical_node(team: Team):
             extra_system_prompt=extra_system_prompt,
             require_tool_use_on_first_call=True,
             usage_sink=usage_sink,
+            on_event=sub_events.append,
         )
-        return {"contributions": {manager.name: text}, "usage": {manager.name: usage_sink}, "context": text, "output": text}
+        return {
+            "contributions": {manager.name: text},
+            "usage": {manager.name: usage_sink},
+            "trace_events": {manager.name: sub_events},
+            "context": text,
+            "output": text,
+        }
 
     return node
 
@@ -335,6 +448,7 @@ def _initial_state(input: str, memory_preamble: str = "") -> _TeamState:
         "context": "",
         "contributions": {},
         "usage": {},
+        "trace_events": {},
         "output": "",
         "memory_preamble": memory_preamble,
     }
@@ -474,7 +588,9 @@ class LangGraphAdapter(EngineAdapter):
                     if not isinstance(partial, dict):
                         continue
                     usage_by_agent = partial.get("usage", {})
+                    events_by_agent = partial.get("trace_events", {})
                     for agent_name, text in partial.get("contributions", {}).items():
+                        yield from events_by_agent.get(agent_name, [])
                         yield TraceEvent(
                             type="agent_completed",
                             workflow="",

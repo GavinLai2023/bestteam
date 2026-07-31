@@ -12,18 +12,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -47,7 +49,9 @@ from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
     Organization,
+    Run,
     SkillRecord,
+    TraceEventRecord,
     User,
     WorkflowRecord,
 )
@@ -538,6 +542,107 @@ def get_run(run_id: str, user: User = Depends(get_current_user)):
     return dataclasses.asdict(run)
 
 
+@app.get("/api/runs/{run_id}/trace")
+def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """The persisted trace-event history for a run (Activity page's run-detail
+    view). Serves finished/historical runs -- a still-`running` run's live
+    detail view uses the WebSocket stream instead; this endpoint doesn't merge
+    with the in-memory registry."""
+    run = db.get(Run, run_id)
+    is_platform_admin = user.is_admin and user.org_id is None
+    if run is None or (run.org_id != user.org_id and not is_platform_admin):
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    rows = (
+        db.query(TraceEventRecord)
+        .filter(TraceEventRecord.run_id == run_id)
+        .order_by(TraceEventRecord.seq)
+        .all()
+    )
+    return {
+        "events": [
+            {
+                "seq": row.seq,
+                "type": row.type,
+                "agent": row.agent,
+                "data": json.loads(row.data) if row.data is not None else None,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run(run_id: str, user: User = Depends(get_current_user)):
+    """Ask a running run to stop cooperatively (`registry.request_cancel`).
+    Cancellation only takes effect between yielded events -- a run mid-node
+    finishes that node first, so this doesn't stop instantly."""
+    run = registry.get(run_id)
+    is_platform_admin = user.is_admin and user.org_id is None
+    if run is None or (run.org_id != user.org_id and not is_platform_admin):
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    if not registry.request_cancel(run_id):
+        raise HTTPException(status_code=409, detail="Run already finished")
+    return JSONResponse(status_code=202, content={"status": "cancel_requested"})
+
+
+@app.get("/api/runs")
+def list_runs(
+    workflow: Optional[str] = None,
+    status: Optional[str] = None,
+    manual: Optional[bool] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Manual + automatic run history for the Activity page's Runs tab.
+    Lightweight rows only (no input/output) -- full detail is `GET
+    /api/runs/{id}` and `GET /api/runs/{id}/trace`.
+
+    Bounded (`limit`/`offset`, default 50, max 200): autonomous runs
+    accumulate indefinitely, so an unbounded query would grow DB work,
+    response size, and browser memory without limit as an org's history
+    grows. `total` is returned so a future "load more"/pager can work off it."""
+    query = db.query(Run).filter(Run.org_id == org.id)
+    if workflow:
+        query = query.filter(Run.workflow == workflow)
+    if status:
+        query = query.filter(Run.status == status)
+    if manual is not None:
+        if manual:
+            # `!=` is UNKNOWN (excluded) for a NULL username in SQL -- a
+            # legacy/pre-migration row with no recorded username is reported
+            # autonomous: False below, so it must match here too.
+            query = query.filter(or_(Run.username != email_trigger.TRIGGER_USERNAME, Run.username.is_(None)))
+        else:
+            query = query.filter(Run.username == email_trigger.TRIGGER_USERNAME)
+    if since is not None:
+        query = query.filter(Run.created_at >= since)
+    if until is not None:
+        query = query.filter(Run.created_at <= until)
+    total = query.count()
+    rows = query.order_by(Run.created_at.desc()).offset(offset).limit(limit).all()
+    return {
+        "runs": [
+            {
+                "id": row.id,
+                "workflow": row.workflow,
+                "status": row.status,
+                "started_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "username": row.username,
+                "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
+            }
+            for row in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.post("/api/runs/ws-ticket")
 def create_ws_ticket(user: User = Depends(get_current_user)) -> Dict[str, str]:
     """Exchange the caller's bearer token for a short-lived, single-use ticket
@@ -623,7 +728,7 @@ async def stream_run(websocket: WebSocket, run_id: str, ticket: Optional[str] = 
                     await websocket.close(code=4404)
                     return
             await websocket.send_json(event)
-            if event["type"] in ("run_completed", "run_failed"):
+            if event["type"] in ("run_completed", "run_failed", "run_cancelled"):
                 break
     except WebSocketDisconnect:
         pass

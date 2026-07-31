@@ -3,6 +3,7 @@ import Layout from './components/Layout'
 import WizardLayout from './components/WizardLayout'
 import LoginPage from './pages/LoginPage'
 import MonitorPage from './pages/MonitorPage'
+import ActivityPage from './pages/ActivityPage'
 import AdvancedPage from './pages/AdvancedPage'
 import MemoryPage from './pages/MemoryPage'
 import AccountsPage from './pages/AccountsPage'
@@ -45,6 +46,7 @@ function App() {
           <Route element={<RequireOrgMember />}>
             <Route path="/" element={<MonitorPage />} />
             <Route path="/teams" element={<SessionsPage />} />
+            <Route path="/activity" element={<ActivityPage />} />
 
             <Route path="/wizard" element={<WizardLayout />}>
               <Route index element={<IntentPage />} />
