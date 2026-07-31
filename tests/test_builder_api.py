@@ -612,3 +612,50 @@ def test_with_model_catalog_appends_catalog_text_when_present():
     assert with_catalog.startswith("Requirements text\n\n")
     assert "openai:gpt-4o-mini" in with_catalog
     assert "Quick Assistant" in with_catalog
+
+
+def test_delete_never_deployed_session_removes_it(client, tmp_path, monkeypatch):
+    from ui.backend import builder as builder_module
+
+    monkeypatch.setattr(builder_module, "_SESSIONS_DIR", tmp_path)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "abandoned idea"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    workspace = tmp_path / session_id
+    assert workspace.exists()
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 204
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 404
+    assert not workspace.exists()
+
+
+def test_delete_deployed_session_is_refused(client):
+    session_id = _make_deployable_session(client)
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 409
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+
+
+def test_delete_unknown_session_is_404(client):
+    assert client.delete("/api/builder/sessions/does-not-exist").status_code == 404
+
+
+def test_delete_another_orgs_session_is_404(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "Org A's bot"}).json()["id"]
+    bob_token = create_user_and_login(client, username="bob", org="orgb")
+    bob = {"Authorization": f"Bearer {bob_token}"}
+
+    assert client.delete(f"/api/builder/sessions/{session_id}", headers=bob).status_code == 404
+    # Still there -- the owning org can still see it (delete didn't leak through).
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+
+
+def test_session_dict_exposes_workflow_id(client):
+    session_id = _make_deployable_session(client)
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is None
+
+    client.post(f"/api/builder/sessions/{session_id}/deploy")
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is not None

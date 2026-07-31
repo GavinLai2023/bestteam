@@ -9,6 +9,8 @@ intent -> requirements -> spec -> solution -> testing -> deployed.
 
 from __future__ import annotations
 
+import logging
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -24,7 +26,7 @@ from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
-from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
+from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User
@@ -47,6 +49,8 @@ from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
 router = APIRouter(prefix="/api/builder/sessions", tags=["builder"], dependencies=[Depends(get_current_user)])
+
+logger = logging.getLogger(__name__)
 
 _SESSIONS_DIR = Path(__file__).parent / "data" / "builder_sessions"
 
@@ -85,6 +89,7 @@ def _session_to_dict(
         "requirements_json": session.requirements_json,
         "specification_json": session.specification_json,
         "status": session.status,
+        "workflow_id": session.workflow_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
         "created_at": session.created_at.isoformat(),
@@ -290,6 +295,34 @@ def get_builder_session(
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
     return _session_to_dict(_get_session_or_404(db, session_id, org.id), db, org.id)
+
+
+@router.delete("/{session_id}", status_code=204)
+def delete_builder_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> None:
+    """Delete a session that was never deployed (`workflow_id IS NULL`) --
+    the "abandoned draft" case. A session that has ever gone live has no
+    delete path here (see docs/superpowers/specs/2026-07-31-draft-session-deletion-design.md);
+    the frontend never offers this for a `workflow_id`-linked session, but
+    this guard holds even if the route is called directly."""
+    session = _get_session_or_404(db, session_id, org.id)
+    if session.workflow_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This team is live -- it can't be deleted from here yet.",
+        )
+    delete_session(db, session_id)
+    try:
+        shutil.rmtree(_SESSIONS_DIR / session_id)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "Failed to remove workspace directory for deleted session %s", session_id, exc_info=True
+        )
 
 
 @router.post("/{session_id}/requirements")
