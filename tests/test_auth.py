@@ -499,7 +499,7 @@ def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir, mo
 
     with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
         event = ws.receive_json()
-        assert event["type"] == "run_started"
+        assert event["type"] == "run_queued"
 
 
 def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir, monkeypatch):

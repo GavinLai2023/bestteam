@@ -85,11 +85,12 @@ implemented** — don't assume they exist:
   a user's memory via the admin-only Memory page (`/api/memory`); there's no
   manual add/edit and no retention/quota policy. Disabled by default
   (`BESTTEAM_MEMORY_DB`) — see `core/memory.py` and `src/bestteam/core/CLAUDE.md`.
-- **Persistent run state**: `RunRegistry` remains the authoritative in-memory
-  live layer (runs vanish on restart; no history API). A `runs` row is now
-  persisted per run so usage/trace FKs are valid (CR-012), but `trace_events`
-  is still not persisted and the registry isn't rehydrated from the DB — see
-  `ui/backend/db/CLAUDE.md`.
+- **Live run state (`RunRegistry`) isn't rehydrated from the DB on restart**:
+  a killed/restarted process still loses in-flight/live run state. History no
+  longer disappears, though — every `trace_events` row is now persisted per
+  run alongside `usage_records`, with a read API (`GET /api/runs`,
+  `GET /api/runs/{id}/trace`) and cooperative cancellation
+  (`POST /api/runs/{id}/cancel`) — see `ui/backend/db/CLAUDE.md`.
 - **General-purpose cache**: only local per-process caches exist — see
   `ui/backend/CLAUDE.md`.
 - **CrewAI adapter, DEBATE collaboration mode, deployment templates**:

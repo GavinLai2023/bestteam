@@ -17,6 +17,7 @@ function MonitorPage() {
   const [error, setError] = useState(null)
   const [connectionStatus, setConnectionStatus] = useState('idle') // idle | connecting | connected | disconnected
   const [cancelling, setCancelling] = useState(false)
+  const [hasRunId, setHasRunId] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [secondsSinceLastEvent, setSecondsSinceLastEvent] = useState(0)
   const wsRef = useRef(null)
@@ -79,13 +80,18 @@ function MonitorPage() {
     setCancelling(false)
     setElapsedSeconds(0)
     setSecondsSinceLastEvent(0)
+    setHasRunId(false)
     wsRef.current?.close()
+    // Clear immediately -- otherwise a Stop click in the window before the
+    // new run id arrives below would silently target the previous run.
+    runIdRef.current = null
     runStartedAtRef.current = Date.now()
     lastEventAtRef.current = Date.now()
 
     try {
       const { run_id: runId } = await api.createRun(selected, input)
       runIdRef.current = runId
+      setHasRunId(true)
 
       const { ticket } = await api.createWsTicket()
       const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
@@ -172,7 +178,7 @@ function MonitorPage() {
           <button onClick={startRun} disabled={status === 'running' || !selected || !input.trim()}>
             {status === 'running' ? 'Running…' : 'Run'}
           </button>
-          {status === 'running' && (
+          {status === 'running' && hasRunId && (
             <button type="button" className="cancel-button" onClick={cancelRun} disabled={cancelling}>
               {cancelling ? 'Stopping…' : 'Stop'}
             </button>

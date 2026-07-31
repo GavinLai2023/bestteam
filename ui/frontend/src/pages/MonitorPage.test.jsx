@@ -152,6 +152,34 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.queryByText('Stop')).not.toBeInTheDocument()
   })
 
+  it('does not show Stop until the new run id exists (avoids a stale-target race)', async () => {
+    api.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
+    let resolveCreateRun
+    api.createRun.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreateRun = resolve
+      }),
+    )
+    api.createWsTicket.mockResolvedValue({ ticket: 't' })
+
+    renderPage()
+    await screen.findByRole('option', { name: 'wf' })
+    fireEvent.change(screen.getByLabelText('Input'), { target: { value: 'do the thing' } })
+    fireEvent.click(screen.getByText('Run'))
+
+    expect(await screen.findByText('Running…')).toBeInTheDocument()
+    expect(screen.queryByText('Stop')).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveCreateRun({ run_id: 'run-1' })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('Stop')).toBeInTheDocument()
+  })
+
   it('renders object-shaped tool_completed data without crashing', async () => {
     const ws = await startARun()
 

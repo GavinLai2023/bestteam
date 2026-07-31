@@ -29,6 +29,24 @@ _logger = logging.getLogger(__name__)
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
+# A node's own buffered events (see adapters/langgraph_adapter.py) -- these
+# describe paid work already done by the time any of them is yielded, so a
+# cancellation check must be deferred across all of them until that node's
+# own agent_completed (which carries its usage). Checking cancellation is
+# safe for every OTHER event type -- see the checkpoint below.
+_BUFFERED_NODE_EVENT_TYPES = frozenset(
+    {
+        "agent_started",
+        "agent_progress",
+        "tool_started",
+        "tool_completed",
+        "delegation_started",
+        "delegation_completed",
+        "subagent_started",
+        "subagent_completed",
+    }
+)
+
 
 def _safe_record_usage(db: Session, **kwargs: Any) -> None:
     """Persist one usage entry, isolating failures from run status (review r5 #1).
@@ -198,16 +216,16 @@ def run_in_background(
                 # before dispatch as a durable activity record; keep it.
                 run_row.workflow = getattr(workflow, "name", "") or run_row.workflow
             db.commit()
+        # The SDK has no notion of "queued" (it only starts once `.stream()`
+        # begins), so this bookend is synthesized here -- published to the
+        # live registry the same way every other event is, so a WS
+        # subscriber's replay log agrees with the persisted trace_events
+        # history below (review finding P3: this used to be persisted only,
+        # leaving the live log starting at run_started).
+        run_queued_event = TraceEvent(type="run_queued", workflow=getattr(workflow, "name", ""), data=None)
+        registry.publish(run_id, dataclasses.asdict(run_queued_event))
         if db is not None:
-            # Mirrors the run_queued event `RunRegistry.create()` seeds into the
-            # live/WS replay log (registry.py) -- the SDK has no notion of
-            # "queued", so it's synthesized identically on both sides here.
-            _safe_record_trace_event(
-                db,
-                run_id=run_id,
-                seq=seq,
-                event=TraceEvent(type="run_queued", workflow=getattr(workflow, "name", ""), data=None),
-            )
+            _safe_record_trace_event(db, run_id=run_id, seq=seq, event=run_queued_event)
             seq += 1
         def _mark_cancelled() -> None:
             # Cooperative cancellation only, never a forceful thread kill (not
@@ -272,7 +290,24 @@ def run_in_background(
                             output_tokens=entry.get("output_tokens", 0),
                             org_id=org_id,
                         )
-                if not terminal_seen and registry.cancel_requested(run_id):
+                # Skip the cancellation check only for a node's own buffered
+                # granular events (tool_started/tool_completed/etc., flushed
+                # together right before that node's agent_completed -- see
+                # adapters/langgraph_adapter.py). The paid model/tool calls
+                # they describe already happened, so stopping between them and
+                # their agent_completed would silently drop that node's usage
+                # from usage_records (review finding P1). Every other event --
+                # notably run_started, reached before any node has started --
+                # is a safe boundary and must still be checked, or a
+                # cancellation already known at that point (e.g. requested
+                # during compile/memory-recall, before run_started was even
+                # yielded) goes unhonored for a whole avoidable extra paid
+                # agent turn (round-2 review P1).
+                if (
+                    not terminal_seen
+                    and event.type not in _BUFFERED_NODE_EVENT_TYPES
+                    and registry.cancel_requested(run_id)
+                ):
                     stream_iter.close()
                     _mark_cancelled()
                     break

@@ -7,6 +7,21 @@ import './ActivityPage.css'
 
 const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 
+// How often to silently refresh the Runs tab while it still shows a
+// `running` row -- otherwise a row's status/badge would go stale the moment
+// its run finishes, since the list is otherwise only fetched on tab/filter
+// change.
+const RUN_POLL_INTERVAL_MS = 5000
+
+function runsQueryParams(filters) {
+  const params = {}
+  if (filters.workflow) params.workflow = filters.workflow
+  if (filters.manual === 'true') params.manual = true
+  if (filters.manual === 'false') params.manual = false
+  if (filters.status) params.status = filters.status
+  return params
+}
+
 export default function ActivityPage() {
   const [tab, setTab] = useState('automations') // automations | runs
   const [workflows, setWorkflows] = useState([])
@@ -15,6 +30,7 @@ export default function ActivityPage() {
   const [error, setError] = useState(null)
   const [filters, setFilters] = useState({ workflow: '', manual: '', status: '' })
   const [selectedRun, setSelectedRun] = useState(null) // { id, status } | null
+  const hasRunningRun = runs.some((run) => run.status === 'running')
 
   useEffect(() => {
     api
@@ -26,13 +42,8 @@ export default function ActivityPage() {
   useEffect(() => {
     if (tab !== 'runs') return undefined
     let ignore = false
-    const params = {}
-    if (filters.workflow) params.workflow = filters.workflow
-    if (filters.manual === 'true') params.manual = true
-    if (filters.manual === 'false') params.manual = false
-    if (filters.status) params.status = filters.status
     api
-      .listRuns(params)
+      .listRuns(runsQueryParams(filters))
       .then((d) => {
         if (ignore) return
         setRuns(d.runs)
@@ -48,6 +59,26 @@ export default function ActivityPage() {
       ignore = true
     }
   }, [tab, filters])
+
+  useEffect(() => {
+    if (tab !== 'runs' || !hasRunningRun) return undefined
+    let ignore = false
+    const id = setInterval(() => {
+      api
+        .listRuns(runsQueryParams(filters))
+        .then((d) => {
+          // A poll started under the previous filters can resolve after
+          // filters changed (this effect already cleaned up) -- applying it
+          // would show rows that don't match the currently selected filters.
+          if (!ignore) setRuns(d.runs)
+        })
+        .catch(() => {})
+    }, RUN_POLL_INTERVAL_MS)
+    return () => {
+      ignore = true
+      clearInterval(id)
+    }
+  }, [tab, filters, hasRunningRun])
 
   return (
     <div className="wizard">

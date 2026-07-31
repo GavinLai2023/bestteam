@@ -231,10 +231,10 @@ from `/advanced`).
 ### T4-5 · Deploy page — Launch the team
 1. From Confirm, continue to deploy → **"Ready to go live?"** with the workflow name.
 2. Click **Launch my team**.
-3. **Expected:** `"Your team is live 🎉"` and a **Talk to your team** button.
+3. **Expected:** `"Your team is live 🎉"` and a **Run a team** button.
 
-### T4-6 · Talk to your team (post-deploy)
-1. Click **Talk to your team**.
+### T4-6 · Run a team (post-deploy)
+1. Click **Run a team**.
 2. **Expected:** Redirected to Monitor with the new workflow pre-selected.
 3. Enter an input and Run → output in the Live trace.
 

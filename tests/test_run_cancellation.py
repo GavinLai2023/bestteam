@@ -115,6 +115,100 @@ def test_cancel_mid_stream_stops_before_the_next_unfetched_event():
     assert registry.get(run.id).status == "cancelled"
 
 
+class _CancelBetweenBufferedEventAndAgentCompleted:
+    """Reproduces the P1 usage-loss bug: cancellation lands between a node's
+    buffered granular event (e.g. tool_completed) and the agent_completed
+    that follows it and carries that node's usage. The paid call already
+    happened by the time either event is yielded, so usage must survive."""
+
+    name = "wf"
+
+    def __init__(self, run_id, events):
+        self._run_id = run_id
+        self._events = events
+
+    def stream(self, *args, **kwargs):
+        yield self._events[0]  # run_started
+        registry.request_cancel(self._run_id)
+        yield self._events[1]  # tool_completed (buffered, same node)
+        yield self._events[2]  # agent_completed carrying usage for that node
+        yield self._events[3]  # next node's event -- must never be delivered
+
+
+def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(db_session_factory=None):
+    from ui.backend.db.usage import list_usage_for_run
+
+    engine = _engine()
+    Session = session_factory(engine)
+    run = registry.create("wf", "in")
+    events = [
+        TraceEvent(type="run_started", workflow="wf"),
+        TraceEvent(type="tool_completed", workflow="wf", agent="a", data={"tool": "t", "success": True}),
+        TraceEvent(
+            type="agent_completed",
+            workflow="wf",
+            agent="a",
+            data="a-output",
+            usage=[{"model": "m", "input_tokens": 10, "output_tokens": 5}],
+        ),
+        TraceEvent(type="agent_completed", workflow="wf", agent="b", data="should-not-be-delivered"),
+    ]
+
+    run_in_background(run.id, _CancelBetweenBufferedEventAndAgentCompleted(run.id, events), "in", engine=engine)
+
+    with Session() as s:
+        row = s.get(Run, run.id)
+        assert row.status == "cancelled"
+        rows = s.query(TraceEventRecord).filter_by(run_id=run.id).order_by(TraceEventRecord.seq).all()
+        usage_records = list_usage_for_run(s, run.id)
+
+    types = [r.type for r in rows]
+    assert types == ["run_queued", "run_started", "tool_completed", "agent_completed", "run_cancelled"]
+    assert len(usage_records) == 1, "usage for the already-completed node must not be dropped by cancellation"
+    assert usage_records[0].input_tokens == 10
+    assert usage_records[0].output_tokens == 5
+
+
+class _CancelDuringPreStreamSetup:
+    """Cancellation lands during workflow setup (compile/memory-recall) --
+    before the generator ever yields its first event. Must be honored right
+    after run_started, before entering the first agent's paid work -- not
+    deferred until that agent's own agent_completed (round-2 review P1)."""
+
+    name = "wf"
+
+    def __init__(self, run_id, events):
+        self._run_id = run_id
+        self._events = events
+
+    def stream(self, *args, **kwargs):
+        registry.request_cancel(self._run_id)
+        yield self._events[0]  # run_started
+        yield self._events[1]  # agent_started (buffered, node1) -- must never be reached
+        yield self._events[2]  # agent_completed (node1) -- must never be reached (a paid call)
+
+
+def test_cancel_during_pre_stream_setup_stops_before_the_first_agent():
+    engine = _engine()
+    Session = session_factory(engine)
+    run = registry.create("wf", "in")
+    events = [
+        TraceEvent(type="run_started", workflow="wf"),
+        TraceEvent(type="agent_started", workflow="wf", agent="a", data={"role": "R", "goal": "G"}),
+        TraceEvent(type="agent_completed", workflow="wf", agent="a", data="should-not-run"),
+    ]
+
+    run_in_background(run.id, _CancelDuringPreStreamSetup(run.id, events), "in", engine=engine)
+
+    with Session() as s:
+        rows = s.query(TraceEventRecord).filter_by(run_id=run.id).order_by(TraceEventRecord.seq).all()
+    types = [r.type for r in rows]
+    assert types == ["run_queued", "run_started", "run_cancelled"], (
+        "cancellation known before the first agent started must stop there, "
+        "not run a whole avoidable extra paid agent turn first"
+    )
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)

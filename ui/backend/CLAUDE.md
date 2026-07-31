@@ -159,6 +159,53 @@ run that's gone missing in that window, and `stream_run` closes 4404 on that
 `None` the same as any other unknown-run case. Spec:
 `docs/superpowers/specs/2026-07-22-run-registry-bounded-eviction-design.md`.
 
+## Granular trace events, cancellation, and run history (Activity page)
+
+The monitoring dashboard's live/historical trace is more than
+`run_started -> agent_completed -> run_completed`: `adapters/langgraph_adapter.py`
+buffers per-node events (`agent_started`, `tool_started`/`tool_completed`,
+`agent_progress`, and, for HIERARCHICAL delegation,
+`delegation_started`/`subagent_started`/`subagent_completed`/`delegation_completed`)
+into a per-node list and flushes it immediately before that node's
+`agent_completed`. `tool_completed`'s `data` carries a truncated,
+business-safe `summary` -- never raw tool args or exception text (see
+`src/bestteam/core/trace.py`'s `TraceEvent` docstring for the full shape of
+each type). `runtime.py::run_in_background` persists every event as a
+`TraceEventRecord` in `seq` order (see `ui/backend/db/CLAUDE.md`) and
+publishes a synthesized `run_queued` bookend to the live registry the same
+way every other event is (not just to the DB), so a live WS subscriber's
+replay log and the persisted historical trace start at the same event.
+
+**Cooperative cancellation** (`POST /api/runs/{id}/cancel`,
+`registry.request_cancel`/`cancel_requested` backed by a per-run
+`threading.Event`) is checked in `run_in_background` between yielded
+events -- never a forceful thread kill, since a node already executing
+can't be safely interrupted mid-`workflow.stream()`. The check is skipped
+for a node's own buffered event types (listed above): those describe paid
+work that's already happened by the time any of them is yielded, so
+stopping between them and their `agent_completed` would silently drop that
+node's usage from `usage_records`. Every other event type (notably
+`run_started`, reached before any node has started) is a safe checkpoint --
+skipping it too would let a cancellation already known before the first
+agent starts (e.g. requested during compile/memory-recall) run one whole
+avoidable extra paid agent turn before stopping. `stream_iter.close()` is
+safe to call there because `GeneratorExit` is a `BaseException`, not caught
+by the existing `except BestTeamError`/`except Exception` handlers.
+
+**Frontend**: the monitoring page (`Run a team`) shows a running timer,
+WebSocket connection status, a "waiting for the agent/model" hint before the
+first real progress event, a stale-run banner past 20s with no new event,
+and a Stop button (gated on the new run's id having actually arrived --
+`runIdRef` is cleared and re-armed per run so an early click can't silently
+no-op or target the previous run). The **Activity** page's Runs tab lists
+history via `GET /api/runs` and polls it every 5s while any listed row is
+still `running` (stopping once none are; an effect-local `ignore` flag
+guards against a stale poll response from before a filter change
+overwriting the current, correctly-filtered rows) -- clicking a run opens
+its detail (`RunDetail.jsx`): a `running` run streams live over the same
+WebSocket the monitor page uses, anything else fetches
+`GET /api/runs/{id}/trace` once (no live/historical merge, by design).
+
 ## Backend API (`ui/backend/`)
 
 Beyond the existing monitoring endpoints (`/api/health`, `/api/workflows`,

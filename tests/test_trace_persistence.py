@@ -36,6 +36,21 @@ def _workflow(tmp_path, response="done"):
     return validate_specification(spec, source=tmp_path / "w.yaml")
 
 
+def test_run_in_background_publishes_run_queued_to_the_live_registry_log(tmp_path):
+    # The DB-persisted trace_events includes a synthesized run_queued bookend
+    # (see test below); the live registry log a WS subscriber replays from
+    # must carry the same event, or a live view starts at run_started while
+    # the historical view starts at run_queued.
+    engine = _engine()
+    wf = _workflow(tmp_path)
+    run = registry.create("w", "in")
+
+    run_in_background(run.id, wf, "in", engine=engine)
+
+    types = [e["type"] for e in registry.get(run.id).events]
+    assert types[0] == "run_queued"
+
+
 def test_run_in_background_persists_trace_events_in_seq_order(tmp_path):
     engine = _engine()
     Session = session_factory(engine)
@@ -131,6 +146,72 @@ def test_get_run_trace_unknown_run_is_404(client):
     resp = client.get("/api/runs/does-not-exist/trace")
 
     assert resp.status_code == 404
+
+
+def test_list_runs_started_at_is_utc_qualified(client):
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.commit()
+
+    resp = client.get("/api/runs")
+
+    started_at = resp.json()["runs"][0]["started_at"]
+    assert started_at.endswith("+00:00") or started_at.endswith("Z"), (
+        f"started_at {started_at!r} must carry a UTC offset, or new Date() on the "
+        "frontend misreads it as browser-local time"
+    )
+
+
+def test_list_runs_manual_filter_includes_null_username_rows(client):
+    # A legacy/pre-migration run with no recorded username is classified
+    # autonomous: False in the unfiltered response (it isn't the email
+    # trigger), so manual=true must include it too -- SQL's
+    # `username != 'email-trigger'` is UNKNOWN (excluded) for a NULL username.
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-null-username", workflow="wf-a", input="in", status="completed", org_id=org_id, username=None))
+        db.commit()
+
+    resp = client.get("/api/runs")
+    row = next(r for r in resp.json()["runs"] if r["id"] == "r-null-username")
+    assert row["autonomous"] is False
+
+    resp = client.get("/api/runs", params={"manual": "true"})
+    assert {r["id"] for r in resp.json()["runs"]} == {"r-null-username"}
+
+    resp = client.get("/api/runs", params={"manual": "false"})
+    assert resp.json()["runs"] == []
+
+
+def test_list_runs_is_paginated(client):
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add_all(
+            [
+                Run(id=f"r-{i}", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test")
+                for i in range(3)
+            ]
+        )
+        db.commit()
+
+    resp = client.get("/api/runs", params={"limit": 2})
+    body = resp.json()
+    assert len(body["runs"]) == 2
+    assert body["total"] == 3
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+
+    resp = client.get("/api/runs", params={"limit": 2, "offset": 2})
+    body = resp.json()
+    assert len(body["runs"]) == 1
+    assert body["total"] == 3
+
+
+def test_list_runs_defaults_to_a_bounded_page(client):
+    resp = client.get("/api/runs")
+
+    assert resp.json()["limit"] == 50
 
 
 def test_list_runs_filters_by_manual_workflow_and_status(client):

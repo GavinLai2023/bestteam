@@ -15,11 +15,28 @@ commands; see `ui/backend/CLAUDE.md` for the API this frontend talks to.
 ## Frontend — wizard UI (Phase 4, `ui/frontend/src/`)
 
 `react-router-dom` (`main.jsx` wraps `<App/>` in `<BrowserRouter>`) drives
-three areas, all under a shared `<Layout/>` nav shell (`components/Layout.jsx`):
+several areas, all under a shared `<Layout/>` nav shell (`components/Layout.jsx`;
+customer nav is Build a team / My teams / Run a team / Activity):
 
-- **`/`** — `pages/MonitorPage.jsx` (the original runtime-monitoring
-  dashboard, unchanged apart from reading an optional `?workflow=` query
-  param via `useSearchParams` to pre-select a workflow).
+- **`/`** — `pages/MonitorPage.jsx`, "Run a team" (renamed from "Talk to
+  your team"): reads an optional `?workflow=` query param via
+  `useSearchParams` to pre-select a workflow, shows a running timer/WS
+  connection status/"waiting for the agent" hint/stale-run banner while a
+  run is in flight, and a Stop button (`POST /api/runs/{id}/cancel`) gated
+  on the new run's id having actually arrived, so an early click can't
+  silently no-op or target the previous run. Live events render via the
+  shared `lib/traceEvents.js` helpers (`EVENT_LABELS`/`RESULT_LABELS`/
+  `TERMINAL_TYPES`/`renderEventData`), also used by `components/RunDetail.jsx`.
+- **`/activity`** — `pages/ActivityPage.jsx`: an Automations tab (unchanged,
+  `components/EmailTriggerActivity.jsx`) and a Runs tab (`GET /api/runs`,
+  filterable by team/manual-or-automatic/status; polls every 5s while a
+  listed row is still `running`, guarded against a stale poll response
+  clobbering a since-changed filter's results). Clicking a run opens
+  `components/RunDetail.jsx` in a panel: a `running` run streams live over
+  the same WebSocket `MonitorPage` uses, anything else fetches
+  `GET /api/runs/{id}/trace` once (no live/historical merge). See
+  `ui/backend/CLAUDE.md` ("Granular trace events, cancellation, and run
+  history").
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.
@@ -51,7 +68,7 @@ three areas, all under a shared `<Layout/>` nav shell (`components/Layout.jsx`):
     drafted JSON directly" path via `BulletEditor`/raw field edits;
     `TestPage` runs `api.createTestRun()` then streams the same
     `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `DeployPage` calls
-    `api.deploySession()` and links to `/?workflow=<name>` for "Talk to your
+    `api.deploySession()` and links to `/?workflow=<name>` for "Run a
     team").
   - `components/TeamFlow.jsx` + `EmployeeCard.jsx` — the customer-facing
     "meet your team" diagram: renders `Specification.teams`/`agents` as
@@ -87,8 +104,8 @@ org}`) and render `null` while it loads:
 Because `is_admin` and org membership are mutually exclusive (CR-030), the two
 guards can't bounce a user between them — each redirect terminates in one hop.
 `Layout.jsx` mirrors this: the **Accounts**/**Advanced**/**Memory** links show
-only when `isAdmin`, the **Build a team**/**My teams**/**Talk to your team**
-links only when `!isAdmin`. `pages/AccountsPage.jsx` is the admin org/user
+only when `isAdmin`, the **Build a team**/**My teams**/**Run a team**/
+**Activity** links only when `!isAdmin`. `pages/AccountsPage.jsx` is the admin org/user
 manager (create orgs, deactivate/reactivate them, and create/reset-password/
 move/delete each org's member; platform accounts are shown read-only — the
 `/api/admin` surface keeps promote/demote and platform-account lifecycle in the

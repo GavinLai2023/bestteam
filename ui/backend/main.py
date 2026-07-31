@@ -17,15 +17,15 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -593,12 +593,19 @@ def list_runs(
     manual: Optional[bool] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ):
     """Manual + automatic run history for the Activity page's Runs tab.
     Lightweight rows only (no input/output) -- full detail is `GET
-    /api/runs/{id}` and `GET /api/runs/{id}/trace`."""
+    /api/runs/{id}` and `GET /api/runs/{id}/trace`.
+
+    Bounded (`limit`/`offset`, default 50, max 200): autonomous runs
+    accumulate indefinitely, so an unbounded query would grow DB work,
+    response size, and browser memory without limit as an org's history
+    grows. `total` is returned so a future "load more"/pager can work off it."""
     query = db.query(Run).filter(Run.org_id == org.id)
     if workflow:
         query = query.filter(Run.workflow == workflow)
@@ -606,26 +613,33 @@ def list_runs(
         query = query.filter(Run.status == status)
     if manual is not None:
         if manual:
-            query = query.filter(Run.username != email_trigger.TRIGGER_USERNAME)
+            # `!=` is UNKNOWN (excluded) for a NULL username in SQL -- a
+            # legacy/pre-migration row with no recorded username is reported
+            # autonomous: False below, so it must match here too.
+            query = query.filter(or_(Run.username != email_trigger.TRIGGER_USERNAME, Run.username.is_(None)))
         else:
             query = query.filter(Run.username == email_trigger.TRIGGER_USERNAME)
     if since is not None:
         query = query.filter(Run.created_at >= since)
     if until is not None:
         query = query.filter(Run.created_at <= until)
-    rows = query.order_by(Run.created_at.desc()).all()
+    total = query.count()
+    rows = query.order_by(Run.created_at.desc()).offset(offset).limit(limit).all()
     return {
         "runs": [
             {
                 "id": row.id,
                 "workflow": row.workflow,
                 "status": row.status,
-                "started_at": row.created_at.isoformat(),
+                "started_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 "username": row.username,
                 "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
             }
             for row in rows
-        ]
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
     }
 
 

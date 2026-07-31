@@ -26,7 +26,7 @@ the org/user subset of it.
 | Term | What it is | `org_id` | `is_admin` |
 |------|-----------|:--------:|:----------:|
 | **Organization** | A customer tenant. All customer data (teams, runs, mailbox, memory) is row-isolated by org. The `default` org is seeded automatically. | — | — |
-| **Org member** | A customer login that belongs to exactly one organization. Uses the customer UI: *Build a team*, *My teams*, *Talk to your team*. | set | `false` |
+| **Org member** | A customer login that belongs to exactly one organization. Uses the customer UI: *Build a team*, *My teams*, *Run a team*, *Activity*. | set | `false` |
 | **Platform operator** | An org-less account. Candidate for admin; runs the deployment rather than using a team. | `NULL` | `false` until promoted |
 | **Platform admin** | A platform operator that has been `promote`d. Gets the **Advanced** (config) and **Memory** pages and can target any org's config via `?org=`. | `NULL` | `true` |
 
@@ -112,8 +112,8 @@ python -m ui.backend.admin create-org acme --display-name "Acme Corp"
 python -m ui.backend.admin create-user alice --org acme    # prompts for a password
 ```
 
-`alice` can now log in and use *Build a team* / *My teams* / *Talk to your team*
-within Acme. If Acme's teams use email, connect its mailbox (§5).
+`alice` can now log in and use *Build a team* / *My teams* / *Run a team* /
+*Activity* within Acme. If Acme's teams use email, connect its mailbox (§5).
 
 ### 4.3 Single-customer deployment
 

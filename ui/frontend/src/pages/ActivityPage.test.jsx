@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import ActivityPage from './ActivityPage'
@@ -56,6 +56,90 @@ describe('ActivityPage', () => {
     })
 
     expect(api.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('refreshes the run list while a run is still shown as running', async () => {
+    vi.useFakeTimers()
+    api.listRuns
+      .mockResolvedValueOnce({
+        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      })
+      .mockResolvedValueOnce({
+        runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('running', { selector: '.status-badge' })).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(screen.getByText('completed', { selector: '.status-badge' })).toBeInTheDocument()
+    expect(api.listRuns).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores a stale poll response that resolves after the filters changed', async () => {
+    vi.useFakeTimers()
+    let resolveStalePoll
+    const stalePollPromise = new Promise((resolve) => {
+      resolveStalePoll = resolve
+    })
+
+    api.listRuns
+      .mockResolvedValueOnce({
+        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      })
+      .mockReturnValueOnce(stalePollPromise)
+      .mockResolvedValueOnce({
+        runs: [{ id: 'r2', workflow: 'wf-b', status: 'completed', started_at: '2026-07-31T11:05:00Z', autonomous: false }],
+      })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
+
+    // The poll tick fires; its request is left pending (stalePollPromise).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Change filters while that poll request is still in flight.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Team'), { target: { value: 'wf-b' } })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('heading', { name: 'wf-b' })).toBeInTheDocument()
+
+    // The stale poll now resolves, carrying pre-filter-change data.
+    await act(async () => {
+      resolveStalePoll({
+        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('heading', { name: 'wf-b' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'wf-a' })).not.toBeInTheDocument()
   })
 
   it('clicking a run opens its detail via getRunTrace', async () => {

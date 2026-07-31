@@ -161,13 +161,25 @@ runs), `init_db(engine)` (`Base.metadata.create_all`), and
 `ui/backend/data/bestteam.db`, override with `BESTTEAM_DB_PATH`) and a
 `get_db()` FastAPI dependency.
 
-## Known limitation: persistent run state
+## Run persistence and history API
 
-`ui/backend/registry.py`'s `RunRegistry` is still the authoritative in-process
-live layer — runs vanish on restart and there's no run-history API. As of
-CR-012, `ui/backend/runtime.py::run_in_background` does persist one `runs` row
-per run (committed before any usage record and updated to its terminal
-status/output), so `usage_records`/`trace_events` foreign keys reference a real
-row rather than a phantom id. Still deferred to Phase 5: persisting
-`trace_events`, rehydrating `RunRegistry` from the DB across restarts, a
-history API, and enabling SQLite foreign-key enforcement.
+`ui/backend/registry.py`'s `RunRegistry` is still the authoritative
+in-process **live** layer — an in-flight run's live state is lost on
+restart, and it isn't rehydrated from the DB. Since CR-012,
+`ui/backend/runtime.py::run_in_background` persists one `runs` row per run
+(committed before any usage record and updated to its terminal
+status/output), and now also persists every `TraceEvent` as a `trace_events`
+row (`TraceEventRecord`, in `seq` order, starting with a synthesized
+`run_queued` bookend published to the live registry the same way every other
+event is — see `ui/backend/CLAUDE.md`), so `usage_records`/`trace_events`
+foreign keys reference a real row and a run's full history survives past its
+live view. `GET /api/runs` (org-scoped, filterable by `workflow`/`status`/
+`manual`/`since`/`until`, paginated via `limit`/`offset` + `total`, default
+page size 50/max 200 — no frontend "load more" yet, so a page beyond the
+default is currently only reachable by widening filters) and
+`GET /api/runs/{id}/trace` (seq-ordered persisted events for one run) serve
+this history; `POST /api/runs/{id}/cancel` requests cooperative cancellation
+(`ui/backend/registry.py::request_cancel`/`cancel_requested`, checked in
+`run_in_background` between yielded events). Still deferred: rehydrating
+`RunRegistry`'s live layer from the DB across restarts, and enabling SQLite
+foreign-key enforcement.

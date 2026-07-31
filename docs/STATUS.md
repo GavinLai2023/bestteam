@@ -485,6 +485,38 @@
   `actions/checkout` + `actions/setup-node` to v5 and `actions/setup-python` to
   v6, clearing the GitHub Actions Node.js-20 runtime deprecation warning.
 
+- Runtime monitoring redesign — granular trace events, run history/cancellation,
+  four-page nav: the dashboard nav is now Build a team / My teams / Run a team
+  (renamed from "Talk to your team") / Activity; My teams drops the embedded
+  Automatic Runs history for a one-line automation status tag; the new Activity
+  page has an Automations tab (unchanged) and a Runs tab (manual + automatic
+  history, filterable, opens a run's persisted or live trace). Backend: the
+  LangGraph adapter now emits granular per-node events (`agent_started`,
+  `tool_started`/`tool_completed` with a truncated business-safe summary,
+  `agent_progress`, HIERARCHICAL `delegation_*`/`subagent_*`) buffered per node
+  and flushed before that node's `agent_completed`; every event is now persisted
+  (`trace_events` table, `seq`-ordered) alongside a `run_queued` bookend
+  published to the live registry too (not DB-only); `GET /api/runs` (filterable,
+  paginated) and `GET /api/runs/{id}/trace` serve history; `POST
+  /api/runs/{id}/cancel` adds real cooperative cancellation (a per-run
+  `threading.Event` checked between yielded events, skipped only for a node's
+  own already-paid-for buffered events so cancelling mid-node can't drop that
+  node's usage from `usage_records`, but still honored immediately at every
+  other checkpoint including before the first agent starts). Frontend: running
+  timer/connection-status/waiting-hint/stale-run banner + a race-safe Stop
+  button on the monitor page; the Activity page's Runs tab polls every 5s while
+  a row is still shown running (stale-filter-safe). See `ui/backend/CLAUDE.md`
+  ("Granular trace events, cancellation, and run history") and
+  `ui/backend/db/CLAUDE.md` ("Run persistence and history API"). Two rounds of
+  independent review closed 9 findings total (usage-preserving + promptly-honored
+  cancellation, UTC-qualified timestamps, NULL-username filter correctness,
+  bounded `/api/runs` pagination, stale-status polling, the Stop-button race,
+  and the live/historical `run_queued` mismatch) — all via TDD regressions; 847
+  backend + 40 frontend tests green, eslint clean. **Known gap** (accepted
+  tradeoff, not yet built): pagination's default 50-row page has no frontend
+  "load more"/pager yet, so an org with 50+ matching runs can't reach older
+  ones from the Activity page today — see Known issues below.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -508,12 +540,20 @@
   state, and pre-SP-2/pre-principal legacy rows with no recorded provenance
   still need a one-time operator sweep — tracked in
   `docs/MEMORY_REVIEW_TRIAGE.md`.
-- **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
-  persisted per run (CR-012) so usage/trace foreign keys are valid, but
-  `trace_events` persistence, restart recovery, and a run-history API remain
-  Phase 5. Growth is now bounded (terminal-run eviction, see Done above) —
-  what's left is that a restart still loses all live trace-event history,
-  not that it grows unbounded. See `ui/backend/db/CLAUDE.md`.
+- **`RunRegistry` remains the in-memory *live* layer, not rehydrated from the
+  DB** — a restart still loses in-flight/live run state. History no longer
+  depends on that, though: `trace_events` are now persisted per run (`seq`-
+  ordered) alongside `usage_records`, with a read API (`GET /api/runs`,
+  `GET /api/runs/{id}/trace`) and cooperative cancellation (`POST
+  /api/runs/{id}/cancel`). Growth is bounded (terminal-run eviction, see Done
+  above). See `ui/backend/db/CLAUDE.md`.
+- **`GET /api/runs` pagination has no frontend consumer yet** — the endpoint
+  is bounded (`limit`/`offset`, default 50/max 200, `total` in the response)
+  but the Activity page's Runs tab doesn't pass `limit`/`offset` or expose a
+  "load more"/pager, so an org with more than 50 matching runs can't reach
+  older ones from the UI today (flagged by independent review; accepted as a
+  follow-up, not blocking, since the backend bound itself is the load-bearing
+  fix). See `ui/backend/CLAUDE.md`.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage
@@ -547,7 +587,9 @@
 - CrewAI adapter, DEBATE collaboration mode, deployment templates — all
   "planned, not started" (see `DECISIONS.md` for why CrewAI isn't the
   current engine).
-- Phase 5: wire `RunRegistry` to persistent `runs`/`trace_events`.
+- Phase 5 (partially done): `runs`/`trace_events` are now persisted with a
+  history API; remaining — rehydrate `RunRegistry`'s live layer from the DB
+  across restarts, and a frontend pager/"load more" for `GET /api/runs`.
 - Phase 6: multi-customer update-distribution strategy (see
   `team_builder_methodology.md`).
 - Refresh `ui/frontend/CLAUDE.md` to describe the current 4-stage wizard.
