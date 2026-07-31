@@ -152,7 +152,7 @@ describe('SessionsPage status grouping', () => {
     api.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled' })
   })
 
-  it('groups sessions into headed sections ordered Deployed, Testing, Solution, Spec', async () => {
+  it('groups sessions into a Live section and one In Progress section covering Spec/Solution/Testing', async () => {
     api.listSessions.mockResolvedValue({
       sessions: [
         session({ id: 's1', status: 'spec', specification_json: { name: 'spec-team' } }),
@@ -166,7 +166,7 @@ describe('SessionsPage status grouping', () => {
     await screen.findByText('deployed-team')
 
     const sectionHeadings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)
-    expect(sectionHeadings).toEqual(['Deployed (1)', 'Testing (1)', 'Solution (1)', 'Spec (1)'])
+    expect(sectionHeadings).toEqual(['Live (1)', 'In Progress (3)'])
   })
 
   it('omits section headers for statuses with no sessions', async () => {
@@ -177,7 +177,7 @@ describe('SessionsPage status grouping', () => {
 
     const sectionHeadings = screen.getAllByRole('heading', { level: 2 })
     expect(sectionHeadings).toHaveLength(1)
-    expect(sectionHeadings[0]).toHaveTextContent('Deployed (1)')
+    expect(sectionHeadings[0]).toHaveTextContent('Live (1)')
   })
 })
 
@@ -193,18 +193,31 @@ describe('SessionsPage status explanations', () => {
     renderPage()
     await screen.findByText('my-team')
 
-    const helpButton = screen.getByRole('button', { name: /what does deployed mean/i })
-    expect(screen.queryByText(/deployed and ready/i)).not.toBeInTheDocument()
+    const helpButton = screen.getByRole('button', { name: /what does live mean/i })
+    expect(screen.queryByText(/ready for your organization/i)).not.toBeInTheDocument()
 
     await act(async () => {
       fireEvent.click(helpButton)
     })
-    expect(screen.getByText(/deployed and ready/i)).toBeInTheDocument()
+    expect(screen.getByText(/ready for your organization/i)).toBeInTheDocument()
 
     await act(async () => {
       fireEvent.click(helpButton)
     })
-    expect(screen.queryByText(/deployed and ready/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ready for your organization/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a distinct explanation for the In Progress bucket', async () => {
+    api.listSessions.mockResolvedValue({ sessions: [session({ status: 'spec' })] })
+
+    renderPage()
+    await screen.findByText('my-team')
+
+    const helpButton = screen.getByRole('button', { name: /what does in progress mean/i })
+    await act(async () => {
+      fireEvent.click(helpButton)
+    })
+    expect(screen.getByText(/still being built/i)).toBeInTheDocument()
   })
 })
 

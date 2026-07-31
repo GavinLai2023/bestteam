@@ -9,22 +9,25 @@ import './SessionsPage.css'
 // name and nowhere sensible to resume into.
 const RESUMABLE_STATUSES = new Set(['spec', 'solution', 'testing', 'deployed'])
 
-// Deployed first (what a customer most wants to see at a glance), then the
-// remaining pipeline stages closest-to-done first.
-const STATUS_ORDER = ['deployed', 'testing', 'solution', 'spec']
+// Spec/solution/testing all resume into the same Confirm page with identical
+// content -- there's no customer-visible difference between them (testing in
+// particular is set just from trying the team once on the Preview page, not
+// from any deliberate stage change), so they're one friendly bucket rather
+// than three technical-sounding statuses.
+const STATUS_ORDER = ['deployed', 'in_progress']
 
 const STATUS_LABELS = {
-  deployed: 'Deployed',
-  testing: 'Testing',
-  solution: 'Solution',
-  spec: 'Spec',
+  deployed: 'Live',
+  in_progress: 'In Progress',
 }
 
 const STATUS_EXPLANATIONS = {
   deployed: 'Live -- this team is deployed and ready for your organization to use.',
-  testing: 'Being tested -- try it out with sample tasks before making it live.',
-  solution: "Reviewing the design -- you've given feedback and the team is being refined.",
-  spec: 'Drafted -- the team has been designed but not yet reviewed or launched.',
+  in_progress: "Still being built -- you're designing, reviewing, or trying out this team before making it live.",
+}
+
+function bucketFor(status) {
+  return status === 'deployed' ? 'deployed' : 'in_progress'
 }
 
 // Short forms of EmailTriggerActivity's STATUS_LABELS, for a one-line card
@@ -67,9 +70,9 @@ export default function SessionsPage() {
     api.getEmailTrigger().then(setTrigger).catch(() => {})
   }, [])
 
-  const statusGroups = STATUS_ORDER.map((status) => ({
-    status,
-    sessions: sessions.filter((s) => s.status === status),
+  const statusGroups = STATUS_ORDER.map((bucket) => ({
+    status: bucket,
+    sessions: sessions.filter((s) => bucketFor(s.status) === bucket),
   })).filter((group) => group.sessions.length > 0)
 
   const handleDelete = async (session) => {
