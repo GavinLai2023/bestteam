@@ -61,11 +61,36 @@
   (`add_if_absent`); and opt-in episodic retention cap
   (`BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER`, `SqliteBM25Memory.prune_user_type`).
   All four memory sub-projects are now done.
-  Deferred to a deletion-lifecycle sub-project: in-flight-run drain fence,
-  immutable-principal keying, durable memory-store state,
-  historical-legacy-provenance sweep. Deferred within SP-4 (documented,
+  Deletion-lifecycle sub-project (immutable-principal keying + in-flight-run
+  write-fence) is now done — see below. Deferred within SP-4 (documented,
   disproportionate for a BM25/opt-in store): embedding/LLM near-dup + conflict
   resolution + consolidation, age-based TTL, per-org quotas, background sweep.
+- Deletion-lifecycle sub-project (merged to `main`, PR #42 `d82fdba` —
+  the integration commit combining PR #40 `fix/memory-legacy-scope` (MEM-14)
+  with PR #41 `feat/memory-principal-lifecycle`, whose independent
+  `SqliteBM25Memory.all()`/`search()` changes conflicted and couldn't both
+  land as separate merges): closes deletion-lifecycle findings 1 & 2.
+  Immutable `users.principal_id` (set once at creation, never rotated —
+  unlike `security_stamp`, which rotates on password reset) stamps every
+  memory record, so a deleted-then-recreated same-`(org, username)` account
+  gets a new principal and can't recall the old one's rows (finding 1).
+  Account deletion retires the principal into a `retired_principals` table;
+  the retirement check is folded atomically into the write itself
+  (`INSERT ... WHERE NOT EXISTS`, not a separate pre-check), so an in-flight
+  run finishing after the purge can't re-create rows behind it (finding 2) —
+  no run-drain fence or distributed lock needed, since the shared SQLite
+  file is the cross-process coordination point.
+  `retire_and_delete_user` retires + purges in one store transaction
+  (rollback on failure), and a fenced/deduped write reports as unrecorded
+  rather than falsely audited as persisted. MEM-14 (admin "legacy (no org)"
+  scope was ambiguous) also lands here: `?org=legacy` reads only NULL-org
+  rows, distinct from `?org=` omitted (all orgs). The integration PR adds
+  regression coverage combining both scopes (org `all`/`legacy`/concrete ×
+  principal admin-unfiltered/concrete, multiple principals per org). Full
+  suite: 819 passed. Deferred (documented, disproportionate): durable
+  authoritative memory-store state, a one-time historical-legacy-provenance
+  sweep. Specs: `2026-07-30-memory-principal-lifecycle-design.md`;
+  `docs/MEMORY_REVIEW_TRIAGE.md`.
 - Code-review triage remediation: all 17 findings (CR-001…CR-017) resolved
   across PRs #4 and #5 — KB path containment + atomic versioned uploads,
   startup secret-key guard, team-scoped aggregation, terminal-run guarantees,
@@ -476,10 +501,13 @@
   today (admin-only, opt-in, operator-provisioned accounts), but the
   shared-platform ceiling is the sum of memory-enabled users across all orgs
   — add a limit/cursor if a customer reaches ~hundreds. See `core/memory.py`.
-  Memory is now org-scoped (SP-2), but a **deletion-lifecycle** gap remains: an
-  in-flight run can record memory *after* an account/org purge (no cross-process
-  drain fence), and pre-SP-2 legacy rows with no recorded provenance need a
-  one-time operator sweep — both tracked in `docs/MEMORY_REVIEW_TRIAGE.md`.
+  Memory is now org- **and** principal-scoped (SP-2 + deletion-lifecycle,
+  PR #42): account deletion retires the principal and purges atomically, and
+  the store's write-fence drops any in-flight run's late write, closing the
+  prior cross-process gap. Remaining: durable authoritative memory-store
+  state, and pre-SP-2/pre-principal legacy rows with no recorded provenance
+  still need a one-time operator sweep — tracked in
+  `docs/MEMORY_REVIEW_TRIAGE.md`.
 - **`RunRegistry` remains the in-memory live layer** — a `runs` row is now
   persisted per run (CR-012) so usage/trace foreign keys are valid, but
   `trace_events` persistence, restart recovery, and a run-history API remain
