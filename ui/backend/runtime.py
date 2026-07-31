@@ -62,6 +62,7 @@ def _env_int(name: str, default: Optional[int]) -> Optional[int]:
 def _make_memory(
     org_id: Optional[int] = None,
     *,
+    principal_id: Optional[str] = None,
     run_id: Optional[str] = None,
     workflow_version_id: Optional[int] = None,
 ) -> Optional[MemoryManager]:
@@ -92,6 +93,7 @@ def _make_memory(
         store,
         extraction_model=extraction_model,
         org_id=org_id,
+        principal_id=principal_id,
         run_id=run_id,
         workflow_version_id=workflow_version_id,
         # SP-4: production recall is bounded by default (M-09); episodic retention
@@ -108,6 +110,7 @@ def run_in_background(
     engine: Optional[Engine] = None,
     user_id: Optional[str] = None,
     org_id: Optional[int] = None,
+    principal_id: Optional[str] = None,
     username: Optional[str] = None,
     workflow_version_id: Optional[int] = None,
 ) -> None:
@@ -123,7 +126,10 @@ def run_in_background(
     If `user_id` is given and memory is enabled (`BESTTEAM_MEMORY_DB`), the
     run recalls that user's memory into every agent's prompt and records the
     run afterward (see `core/memory.py`). Memory is built here, on the worker
-    thread, so its SQLite connection is thread-local.
+    thread, so its SQLite connection is thread-local. `principal_id` (the
+    caller's immutable `users.principal_id`) scopes recall/writes to the account
+    instance, so a recreated same-username account can't recall the deleted
+    account's memory (deletion-lifecycle).
 
     `username` records who started the run on the persisted row (CR-032,
     audit); it is separate from `user_id` so builder sandbox runs can keep
@@ -132,7 +138,12 @@ def run_in_background(
     db = Session(engine) if engine is not None else None
     run_row: Optional[Run] = None
     memory = (
-        _make_memory(org_id, run_id=run_id, workflow_version_id=workflow_version_id)
+        _make_memory(
+            org_id,
+            principal_id=principal_id,
+            run_id=run_id,
+            workflow_version_id=workflow_version_id,
+        )
         if user_id
         else None
     )

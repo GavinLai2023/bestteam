@@ -20,6 +20,40 @@ def session_local(monkeypatch):
     return Session
 
 
+def test_create_user_assigns_immutable_principal_id(session_local):
+    # Deletion-lifecycle: every account gets a random, immutable principal_id at
+    # creation, distinct per account, so a recreated same-username account is a
+    # different principal (findings 1 & 2).
+    with session_local() as db:
+        alice = create_user(db, "alice", "pw")
+        bob = create_user(db, "bob", "pw")
+        assert alice.principal_id and bob.principal_id
+        assert alice.principal_id != bob.principal_id
+
+
+def test_backfill_memory_principals(session_local, monkeypatch, tmp_path, capsys):
+    # Optional operator reconciliation: bind current users' legacy NULL-principal
+    # memory rows to their principal so existing memory keeps being recalled.
+    from bestteam import SqliteBM25Memory
+
+    with session_local() as db:
+        alice = create_user(db, "alice", "pw")
+        principal, org = alice.principal_id, alice.org_id
+
+    mem_path = tmp_path / "mem.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(mem_path))
+    store = SqliteBM25Memory(str(mem_path))
+    store.add("alice", "episodic", "legacy note", org_id=org)  # principal NULL
+    store.close()
+
+    assert admin_cli.main(["backfill-memory-principals"]) == 0
+
+    store = SqliteBM25Memory(str(mem_path))
+    rows = store.all("alice", org_id=org, principal_id=principal)
+    assert [r.content for r in rows] == ["legacy note"]
+    store.close()
+
+
 def test_promote_and_demote(session_local, capsys):
     with session_local() as db:
         create_user(db, "alice", "pw")

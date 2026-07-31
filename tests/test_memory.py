@@ -177,9 +177,9 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_all = store.all
 
-    def spy_all(user_id, types=None, limit=None, *, org_id=None):
+    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None):
         captured["limit"] = limit
-        return real_all(user_id, types, limit, org_id=org_id)
+        return real_all(user_id, types, limit, org_id=org_id, principal_id=principal_id)
 
     monkeypatch.setattr(store, "all", spy_all)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
@@ -863,6 +863,292 @@ def test_delete_org_removes_only_that_org():
     assert removed == 1
     assert store.all("alice", org_id=None) == []
     assert len(store.all("bob", org_id=None)) == 1
+
+
+def test_all_scopes_combine_org_and_principal():
+    # Integration coverage for the fix/memory-legacy-scope + feat/memory-
+    # principal-lifecycle merge: org's tri-state read scope (all / legacy-NULL /
+    # concrete org) must compose with principal filtering (admin-unfiltered /
+    # concrete account), including rows from more than one principal per org.
+    store = _store()
+    store.add("alice", EPISODIC, "org5 P1 row", org_id=5, principal_id="P1")
+    store.add("alice", EPISODIC, "org5 P2 row", org_id=5, principal_id="P2")
+    store.add("alice", EPISODIC, "org6 P3 row", org_id=6, principal_id="P3")
+    store.add("alice", EPISODIC, "legacy P1 row", principal_id="P1")  # org_id NULL
+
+    def contents(**kwargs):
+        return sorted(r.content for r in store.all("alice", **kwargs))
+
+    # org=all (None), principal=admin-unfiltered (None): every row.
+    assert contents(org_id=None, principal_id=None) == [
+        "legacy P1 row",
+        "org5 P1 row",
+        "org5 P2 row",
+        "org6 P3 row",
+    ]
+    # org=all, principal=concrete: that principal's rows across every org scope.
+    assert contents(org_id=None, principal_id="P1") == ["legacy P1 row", "org5 P1 row"]
+    # org=legacy (NULL), principal=admin-unfiltered.
+    assert contents(org_id=LEGACY_ORG, principal_id=None) == ["legacy P1 row"]
+    # org=legacy, principal=concrete: legacy row only for the matching principal.
+    assert contents(org_id=LEGACY_ORG, principal_id="P1") == ["legacy P1 row"]
+    assert contents(org_id=LEGACY_ORG, principal_id="P2") == []
+    # org=concrete, principal=admin-unfiltered: both principals in that org.
+    assert contents(org_id=5, principal_id=None) == ["org5 P1 row", "org5 P2 row"]
+    # org=concrete, principal=concrete: exactly one row.
+    assert contents(org_id=5, principal_id="P1") == ["org5 P1 row"]
+    assert contents(org_id=5, principal_id="P2") == ["org5 P2 row"]
+    assert contents(org_id=6, principal_id="P1") == []
+
+
+def test_search_scopes_combine_org_and_principal():
+    store = _store()
+    store.add("alice", EPISODIC, "refund policy for org5 P1", org_id=5, principal_id="P1")
+    store.add("alice", EPISODIC, "refund policy for org5 P2", org_id=5, principal_id="P2")
+    store.add("alice", EPISODIC, "refund policy legacy P1", principal_id="P1")  # org_id NULL
+
+    hits = store.search("alice", "refund policy", org_id=LEGACY_ORG, principal_id="P1")
+    assert [r.content for r in hits] == ["refund policy legacy P1"]
+
+    hits = store.search("alice", "refund policy", org_id=5, principal_id="P2")
+    assert [r.content for r in hits] == ["refund policy for org5 P2"]
+
+    hits = store.search("alice", "refund policy", org_id=5, principal_id=None)
+    assert sorted(r.content for r in hits) == [
+        "refund policy for org5 P1",
+        "refund policy for org5 P2",
+    ]
+
+
+# --- Deletion-lifecycle: principal-stamped memory (findings 1 & 2) ---
+
+
+def test_add_persists_principal_id():
+    store = _store()
+    rec = store.add("alice", EPISODIC, "content", org_id=5, principal_id="P1")
+    assert rec.principal_id == "P1"
+    assert store.all("alice", org_id=5, principal_id="P1")[0].principal_id == "P1"
+
+
+def test_all_and_search_scope_by_principal():
+    store = _store()
+    store.add("alice", EPISODIC, "note from principal one", org_id=5, principal_id="P1")
+    store.add("alice", EPISODIC, "note from principal two", org_id=5, principal_id="P2")
+
+    # A recreated account (new principal) recalls only its own rows (finding 1).
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P2")] == [
+        "note from principal two"
+    ]
+    hits = store.search("alice", "note principal", org_id=5, principal_id="P1")
+    assert [r.content for r in hits] == ["note from principal one"]
+    # principal_id=None (admin / SDK-direct) is unfiltered — sees both.
+    assert len(store.all("alice", org_id=5, principal_id=None)) == 2
+
+
+def test_dedup_is_per_principal():
+    store = _store()
+    a = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P1")
+    # Same text under a DIFFERENT principal is not a duplicate.
+    b = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P2")
+    # Same (text, principal) IS a duplicate.
+    c = store.add_if_absent("alice", SEMANTIC, "prefers dark mode", org_id=5, principal_id="P1")
+    assert a is not None and b is not None and c is None
+
+
+def test_retired_principal_write_is_fenced():
+    # Finding 2: after a principal is retired (account deleted), an in-flight
+    # run's late write for that principal must be dropped, not persisted.
+    store = _store()
+    store.retire_principal("P1")
+    assert store.is_retired("P1") is True
+
+    store.add("alice", EPISODIC, "late episodic", org_id=5, principal_id="P1")
+    assert store.add_if_absent("alice", SEMANTIC, "late fact", org_id=5, principal_id="P1") is None
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+    # A different (recreated) principal is unaffected.
+    store.add("alice", EPISODIC, "new life", org_id=5, principal_id="P2")
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P2")] == ["new life"]
+
+
+def test_retire_principal_is_idempotent():
+    store = _store()
+    store.retire_principal("P1")
+    store.retire_principal("P1")  # no error, still retired
+    assert store.is_retired("P1") is True
+    assert store.is_retired("P-unknown") is False
+
+
+class _RetireBeforeInsertConn:
+    """Wraps a SQLite connection so that, right before an INSERT into `memories`,
+    `deleter` (a second connection to the same file) retires `principal_id` and
+    commits. Reproduces the TOCTOU: the retire lands between a would-be pre-check
+    and the actual insert. A correct fence checks retirement atomically inside the
+    insert statement and so still drops the write. (`sqlite3.Connection.execute`
+    is read-only, so we wrap rather than monkeypatch it.)"""
+
+    def __init__(self, real, deleter, principal_id):
+        self._real = real
+        self._deleter = deleter
+        self._principal_id = principal_id
+
+    def execute(self, sql, *args):
+        if sql.lstrip().upper().startswith("INSERT INTO MEMORIES"):
+            self._deleter.retire_principal(self._principal_id)
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _retire_before_memories_insert(writer, deleter, principal_id):
+    writer._conn = _RetireBeforeInsertConn(writer._conn, deleter, principal_id)
+
+
+def test_add_fence_is_atomic_with_insert(tmp_path):
+    # Finding 1 (TOCTOU): a retire committed by another connection just before the
+    # insert must still drop the write -- retirement and insert must be one
+    # SQLite-serialized operation, not a separate pre-SELECT then insert.
+    path = str(tmp_path / "m.db")
+    writer, deleter = SqliteBM25Memory(path), SqliteBM25Memory(path)
+    _retire_before_memories_insert(writer, deleter, "P1")
+
+    writer.add("alice", EPISODIC, "late-after-check", org_id=5, principal_id="P1")
+    assert deleter.all("alice", org_id=5, principal_id=None) == []
+    writer.close()
+    deleter.close()
+
+
+def test_add_if_absent_fence_is_atomic_with_insert(tmp_path):
+    path = str(tmp_path / "m.db")
+    writer, deleter = SqliteBM25Memory(path), SqliteBM25Memory(path)
+    _retire_before_memories_insert(writer, deleter, "P1")
+
+    writer.add_if_absent("alice", SEMANTIC, "fact", org_id=5, principal_id="P1")
+    assert deleter.all("alice", org_id=5, principal_id=None) == []
+    writer.close()
+    deleter.close()
+
+
+def test_add_returns_none_when_fenced():
+    # Finding 4: a fenced write returns None (not an unpersisted record), so callers
+    # can tell it wasn't recorded.
+    store = _store()
+    store.retire_principal("P1")
+    assert store.add("alice", EPISODIC, "late", org_id=5, principal_id="P1") is None
+
+
+def test_record_run_does_not_report_fenced_write_as_recorded():
+    # Finding 4: record_run must not report a fenced write as recorded (no false
+    # memory_recorded / audit trace).
+    store = _store()
+    store.retire_principal("P1")
+    outcome = MemoryManager(store, org_id=5, principal_id="P1").record_run("alice", "in", "out")
+    assert outcome.recorded == []
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+
+class _RaiseOnSqlConn:
+    """Wraps a connection, raising OperationalError on a statement whose SQL starts
+    with `prefix` (uppercased). Used to inject a mid-transaction failure."""
+
+    def __init__(self, real, prefix):
+        self._real = real
+        self._prefix = prefix.upper()
+
+    def execute(self, sql, *args):
+        import sqlite3
+
+        if sql.lstrip().upper().startswith(self._prefix):
+            raise sqlite3.OperationalError("injected failure")
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_retire_and_delete_user_is_atomic_on_delete_failure():
+    # Finding 3: retiring the principal and purging its memory must be one
+    # transaction. If the delete fails, the retirement must roll back too -- else
+    # the account stays active but every future memory write is silently dropped.
+    import sqlite3
+
+    store = _store()
+    store.add("alice", EPISODIC, "existing secret", org_id=5, principal_id="P1")
+    store._conn = _RaiseOnSqlConn(store._conn, "DELETE FROM MEMORIES")
+
+    with pytest.raises(sqlite3.OperationalError):
+        store.retire_and_delete_user("P1", "alice")
+
+    # Rolled back: principal NOT retired, memory intact -- consistent with the SQL
+    # account still existing (the caller aborts the account delete on this error).
+    assert store.is_retired("P1") is False
+    assert len(store.all("alice", org_id=5, principal_id=None)) == 1
+
+
+def test_retire_and_delete_user_retires_and_purges_on_success():
+    store = _store()
+    store.add("alice", EPISODIC, "secret", org_id=5, principal_id="P1")
+
+    removed = store.retire_and_delete_user("P1", "alice")
+
+    assert removed == 1
+    assert store.is_retired("P1") is True
+    assert store.all("alice", org_id=5, principal_id=None) == []
+
+
+def test_manager_stamps_writes_and_scopes_recall_by_principal():
+    # The manager binds a principal at construction, stamps every write with it,
+    # and scopes recall to it -- so a recreated account can't recall old rows.
+    store = _store()
+    MemoryManager(store, org_id=5, principal_id="P1").record_run(
+        "alice", "about refunds", "our refund policy is 30 days"
+    )
+    rows = store.all("alice", org_id=5, principal_id="P1")
+    assert rows and all(r.principal_id == "P1" for r in rows)
+
+    assert MemoryManager(store, org_id=5, principal_id="P2").recall("alice", "refund").count == 0
+    assert MemoryManager(store, org_id=5, principal_id="P1").recall("alice", "refund").count >= 1
+
+
+def test_assign_null_principal_binds_only_matching_null_rows():
+    store = _store()
+    store.add("alice", EPISODIC, "legacy note", org_id=5)  # principal NULL
+    store.add("alice", EPISODIC, "already owned", org_id=5, principal_id="P0")
+    store.add("alice", EPISODIC, "other org legacy", org_id=6)  # different org
+
+    updated = store.assign_null_principal("alice", 5, "P1")
+    assert updated == 1
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P1")] == ["legacy note"]
+    # The already-owned row and the other-org legacy row are untouched.
+    assert store.all("alice", org_id=6, principal_id="P1") == []
+
+
+def test_opens_pre_principal_db_and_migrates(tmp_path):
+    # A DB created before principal stamping (no principal_id column) must gain the
+    # column in place, keep its rows (principal_id NULL), and work afterward.
+    import sqlite3
+
+    db_path = str(tmp_path / "pre_principal.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, org_id INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'episodic', 'legacy note', '{}', "
+        "'2026-01-01T00:00:00+00:00', 5)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path)
+    legacy = store.all("alice", org_id=5, principal_id=None)
+    assert len(legacy) == 1 and legacy[0].principal_id is None
+    store.add("alice", EPISODIC, "stamped note", org_id=5, principal_id="P1")
+    assert [r.content for r in store.all("alice", org_id=5, principal_id="P1")] == ["stamped note"]
+    store.close()
 
 
 def test_delete_org_and_legacy_scopes_correctly():

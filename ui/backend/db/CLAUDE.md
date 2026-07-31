@@ -142,6 +142,13 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   many. That migration **refuses** if an upgraded DB already has multi-member
   orgs (names them; never auto-deletes). See `db/users.py::create_user` (the
   friendly pre-check) and `docs/DECISIONS.md`.
+  `principal_id` (migration `b8c9d0e1f2a3`, per-row random backfill) is the
+  **immutable per-account memory principal** for the deletion-lifecycle: set once
+  at creation via `new_principal_id()` and **never rotated** (unlike
+  `security_stamp`, which rotates on password reset), so a run's memory
+  recall/writes scope to it and a deleted-then-recreated username gets a fresh
+  value that can't reach the old account's memory. See `core/memory.py`
+  (`principal_id` store dimension + `retired_principals` fence).
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry
