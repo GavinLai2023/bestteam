@@ -8,6 +8,7 @@ other.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
-from .db.models import Run
+from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
 
@@ -40,6 +41,30 @@ def _safe_record_usage(db: Session, **kwargs: Any) -> None:
         record_usage(db, **kwargs)
     except Exception:  # noqa: BLE001 -- metering must never break a run
         _logger.warning("Usage recording failed for run %s; run unaffected", kwargs.get("run_id"), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: TraceEvent) -> None:
+    """Persist one TraceEvent as a `trace_events` row, isolating failures from
+    run status -- same rationale as `_safe_record_usage`. `data` is always
+    JSON-encoded (even a plain string) so the read side has one consistent
+    `json.loads()` path regardless of the event's `data` shape."""
+    try:
+        db.add(
+            TraceEventRecord(
+                run_id=run_id,
+                seq=seq,
+                type=event.type,
+                agent=event.agent,
+                data=json.dumps(event.data),
+            )
+        )
+        db.commit()
+    except Exception:  # noqa: BLE001 -- trace persistence must never break a run
+        _logger.warning("Trace event persistence failed for run %s; run unaffected", run_id, exc_info=True)
         try:
             db.rollback()
         except Exception:  # noqa: BLE001
@@ -148,6 +173,7 @@ def run_in_background(
         else None
     )
     terminal_seen = False
+    seq = 0
     try:
         if db is not None:
             # Persist the run up front so usage_records/trace_events foreign
@@ -172,41 +198,84 @@ def run_in_background(
                 # before dispatch as a durable activity record; keep it.
                 run_row.workflow = getattr(workflow, "name", "") or run_row.workflow
             db.commit()
-        for event in workflow.stream(input, user_id=user_id, memory=memory):
-            payload = dataclasses.asdict(event)
-            registry.publish(run_id, payload)
-            if event.type in ("run_completed", "run_failed"):
-                terminal_seen = True
+        if db is not None:
+            # Mirrors the run_queued event `RunRegistry.create()` seeds into the
+            # live/WS replay log (registry.py) -- the SDK has no notion of
+            # "queued", so it's synthesized identically on both sides here.
+            _safe_record_trace_event(
+                db,
+                run_id=run_id,
+                seq=seq,
+                event=TraceEvent(type="run_queued", workflow=getattr(workflow, "name", ""), data=None),
+            )
+            seq += 1
+        def _mark_cancelled() -> None:
+            # Cooperative cancellation only, never a forceful thread kill (not
+            # safely possible mid-`workflow.stream()`) -- this only runs
+            # between yielded events, so it can't cut off a node already in
+            # flight (see registry.py::request_cancel).
+            nonlocal seq, terminal_seen
+            cancelled = TraceEvent(
+                type="run_cancelled", workflow=getattr(workflow, "name", ""), data="Run was cancelled."
+            )
+            registry.publish(run_id, dataclasses.asdict(cancelled))
+            if db is not None:
+                _safe_record_trace_event(db, run_id=run_id, seq=seq, event=cancelled)
+                seq += 1
                 if run_row is not None:
-                    run_row.status = "completed" if event.type == "run_completed" else "failed"
-                    run_row.output = event.data
+                    run_row.status = "cancelled"
+                    run_row.output = cancelled.data
                     db.commit()
-            if db is not None and event.type == "agent_completed":
-                for entry in event.usage:
-                    _safe_record_usage(
-                        db,
-                        run_id=run_id,
-                        agent=event.agent,
-                        model=entry.get("model"),
-                        input_tokens=entry.get("input_tokens", 0),
-                        output_tokens=entry.get("output_tokens", 0),
-                        org_id=org_id,
-                    )
-            if db is not None and event.type in ("memory_recorded", "memory_failed"):
-                # Meter the memory extraction LLM call (M-04); it bypasses the
-                # adapter's usage path, so it arrives on the memory event. The SDK
-                # attaches the usage to exactly one event (recorded, or failed when
-                # every write failed), so this never double-counts (review r6 #1).
-                for entry in event.usage:
-                    _safe_record_usage(
-                        db,
-                        run_id=run_id,
-                        agent="memory:extraction",
-                        model=entry.get("model"),
-                        input_tokens=entry.get("input_tokens", 0),
-                        output_tokens=entry.get("output_tokens", 0),
-                        org_id=org_id,
-                    )
+            terminal_seen = True
+
+        if registry.cancel_requested(run_id):
+            # Already cancelled before this worker even started (e.g. queued
+            # behind other runs on the thread pool) -- skip streaming entirely.
+            _mark_cancelled()
+        else:
+            stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
+            for event in stream_iter:
+                payload = dataclasses.asdict(event)
+                registry.publish(run_id, payload)
+                if db is not None:
+                    _safe_record_trace_event(db, run_id=run_id, seq=seq, event=event)
+                    seq += 1
+                if event.type in ("run_completed", "run_failed"):
+                    terminal_seen = True
+                    if run_row is not None:
+                        run_row.status = "completed" if event.type == "run_completed" else "failed"
+                        run_row.output = event.data
+                        db.commit()
+                if db is not None and event.type == "agent_completed":
+                    for entry in event.usage:
+                        _safe_record_usage(
+                            db,
+                            run_id=run_id,
+                            agent=event.agent,
+                            model=entry.get("model"),
+                            input_tokens=entry.get("input_tokens", 0),
+                            output_tokens=entry.get("output_tokens", 0),
+                            org_id=org_id,
+                        )
+                if db is not None and event.type in ("memory_recorded", "memory_failed"):
+                    # Meter the memory extraction LLM call (M-04); it bypasses the
+                    # adapter's usage path, so it arrives on the memory event. The SDK
+                    # attaches the usage to exactly one event (recorded, or failed when
+                    # every write failed), so this never double-counts (review r6 #1).
+                    for entry in event.usage:
+                        _safe_record_usage(
+                            db,
+                            run_id=run_id,
+                            agent="memory:extraction",
+                            model=entry.get("model"),
+                            input_tokens=entry.get("input_tokens", 0),
+                            output_tokens=entry.get("output_tokens", 0),
+                            org_id=org_id,
+                        )
+                if not terminal_seen and registry.cancel_requested(run_id):
+                    stream_iter.close()
+                    _mark_cancelled()
+                    break
     except Exception:  # noqa: BLE001 -- any worker failure must still yield a terminal event
         # Workflow.stream() compiles before its own BestTeamError handler, so a
         # compile failure (e.g. an unsupported collaboration mode) escapes as an
@@ -219,16 +288,12 @@ def run_in_background(
         _logger.exception("Run %s failed on the worker thread", run_id)
         if not terminal_seen:
             message = "The run failed due to an internal error."
-            registry.publish(
-                run_id,
-                dataclasses.asdict(
-                    TraceEvent(
-                        type="run_failed",
-                        workflow=getattr(workflow, "name", ""),
-                        data=message,
-                    )
-                ),
-            )
+            failed_event = TraceEvent(type="run_failed", workflow=getattr(workflow, "name", ""), data=message)
+            registry.publish(run_id, dataclasses.asdict(failed_event))
+            if db is not None:
+                # `_safe_record_trace_event` rolls back internally on failure, so
+                # it self-heals a session left poisoned by whatever raised above.
+                _safe_record_trace_event(db, run_id=run_id, seq=seq, event=failed_event)
             # Best-effort: the terminal event above is the hard CR-003
             # guarantee; recording the failed status must never re-raise (the
             # up-front persist may itself have failed, leaving the session

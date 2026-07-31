@@ -27,7 +27,10 @@ export default function Layout() {
                 My teams
               </NavLink>
               <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
-                Talk to your team
+                Run a team
+              </NavLink>
+              <NavLink to="/activity" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Activity
               </NavLink>
             </>
           )}

@@ -11,8 +11,20 @@ class TraceEvent:
     This is the unit a monitoring UI subscribes to — engine-agnostic, so
     whatever engine produced it, the UI only ever sees this shape.
 
-    `type` is one of: "run_started", "agent_completed", "run_completed"
-    (always the FINAL event of a run), "run_failed", and (when per-user memory is
+    `type` is one of: "run_started", "run_queued" (backend-lifecycle only —
+    the SDK never emits it, see `ui/backend/registry.py`), "agent_started",
+    "agent_progress" (`data` = {"note": str}, emitted before a tool-calling
+    agent's 2nd+ model call in one turn), "tool_started" (`data` =
+    {"tool": str} — never the call's raw args), "tool_completed" (`data` =
+    {"tool", "success": bool, "duration_ms": int, "summary": str} — a
+    truncated, business-safe summary of the tool result, never the raw
+    exception on failure), "delegation_started"/"delegation_completed"
+    (`data` = {"to": str, "task_summary"/"summary": str}, emitted on the
+    HIERARCHICAL manager), "subagent_started"/"subagent_completed" (emitted
+    on the delegated subordinate, `agent` = subordinate name), "agent_completed",
+    "run_completed" (always the FINAL event of a run), "run_failed",
+    "run_cancelled" (backend-lifecycle only, see cooperative cancellation in
+    `ui/backend/runtime.py`), and (when per-user memory is
     active, SP-3) "memory_recalled" (`data` = count recalled, 0 included),
     "memory_recorded" (`data` = record types written; `usage` = the extraction
     call's token usage, if any), and "memory_failed" (`data` = "recall" | "record",

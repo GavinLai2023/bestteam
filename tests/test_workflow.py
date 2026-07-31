@@ -157,14 +157,17 @@ def test_stream_yields_run_bookends_and_agent_events_in_order():
 
     assert [e.type for e in events] == [
         "run_started",
+        "agent_started",
         "agent_completed",
+        "agent_started",
         "agent_completed",
         "run_completed",
     ]
     assert all(e.workflow == "wf" for e in events)
     assert [e.agent for e in events if e.type == "agent_completed"] == ["a", "b"]
-    assert events[1].data == "output from a"
-    assert events[2].data == "output from b"
+    completed_events = [e for e in events if e.type == "agent_completed"]
+    assert completed_events[0].data == "output from a"
+    assert completed_events[1].data == "output from b"
     assert events[-1].data == "output from b"
 
 

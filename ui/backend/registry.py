@@ -22,7 +22,7 @@ class Run:
     input: str
     org_id: Optional[int] = None
     username: Optional[str] = None
-    status: str = "running"  # running | completed | failed
+    status: str = "running"  # running | completed | failed | cancelled
     events: List[dict] = field(default_factory=list)
 
 
@@ -40,6 +40,10 @@ class RunRegistry:
     def __init__(self) -> None:
         self._runs: Dict[str, Run] = {}
         self._subscribers: Dict[str, List[Tuple[asyncio.AbstractEventLoop, "asyncio.Queue[dict]"]]] = {}
+        # Cooperative-cancellation flags, one per run -- the worker thread
+        # can't be force-killed mid-`workflow.stream()`, so this is checked
+        # between yielded events instead (see runtime.py::run_in_background).
+        self._cancel_flags: Dict[str, threading.Event] = {}
         # One lock serialises the event append, the replay snapshot, and
         # subscriber insertion so a publish landing between subscribe()'s
         # replay and its registration can't be lost to that subscriber
@@ -59,6 +63,7 @@ class RunRegistry:
         with self._lock:
             self._runs[run.id] = run
             self._subscribers[run.id] = []
+            self._cancel_flags[run.id] = threading.Event()
             self._evict_if_over_bound()
         return run
 
@@ -74,6 +79,7 @@ class RunRegistry:
         with self._lock:
             self._runs.pop(run_id, None)
             self._subscribers.pop(run_id, None)
+            self._cancel_flags.pop(run_id, None)
 
     def _evict_if_over_bound(self) -> None:
         """Evict the oldest terminal, subscriber-free runs until back within
@@ -97,9 +103,25 @@ class RunRegistry:
                 continue
             del self._runs[run_id]
             del self._subscribers[run_id]
+            self._cancel_flags.pop(run_id, None)
 
     def get(self, run_id: str) -> "Run | None":
         return self._runs.get(run_id)
+
+    def request_cancel(self, run_id: str) -> bool:
+        """Ask a running run to stop cooperatively. Returns False (no-op) for
+        an unknown run or one that's already terminal -- there's nothing left
+        to cancel."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.status != "running":
+                return False
+            self._cancel_flags[run_id].set()
+            return True
+
+    def cancel_requested(self, run_id: str) -> bool:
+        flag = self._cancel_flags.get(run_id)
+        return flag.is_set() if flag else False
 
     def publish(self, run_id: str, event: dict) -> None:
         """Called from the worker thread running the workflow. Each
@@ -120,6 +142,8 @@ class RunRegistry:
                 run.status = "completed"
             elif event["type"] == "run_failed":
                 run.status = "failed"
+            elif event["type"] == "run_cancelled":
+                run.status = "cancelled"
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 

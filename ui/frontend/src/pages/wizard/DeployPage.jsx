@@ -53,7 +53,7 @@ export default function DeployPage() {
         {session.uses_email && <EmailTriggerToggle workflowName={spec.name} />}
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate(`/?workflow=${encodeURIComponent(spec.name)}`)}>
-            Talk to your team
+            Run a team
           </button>
           <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
             Make more adjustments

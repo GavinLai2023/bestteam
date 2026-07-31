@@ -8,10 +8,16 @@ const STATUS_LABELS = {
   disabled: 'Paused by the operator',
 }
 
-// Org-level automatic-runs status + recent autonomous activity, shown on
-// "My teams". Renders nothing while loading or while automatic runs are off
-// (most teams never turn this on); a fetch failure gets its own banner so it
-// is never mistaken for either of those.
+// How often to re-poll while mounted on the Activity page's Automations tab.
+// The backend's own poller checks mail every BESTTEAM_TRIGGER_POLL_SECONDS
+// (default 120s) -- refreshing faster than that would just show stale data
+// sooner, so this trades a little staleness for not hammering the endpoint.
+const REFRESH_INTERVAL_MS = 30_000
+
+// Org-level automatic-runs status + recent autonomous activity, shown on the
+// Activity page's Automations tab. Renders nothing while loading or while
+// automatic runs are off (most teams never turn this on); a fetch failure
+// gets its own banner so it is never mistaken for either of those.
 export default function EmailTriggerActivity() {
   const [trigger, setTrigger] = useState(undefined) // undefined = still loading
   const [statusFailed, setStatusFailed] = useState(false)
@@ -19,11 +25,16 @@ export default function EmailTriggerActivity() {
   const [activityFailed, setActivityFailed] = useState(false)
 
   useEffect(() => {
-    api.getEmailTrigger().then(setTrigger).catch(() => setStatusFailed(true))
-    api
-      .emailTriggerActivity()
-      .then((d) => setRuns(d.runs.filter((r) => r.autonomous).slice(0, 10)))
-      .catch(() => setActivityFailed(true))
+    const load = () => {
+      api.getEmailTrigger().then(setTrigger).catch(() => setStatusFailed(true))
+      api
+        .emailTriggerActivity()
+        .then((d) => setRuns(d.runs.filter((r) => r.autonomous).slice(0, 10)))
+        .catch(() => setActivityFailed(true))
+    }
+    load()
+    const id = setInterval(load, REFRESH_INTERVAL_MS)
+    return () => clearInterval(id)
   }, [])
 
   if (statusFailed) {
