@@ -235,6 +235,19 @@ describe('SessionsPage draft deletion', () => {
     expect(await screen.findByRole('button', { name: 'Delete' })).toBeInTheDocument()
   })
 
+  it('renders the delete action as an icon-only trash button, not a visible "Delete" label', async () => {
+    // "Delete" as visible text reads as if the AI team itself is being
+    // erased; a recycle-bin icon (with "Delete" kept as the accessible
+    // name, for screen readers and the existing role queries) softens that.
+    api.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: null })] })
+
+    renderPage()
+    const deleteButton = await screen.findByRole('button', { name: 'Delete' })
+
+    expect(deleteButton).not.toHaveTextContent('Delete')
+    expect(deleteButton.querySelector('svg')).toBeInTheDocument()
+  })
+
   it('does not show a Delete button for a session linked to a live team', async () => {
     api.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: 7 })] })
 
