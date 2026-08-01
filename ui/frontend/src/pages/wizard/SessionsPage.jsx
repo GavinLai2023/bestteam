@@ -40,6 +40,13 @@ const AUTOMATION_STATUS_LABELS = {
 }
 
 function resumePathFor(session) {
+  // A deployed workflow with no builder session (deployed straight through
+  // the admin Advanced/CRUD page, see builder.py's
+  // _synthetic_session_for_workflow) has no wizard flow to resume into --
+  // send it to Run a Team, pre-selected, instead.
+  if (session.id == null) {
+    return `/?workflow=${encodeURIComponent(session.specification_json?.name ?? '')}`
+  }
   return session.status === 'deployed' ? `/wizard/${session.id}/deploy` : `/wizard/${session.id}/confirm`
 }
 
@@ -123,7 +130,7 @@ export default function SessionsPage() {
                 const teamName = session.specification_json?.name
                 const isAutomated = trigger?.enabled && teamName && trigger.workflow_name === teamName
                 return (
-                  <li key={session.id} className="session-item">
+                  <li key={session.id ?? `workflow:${teamName}`} className="session-item">
                     <button className="wizard-card session-card" onClick={() => navigate(resumePathFor(session))}>
                       <h3>{teamName ?? session.intent_text}</h3>
                       <p className="subtitle">{descriptionFor(session)}</p>

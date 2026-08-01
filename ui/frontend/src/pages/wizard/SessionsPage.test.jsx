@@ -12,6 +12,12 @@ vi.mock('../../lib/api', () => ({
   },
 }))
 
+const mockNavigate = vi.fn()
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual('react-router-dom')
+  return { ...actual, useNavigate: () => mockNavigate }
+})
+
 const renderPage = () =>
   render(
     <MemoryRouter>
@@ -302,5 +308,53 @@ describe('SessionsPage draft deletion', () => {
 
     expect(await screen.findByText("Can't delete right now")).toBeInTheDocument()
     expect(screen.getByText('my-team')).toBeInTheDocument()
+  })
+})
+
+describe('SessionsPage session-less deployed workflows', () => {
+  // A workflow can be deployed straight through the admin Advanced/CRUD
+  // page, bypassing the wizard entirely; the backend represents it as a
+  // session-shaped entry with id: null (see builder.py's
+  // _synthetic_session_for_workflow) so My Teams shows every deployed team,
+  // not just wizard-built ones.
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled' })
+  })
+
+  it('shows a card for a deployed workflow with no builder session', async () => {
+    api.listSessions.mockResolvedValue({
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team' } })],
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('orphan_team')).toBeInTheDocument()
+  })
+
+  it('does not show a Delete button for a session-less deployed workflow', async () => {
+    api.listSessions.mockResolvedValue({
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team' } })],
+    })
+
+    renderPage()
+
+    await screen.findByText('orphan_team')
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+  })
+
+  it('clicking a session-less deployed workflow card goes to Run a Team pre-selected, not a wizard page', async () => {
+    api.listSessions.mockResolvedValue({
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team' } })],
+    })
+
+    renderPage()
+    const card = await screen.findByText('orphan_team')
+
+    await act(async () => {
+      fireEvent.click(card)
+    })
+
+    expect(mockNavigate).toHaveBeenCalledWith('/?workflow=orphan_team')
   })
 })

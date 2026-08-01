@@ -29,7 +29,7 @@ from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db.workflows import publish_workflow_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
@@ -278,14 +278,49 @@ def create_builder_session(
     return _session_to_dict(session, db, org.id)
 
 
+def _synthetic_session_for_workflow(record: WorkflowRecord) -> Dict[str, Any]:
+    """A My-teams card for a workflow deployed without ever going through the
+    wizard (e.g. via the admin Advanced/CRUD page) -- so every deployed team
+    is visible there, not just wizard-built ones. `id` stays `None`: there is
+    no `BuilderSession` to resume into, so the frontend routes a click
+    straight to Run a Team instead of a wizard page."""
+    return {
+        "id": None,
+        "intent_text": record.name,
+        "as_is_text": None,
+        "requirements_json": None,
+        "specification_json": record.config,
+        "status": "deployed",
+        "workflow_id": record.id,
+        "feedback_history": [],
+        "uses_email": False,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+    }
+
+
 @router.get("")
 def list_builder_sessions(
     db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
 ) -> Dict[str, Any]:
     """List the org's builder sessions (most recent first), for an "AI teams
     I've built" list page. A session with status 'deployed' has a live
-    WorkflowRecord matching specification_json['name']."""
-    return {"sessions": [_session_to_dict(s, db, org.id) for s in list_sessions(db, org_id=org.id)]}
+    WorkflowRecord matching specification_json['name']. Deployed workflows
+    with no backing session at all (deployed straight through the admin
+    Advanced/CRUD page) get a synthetic entry too, so My Teams shows every
+    team the org can run, not just the wizard-built subset."""
+    sessions = list_sessions(db, org_id=org.id)
+    session_dicts = [_session_to_dict(s, db, org.id) for s in sessions]
+
+    session_workflow_ids = {s.workflow_id for s in sessions if s.workflow_id is not None}
+    orphan_workflows = (
+        db.query(WorkflowRecord)
+        .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
+        .filter(WorkflowRecord.id.notin_(session_workflow_ids))
+        .all()
+    )
+    session_dicts.extend(_synthetic_session_for_workflow(r) for r in orphan_workflows)
+    return {"sessions": session_dicts}
 
 
 @router.get("/{session_id}")
