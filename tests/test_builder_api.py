@@ -630,6 +630,43 @@ def test_delete_never_deployed_session_removes_it(client, tmp_path, monkeypatch)
     assert not workspace.exists()
 
 
+def test_delete_session_with_in_flight_sandbox_run_does_not_disrupt_the_run(client, tmp_path, monkeypatch):
+    # A test-run dispatches to a worker thread and returns immediately (the
+    # run may still be executing when the request completes); the customer
+    # can delete the never-deployed draft the instant that response lands.
+    # Deletion must succeed regardless, and the already-dispatched run --
+    # its `Workflow` was fully built and handed to the executor before the
+    # delete request even arrived, and a `Run` row carries no session_id --
+    # must still reach a normal terminal state rather than erroring out from
+    # under the just-removed session row/workspace directory.
+    from ui.backend import builder as builder_module
+
+    monkeypatch.setattr(builder_module, "_SESSIONS_DIR", tmp_path)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "abandoned idea"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    workspace = tmp_path / session_id
+    assert workspace.exists()
+
+    run_id = client.post(f"/api/builder/sessions/{session_id}/test-runs", json={"input": "hi"}).json()["run_id"]
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 204
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 404
+    assert not workspace.exists()
+
+    import time
+
+    deadline = time.time() + 10
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"/api/runs/{run_id}").json()["status"]
+        if status != "running":
+            break
+        time.sleep(0.05)
+    assert status == "completed"
+
+
 def test_delete_deployed_session_is_refused(client):
     session_id = _make_deployable_session(client)
     assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
