@@ -99,7 +99,12 @@ def set_trigger(
             status_code=400,
             detail="That team isn't live yet -- launch it before turning on automatic runs.",
         )
-    if not spec_uses_email(db, record.config, org.id):
+    if not spec_uses_email(
+        db,
+        record.config,
+        org.id,
+        workflow_version_id=record.current_version_id,
+    ):
         raise HTTPException(
             status_code=400,
             detail="This team doesn't use email, so new mail can't trigger it.",

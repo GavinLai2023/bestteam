@@ -395,12 +395,20 @@ def _resolve_workflow_and_version(
             # standalone KB (e.g. a legacy KB shadowing a built-in, F4) becomes a
             # clean 400 like a build error, not an uncaught 500.
             if db is not None:
-                skill_lookup = load_skills(db, record.org_id)
+                skill_lookup = load_skills(
+                    db,
+                    record.org_id,
+                    workflow_version_id=record.current_version_id,
+                )
                 kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
                 email_tools = load_email_tools(db, record.org_id)
             else:
                 with SessionLocal() as session:
-                    skill_lookup = load_skills(session, record.org_id)
+                    skill_lookup = load_skills(
+                        session,
+                        record.org_id,
+                        workflow_version_id=record.current_version_id,
+                    )
                     kb_tools = load_knowledge_base_tools(
                         session, record.config, source, org_id=record.org_id
                     )

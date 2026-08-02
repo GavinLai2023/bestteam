@@ -26,7 +26,6 @@ import os
 import shutil
 import threading
 import uuid
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
@@ -50,11 +49,14 @@ from .db.models import (
     Organization,
     Run,
     SkillRecord,
+    SkillVersion,
+    User,
     WorkflowDependency,
     WorkflowRecord,
     WorkflowVersion,
 )
-from .db.dependencies import reconcile_skill_dependencies, workflows_referencing
+from .db.dependencies import workflows_referencing
+from .db.skills import publish_skill_version
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
@@ -251,6 +253,13 @@ def _org_name_map(db: Session) -> Dict[int, str]:
     return {o.id: o.name for o in db.query(Organization).all()}
 
 
+def _skill_version_number(db: Session, item: SkillRecord) -> Optional[int]:
+    if item.current_version_id is None:
+        return None
+    version = db.get(SkillVersion, item.current_version_id)
+    return version.version_number if version is not None else None
+
+
 def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel]) -> APIRouter:
     sub = APIRouter(prefix=f"/{name}")
     # Skills have a platform tier (org_id NULL = built-ins visible to every
@@ -267,7 +276,17 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         items = query.order_by(record_cls.name).all()
         org_names = _org_name_map(db)
         return [
-            {"name": item.name, "org": org_names.get(item.org_id), "config": item.config}
+            {
+                "name": item.name,
+                "org": org_names.get(item.org_id),
+                "config": item.config,
+                **(
+                    {
+                        "version": _skill_version_number(db, item)
+                    }
+                    if name == "skills" else {}
+                ),
+            }
             for item in items
         ]
 
@@ -279,7 +298,10 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
-        return {"name": item.name, "org": org, "config": item.config}
+        payload = {"name": item.name, "org": org, "config": item.config}
+        if name == "skills":
+            payload["version"] = _skill_version_number(db, item)
+        return payload
 
     @sub.put("/{item_name}")
     def upsert_item(
@@ -287,6 +309,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         config: Dict[str, Any] = Body(...),
         org: Optional[str] = Query(None),
         db: Session = Depends(get_db),
+        admin: User = Depends(get_current_admin),
     ) -> Dict[str, Any]:
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
         if name == "knowledge_bases":
@@ -298,27 +321,36 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        # Creating an org skill can shadow a same-named platform built-in that a
-        # workflow already deployed against, so serialize the write + dependency
-        # reconciliation against concurrent deploys/deletes under the same lock
-        # they take, and re-point stale current-version skill dep rows to the now
-        # -resolved id. Other component kinds have no such shadowing (KBs are
-        # org-scoped) and keep the plain write.
-        reconcile = name == "skills" and org_id is not None
-        with (component_mutation_lock if reconcile else nullcontext()):
+        # Skill saves append immutable versions and are serialized with workflow
+        # deploy so the deploy pins either the old or new version atomically.
+        # Creating an org override deliberately does not rewrite existing team
+        # dependencies: only a future redeploy opts that team into the override.
+        with component_mutation_lock:
             item = db.query(record_cls).filter_by(name=item_name, org_id=org_id).one_or_none()
-            if item is None:
-                item = record_cls(name=item_name, config=raw, org_id=org_id)
-                db.add(item)
+            if name == "skills":
+                item, version = publish_skill_version(
+                    db,
+                    org_id=org_id,
+                    name=item_name,
+                    config=raw,
+                    created_by=admin.username,
+                )
             else:
-                item.config = raw
-            if reconcile:
-                db.flush()  # the new/updated skill row must be visible to the resolve
-                reconcile_skill_dependencies(db, org_id=org_id, name=item_name)
+                version = None
+                if item is None:
+                    item = record_cls(name=item_name, config=raw, org_id=org_id)
+                    db.add(item)
+                else:
+                    item.config = raw
             db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
-        return {"name": item_name, "org": org, "config": raw}
+        return {
+            "name": item_name,
+            "org": org,
+            "config": raw,
+            **({"version": version.version_number} if version is not None else {}),
+        }
 
     @sub.delete("/{item_name}", status_code=204)
     def delete_item(
@@ -370,11 +402,50 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                                 item_name, org_id, exc,
                             )
             else:
+                if name == "skills":
+                    # Retain immutable version snapshots for superseded workflow
+                    # provenance while detaching them from the deleted library head.
+                    db.query(SkillVersion).filter_by(skill_id=item.id).update(
+                        {SkillVersion.skill_id: None}, synchronize_session=False
+                    )
+                    item.current_version_id = None
+                    db.flush()
                 db.delete(item)
                 db.commit()
         if name in ("knowledge_bases", "skills"):
             _invalidate_workflow_cache()
         return Response(status_code=204)
+
+    if name == "skills":
+        @sub.get("/{item_name}/versions")
+        def list_skill_versions(
+            item_name: str,
+            org: Optional[str] = Query(None),
+            db: Session = Depends(get_db),
+        ) -> list[Dict[str, Any]]:
+            """Immutable version history for an active skill library head."""
+            org_id = _resolve_org_id(db, org, allow_platform=True)
+            item = db.query(SkillRecord).filter_by(
+                name=item_name, org_id=org_id
+            ).one_or_none()
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"Unknown skill '{item_name}'")
+            versions = (
+                db.query(SkillVersion)
+                .filter_by(skill_id=item.id)
+                .order_by(SkillVersion.version_number.desc())
+                .all()
+            )
+            return [
+                {
+                    "version": version.version_number,
+                    "config": version.config,
+                    "created_by": version.created_by,
+                    "created_at": version.created_at.isoformat(),
+                    "current": version.id == item.current_version_id,
+                }
+                for version in versions
+            ]
 
     return sub
 

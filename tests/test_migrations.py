@@ -42,6 +42,7 @@ _EXPECTED_HEAD_TABLES = {
     "users",
     "knowledge_bases",
     "skills",
+    "skill_versions",
     "workflows",
     "workflow_dependencies",
     "builder_sessions",
@@ -70,6 +71,14 @@ def _table_names(db_path: Path) -> set[str]:
         engine.dispose()
 
 
+def _has_fk(engine, table: str, column: str, referred_table: str) -> bool:
+    return any(
+        fk.get("constrained_columns") == [column]
+        and fk.get("referred_table") == referred_table
+        for fk in sa.inspect(engine).get_foreign_keys(table)
+    )
+
+
 def test_create_all_then_upgrade_head_is_idempotent(tmp_path, monkeypatch):
     """The documented deploy order: create_all (backend import) THEN migrate.
 
@@ -88,6 +97,17 @@ def test_create_all_then_upgrade_head_is_idempotent(tmp_path, monkeypatch):
     assert _EXPECTED_HEAD_TABLES.issubset(tables)
     assert "agents" not in tables
     assert "teams" not in tables
+    engine = make_engine(db_path)
+    try:
+        assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
+        assert _has_fk(
+            engine,
+            "workflow_dependencies",
+            "resource_version_id",
+            "skill_versions",
+        )
+    finally:
+        engine.dispose()
 
 
 # Revision just before principal_id, and the principal_id revision itself.
@@ -224,6 +244,106 @@ def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
                     "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at) "
                     "VALUES ('bad', NULL, '{}', 'bogus', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ))
+    finally:
+        engine.dispose()
+
+
+# Revision immediately before immutable skill versions/pins.
+_PRE_SKILL_VERSIONS = "b8c9d0e1f2a3"
+
+
+def test_skill_version_migration_backfills_heads_and_workflow_pins(tmp_path, monkeypatch):
+    db_path = tmp_path / "skill_versions.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_SKILL_VERSIONS)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO skills (id, name, org_id, config, created_at, updated_at) "
+            "VALUES (3, 'greet', NULL, '{\"name\": \"greet\", "
+            "\"instructions\": \"legacy\"}', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows "
+            "(id, name, org_id, config, status, created_at, updated_at, current_version_id) "
+            "VALUES (4, 'team', NULL, '{}', 'deployed', '2026-01-01', '2026-01-01', NULL)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions "
+            "(id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (5, 4, 1, '{}', NULL, '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "UPDATE workflows SET current_version_id = 5 WHERE id = 4"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflow_dependencies "
+            "(id, workflow_version_id, resource_kind, resource_name, resource_id) "
+            "VALUES (6, 5, 'skill', 'greet', 3)"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(sa.text(
+                "SELECT id, skill_id, version_number, config FROM skill_versions"
+            )).one()
+            assert version[1:3] == (3, 1)
+            assert "legacy" in version[3]
+            assert conn.execute(sa.text(
+                "SELECT current_version_id FROM skills WHERE id = 3"
+            )).scalar() == version[0]
+            assert conn.execute(sa.text(
+                "SELECT resource_version_id FROM workflow_dependencies WHERE id = 6"
+            )).scalar() == version[0]
+        assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
+        assert _has_fk(
+            engine,
+            "workflow_dependencies",
+            "resource_version_id",
+            "skill_versions",
+        )
+    finally:
+        engine.dispose()
+
+
+def test_skill_version_migration_repairs_existing_columns_missing_fks(tmp_path, monkeypatch):
+    """Retry must repair schema parity when columns exist without constraints."""
+    db_path = tmp_path / "skill_versions_missing_fks.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_SKILL_VERSIONS)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "CREATE TABLE skill_versions ("
+            "id INTEGER PRIMARY KEY, skill_id INTEGER, version_number INTEGER NOT NULL, "
+            "config JSON NOT NULL, created_by VARCHAR, created_at DATETIME NOT NULL, "
+            "CONSTRAINT uq_skill_versions_skill_id_version_number "
+            "UNIQUE (skill_id, version_number), "
+            "FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE SET NULL)"
+        ))
+        conn.execute(sa.text("ALTER TABLE skills ADD COLUMN current_version_id INTEGER"))
+        conn.execute(sa.text(
+            "ALTER TABLE workflow_dependencies ADD COLUMN resource_version_id INTEGER"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
+        assert _has_fk(
+            engine,
+            "workflow_dependencies",
+            "resource_version_id",
+            "skill_versions",
+        )
     finally:
         engine.dispose()
 

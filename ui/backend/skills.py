@@ -8,18 +8,51 @@ from sqlalchemy.orm import Session
 
 from bestteam import SkillSpec
 
-from .db.models import SkillRecord
+from .db.models import SkillRecord, SkillVersion, WorkflowDependency
+from .db.skills import ensure_skill_version, publish_skill_version
 
 
-def load_skills(db: Session, org_id: Optional[int] = None) -> Dict[str, SkillSpec]:
+def load_skills(
+    db: Session,
+    org_id: Optional[int] = None,
+    *,
+    workflow_version_id: Optional[int] = None,
+) -> Dict[str, SkillSpec]:
     """Return the skills visible to `org_id` as a name→SkillSpec mapping.
+
+    When ``workflow_version_id`` is supplied, return only the immutable skill
+    versions pinned when that workflow version was deployed. This is the
+    execution path. Without it, return the current visible catalog for builder
+    drafts, deploy validation, YAML demos, and SDK compatibility.
 
     Platform built-ins (org_id IS NULL) are visible to everyone; an org
     additionally sees its own skills, and an org skill shadows a same-named
     built-in (built-ins are folded in first). org_id=None returns the
     built-in tier only.
     """
-    query = db.query(SkillRecord)
+    if workflow_version_id is not None:
+        dependencies = db.query(WorkflowDependency).filter_by(
+            workflow_version_id=workflow_version_id,
+            resource_kind="skill",
+        ).all()
+        result: Dict[str, SkillSpec] = {}
+        for dependency in dependencies:
+            config = None
+            if dependency.resource_version_id is not None:
+                version = db.get(SkillVersion, dependency.resource_version_id)
+                if version is not None:
+                    config = version.config
+            if config is not None:
+                result[dependency.resource_name] = SkillSpec.model_validate(
+                    {**config, "name": dependency.resource_name}
+                )
+        return result
+
+    # Select only legacy columns: YAML/SDK catalog reads can keep working while
+    # an operator is between application update and ``alembic upgrade head``.
+    # Published DB workflows use the version-aware branch above and correctly
+    # require the new schema.
+    query = db.query(SkillRecord.name, SkillRecord.config, SkillRecord.org_id)
     if org_id is None:
         records = query.filter(SkillRecord.org_id.is_(None)).all()
     else:
@@ -34,9 +67,8 @@ def load_skills(db: Session, org_id: Optional[int] = None) -> Dict[str, SkillSpe
     }
 
 
-# Built-in skills shipped with the platform. Seeded per-row (if the name is
-# absent) so an admin's edits to a built-in are never overwritten, and a
-# deleted built-in stays deleted only until the next restart re-seeds it.
+# Built-in skills shipped with the platform. Seeded as version 1 when absent;
+# an existing admin-customized head is never overwritten.
 DEFAULT_SKILLS: List[SkillSpec] = [
     SkillSpec(
         name="email_triage_reply",
@@ -86,25 +118,25 @@ def seed_default_skills(db: Session) -> None:
     looks only at that tier so an org's same-named skill can't suppress
     seeding of the built-in.
 
-    Because existing rows are never overwritten (to protect admin edits), a
-    change to a built-in's ``DEFAULT_SKILLS`` definition reaches **new**
-    deployments only. To adopt an updated built-in on a deployment that
-    already has the row, an operator re-saves the new JSON through the Advanced
-    UI / ``PUT /api/config/skills/<name>`` (org omitted = platform tier), or
-    deletes the row and restarts to let it re-seed. There is deliberately no
-    automatic version-and-overwrite here: distinguishing an untouched shipped
-    value from a genuine customization would need a stored version, which isn't
-    worth it at this scale.
+    A change to a built-in's ``DEFAULT_SKILLS`` definition reaches new
+    deployments only. An operator can save the new JSON through the Advanced
+    API/UI to append a version without changing teams already pinned to an
+    earlier version. Automatic replacement remains disabled because an
+    existing value may be an intentional platform customization.
     """
     existing = {
-        name
-        for (name,) in db.query(SkillRecord.name).filter(SkillRecord.org_id.is_(None)).all()
+        record.name: record
+        for record in db.query(SkillRecord).filter(SkillRecord.org_id.is_(None)).all()
     }
     changed = False
     for spec in DEFAULT_SKILLS:
-        if spec.name in existing:
+        record = existing.get(spec.name)
+        if record is not None:
+            if record.current_version_id is None:
+                ensure_skill_version(db, record)
+                changed = True
             continue
-        db.add(SkillRecord(name=spec.name, config=spec.to_raw()))
+        publish_skill_version(db, org_id=None, name=spec.name, config=spec.to_raw())
         changed = True
     if changed:
         db.commit()

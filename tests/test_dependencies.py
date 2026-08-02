@@ -4,13 +4,11 @@ pytest.importorskip("sqlalchemy")
 
 from ui.backend.db import init_db, make_engine
 from ui.backend.db.database import session_factory
-from ui.backend.db.dependencies import (
-    reconcile_skill_dependencies,
-    record_version_dependencies,
-    workflows_referencing,
-)
-from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, WorkflowDependency
+from ui.backend.db.dependencies import record_version_dependencies, workflows_referencing
+from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, SkillVersion, WorkflowDependency
+from ui.backend.db.skills import publish_skill_version
 from ui.backend.db.workflows import publish_workflow_version
+from ui.backend.skills import load_skills
 
 
 @pytest.fixture
@@ -45,6 +43,8 @@ def test_records_skill_and_standalone_kb_deps(db):
     }
     # http_get is a built-in tool, not a standalone KB -> no row.
     assert deps == {("skill", "greet", 1), ("knowledge_base", "returns_policy", 2)}
+    skill_dep = db.query(WorkflowDependency).filter_by(resource_kind="skill").one()
+    assert db.get(SkillVersion, skill_dep.resource_version_id).config == {}
 
 
 def test_org_skill_shadows_platform_builtin(db):
@@ -121,13 +121,11 @@ def test_mixed_type_refs_are_dropped_not_fatal(db):
     assert rows == {("skill", "greet", 1)}
 
 
-def test_reconcile_repoints_dep_to_post_deploy_org_override(db):
-    # Deploy referencing "triage" when only the platform built-in (id 1) exists,
-    # then the org creates its own "triage" (id 2). The runtime now prefers the
-    # org skill, so reconcile must move the dep row off the shadowed built-in --
-    # otherwise the delete guard would allow deleting the in-use org skill and
-    # keep blocking the now-unused built-in.
-    db.add(SkillRecord(id=1, name="triage", org_id=None, config={}))  # platform built-in
+def test_post_deploy_org_override_does_not_rewrite_pinned_dependency(db):
+    platform, _ = publish_skill_version(
+        db, org_id=None, name="triage",
+        config={"name": "triage", "instructions": "platform", "tools": []},
+    )
     db.commit()
     _rec, version = publish_workflow_version(
         db, org_id=7, name="wf",
@@ -135,35 +133,46 @@ def test_reconcile_repoints_dep_to_post_deploy_org_override(db):
     )
     db.commit()
     row = db.query(WorkflowDependency).filter_by(workflow_version_id=version.id).one()
-    assert row.resource_id == 1  # resolved to the built-in at deploy
+    pinned_version_id = row.resource_version_id
 
-    db.add(SkillRecord(id=2, name="triage", org_id=7, config={}))  # org override
+    org_skill, _ = publish_skill_version(
+        db, org_id=7, name="triage",
+        config={"name": "triage", "instructions": "org override", "tools": []},
+    )
     db.commit()
-    reconcile_skill_dependencies(db, org_id=7, name="triage")
+
+    db.refresh(row)
+    assert (row.resource_id, row.resource_version_id) == (platform.id, pinned_version_id)
+    assert load_skills(db, 7, workflow_version_id=version.id)["triage"].instructions == "platform"
+    assert workflows_referencing(db, kind="skill", resource_id=platform.id) == ["wf"]
+    assert workflows_referencing(db, kind="skill", resource_id=org_skill.id) == []
+
+
+def test_redeploy_after_org_override_pins_override(db):
+    platform, _ = publish_skill_version(
+        db, org_id=None, name="triage",
+        config={"name": "triage", "instructions": "platform", "tools": []},
+    )
     db.commit()
-
-    assert workflows_referencing(db, kind="skill", resource_id=2) == ["wf"]  # org skill: in use
-    assert workflows_referencing(db, kind="skill", resource_id=1) == []      # built-in: freed
-
-
-def test_reconcile_ignores_other_orgs_and_names(db):
-    # Reconcile is scoped to (org_id, name): a same-named skill in another org
-    # and a different-named skill in the same org must be untouched.
-    db.add(SkillRecord(id=1, name="triage", org_id=None, config={}))
-    db.commit()
-    _rec, version = publish_workflow_version(
+    publish_workflow_version(
         db, org_id=7, name="wf",
         config=_config([{"name": "a", "skills": ["triage"], "tools": []}]),
     )
     db.commit()
-    # An org override in a DIFFERENT org (8) exists; reconciling org 7 must not
-    # touch org 7's row on account of it, and there's no org-7 override yet.
-    db.add(SkillRecord(id=9, name="triage", org_id=8, config={}))
+    org_skill, org_version = publish_skill_version(
+        db, org_id=7, name="triage",
+        config={"name": "triage", "instructions": "org", "tools": []},
+    )
     db.commit()
-    reconcile_skill_dependencies(db, org_id=7, name="triage")
+    _head, v2 = publish_workflow_version(
+        db, org_id=7, name="wf",
+        config=_config([{"name": "a", "skills": ["triage"], "tools": []}]),
+    )
     db.commit()
-    row = db.query(WorkflowDependency).filter_by(workflow_version_id=version.id).one()
-    assert row.resource_id == 1  # still the built-in (no org-7 override)
+    row = db.query(WorkflowDependency).filter_by(workflow_version_id=v2.id).one()
+    assert (row.resource_id, row.resource_version_id) == (org_skill.id, org_version.id)
+    assert workflows_referencing(db, kind="skill", resource_id=platform.id) == []
+    assert workflows_referencing(db, kind="skill", resource_id=org_skill.id) == ["wf"]
 
 
 def test_workflows_referencing_matches_current_version_only(db):

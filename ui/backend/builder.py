@@ -81,7 +81,26 @@ def _session_to_dict(
     # and the caller passes its org context; defaults False otherwise.
     uses_email = False
     if db is not None and org_id is not None and session.specification_json:
-        uses_email = spec_uses_email(db, session.specification_json, org_id)
+        spec_raw = session.specification_json
+        workflow_version_id = None
+        # Once deployed, capability metadata must describe the exact live team,
+        # including its pinned skills. The session spec can be stale after an
+        # Advanced-page redeploy, and current skill heads can move independently.
+        if session.status == "deployed" and session.workflow_id is not None:
+            record = (
+                db.query(WorkflowRecord)
+                .filter_by(id=session.workflow_id, org_id=org_id, status="deployed")
+                .one_or_none()
+            )
+            if record is not None:
+                spec_raw = record.config
+                workflow_version_id = record.current_version_id
+        uses_email = spec_uses_email(
+            db,
+            spec_raw,
+            org_id,
+            workflow_version_id=workflow_version_id,
+        )
     return {
         "id": session.id,
         "intent_text": session.intent_text,
@@ -278,7 +297,9 @@ def create_builder_session(
     return _session_to_dict(session, db, org.id)
 
 
-def _synthetic_session_for_workflow(record: WorkflowRecord) -> Dict[str, Any]:
+def _synthetic_session_for_workflow(
+    record: WorkflowRecord, db: Session, org_id: int
+) -> Dict[str, Any]:
     """A My-teams card for a workflow deployed without ever going through the
     wizard (e.g. via the admin Advanced/CRUD page) -- so every deployed team
     is visible there, not just wizard-built ones. `id` stays `None`: there is
@@ -293,7 +314,12 @@ def _synthetic_session_for_workflow(record: WorkflowRecord) -> Dict[str, Any]:
         "status": "deployed",
         "workflow_id": record.id,
         "feedback_history": [],
-        "uses_email": False,
+        "uses_email": spec_uses_email(
+            db,
+            record.config,
+            org_id,
+            workflow_version_id=record.current_version_id,
+        ),
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
     }
@@ -319,7 +345,19 @@ def list_builder_sessions(
         .filter(WorkflowRecord.id.notin_(session_workflow_ids))
         .all()
     )
-    session_dicts.extend(_synthetic_session_for_workflow(r) for r in orphan_workflows)
+    session_dicts.extend(
+        _synthetic_session_for_workflow(r, db, org.id) for r in orphan_workflows
+    )
+    # Both source queries have different ordering semantics; enforce the API's
+    # most-recent-first contract after combining them, with stable tie-breakers.
+    session_dicts.sort(
+        key=lambda item: (
+            item["updated_at"],
+            item["id"] or "",
+            item["workflow_id"] or 0,
+        ),
+        reverse=True,
+    )
     return {"sessions": session_dicts}
 
 
@@ -561,20 +599,22 @@ def deploy_session(
                 + ". Rename the knowledge base."
             ),
         )
-    # A team that reads/drafts email can't go live without a connected mailbox.
-    if spec_uses_email(db, session.specification_json, org.id) and (
-        get_email_credentials(db, org.id) is None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="This team works in your email, so connect a mailbox before going live.",
-        )
     source = _source_for(session_id)
     ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
     # Serialize dependency resolution + the deployed write against a concurrent
     # component delete (F3): either the delete's scan sees this workflow, or this
     # deploy's resolution fails because the resource was already removed.
     with component_mutation_lock:
+        # Resolve capability and publish dependencies from one skill-head
+        # snapshot. Otherwise an admin edit between this gate and publication
+        # could pin an email skill after a no-mailbox check had already passed.
+        if spec_uses_email(db, session.specification_json, org.id) and (
+            get_email_credentials(db, org.id) is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="This team works in your email, so connect a mailbox before going live.",
+            )
         extra_tools = {
             **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
             **load_email_tools(db, org.id),
