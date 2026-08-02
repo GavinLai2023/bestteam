@@ -9,6 +9,8 @@ intent -> requirements -> spec -> solution -> testing -> deployed.
 
 from __future__ import annotations
 
+import logging
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -24,10 +26,10 @@ from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
-from .db.builder_sessions import append_feedback, create_session, get_session, list_sessions, update_session
+from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
 from .db.workflows import publish_workflow_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
@@ -47,6 +49,8 @@ from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
 router = APIRouter(prefix="/api/builder/sessions", tags=["builder"], dependencies=[Depends(get_current_user)])
+
+logger = logging.getLogger(__name__)
 
 _SESSIONS_DIR = Path(__file__).parent / "data" / "builder_sessions"
 
@@ -85,6 +89,7 @@ def _session_to_dict(
         "requirements_json": session.requirements_json,
         "specification_json": session.specification_json,
         "status": session.status,
+        "workflow_id": session.workflow_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
         "created_at": session.created_at.isoformat(),
@@ -273,14 +278,49 @@ def create_builder_session(
     return _session_to_dict(session, db, org.id)
 
 
+def _synthetic_session_for_workflow(record: WorkflowRecord) -> Dict[str, Any]:
+    """A My-teams card for a workflow deployed without ever going through the
+    wizard (e.g. via the admin Advanced/CRUD page) -- so every deployed team
+    is visible there, not just wizard-built ones. `id` stays `None`: there is
+    no `BuilderSession` to resume into, so the frontend routes a click
+    straight to Run a Team instead of a wizard page."""
+    return {
+        "id": None,
+        "intent_text": record.name,
+        "as_is_text": None,
+        "requirements_json": None,
+        "specification_json": record.config,
+        "status": "deployed",
+        "workflow_id": record.id,
+        "feedback_history": [],
+        "uses_email": False,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+    }
+
+
 @router.get("")
 def list_builder_sessions(
     db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
 ) -> Dict[str, Any]:
     """List the org's builder sessions (most recent first), for an "AI teams
     I've built" list page. A session with status 'deployed' has a live
-    WorkflowRecord matching specification_json['name']."""
-    return {"sessions": [_session_to_dict(s, db, org.id) for s in list_sessions(db, org_id=org.id)]}
+    WorkflowRecord matching specification_json['name']. Deployed workflows
+    with no backing session at all (deployed straight through the admin
+    Advanced/CRUD page) get a synthetic entry too, so My Teams shows every
+    team the org can run, not just the wizard-built subset."""
+    sessions = list_sessions(db, org_id=org.id)
+    session_dicts = [_session_to_dict(s, db, org.id) for s in sessions]
+
+    session_workflow_ids = {s.workflow_id for s in sessions if s.workflow_id is not None}
+    orphan_workflows = (
+        db.query(WorkflowRecord)
+        .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
+        .filter(WorkflowRecord.id.notin_(session_workflow_ids))
+        .all()
+    )
+    session_dicts.extend(_synthetic_session_for_workflow(r) for r in orphan_workflows)
+    return {"sessions": session_dicts}
 
 
 @router.get("/{session_id}")
@@ -290,6 +330,34 @@ def get_builder_session(
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
     return _session_to_dict(_get_session_or_404(db, session_id, org.id), db, org.id)
+
+
+@router.delete("/{session_id}", status_code=204)
+def delete_builder_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> None:
+    """Delete a session that was never deployed (`workflow_id IS NULL`) --
+    the "abandoned draft" case. A session that has ever gone live has no
+    delete path here (see docs/superpowers/specs/2026-07-31-draft-session-deletion-design.md);
+    the frontend never offers this for a `workflow_id`-linked session, but
+    this guard holds even if the route is called directly."""
+    session = _get_session_or_404(db, session_id, org.id)
+    if session.workflow_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This team is live -- it can't be deleted from here yet.",
+        )
+    delete_session(db, session_id)
+    try:
+        shutil.rmtree(_SESSIONS_DIR / session_id)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "Failed to remove workspace directory for deleted session %s", session_id, exc_info=True
+        )
 
 
 @router.post("/{session_id}/requirements")

@@ -93,6 +93,28 @@ def test_build_trigger_workflow_refuses_non_deployed_team(db, monkeypatch):
         email_trigger.build_trigger_workflow("wip", db, org.id, {1}, backend)
 
 
+def test_build_trigger_workflow_refuses_team_redeployed_without_email(db, monkeypatch):
+    # A trigger stays enabled across redeploys (only a mailbox identity change
+    # disables it). If the team is redeployed to a version with no email
+    # tools/skills, the poller must not dispatch against it -- it would
+    # consume the batch's UIDs and daily cap launching an unrelated team with
+    # an email-triage prompt aimed at agents that never asked for one.
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(db, org.id, host="h", username="u", password="pw")
+    no_email_team = {
+        "name": "triage",
+        "agents": [{"name": "t", "role": "Writer", "goal": "write",
+                    "model": "fake:done"}],
+        "teams": [{"name": "tm", "agents": ["t"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    db.add(WorkflowRecord(name="triage", org_id=org.id, config=no_email_team, status="deployed"))
+    db.commit()
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    with pytest.raises(Exception):
+        email_trigger.build_trigger_workflow("triage", db, org.id, {1}, backend)
+
+
 def test_batch_size_default_and_override(monkeypatch):
     monkeypatch.delenv("BESTTEAM_TRIGGER_BATCH_SIZE", raising=False)
     assert email_trigger.batch_size() == 20

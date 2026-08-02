@@ -58,6 +58,19 @@ describe('ActivityPage', () => {
     expect(api.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
   })
 
+  it('shows a run\'s start time as "DD MMM YYYY, h:mm AM/PM"', async () => {
+    api.listRuns.mockResolvedValue({
+      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T14:05:00', autonomous: false }],
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+
+    expect(await screen.findByText(/31 JUL 2026, 2:05 PM/)).toBeInTheDocument()
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })
@@ -140,6 +153,48 @@ describe('ActivityPage', () => {
 
     expect(screen.getByRole('heading', { name: 'wf-b' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'wf-a' })).not.toBeInTheDocument()
+  })
+
+  it('"View automatic runs" on the Automations tab jumps to the Runs tab filtered to Automatic only', async () => {
+    api.getEmailTrigger.mockResolvedValue({
+      enabled: true,
+      workflow_name: 'wf-a',
+      status: 'active',
+      last_checked_at: null,
+      last_error: null,
+    })
+    api.listRuns.mockResolvedValue({ runs: [] })
+
+    renderPage()
+    const viewRunsButton = await screen.findByText('View automatic runs')
+
+    await act(async () => {
+      fireEvent.click(viewRunsButton)
+    })
+
+    expect(await screen.findByText('Runs')).toHaveClass('active')
+    expect(api.listRuns).toHaveBeenCalledWith({ manual: false })
+  })
+
+  it('scrolls the run detail panel into view when a run is selected', async () => {
+    api.listRuns.mockResolvedValue({
+      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+    })
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+    const runHeading = await screen.findByRole('heading', { name: 'wf-a' })
+
+    await act(async () => {
+      fireEvent.click(runHeading)
+    })
+
+    expect(scrollIntoView).toHaveBeenCalled()
   })
 
   it('clicking a run opens its detail via getRunTrace', async () => {

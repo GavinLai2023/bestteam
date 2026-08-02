@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { formatDateTime } from '../lib/dateFormat'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import RunDetail from '../components/RunDetail'
 import '../components/WizardLayout.css'
@@ -31,6 +32,14 @@ export default function ActivityPage() {
   const [filters, setFilters] = useState({ workflow: '', manual: '', status: '' })
   const [selectedRun, setSelectedRun] = useState(null) // { id, status } | null
   const hasRunningRun = runs.some((run) => run.status === 'running')
+  const runDetailRef = useRef(null)
+
+  // The run list can be long -- opening the detail panel below it (it's
+  // rendered after the list) would otherwise leave it off-screen when the
+  // clicked run is near the top.
+  useEffect(() => {
+    if (selectedRun) runDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [selectedRun])
 
   useEffect(() => {
     api
@@ -100,7 +109,14 @@ export default function ActivityPage() {
         </button>
       </div>
 
-      {tab === 'automations' && <EmailTriggerActivity />}
+      {tab === 'automations' && (
+        <EmailTriggerActivity
+          onViewRuns={() => {
+            setFilters((f) => ({ ...f, manual: 'false' }))
+            setTab('runs')
+          }}
+        />
+      )}
 
       {tab === 'runs' && (
         <>
@@ -158,7 +174,7 @@ export default function ActivityPage() {
                     <div className="session-card-footer">
                       <span className="status-badge">{run.status}</span>
                       <span className="session-updated">
-                        {run.autonomous ? 'Automatic' : 'Manual'} · {new Date(run.started_at).toLocaleString()}
+                        {run.autonomous ? 'Automatic' : 'Manual'} · {formatDateTime(run.started_at)}
                       </span>
                     </div>
                   </button>
@@ -168,7 +184,7 @@ export default function ActivityPage() {
           )}
 
           {selectedRun && (
-            <section className="run-detail-panel">
+            <section className="run-detail-panel" ref={runDetailRef}>
               <div className="run-detail-panel-header">
                 <h2>Run {selectedRun.id}</h2>
                 <button type="button" onClick={() => setSelectedRun(null)}>

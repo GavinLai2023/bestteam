@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import { formatDateTime } from '../lib/dateFormat'
 
-const STATUS_LABELS = {
-  active: 'Active — watching for new email',
-  paused_cap: 'Paused — daily limit reached (resumes tomorrow)',
-  error: 'Problem checking the mailbox',
-  disabled: 'Paused by the operator',
+const STATUS_META = {
+  active: { badge: 'Active', text: 'Watching for new email.' },
+  off: { badge: 'Off', text: 'Automatic runs are turned off.' },
+  disabled: { badge: 'Paused', text: 'Paused by the operator.' },
+  paused_cap: { badge: 'Paused', text: "Today's run limit was reached -- resumes tomorrow." },
+  error: { badge: 'Problem', text: 'Problem checking the mailbox.' },
 }
 
 // How often to re-poll while mounted on the Activity page's Automations tab.
@@ -14,23 +16,19 @@ const STATUS_LABELS = {
 // sooner, so this trades a little staleness for not hammering the endpoint.
 const REFRESH_INTERVAL_MS = 30_000
 
-// Org-level automatic-runs status + recent autonomous activity, shown on the
-// Activity page's Automations tab. Renders nothing while loading or while
-// automatic runs are off (most teams never turn this on); a fetch failure
-// gets its own banner so it is never mistaken for either of those.
-export default function EmailTriggerActivity() {
+// Org-level automatic-runs status, shown on the Activity page's Automations
+// tab. Always shows a status card once loaded -- including "off" -- so a
+// deliberately-disabled trigger reads differently from never having
+// configured one. Recent autonomous runs live on the Runs tab (filter:
+// "Automatic only") instead of being duplicated here; `onViewRuns` jumps
+// there pre-filtered.
+export default function EmailTriggerActivity({ onViewRuns }) {
   const [trigger, setTrigger] = useState(undefined) // undefined = still loading
   const [statusFailed, setStatusFailed] = useState(false)
-  const [runs, setRuns] = useState([])
-  const [activityFailed, setActivityFailed] = useState(false)
 
   useEffect(() => {
     const load = () => {
       api.getEmailTrigger().then(setTrigger).catch(() => setStatusFailed(true))
-      api
-        .emailTriggerActivity()
-        .then((d) => setRuns(d.runs.filter((r) => r.autonomous).slice(0, 10)))
-        .catch(() => setActivityFailed(true))
     }
     load()
     const id = setInterval(load, REFRESH_INTERVAL_MS)
@@ -48,33 +46,45 @@ export default function EmailTriggerActivity() {
   }
 
   if (trigger === undefined) return null // still loading -- avoid a flash
-  if (!trigger.enabled) return null // genuinely off -- nothing to show
+
+  if (!trigger.workflow_name) {
+    return (
+      <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
+        <h3>Automatic runs</h3>
+        <p className="hint">
+          No automatic runs configured yet. Connect a mailbox and turn one on from a team's
+          Deploy page in the Team Builder.
+        </p>
+      </div>
+    )
+  }
+
+  const meta = STATUS_META[trigger.status] ?? { badge: trigger.status, text: '' }
 
   return (
     <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
-      <h3>Automatic runs — "{trigger.workflow_name}"</h3>
-      <p className="subtitle">{STATUS_LABELS[trigger.status] ?? trigger.status}</p>
+      <div className="trigger-status-header">
+        <h3>Automatic runs — "{trigger.workflow_name}"</h3>
+        <span className="status-badge">{meta.badge}</span>
+      </div>
+      <p className="subtitle">{meta.text}</p>
+      <p className="hint">Triggers when new email arrives in the connected mailbox.</p>
       {trigger.last_checked_at && (
         <p className="hint">
-          Last checked: {new Date(trigger.last_checked_at).toLocaleString()}
+          Last checked: {formatDateTime(trigger.last_checked_at)}
         </p>
       )}
       {trigger.status === 'error' && trigger.last_error && (
         <p className="banner banner-error">{trigger.last_error}</p>
       )}
-      {activityFailed ? (
-        <p className="hint">Couldn't load recent activity. Refresh the page to try again.</p>
-      ) : runs.length === 0 ? (
-        <p className="hint">No automatic runs yet — they'll show up here when new email arrives.</p>
-      ) : (
-        <ul className="session-list">
-          {runs.map((r) => (
-            <li key={r.id} className="hint">
-              <span className="status-badge">{r.status}</span>{' '}
-              {r.started_at ? new Date(r.started_at).toLocaleString() : ''}
-            </li>
-          ))}
-        </ul>
+      <p className="hint">
+        Turn this on, off, or point it at a different team from that team's Deploy page in the
+        Team Builder.
+      </p>
+      {onViewRuns && (
+        <button type="button" className="btn-link" onClick={onViewRuns}>
+          View automatic runs
+        </button>
       )}
     </div>
   )

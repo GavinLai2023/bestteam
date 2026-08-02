@@ -44,6 +44,17 @@
   border-radius: 8px;
 }
 
+.trigger-status-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trigger-status-header h3 {
+  margin: 0;
+}
+
 .run-detail-panel {
   margin-top: 20px;
   background: #fff;

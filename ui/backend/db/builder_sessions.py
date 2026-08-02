@@ -103,3 +103,14 @@ def append_feedback(db: Session, session_id: str, feedback: dict[str, Any]) -> B
     db.commit()
     db.refresh(session)
     return session
+
+
+def delete_session(db: Session, session_id: str) -> None:
+    """Permanently remove a builder session. Callers are responsible for any
+    ownership or "never deployed" guard before calling this -- see
+    `ui/backend/builder.py::delete_builder_session`."""
+    session = get_session(db, session_id)
+    if session is None:
+        raise LookupError(f"Unknown builder session '{session_id}'")
+    db.delete(session)
+    db.commit()

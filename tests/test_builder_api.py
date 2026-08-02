@@ -223,6 +223,53 @@ def test_list_sessions_returns_most_recently_updated_first(client):
     assert ids.index(second["id"]) < ids.index(first["id"])
 
 
+def test_list_sessions_includes_deployed_workflows_with_no_builder_session(client):
+    # A workflow can be deployed straight through the admin Advanced/CRUD
+    # page, bypassing the wizard entirely -- it should still show up on My
+    # Teams (as a session-shaped entry with id=None) instead of being
+    # invisible there while still being runnable from Run a Team. The CRUD
+    # path builds `Agent(**spec)` directly (ui/backend/CLAUDE.md), so its raw
+    # config has no wizard-only display_name/friendly_description fields.
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    resp = client.put(
+        "/api/config/workflows/orphan_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
+    sessions = resp.json()["sessions"]
+    orphan = next(s for s in sessions if s["specification_json"]["name"] == "orphan_team")
+    assert orphan["id"] is None
+    assert orphan["status"] == "deployed"
+    assert orphan["workflow_id"] is not None
+
+
+def test_list_sessions_does_not_duplicate_a_deployed_workflow_that_has_a_session(client):
+    session_id = _make_deployable_session(client)
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    sessions = client.get("/api/builder/sessions").json()["sessions"]
+    matches = [s for s in sessions if s.get("specification_json", {}).get("name") == "support_workflow"]
+    assert len(matches) == 1
+    assert matches[0]["id"] == session_id
+
+
 def test_submit_requirements_with_confirmed_payload(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
 
@@ -612,3 +659,87 @@ def test_with_model_catalog_appends_catalog_text_when_present():
     assert with_catalog.startswith("Requirements text\n\n")
     assert "openai:gpt-4o-mini" in with_catalog
     assert "Quick Assistant" in with_catalog
+
+
+def test_delete_never_deployed_session_removes_it(client, tmp_path, monkeypatch):
+    from ui.backend import builder as builder_module
+
+    monkeypatch.setattr(builder_module, "_SESSIONS_DIR", tmp_path)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "abandoned idea"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    workspace = tmp_path / session_id
+    assert workspace.exists()
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 204
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 404
+    assert not workspace.exists()
+
+
+def test_delete_session_with_in_flight_sandbox_run_does_not_disrupt_the_run(client, tmp_path, monkeypatch):
+    # A test-run dispatches to a worker thread and returns immediately (the
+    # run may still be executing when the request completes); the customer
+    # can delete the never-deployed draft the instant that response lands.
+    # Deletion must succeed regardless, and the already-dispatched run --
+    # its `Workflow` was fully built and handed to the executor before the
+    # delete request even arrived, and a `Run` row carries no session_id --
+    # must still reach a normal terminal state rather than erroring out from
+    # under the just-removed session row/workspace directory.
+    from ui.backend import builder as builder_module
+
+    monkeypatch.setattr(builder_module, "_SESSIONS_DIR", tmp_path)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "abandoned idea"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    workspace = tmp_path / session_id
+    assert workspace.exists()
+
+    run_id = client.post(f"/api/builder/sessions/{session_id}/test-runs", json={"input": "hi"}).json()["run_id"]
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 204
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 404
+    assert not workspace.exists()
+
+    import time
+
+    deadline = time.time() + 10
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"/api/runs/{run_id}").json()["status"]
+        if status != "running":
+            break
+        time.sleep(0.05)
+    assert status == "completed"
+
+
+def test_delete_deployed_session_is_refused(client):
+    session_id = _make_deployable_session(client)
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    resp = client.delete(f"/api/builder/sessions/{session_id}")
+    assert resp.status_code == 409
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+
+
+def test_delete_unknown_session_is_404(client):
+    assert client.delete("/api/builder/sessions/does-not-exist").status_code == 404
+
+
+def test_delete_another_orgs_session_is_404(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "Org A's bot"}).json()["id"]
+    bob_token = create_user_and_login(client, username="bob", org="orgb")
+    bob = {"Authorization": f"Bearer {bob_token}"}
+
+    assert client.delete(f"/api/builder/sessions/{session_id}", headers=bob).status_code == 404
+    # Still there -- the owning org can still see it (delete didn't leak through).
+    assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
+
+
+def test_session_dict_exposes_workflow_id(client):
+    session_id = _make_deployable_session(client)
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is None
+
+    client.post(f"/api/builder/sessions/{session_id}/deploy")
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is not None

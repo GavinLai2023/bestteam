@@ -1,3 +1,37 @@
+.session-status-group {
+  margin-bottom: 24px;
+}
+
+.session-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.session-status-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.status-help-button {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #6b7280;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.status-help-text {
+  margin: -4px 0 10px;
+}
+
 .session-list {
   list-style: none;
   padding: 0;
@@ -33,4 +67,28 @@
   color: #6b7280;
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.session-item {
+  position: relative;
+}
+
+.session-delete-button {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  color: #b91c1c;
+  cursor: pointer;
+  padding: 6px;
+}
+
+.session-delete-button:hover {
+  background: #fef2f2;
+  border-color: #b91c1c;
 }
