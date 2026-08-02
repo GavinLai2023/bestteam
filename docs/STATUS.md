@@ -418,12 +418,10 @@
   stamped with `workflow_version_id` (`current_version_id(db, org_id, name)`
   resolved in `create_run` and the email trigger); sandbox test-runs stay
   NULL. Migration `c3f5a1b8e2d4` (guarded/idempotent) creates the table +
-  columns and backfills one v1 per existing workflow. **Scope:** freezes the
-  inline config blob + run linkage only — standalone Skills/KBs/models are
-  still resolved by name at load, so behavioral drift (P1-05) and a
-  fully-resolved dependency snapshot remain deferred to P1-04 (typed
-  dependency records); version-history/rollback UI and rollback execution
-  are also deferred. Spec:
+  columns and backfills one v1 per existing workflow. The later skill-version
+  work freezes referenced skill content as well; standalone KBs/models remain
+  name-resolved. Workflow version-history/rollback UI and rollback execution
+  are still deferred. Spec:
   `docs/superpowers/specs/2026-07-25-versioning-keystone-design.md`. See
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this pass").
   Hardened via two external-review rounds: BOTH run paths record the version
@@ -454,9 +452,14 @@
   deployed workflows' JSON — non-regressing, and the stable id makes the
   platform-built-in-skill cross-org case fall out with no all-orgs scan.
   Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's
-  current version. **Scope:** skills and standalone KBs only; model/tool
-  dependency rows and skill/KB content pinning to freeze behavior (P1-05) stay
-  deferred. See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this
+  current version. Skill dependencies now additionally pin an immutable
+  `skill_versions.id` (migration `c4d5e6f7a8b9`); edits and org overrides
+  affect a team only after redeploy. Standalone-KB/model/tool content pinning
+  stays deferred. Post-review hardening makes deployed `uses_email` metadata
+  resolve pinned skills (including Advanced-deployed synthetic team cards),
+  moves the mailbox gate into the deploy/version lock, enforces fresh/upgrade
+  FK parity with interrupted-column repair, and sorts the combined My Teams
+  payload most-recent-first. See `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md` ("Implemented this
   pass").
 - Frontend hardening + role-aware routing (merged to `main`, PR #34 `d86e966`,
   PR #37 `78fa013`): `lib/api.js` now carries the HTTP status

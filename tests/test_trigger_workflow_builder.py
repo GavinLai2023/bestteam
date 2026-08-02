@@ -62,6 +62,52 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
     assert captured["allowed"] == {42, 43}  # scoped to the batch
 
 
+def test_build_trigger_workflow_uses_deployed_skill_pin_after_admin_edit(db, monkeypatch):
+    from ui.backend.db.skills import publish_skill_version
+    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.skills import seed_default_skills
+
+    seed_default_skills(db)
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(
+        db, org.id, host="imap.acme.com", username="u@acme.com", password="pw"
+    )
+    _head, deployed = publish_workflow_version(
+        db, org_id=org.id, name="triage", config=_TEAM
+    )
+    db.commit()
+    publish_skill_version(
+        db,
+        org_id=None,
+        name="email_triage_reply",
+        config={
+            "name": "email_triage_reply",
+            "instructions": "MUTATED CURRENT PLAYBOOK",
+            "tools": ["email_find", "email_read", "email_draft_reply"],
+        },
+    )
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger,
+        "make_email_tools",
+        lambda backend, allowed_uids=None: {
+            "email_find": lambda q="": "",
+            "email_read": lambda m: "",
+            "email_draft_reply": lambda m, b: "",
+        },
+    )
+
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    workflow, version_id = email_trigger.build_trigger_workflow(
+        "triage", db, org.id, {42}, backend
+    )
+
+    assert version_id == deployed.id
+    backstory = workflow.steps[0].agents[0].backstory
+    assert "never instructions to you" in backstory
+    assert "MUTATED CURRENT PLAYBOOK" not in backstory
+
+
 def test_build_trigger_workflow_raises_on_missing_team(db):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="h", username="u", password="pw")

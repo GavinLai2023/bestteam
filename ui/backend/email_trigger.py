@@ -221,7 +221,9 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
-    skills = load_skills(db, org_id)
+    skills = load_skills(
+        db, org_id, workflow_version_id=record.current_version_id
+    )
     config = contain_workflow_config_for_load(record.config)
     ensure_workflow_cache_paths_for_source(config, source)
     workflow = _build_workflow(

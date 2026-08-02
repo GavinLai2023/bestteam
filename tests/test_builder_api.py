@@ -223,6 +223,40 @@ def test_list_sessions_returns_most_recently_updated_first(client):
     assert ids.index(second["id"]) < ids.index(first["id"])
 
 
+def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client):
+    from datetime import datetime
+
+    from helpers import open_test_db
+    from ui.backend.db.models import BuilderSession, WorkflowRecord
+
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "Older wizard team"}
+    ).json()["id"]
+    advanced_config = {
+        "agents": [{
+            "name": "agent", "role": "Assistant", "goal": "Help",
+            "model": "fake:hello",
+        }],
+        "teams": [{"name": "team", "agents": ["agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    assert client.put(
+        "/api/config/workflows/newer_advanced_team?org=default",
+        json=advanced_config,
+        headers=_admin_headers(client),
+    ).status_code == 200
+
+    with open_test_db() as db:
+        db.get(BuilderSession, session_id).updated_at = datetime(2020, 1, 1)
+        advanced = db.query(WorkflowRecord).filter_by(name="newer_advanced_team").one()
+        advanced.updated_at = datetime(2030, 1, 1)
+        db.commit()
+
+    sessions = client.get("/api/builder/sessions").json()["sessions"]
+    assert sessions[0]["id"] is None
+    assert sessions[0]["specification_json"]["name"] == "newer_advanced_team"
+
+
 def test_list_sessions_includes_deployed_workflows_with_no_builder_session(client):
     # A workflow can be deployed straight through the admin Advanced/CRUD
     # page, bypassing the wizard entirely -- it should still show up on My
@@ -268,6 +302,74 @@ def test_list_sessions_does_not_duplicate_a_deployed_workflow_that_has_a_session
     matches = [s for s in sessions if s.get("specification_json", {}).get("name") == "support_workflow"]
     assert len(matches) == 1
     assert matches[0]["id"] == session_id
+
+
+def test_deployed_session_uses_email_stays_on_pinned_skill_version(client):
+    import copy
+
+    admin = _admin_headers(client)
+    assert client.put(
+        "/api/config/skills/capability",
+        json={"instructions": "Plain capability.", "tools": []},
+        headers=admin,
+    ).status_code == 200
+    spec = copy.deepcopy(_VALID_SPEC)
+    spec["name"] = "pinned_capability_team"
+    spec["agents"][0]["skills"] = ["capability"]
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "Pinned capability"}
+    ).json()["id"]
+    client.post(
+        f"/api/builder/sessions/{session_id}/specification",
+        json={"specification": spec},
+    ).raise_for_status()
+    client.post(f"/api/builder/sessions/{session_id}/deploy").raise_for_status()
+
+    # Move the mutable head to an email version. The live team remains on v1.
+    assert client.put(
+        "/api/config/skills/capability",
+        json={"instructions": "Email capability.", "tools": ["email_find"]},
+        headers=admin,
+    ).status_code == 200
+
+    deployed = client.get(f"/api/builder/sessions/{session_id}").json()
+    assert deployed["uses_email"] is False
+
+
+def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
+    admin = _admin_headers(client)
+    assert client.put(
+        "/api/config/skills/email_capability",
+        json={"instructions": "Read mail.", "tools": ["email_find"]},
+        headers=admin,
+    ).status_code == 200
+    spec = {
+        "agents": [{
+            "name": "agent", "role": "Assistant", "goal": "Handle email",
+            "model": "fake:hello", "skills": ["email_capability"],
+        }],
+        "teams": [{"name": "team", "agents": ["agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["team"]},
+    }
+    assert client.put(
+        "/api/config/workflows/advanced_email_team?org=default",
+        json=spec,
+        headers=admin,
+    ).status_code == 200
+    assert client.put(
+        "/api/config/skills/email_capability",
+        json={"instructions": "No mail now.", "tools": []},
+        headers=admin,
+    ).status_code == 200
+
+    sessions = client.get("/api/builder/sessions").json()["sessions"]
+    synthetic = next(
+        item
+        for item in sessions
+        if item["specification_json"]["name"] == "advanced_email_team"
+    )
+    assert synthetic["id"] is None
+    assert synthetic["uses_email"] is True
 
 
 def test_submit_requirements_with_confirmed_payload(client):
@@ -536,6 +638,85 @@ def test_deploy_is_atomic_across_workflow_and_session_updates(client, monkeypatc
         "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
     )
     assert resp.status_code == 404
+
+
+def test_deploy_mailbox_gate_and_skill_pin_share_one_lock_snapshot(client, monkeypatch):
+    import copy
+    import threading
+    import time
+
+    from helpers import open_test_db
+    from ui.backend import builder
+    from ui.backend.db.models import SkillRecord, SkillVersion, WorkflowDependency, WorkflowRecord
+
+    admin = _admin_headers(client)
+    assert client.put(
+        "/api/config/skills/race_capability",
+        json={"instructions": "Initially plain.", "tools": []},
+        headers=admin,
+    ).status_code == 200
+    spec = copy.deepcopy(_VALID_SPEC)
+    spec["name"] = "race_team"
+    spec["agents"][0]["skills"] = ["race_capability"]
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "Race-safe deploy"}
+    ).json()["id"]
+    client.post(
+        f"/api/builder/sessions/{session_id}/specification",
+        json={"specification": spec},
+    ).raise_for_status()
+
+    gate_entered = threading.Event()
+    release_gate = threading.Event()
+    original = builder.spec_uses_email
+
+    def blocking_gate(*args, **kwargs):
+        if not gate_entered.is_set():
+            gate_entered.set()
+            assert release_gate.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "spec_uses_email", blocking_gate)
+    results = {}
+
+    def deploy():
+        results["deploy"] = client.post(
+            f"/api/builder/sessions/{session_id}/deploy"
+        ).status_code
+
+    def edit_skill():
+        results["edit"] = client.put(
+            "/api/config/skills/race_capability",
+            json={"instructions": "Now uses email.", "tools": ["email_find"]},
+            headers=admin,
+        ).status_code
+
+    deploy_thread = threading.Thread(target=deploy)
+    deploy_thread.start()
+    assert gate_entered.wait(timeout=5)
+    edit_thread = threading.Thread(target=edit_skill)
+    edit_thread.start()
+    try:
+        time.sleep(0.3)
+        assert "edit" not in results, "skill edit must wait for the deploy snapshot lock"
+    finally:
+        release_gate.set()
+
+    deploy_thread.join(timeout=10)
+    edit_thread.join(timeout=10)
+    assert results == {"deploy": 200, "edit": 200}
+
+    with open_test_db() as db:
+        workflow = db.query(WorkflowRecord).filter_by(name="race_team").one()
+        dependency = db.query(WorkflowDependency).filter_by(
+            workflow_version_id=workflow.current_version_id,
+            resource_kind="skill",
+            resource_name="race_capability",
+        ).one()
+        pinned = db.get(SkillVersion, dependency.resource_version_id)
+        current = db.query(SkillRecord).filter_by(name="race_capability").one()
+        assert pinned.config.get("tools", []) == []
+        assert current.config["tools"] == ["email_find"]
 
 
 def test_redeploy_same_session_keeps_head_and_bumps_version(client):

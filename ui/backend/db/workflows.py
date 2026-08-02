@@ -2,8 +2,8 @@
 
 `WorkflowRecord` is the stable team head (unique `(org_id, name)`);
 `workflow_versions` is its append-only history. Deploy appends a version, moves
-`current_version_id`, and keeps `config` as a mirror of the current version so
-every reader stays name-based and unchanged (P1-01/02/03). Callers hold
+`current_version_id`, and keeps `config` as a mirror of the current version.
+Skill dependencies are content-version-pinned during the same transaction. Callers hold
 `component_mutation_lock` and own the commit."""
 
 from __future__ import annotations

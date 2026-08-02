@@ -1,8 +1,8 @@
 """Typed skill/KB dependency records for published workflow versions (P1-04).
 
 `record_version_dependencies` materializes, at deploy, one row per skill/standalone
-KB a version depends on; `workflows_referencing` answers the reverse "which deployed
-teams' current version depend on this resource?" that the skill/KB delete guard uses.
+KB a version depends on. Skill rows pin immutable content versions;
+`workflows_referencing` answers the reverse query used by delete guards.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from .models import (
     WorkflowRecord,
     WorkflowVersion,
 )
+from .skills import ensure_skill_version
 
 
 def _referenced_names(raw: Any) -> tuple[set[str], set[str]]:
@@ -61,7 +62,8 @@ def record_version_dependencies(
     db: Session, *, version_id: int, org_id: Optional[int], raw: dict[str, Any]
 ) -> None:
     """Insert one WorkflowDependency row per skill and per standalone KB `raw`
-    references. Resolves resource_id the way the loader resolves names: an org
+    references. Resolves resource_id the way the loader resolves names and pins
+    the current immutable SkillVersion: an org
     skill shadows a same-named platform built-in (org_id IS NULL); KBs are
     org-scoped. A tool name that is not a standalone KB (built-in tool, email
     tool, or inline KB -- including one whose name collides with a standalone
@@ -70,10 +72,10 @@ def record_version_dependencies(
     skill_names, tool_names = _referenced_names(raw)
     kb_tool_names = tool_names - _inline_kb_names(raw)
 
-    skill_ids: dict[str, int] = {}
+    skill_records: dict[str, SkillRecord] = {}
     if skill_names:
         rows = (
-            db.query(SkillRecord.name, SkillRecord.id, SkillRecord.org_id)
+            db.query(SkillRecord)
             .filter(
                 SkillRecord.name.in_(skill_names),
                 or_(SkillRecord.org_id == org_id, SkillRecord.org_id.is_(None)),
@@ -82,8 +84,8 @@ def record_version_dependencies(
         )
         # Platform built-ins (org_id IS NULL, sort key False) first so an org's
         # own row (sort key True) overwrites on a name clash.
-        for name, sid, _row_org in sorted(rows, key=lambda r: r[2] is not None):
-            skill_ids[name] = sid
+        for record in sorted(rows, key=lambda r: r.org_id is not None):
+            skill_records[record.name] = record
 
     kb_ids: dict[str, int] = {}
     if kb_tool_names:
@@ -94,9 +96,13 @@ def record_version_dependencies(
             kb_ids[name] = kid
 
     for name in sorted(skill_names):
+        skill = skill_records.get(name)
+        skill_version = ensure_skill_version(db, skill) if skill is not None else None
         db.add(WorkflowDependency(
             workflow_version_id=version_id, resource_kind="skill",
-            resource_name=name, resource_id=skill_ids.get(name),
+            resource_name=name,
+            resource_id=skill.id if skill is not None else None,
+            resource_version_id=skill_version.id if skill_version is not None else None,
         ))
     for name in sorted(kb_tool_names):
         if name in kb_ids:
@@ -123,53 +129,3 @@ def workflows_referencing(db: Session, *, kind: str, resource_id: int) -> list[s
         )
     )
     return sorted({name for (name,) in q})
-
-
-def _resolve_skill_id(db: Session, *, org_id: Optional[int], name: str) -> Optional[int]:
-    """The skill id `load_skills(org_id)` resolves for `name`: the org's own row
-    shadows a same-named platform built-in (org_id IS NULL); None if neither."""
-    if org_id is not None:
-        row = (
-            db.query(SkillRecord.id)
-            .filter(SkillRecord.name == name, SkillRecord.org_id == org_id)
-            .first()
-        )
-        if row is not None:
-            return row[0]
-    row = (
-        db.query(SkillRecord.id)
-        .filter(SkillRecord.name == name, SkillRecord.org_id.is_(None))
-        .first()
-    )
-    return row[0] if row is not None else None
-
-
-def reconcile_skill_dependencies(db: Session, *, org_id: int, name: str) -> None:
-    """Re-point `org_id`'s deployed workflows' current-version skill dep rows for
-    `name` to the id resolved now. Called when an org skill is created/updated:
-    a workflow deployed against a platform built-in recorded that built-in's id,
-    but once the org creates a same-named skill the runtime prefers the org row,
-    so the recorded id (and thus the delete guard) would otherwise track the
-    stale, shadowed skill. Must run under `component_mutation_lock` so it can't
-    interleave with a concurrent deploy's own dependency recording. Does NOT
-    commit -- the caller owns the transaction."""
-    resolved = _resolve_skill_id(db, org_id=org_id, name=name)
-    version_ids = [
-        vid
-        for (vid,) in db.query(WorkflowRecord.current_version_id).filter(
-            WorkflowRecord.org_id == org_id,
-            WorkflowRecord.status == "deployed",
-            WorkflowRecord.current_version_id.isnot(None),
-        )
-    ]
-    if not version_ids:
-        return
-    (
-        db.query(WorkflowDependency)
-        .filter(
-            WorkflowDependency.workflow_version_id.in_(version_ids),
-            WorkflowDependency.resource_kind == "skill",
-            WorkflowDependency.resource_name == name,
-        )
-        .update({WorkflowDependency.resource_id: resolved}, synchronize_session=False)
-    )
