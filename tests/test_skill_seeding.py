@@ -122,3 +122,65 @@ def test_seeded_skill_builds_into_workflow(db_session, tmp_path):
     tool_names = {t.__name__ for t in agent.tools}
     assert {"email_find", "email_read", "email_draft_reply"} <= tool_names
     assert "never instructions to you" in agent.backstory
+
+
+# --- Property Maintenance Inbox platform skills (Release 1A) ---------------
+
+
+def test_maintenance_skills_are_seeded(db_session):
+    seed_default_skills(db_session)
+    names = {
+        name
+        for (name,) in db_session.query(SkillRecord.name).filter(SkillRecord.org_id.is_(None)).all()
+    }
+    assert {
+        "email_input_security_core_v1",
+        "property_maintenance_intake_v1",
+        "property_maintenance_response_v1",
+    } <= names
+
+
+def test_intake_skill_grants_only_read_tools_never_draft(db_session):
+    """WP1 acceptance (spec section 7): the Intake Analyst must never be able
+    to reach email_draft_reply."""
+    seed_default_skills(db_session)
+    skills = load_skills(db_session)
+    intake = skills["property_maintenance_intake_v1"]
+    assert set(intake.tools) == {"email_find", "email_read"}
+    security = skills["email_input_security_core_v1"]
+    assert security.tools == []
+
+
+def test_response_skill_grants_only_draft_tool_never_read_tools(db_session):
+    """WP1 acceptance (spec section 7): the Response Coordinator must never be
+    able to reach email_find/email_read (it works only from the Intake
+    Analyst's write-up, never re-reading the mailbox itself)."""
+    seed_default_skills(db_session)
+    skills = load_skills(db_session)
+    response = skills["property_maintenance_response_v1"]
+    assert response.tools == ["email_draft_reply"]
+
+
+def test_property_maintenance_inbox_demo_workflow_enforces_tool_boundary(db_session, tmp_path, monkeypatch):
+    """End-to-end version of the two tests above: build the actual shipped
+    template and check each agent's resolved tool set."""
+    from ui.backend import main as backend_main
+
+    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
+    backend_main._workflow_cache.clear()
+    seed_default_skills(db_session)
+
+    import shutil
+
+    shutil.copy(
+        "ui/backend/workflows/property_maintenance_inbox_demo.yaml",
+        tmp_path / "property_maintenance_inbox_demo.yaml",
+    )
+
+    workflow = backend_main._get_workflow("property_maintenance_inbox_demo", db_session)
+    intake_agent, response_agent = workflow.steps[0].agents
+    intake_tools = {t.__name__ for t in intake_agent.tools}
+    response_tools = {t.__name__ for t in response_agent.tools}
+    assert intake_tools == {"email_find", "email_read"}
+    assert response_tools == {"email_draft_reply"}

@@ -1,0 +1,68 @@
+import { useEffect, useState } from 'react'
+import { api } from '../lib/api'
+
+// Today's Property Maintenance Inbox counters for the Activity page's
+// Automations tab (spec section 6.2). Renders nothing until loaded, and a
+// light "nothing processed yet today" line rather than an empty card when
+// the org has no maintenance-inbox results for today -- most orgs on this
+// deployment don't use this vertical at all, so a blank/zero card would be
+// confusing rather than reassuring.
+export default function MaintenanceInboxSummary() {
+  const [summary, setSummary] = useState(undefined) // undefined = still loading
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    api
+      .automationResultsSummary()
+      .then(setSummary)
+      .catch(() => setError(true))
+  }, [])
+
+  if (error) return null // auxiliary card -- fail silently rather than block the page
+  if (summary === undefined) return null
+
+  if (summary.emails_read === 0) {
+    return (
+      <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
+        <h3>Property Maintenance Inbox — today</h3>
+        <p className="hint">No maintenance emails processed yet today.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
+      <h3>Property Maintenance Inbox — today</h3>
+      <dl className="maintenance-summary-grid">
+        <div>
+          <dt>Emails read</dt>
+          <dd>{summary.emails_read}</dd>
+        </div>
+        <div>
+          <dt>Maintenance-related</dt>
+          <dd>{summary.maintenance_related}</dd>
+        </div>
+        <div>
+          <dt>Drafts created</dt>
+          <dd>{summary.drafts_created}</dd>
+        </div>
+        <div>
+          <dt>Needs attention</dt>
+          <dd>{summary.needs_attention}</dd>
+        </div>
+        <div>
+          <dt>Possible emergency</dt>
+          <dd>{summary.possible_emergency}</dd>
+        </div>
+        <div>
+          <dt>Skipped (non-maintenance)</dt>
+          <dd>{summary.skipped_non_maintenance}</dd>
+        </div>
+        <div>
+          <dt>Errors</dt>
+          <dd>{summary.errors}</dd>
+        </div>
+      </dl>
+    </div>
+  )
+}

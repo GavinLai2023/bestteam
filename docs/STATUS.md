@@ -517,6 +517,42 @@
   "load more"/pager yet, so an org with 50+ matching runs can't reach older
   ones from the Activity page today — see Known issues below.
 
+- Property Maintenance Inbox — Release 1A (`feat/property-maintenance-inbox-phase1`):
+  a vertical solution template on top of the existing multi-agent platform,
+  not a new `Case`/work-item subsystem. Three versioned platform Skills
+  (`email_input_security_core_v1`, `property_maintenance_intake_v1`,
+  `property_maintenance_response_v1`) + a two-agent SEQUENTIAL demo template
+  (`ui/backend/workflows/property_maintenance_inbox_demo.yaml`) wire the
+  Intake Analyst (email_find/email_read only) to the Response Coordinator
+  (email_draft_reply only, draft-only — nothing in this vertical can send).
+  A new `automation_item_results` table (`ui/backend/automation_results.py`)
+  is populated server-side after a triggered run completes: the Response
+  Coordinator's final message is parsed as a JSON envelope, validated against
+  Pydantic models, and reconciled against the run's own `trigger_context`
+  (the poller-detected UID batch) — never trusting the model for
+  org/run/source identity. Every UID in the batch gets exactly one
+  (`run_id`, `source_key`)-unique row, including a synthesized `error`/
+  `needs_attention` row for a missing/invalid/out-of-batch item, so nothing
+  silently disappears; `possible_emergency`/`unknown` priority is
+  server-enforced to always need a human, regardless of what the model itself
+  claimed. `Run.trigger_context`/`retry_of_run_id` (migration `c1d2e3f4a5b6`)
+  let a failed/errored triggered run be safely retried
+  (`POST /api/runs/{id}/retry`, revalidates UIDVALIDITY + mailbox + daily cap
+  before rebuilding — always a new run, history stays immutable). New
+  org-scoped `GET /api/automation-results` (+ `/summary`) back a Maintenance
+  Inbox summary card and Needs-attention list on the Activity page, and a Run
+  Detail automation-results section. Email-tool `tool_completed` trace
+  summaries are now redacted (message id/count only — never subject/body/
+  draft text) for `email_find`/`email_read`/`email_draft_reply`, closing a
+  pre-existing leak where the generic 200-char summary could include body
+  text. Scope: Release 1A only, per
+  `docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md` —
+  explicitly deferred: WP0 (real customer discovery/offline eval, needs live
+  customers), WP6 (attachment reading, per-org Microsoft Graph/OAuth), and the
+  guided Policy-Skill wizard form (an org's own policy skill can already be
+  authored today via the existing Advanced Skills CRUD). 891 backend + 82
+  frontend tests, lint/build green.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -570,6 +606,14 @@
   can keep running briefly after the ASGI shutdown handler returns; a process
   killed between a trigger's state commit and dispatch orphans a `runs` row
   (overlap guard self-recovers on restart; no reconciliation sweep yet).
+
+- **Property Maintenance Inbox retry doesn't pre-check every UID still exists
+  in the mailbox** — `POST /api/runs/{id}/retry` revalidates UIDVALIDITY (the
+  mailbox wasn't rebuilt/migrated) but not that each individual UID is still
+  present; a since-deleted message degrades gracefully (`email_read` returns
+  "no message found" for that id, scoped tools refuse ids outside the batch)
+  rather than erroring the retry. Full per-UID existence pre-check deferred as
+  an easy follow-up, not required for Release 1A's Definition of Done.
 
 ## Next steps / roadmap
 

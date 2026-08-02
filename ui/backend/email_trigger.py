@@ -343,7 +343,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         db.commit()
         return
 
-    _start_triggered_run(db, trigger, new_uids, get_workflow, backend)
+    _start_triggered_run(db, trigger, new_uids, get_workflow, backend, cred.id)
 
 
 def _trigger_input(uids) -> str:
@@ -354,7 +354,9 @@ def _trigger_input(uids) -> str:
     )
 
 
-def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend) -> None:
+def _start_triggered_run(
+    db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend, mailbox_credential_id: int
+) -> None:
     """Start ONE run over a bounded batch of the detected UIDs.
 
     Build the workflow FIRST (a build failure must consume no message and no
@@ -363,9 +365,24 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     allowed_uids, backend) -> (Workflow, Optional[int] version_id)`; the version
     is captured from the same record read that built the config so the run
     records exactly the version it executes.
+
+    `mailbox_credential_id` is stamped into the run's `trigger_context`
+    (below) so a later server-side result normalization or manual retry can
+    reconstruct exactly which mailbox/UIDVALIDITY/UID batch this run covers,
+    without trusting anything the model itself claims to have processed --
+    see `automation_results.py` and `docs/superpowers/specs/
+    2026-08-02-property-maintenance-inbox-phase-1-development-plan.md` section 11.1.
     """
     batch = sorted(new_uids)[:batch_size()]
     input_text = _trigger_input(batch)
+    trigger_context = {
+        "trigger_type": "email",
+        "mailbox_credential_id": mailbox_credential_id,
+        "uidvalidity": trigger.uidvalidity,
+        "uids": batch,
+        "folder": "INBOX",
+        "triggered_at": _utcnow().isoformat(),
+    }
     try:
         workflow, version_id = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
@@ -387,7 +404,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     run_row = Run(
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
-        workflow_version_id=version_id,
+        workflow_version_id=version_id, trigger_context=trigger_context,
     )
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
@@ -457,6 +474,105 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
         trigger.last_error = message
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
         db.commit()
+
+
+class RetryError(Exception):
+    """A customer-facing reason a triggered run can't be retried right now.
+    `main.py`'s `POST /api/runs/{id}/retry` maps this to a 400/409."""
+
+
+def retry_triggered_run(db: Session, run_row: Run) -> str:
+    """Rebuild and dispatch a NEW run over the exact UID batch `run_row`
+    originally covered (spec section 11.2). Never mutates `run_row` itself --
+    history stays immutable; the new run records `retry_of_run_id`.
+
+    Revalidates before dispatch: current UIDVALIDITY must still match the
+    original (a rebuilt/migrated mailbox invalidates the batch), the mailbox
+    credential must still work, the workflow must still build, and the org's
+    daily automatic-run cap must not already be hit. Raises `RetryError` with
+    a customer-facing message for any ineligibility; returns the new run id
+    on successful dispatch.
+    """
+    trigger_context = run_row.trigger_context
+    if not trigger_context or trigger_context.get("trigger_type") != "email":
+        raise RetryError("This run has no recorded email batch to retry.")
+    if run_row.status == "running":
+        raise RetryError("This run is still in progress.")
+    if (
+        db.query(Run)
+        .filter(Run.retry_of_run_id == run_row.id, Run.status == "running")
+        .first()
+        is not None
+    ):
+        raise RetryError("A retry of this run is already in progress.")
+
+    org_id = run_row.org_id
+    cred = get_email_credentials(db, org_id)
+    if cred is None:
+        raise RetryError("Connect a mailbox before retrying.")
+    try:
+        password = secret_store.decrypt(cred.password_encrypted)
+        backend = _ImapBackend(
+            host=cred.host, user=cred.username, password=password,
+            port=cred.port, drafts=cred.drafts_folder, restrict_to_public=True,
+        )
+        uidvalidity, _max_uid = mailbox_state(backend)
+    except (InvalidToken, secret_store.SecretsKeyError) as exc:
+        raise RetryError("The mailbox connection can't be read right now -- reconnect it and try again.") from exc
+    except Exception as exc:  # noqa: BLE001 -- always a friendly message outward
+        raise RetryError("Couldn't reach the mailbox to verify it before retrying.") from exc
+
+    if uidvalidity != trigger_context.get("uidvalidity"):
+        raise RetryError(
+            "The mailbox has changed since this run (its UIDVALIDITY no longer matches) "
+            "-- this batch can no longer be safely retried."
+        )
+
+    trigger = get_email_trigger(db, org_id)
+    if trigger is None:
+        raise RetryError("No automatic-run configuration exists for this team anymore.")
+    today = _today()
+    if trigger.runs_date != today:
+        trigger.runs_today = 0
+        trigger.runs_date = today
+    if trigger.runs_today >= daily_cap():
+        db.commit()
+        raise RetryError("Today's automatic-run limit has been reached -- try again tomorrow.")
+
+    uids = trigger_context.get("uids") or []
+    try:
+        workflow, version_id = build_trigger_workflow(run_row.workflow, db, org_id, set(uids), backend)
+    except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since the original run
+        raise RetryError(
+            f"Couldn't rebuild the team '{run_row.workflow}' -- it may have been changed or removed."
+        ) from exc
+
+    new_run = registry.create(run_row.workflow, run_row.input, org_id=org_id, username=TRIGGER_USERNAME)
+    new_trigger_context = {**trigger_context, "triggered_at": _utcnow().isoformat()}
+    new_row = Run(
+        id=new_run.id, workflow=run_row.workflow, input=run_row.input,
+        status="running", org_id=org_id, username=TRIGGER_USERNAME,
+        workflow_version_id=version_id, trigger_context=new_trigger_context,
+        retry_of_run_id=run_row.id,
+    )
+    db.add(new_row)
+    trigger.runs_today += 1
+    db.commit()
+    try:
+        _executor.submit(
+            run_in_background, new_run.id, workflow, run_row.input,
+            engine=db.get_bind(), org_id=org_id, username=TRIGGER_USERNAME,
+        )
+    except Exception:  # noqa: BLE001 -- submission itself must never raise out of this call
+        _logger.exception("email trigger retry: failed to dispatch run %s for org %s", new_run.id, org_id)
+        message = "Couldn't start the retry. Try again."
+        registry.publish(new_run.id, dataclasses.asdict(
+            TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
+        ))
+        new_row.status = "failed"
+        new_row.output = message
+        db.commit()
+    return new_run.id
 
 
 def poll_once(get_workflow: Callable, session_factory=None) -> None:

@@ -169,6 +169,10 @@ export const api = {
   // Cooperative cancellation -- takes effect between yielded events, not
   // instantly (see ui/backend/CLAUDE.md).
   cancelRun: (id) => request(`/api/runs/${id}/cancel`, { method: 'POST' }),
+  // Safely retry a failed/errored autonomous email-triggered run over its
+  // exact original UID batch -- always a new run (see ui/backend/CLAUDE.md,
+  // "Property Maintenance Inbox").
+  retryRun: (id) => request(`/api/runs/${id}/retry`, { method: 'POST' }),
   listRuns: (filters = {}) => {
     const params = new URLSearchParams(
       Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== '')),
@@ -177,6 +181,17 @@ export const api = {
     return request(`/api/runs${qs ? `?${qs}` : ''}`)
   },
   getRunTrace: (id) => request(`/api/runs/${id}/trace`),
+
+  // Property Maintenance Inbox: structured, org-scoped automation results.
+  listAutomationResults: (filters = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== '')),
+    )
+    const qs = params.toString()
+    return request(`/api/automation-results${qs ? `?${qs}` : ''}`)
+  },
+  automationResultsSummary: (date) =>
+    request(`/api/automation-results/summary${date ? `?${new URLSearchParams({ date })}` : ''}`),
 
   // Model catalog
   modelCatalog: () => request('/api/model-catalog'),

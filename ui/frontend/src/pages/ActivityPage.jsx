@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
+import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
+import NeedsAttentionList from '../components/NeedsAttentionList'
 import RunDetail from '../components/RunDetail'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -110,12 +112,21 @@ export default function ActivityPage() {
       </div>
 
       {tab === 'automations' && (
-        <EmailTriggerActivity
-          onViewRuns={() => {
-            setFilters((f) => ({ ...f, manual: 'false' }))
-            setTab('runs')
-          }}
-        />
+        <>
+          <MaintenanceInboxSummary />
+          <NeedsAttentionList
+            onOpenRun={(runId) => {
+              setTab('runs')
+              setSelectedRun({ id: runId, status: 'completed' })
+            }}
+          />
+          <EmailTriggerActivity
+            onViewRuns={() => {
+              setFilters((f) => ({ ...f, manual: 'false' }))
+              setTab('runs')
+            }}
+          />
+        </>
       )}
 
       {tab === 'runs' && (

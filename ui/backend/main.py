@@ -17,7 +17,7 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -34,6 +34,7 @@ from bestteam.core.loader import _build_workflow
 from bestteam.exceptions import BestTeamError
 
 from . import auth
+from . import automation_results
 from . import email_trigger
 from . import interview
 from . import secret_store
@@ -586,6 +587,28 @@ def cancel_run(run_id: str, user: User = Depends(get_current_user)):
     return JSONResponse(status_code=202, content={"status": "cancel_requested"})
 
 
+@app.post("/api/runs/{run_id}/retry")
+def retry_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Safely retry a failed/errored autonomous email-triggered run over its
+    exact original UID batch (spec section 11.2) -- always a NEW run, never an
+    overwrite of history. Only eligible for a run this org owns that carries a
+    recorded `trigger_context`; see `email_trigger.retry_triggered_run` for the
+    full eligibility checks (UIDVALIDITY match, mailbox reachable, workflow
+    still buildable, daily cap)."""
+    run_row = db.get(Run, run_id)
+    if run_row is None or run_row.org_id != org.id:
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    try:
+        new_run_id = email_trigger.retry_triggered_run(db, run_row)
+    except email_trigger.RetryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"run_id": new_run_id}
+
+
 @app.get("/api/runs")
 def list_runs(
     workflow: Optional[str] = None,
@@ -641,6 +664,65 @@ def list_runs(
         "limit": limit,
         "offset": offset,
     }
+
+
+@app.get("/api/automation-results")
+def list_automation_results_endpoint(
+    run_id: Optional[str] = None,
+    needs_attention: Optional[bool] = None,
+    status: Optional[str] = None,
+    result_type: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Org-scoped, filterable, paginated Property Maintenance Inbox results --
+    the Activity page's Needs-attention list, and (filtered by `run_id`) Run
+    Detail's automation-results section (spec section 12.1). Never returns raw
+    email bodies; `payload` is the capped, validated extraction already
+    written by `automation_results.normalize_run_result`."""
+    rows, total = automation_results.list_automation_results(
+        db, org.id, run_id=run_id,
+        needs_attention=needs_attention, status=status, result_type=result_type,
+        limit=limit, offset=offset,
+    )
+    return {
+        "results": [
+            {
+                "id": row.id,
+                "run_id": row.run_id,
+                "source_type": row.source_type,
+                "result_type": row.result_type,
+                "status": row.status,
+                "needs_attention": row.needs_attention,
+                "payload": row.payload,
+                "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+            }
+            for row in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/automation-results/summary")
+def automation_results_summary_endpoint(
+    date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Today's (or `date`, an ISO `YYYY-MM-DD` string) Property Maintenance
+    Inbox counters for the Activity page's summary card (spec section 6.2)."""
+    if date:
+        try:
+            day = _date.fromisoformat(date)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="date must be an ISO date (YYYY-MM-DD)") from exc
+    else:
+        day = datetime.now(timezone.utc).date()
+    return automation_results.summary_for_date(db, org.id, day)
 
 
 @app.post("/api/runs/ws-ticket")

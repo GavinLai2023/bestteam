@@ -1,0 +1,49 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import MaintenanceInboxSummary from './MaintenanceInboxSummary'
+import { api } from '../lib/api'
+
+vi.mock('../lib/api', () => ({
+  api: {
+    automationResultsSummary: vi.fn(),
+  },
+}))
+
+describe('MaintenanceInboxSummary', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows a light empty state when nothing was processed today', async () => {
+    api.automationResultsSummary.mockResolvedValue({
+      emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
+    })
+
+    render(<MaintenanceInboxSummary />)
+
+    expect(await screen.findByText(/no maintenance emails processed yet today/i)).toBeInTheDocument()
+  })
+
+  it('shows the counters when the org has results today', async () => {
+    api.automationResultsSummary.mockResolvedValue({
+      emails_read: 5, maintenance_related: 3, drafts_created: 2,
+      needs_attention: 1, possible_emergency: 1, skipped_non_maintenance: 2, errors: 0,
+    })
+
+    render(<MaintenanceInboxSummary />)
+
+    expect(await screen.findByText('Emails read')).toBeInTheDocument()
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText('Needs attention')).toBeInTheDocument()
+  })
+
+  it('renders nothing on a fetch failure rather than blocking the page', async () => {
+    api.automationResultsSummary.mockRejectedValue(new Error('boom'))
+
+    const { container } = render(<MaintenanceInboxSummary />)
+
+    await vi.waitFor(() => expect(api.automationResultsSummary).toHaveBeenCalled())
+    expect(container).toBeEmptyDOMElement()
+  })
+})

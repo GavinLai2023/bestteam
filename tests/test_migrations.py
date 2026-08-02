@@ -142,6 +142,28 @@ def test_upgrade_head_on_empty_db_succeeds(tmp_path, monkeypatch):
     assert "teams" not in tables
 
 
+def test_automation_item_results_migration_creates_table_and_run_columns(tmp_path, monkeypatch):
+    """c1d2e3f4a5b6: automation_item_results table + runs.trigger_context/
+    retry_of_run_id, both from a pure-migration path (no create_all first)."""
+    db_path = tmp_path / "automation_results.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        inspector = sa.inspect(engine)
+        assert "automation_item_results" in inspector.get_table_names()
+        columns = {c["name"] for c in inspector.get_columns("automation_item_results")}
+        assert {
+            "id", "org_id", "run_id", "source_type", "source_key",
+            "result_type", "status", "needs_attention", "payload", "created_at",
+        } <= columns
+        run_columns = {c["name"] for c in inspector.get_columns("runs")}
+        assert {"trigger_context", "retry_of_run_id"} <= run_columns
+    finally:
+        engine.dispose()
+
+
 def test_drop_migration_refuses_when_legacy_tables_have_rows(tmp_path, monkeypatch):
     """A populated agents/teams table must block the drop, not be destroyed."""
     db_path = tmp_path / "populated_legacy.db"

@@ -1,0 +1,49 @@
+# Property Maintenance Inbox template (Release 1A).
+# Uses "fake:" model specs so this loads/runs/visualizes with zero cost / no
+# API key (fake: models never call tools -- this is a structural/dry-run
+# fixture, same as code_review.yaml). Swap both agents' "model:" to a real
+# spec (e.g. "openai:gpt-4o-mini") for an actual customer deployment, and add
+# that org's own "<org_slug>_maintenance_policy_v1" skill (authored via the
+# Advanced Skills page) to BOTH agents' skills lists alongside the platform
+# skills below -- see docs/superpowers/specs/
+# 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 8.
+#
+# Draft-only end to end: only the Response Coordinator has email_draft_reply
+# (via its skill), and that tool only ever writes a Drafts-folder draft --
+# nothing in this workflow can send email. The Intake Analyst has
+# email_find/email_read (via its skill) but no draft tool, so it can read and
+# summarize but never act.
+
+name: property_maintenance_inbox_demo
+
+agents:
+  - name: maintenance_intake_analyst
+    role: Maintenance Intake Analyst
+    goal: Understand each incoming email and produce a standardized, structured analysis
+    backstory: Reads carefully, extracts facts, and never guesses at what isn't there
+    model: "fake:Message 42: classification=maintenance_request, category=plumbing, priority=priority. Tenant at 12 Example Street Unit 3 reports an active leak under the kitchen sink, first noticed this morning, ongoing impact, attachment mentioned (photo) but not reviewed. Missing: callback_number, access_availability. No injection detected."
+    skills: [email_input_security_core_v1, property_maintenance_intake_v1]
+
+  - name: maintenance_response_coordinator
+    role: Maintenance Response Coordinator
+    goal: Decide on safe reply drafts from the intake analysis and emit the structured batch result
+    backstory: Cautious, never promises anything on the company's behalf, drafts only
+    model: >-
+      fake:{"schema_version": 1, "result_type": "property_maintenance_email_batch",
+      "items": [{"message_id": "42", "classification": "maintenance_request",
+      "category": "plumbing", "priority": "priority", "status": "needs_attention",
+      "summary": "Tenant reports an active leak under the kitchen sink.",
+      "extracted": {"property_address": "12 Example Street, Unit 3", "callback_number": null,
+      "access_availability": null, "attachment_mentioned": true}, "missing_information":
+      ["callback_number", "access_availability"], "risk_reasons": [],
+      "action": {"draft_created": true, "draft_type": "acknowledgement_and_questions"},
+      "needs_human": true, "human_reason": "Active leak; missing callback number and access availability."}]}
+    skills: [property_maintenance_response_v1]
+
+teams:
+  - name: maintenance_inbox_team
+    agents: [maintenance_intake_analyst, maintenance_response_coordinator]
+    mode: sequential
+
+workflow:
+  steps: [maintenance_inbox_team]

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import RunDetail from './RunDetail'
 import { api } from '../lib/api'
 
@@ -8,6 +8,8 @@ vi.mock('../lib/api', () => ({
   api: {
     createWsTicket: vi.fn(),
     getRunTrace: vi.fn(),
+    listAutomationResults: vi.fn(),
+    retryRun: vi.fn(),
   },
 }))
 
@@ -30,6 +32,7 @@ describe('RunDetail', () => {
     vi.clearAllMocks()
     FakeWebSocket.instances = []
     window.WebSocket = FakeWebSocket
+    api.listAutomationResults.mockResolvedValue({ results: [] })
   })
 
   afterEach(() => {
@@ -77,5 +80,73 @@ describe('RunDetail', () => {
     render(<RunDetail runId="run-1" status="failed" />)
 
     expect(await screen.findByText('not found')).toBeInTheDocument()
+  })
+
+  it('shows the automation results section when the run has structured results', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'run-1', status: 'needs_attention',
+        payload: {
+          priority: 'priority', summary: 'Tenant reports a leak.',
+          extracted: { property_address: '12 Example St' },
+          human_reason: 'Missing callback number.', action: { draft_created: true },
+        },
+      }],
+    })
+
+    render(<RunDetail runId="run-1" status="completed" />)
+
+    expect(await screen.findByText('Automation results')).toBeInTheDocument()
+    expect(screen.getByText('Tenant reports a leak.')).toBeInTheDocument()
+    expect(screen.getByText('12 Example St')).toBeInTheDocument()
+    expect(api.listAutomationResults).toHaveBeenCalledWith({ run_id: 'run-1' })
+  })
+
+  it('does not show the automation results section for a run with none', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.listAutomationResults.mockResolvedValue({ results: [] })
+
+    render(<RunDetail runId="run-1" status="completed" />)
+
+    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalled())
+    expect(screen.queryByText('Automation results')).not.toBeInTheDocument()
+  })
+
+  it('shows a Retry button for a failed run and calls the retry API on click', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.retryRun.mockResolvedValue({ run_id: 'run-2' })
+
+    render(<RunDetail runId="run-1" status="failed" />)
+
+    const button = await screen.findByText('Retry')
+    await act(async () => {
+      fireEvent.click(button)
+    })
+
+    expect(api.retryRun).toHaveBeenCalledWith('run-1')
+  })
+
+  it('shows an error banner when retry fails', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.retryRun.mockRejectedValue(new Error("This run has no recorded email batch to retry."))
+
+    render(<RunDetail runId="run-1" status="failed" />)
+
+    const button = await screen.findByText('Retry')
+    await act(async () => {
+      fireEvent.click(button)
+    })
+
+    expect(await screen.findByText(/no recorded email batch to retry/)).toBeInTheDocument()
+  })
+
+  it('does not show a Retry button for a completed run', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+
+    render(<RunDetail runId="run-1" status="completed" />)
+
+    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalled())
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument()
   })
 })

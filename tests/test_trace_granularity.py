@@ -174,3 +174,76 @@ def test_parallel_team_trace_events_do_not_collide_between_branches():
 
     assert started_agents == {"a", "b"}
     assert completed_agents == {"a", "b"}
+
+
+# --- Email tool trace redaction (spec: subject/body/draft text must never
+# reach a tool_completed trace event -- see docs/superpowers/specs/
+# 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2) --
+
+
+def _email_tool_call_workflow(tool_fn, tool_name, args, final_message="done"):
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": tool_name, "args": args, "id": "call_1"}]),
+            AIMessage(content=final_message),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[tool_fn])
+    workflow = Workflow(
+        name="wf",
+        steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
+    )
+    return list(workflow.stream("do the thing"))
+
+
+def test_email_read_tool_completed_summary_never_contains_body_or_subject():
+    def email_read(message_id: str) -> str:
+        return (
+            "From: tenant@example.com\nTo: pm@example.com\n"
+            "Subject: URGENT gas leak smell in kitchen\nDate: today\n\n"
+            "Please send someone immediately, my landlord's phone is 555-1234."
+        )
+
+    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "42"})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    summary = tool_completed.data["summary"]
+    assert "gas leak" not in summary
+    assert "555-1234" not in summary
+    assert "tenant@example.com" not in summary
+    assert "42" in summary  # the message id itself is fine to record
+
+
+def test_email_find_tool_completed_summary_never_contains_subject_lines():
+    def email_find(query: str = "") -> str:
+        return "Found 2 message(s):\n42 · a@b.com · Confidential lease dispute · today\n43 · c@d.com · gas smell · today"
+
+    events = _email_tool_call_workflow(email_find, "email_find", {"query": ""})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    summary = tool_completed.data["summary"]
+    assert "lease dispute" not in summary
+    assert "gas smell" not in summary
+    assert summary == "Found 2 message(s)."
+
+
+def test_email_draft_reply_tool_completed_summary_never_contains_draft_body():
+    def email_draft_reply(message_id: str, body: str) -> str:
+        return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
+
+    events = _email_tool_call_workflow(
+        email_draft_reply, "email_draft_reply",
+        {"message_id": "42", "body": "We will send a plumber tomorrow and cover the cost."},
+    )
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    summary = tool_completed.data["summary"]
+    assert "plumber" not in summary
+    assert "cover the cost" not in summary
+    assert "42" in summary
+
+
+def test_non_email_tool_summary_is_unaffected_by_redaction():
+    def some_tool(text: str) -> str:
+        return f"result: {text}"
+
+    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["summary"] == "result: hello"

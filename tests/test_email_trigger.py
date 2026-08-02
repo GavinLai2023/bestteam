@@ -255,6 +255,33 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 
+def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
+    """Run.trigger_context is the server's own record of exactly which
+    mailbox/UIDVALIDITY/UID batch a triggered run covers -- automation result
+    normalization and manual retry both depend on it (spec section 11.1)."""
+    from ui.backend.db.email_credentials import get_email_credentials
+    from ui.backend.db.models import Run
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    cred = get_email_credentials(db, org.id)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert run_row.trigger_context == {
+        "trigger_type": "email",
+        "mailbox_credential_id": cred.id,
+        "uidvalidity": 3,
+        "uids": [42, 45],
+        "folder": "INBOX",
+        "triggered_at": run_row.trigger_context["triggered_at"],  # timestamp, checked for presence only
+    }
+    assert run_row.trigger_context["triggered_at"]  # non-empty
+
+
 def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeypatch):
     """_start_triggered_run records the version the builder returned (bound to the
     config it built), NOT a fresh current_version_id re-query -- so a redeploy
@@ -678,4 +705,121 @@ def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypa
     assert recorder.calls == []          # no run dispatched
     assert trigger.last_uid == 41        # UID baseline NOT advanced
     assert trigger.runs_today == 0
+
+
+# --- retry_triggered_run: safe manual retry of a triggered run (spec 11.2) --
+
+from ui.backend.db.models import Run as _RunRow
+from ui.backend.email_trigger import RetryError, retry_triggered_run
+
+
+def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig-1",
+                              status="failed", mailbox_credential_id=None):
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    if mailbox_credential_id is None:
+        mailbox_credential_id = get_email_credentials(db, org.id).id
+    row = _RunRow(
+        id=run_id, workflow="triage", input="triage this batch",
+        status=status, org_id=org.id, username="email-trigger",
+        trigger_context={
+            "trigger_type": "email",
+            "mailbox_credential_id": mailbox_credential_id,
+            "uidvalidity": uidvalidity,
+            "uids": list(uids),
+            "folder": "INBOX",
+            "triggered_at": "2026-08-01T00:00:00+00:00",
+        },
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert new_run_id != run_row.id
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.retry_of_run_id == run_row.id
+    assert new_row.trigger_context["uids"] == [42, 43]
+    assert new_row.status == "running"
+    # Original row is untouched -- history stays immutable.
+    assert db.get(_RunRow, run_row.id).status == "failed"
+    assert db.get(_RunRow, run_row.id).retry_of_run_id is None
+    assert len(recorder.calls) == 1
+
+
+def test_retry_rejects_uidvalidity_mismatch(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    # Mailbox was rebuilt/migrated since the original run -- current validity differs.
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (9, 45))
+
+    with pytest.raises(RetryError, match="UIDVALIDITY"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_a_run_with_no_trigger_context(db):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    row = _RunRow(id="manual-1", workflow="triage", input="hi", status="failed", org_id=org.id)
+    db.add(row)
+    db.commit()
+    with pytest.raises(RetryError, match="no recorded email batch"):
+        retry_triggered_run(db, row)
+
+
+def test_retry_rejects_a_still_running_run(db):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org, status="running")
+    with pytest.raises(RetryError, match="still in progress"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_when_a_retry_is_already_running(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org)
+    db.add(_RunRow(
+        id="retry-in-flight", workflow="triage", input="x", status="running",
+        org_id=org.id, retry_of_run_id=run_row.id,
+    ))
+    db.commit()
+    with pytest.raises(RetryError, match="already in progress"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_respects_daily_cap(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    trigger.runs_today = daily_cap()
+    trigger.runs_date = datetime.now(timezone.utc).date().isoformat()
+    db.commit()
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    with pytest.raises(RetryError, match="limit"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_reports_unbuildable_workflow(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    def _boom(name, db_, org_id, allowed_uids, backend):
+        raise ValueError("team not found")
+
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _boom)
+    with pytest.raises(RetryError, match="triage"):
+        retry_triggered_run(db, run_row)
     assert trigger.last_run_id is None

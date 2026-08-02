@@ -117,6 +117,36 @@ def _summarize(value: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
+# Email tools carry customer/tenant content (subject lines, body snippets,
+# drafted reply text) that a generic 200-char `_summarize()` would still leak
+# into the trace_events table and any log/UI that renders it. Special-cased
+# below so the *content* of a mailbox never reaches a trace event -- only
+# success/failure and counts/ids, derived from the call's own arguments
+# rather than parsed out of the tool's return text (robust to the return
+# text's exact wording changing). See docs/superpowers/specs/
+# 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2.
+_EMAIL_TOOLS_NEEDING_REDACTION = frozenset({"email_find", "email_read", "email_draft_reply"})
+
+
+def _redacted_email_tool_summary(tool_name: str, call_args: Dict[str, Any], result: Any) -> str:
+    text = str(result)
+    if tool_name == "email_find":
+        if text.startswith("Found "):
+            count = text.split(" ", 2)[1]
+            return f"Found {count} message(s)."
+        return "No messages found."
+    if tool_name == "email_read":
+        message_id = call_args.get("message_id", "")
+        if text.startswith("No message found"):
+            return f"No message found for id '{message_id}'."
+        return f"Read message '{message_id}'."
+    # email_draft_reply
+    message_id = call_args.get("message_id", "")
+    if text.startswith("No message found"):
+        return f"No message found for id '{message_id}'."
+    return f"Draft reply saved for message '{message_id}'."
+
+
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
     """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
     if usage_sink is None:
@@ -226,13 +256,18 @@ def _run_agent(
                         },
                     )
                 else:
+                    summary = (
+                        _redacted_email_tool_summary(call["name"], call["args"], result)
+                        if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION
+                        else _summarize(result)
+                    )
                     _emit(
                         "tool_completed",
                         {
                             "tool": call["name"],
                             "success": True,
                             "duration_ms": int((time.monotonic() - start) * 1000),
-                            "summary": _summarize(result),
+                            "summary": summary,
                         },
                     )
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))

@@ -122,6 +122,64 @@ poller mid-loop. Deferred: awaiting in-flight polling threads on shutdown (see
 previously-deferred item) is no longer deferred -- see "Sync-to-async
 streaming bridge" above.
 
+`_start_triggered_run` also stamps a `Run.trigger_context` JSON blob
+(mailbox credential id, UIDVALIDITY, the exact UID batch, folder, trigger
+time) -- the server's own record of what a triggered run covered, used by
+both automation-result normalization and `retry_triggered_run` below. Never
+trust a model's own claim about which messages it processed; this is that
+ground truth. `email_trigger.retry_triggered_run(db, run_row)` (spec section
+11.2) safely reruns a failed/errored triggered run over its exact original
+UID batch as a brand-new `Run` (`retry_of_run_id` set, history untouched):
+revalidates current UIDVALIDITY still matches, the mailbox still decrypts and
+connects, the workflow still builds, and the org's daily cap isn't already
+hit, raising `RetryError` (customer-facing message) otherwise. Exposed as
+`POST /api/runs/{run_id}/retry` in `main.py`.
+
+## Property Maintenance Inbox (`automation_results.py`)
+
+The first vertical solution template (Release 1A of
+`docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`):
+a two-agent SEQUENTIAL Workflow template
+(`workflows/property_maintenance_inbox_demo.yaml`) built from three platform
+Skills (`email_input_security_core_v1`, `property_maintenance_intake_v1`,
+`property_maintenance_response_v1`, seeded in `skills.py`) on top of the
+existing email-trigger/draft-only toolkit above. Deliberately **not** a
+`Case`/work-item entity -- see `docs/DECISIONS.md` ("Property Maintenance
+Inbox: no Case/work-item entity in Phase 1").
+
+`automation_results.py::normalize_run_result(db, run_row)` is called from
+`runtime.py::run_in_background` right after a run with a `trigger_context`
+reaches `run_completed`/`run_failed`. It extracts a JSON object from the
+run's final output (handling a ```json fence) and only proceeds if
+`result_type == "property_maintenance_email_batch"` -- any other
+`trigger_context`-bearing run (e.g. another org's plain `email_triage_reply`
+team, free-text output) is left completely untouched, so this never
+regresses unrelated email-trigger workflows. Once engaged: the whole
+envelope is validated via Pydantic (`Envelope`/`EnvelopeItem`; an enum/shape
+failure fails the *whole* batch, not per-item); each item is matched by
+`message_id` against `trigger_context["uids"]` (an id outside that set is
+logged and dropped -- the model can't expand its own scope); every UID in
+the batch gets exactly one `automation_item_results` row, including a
+synthesized `status="error", needs_attention=True` row for one the model
+omitted or for a whole-envelope validation failure (nothing silently
+disappears); `needs_attention` is server-computed
+(`possible_emergency`/`unknown` priority or `needs_attention`/`error` status
+always forces it, regardless of what the model itself claimed); and
+`payload` is length-capped and only ever holds the validated extraction
+fields -- never a raw email body. `source_key` is always server-generated
+(`mailbox:<credential-id>:uidvalidity:<value>:uid:<uid>`), so a model can
+never fabricate which input it claims to have processed. The
+`(run_id, source_key)` unique constraint makes a repeated normalize call (a
+duplicate completion callback, or calling it twice) a no-op for rows already
+written.
+
+Read APIs (`main.py`): `GET /api/automation-results` (org-scoped, filterable
+by `run_id`/`needs_attention`/`status`/`result_type`, offset/limit/total --
+same convention as `GET /api/runs`, not the design spec's `cursor` wording)
+backs the Activity page's Needs-attention list and Run Detail's
+automation-results section; `GET /api/automation-results/summary` backs the
+Activity page's daily counters card.
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The

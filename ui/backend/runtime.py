@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
+from .automation_results import normalize_run_result
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -264,6 +265,14 @@ def run_in_background(
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
                         run_row.output = event.data
                         db.commit()
+                        if run_row.trigger_context is not None:
+                            # Property Maintenance Inbox (and any future
+                            # vertical using the same envelope contract):
+                            # turn this triggered run's output into immutable,
+                            # queryable automation_item_results rows. A no-op
+                            # for any run whose output isn't one of these
+                            # envelopes -- see automation_results.py.
+                            normalize_run_result(db, run_row)
                 if db is not None and event.type == "agent_completed":
                     for entry in event.usage:
                         _safe_record_usage(

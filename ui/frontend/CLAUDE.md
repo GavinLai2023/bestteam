@@ -27,16 +27,24 @@ customer nav is Build a team / My teams / Run a team / Activity):
   silently no-op or target the previous run. Live events render via the
   shared `lib/traceEvents.js` helpers (`EVENT_LABELS`/`RESULT_LABELS`/
   `TERMINAL_TYPES`/`renderEventData`), also used by `components/RunDetail.jsx`.
-- **`/activity`** — `pages/ActivityPage.jsx`: an Automations tab (unchanged,
-  `components/EmailTriggerActivity.jsx`) and a Runs tab (`GET /api/runs`,
-  filterable by team/manual-or-automatic/status; polls every 5s while a
-  listed row is still `running`, guarded against a stale poll response
-  clobbering a since-changed filter's results). Clicking a run opens
+- **`/activity`** — `pages/ActivityPage.jsx`: an Automations tab
+  (`components/EmailTriggerActivity.jsx`, plus — for the Property Maintenance
+  Inbox vertical template, see `ui/backend/CLAUDE.md` — `components/
+  MaintenanceInboxSummary.jsx` fetching `GET /api/automation-results/summary`
+  and `components/NeedsAttentionList.jsx` fetching `GET /api/automation-results
+  ?needs_attention=true`; both render nothing for an org that isn't using this
+  template, and `NeedsAttentionList`'s "View run" jumps to the Runs tab and
+  opens that run's detail) and a Runs tab (`GET /api/runs`, filterable by
+  team/manual-or-automatic/status; polls every 5s while a listed row is still
+  `running`, guarded against a stale poll response clobbering a
+  since-changed filter's results). Clicking a run opens
   `components/RunDetail.jsx` in a panel: a `running` run streams live over
   the same WebSocket `MonitorPage` uses, anything else fetches
-  `GET /api/runs/{id}/trace` once (no live/historical merge). See
-  `ui/backend/CLAUDE.md` ("Granular trace events, cancellation, and run
-  history").
+  `GET /api/runs/{id}/trace` once (no live/historical merge); `RunDetail`
+  also fetches that run's `GET /api/automation-results?run_id=` (renders
+  nothing for a run with none) and, for a `failed` run, shows a Retry button
+  (`POST /api/runs/{id}/retry`). See `ui/backend/CLAUDE.md` ("Granular trace
+  events, cancellation, and run history", "Property Maintenance Inbox").
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.
