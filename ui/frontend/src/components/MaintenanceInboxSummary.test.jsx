@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import MaintenanceInboxSummary from './MaintenanceInboxSummary'
 import { api } from '../lib/api'
@@ -12,6 +12,10 @@ vi.mock('../lib/api', () => ({
 describe('MaintenanceInboxSummary', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('shows a light empty state when the org uses this template but nothing was processed today', async () => {
@@ -76,5 +80,19 @@ describe('MaintenanceInboxSummary', () => {
     const now = new Date()
     const expected = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     expect(dateArg).toBe(expected)
+  })
+
+  it('refreshes on the same 30s cadence as the adjacent needs-attention list, so new results while the page stays open are reflected (Codex review finding)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    api.automationResultsSummary.mockResolvedValue({
+      ever_used: true, emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
+    })
+
+    render(<MaintenanceInboxSummary />)
+    await vi.waitFor(() => expect(api.automationResultsSummary).toHaveBeenCalledTimes(1))
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(api.automationResultsSummary).toHaveBeenCalledTimes(2)
   })
 })

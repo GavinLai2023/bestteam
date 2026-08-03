@@ -448,13 +448,22 @@ def list_automation_results(
     return rows, total
 
 
-def summary_for_date(db: Session, org_id: int, day: _date) -> Dict[str, int]:
+def summary_for_date(db: Session, org_id: int, day: _date, tz_offset_minutes: int = 0) -> Dict[str, int]:
     """Today's Maintenance Inbox counters for the Activity page (spec 6.2).
     Aggregated in Python over one org's one day of rows -- a small dataset at
     this scale, and avoids depending on SQLite's JSON1 extension being
     available for the payload-embedded fields (classification/priority/
-    action.draft_created aren't their own indexed columns)."""
-    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    action.draft_created aren't their own indexed columns).
+
+    `tz_offset_minutes` is the caller's `Date.getTimezoneOffset()` (UTC =
+    local + offset): without it, `day` (the caller's local calendar date) got
+    bounded as UTC midnight-to-midnight, which is the wrong window for any
+    org not in UTC -- e.g. UTC+10 local midnight is still the previous UTC
+    date, so its first ~10 hours of rows were excluded (Codex review
+    finding). There's no org-level timezone setting in this app, so this
+    takes the browser's own offset rather than adding one."""
+    local_midnight = datetime(day.year, day.month, day.day)
+    start = (local_midnight + timedelta(minutes=tz_offset_minutes)).replace(tzinfo=timezone.utc)
     end = start + timedelta(days=1)
     rows = (
         db.query(AutomationItemResult)

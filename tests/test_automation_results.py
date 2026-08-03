@@ -3,12 +3,13 @@ parser that turns a Property Maintenance Inbox run's JSON output into
 immutable automation_item_results rows (spec sections 5.3, 10, 10.1)."""
 
 import json
+from datetime import date as _date, datetime, timezone
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.automation_results import ITEM_RESULT_TYPE, normalize_run_result
+from ui.backend.automation_results import ITEM_RESULT_TYPE, normalize_run_result, summary_for_date
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import AutomationItemResult, Run
 from ui.backend.db.orgs import get_or_create_org
@@ -271,6 +272,31 @@ def test_claimed_draft_is_kept_when_confirmed_by_trace(db):
     row = db.query(AutomationItemResult).one()
     assert row.payload["action"]["draft_created"] is True
     assert row.needs_attention is False
+
+
+def test_summary_respects_the_callers_local_day_via_tz_offset(db):
+    """Without tz_offset_minutes, a UTC+10 caller's first ~10 local hours of
+    'today' are still the previous UTC date and got dropped from the summary
+    -- the browser's own offset (Date.getTimezoneOffset()) fixes this (Codex
+    review finding)."""
+    org = get_or_create_org(db, "acme")
+    run = Run(id="run-1", workflow="w", input="x", status="completed", org_id=org.id)
+    db.add(run)
+    db.commit()
+    row = AutomationItemResult(
+        org_id=org.id, run_id=run.id, source_type="email", source_key="k",
+        result_type=ITEM_RESULT_TYPE, status="processed", needs_attention=False,
+        payload={},
+        created_at=datetime(2026, 8, 2, 15, 0, tzinfo=timezone.utc),  # 01:00 local in UTC+10, on local Aug 3
+    )
+    db.add(row)
+    db.commit()
+
+    without_offset = summary_for_date(db, org.id, _date(2026, 8, 3))
+    assert without_offset["emails_read"] == 0  # UTC-bounded day misses it
+
+    with_offset = summary_for_date(db, org.id, _date(2026, 8, 3), tz_offset_minutes=-600)
+    assert with_offset["emails_read"] == 1
 
 
 def test_unclaimed_draft_is_unaffected_by_confirmation_set(db):

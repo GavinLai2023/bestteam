@@ -134,7 +134,10 @@ export default function RunDetail({ runId, status, onRetried }) {
           </ul>
         </section>
       )}
-      {status === 'failed' && (
+      {/* finalEventType covers a run that fails WHILE this panel is open: ActivityPage's
+          selectedRun.status is only set at click time, so `status` alone stays stale
+          at 'running' until the panel is closed and reopened (Codex review finding). */}
+      {(status === 'failed' || finalEventType === 'run_failed') && (
         <section className="run-detail-retry">
           <button type="button" onClick={retry} disabled={retryState === 'retrying'}>
             {retryState === 'retrying' ? 'Retrying…' : 'Retry'}

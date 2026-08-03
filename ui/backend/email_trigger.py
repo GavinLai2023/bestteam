@@ -560,6 +560,17 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         db.commit()
         raise RetryError("Today's automatic-run limit has been reached -- try again tomorrow.")
 
+    # Same overlap guard poll_org enforces (see its comment above): a run still
+    # registered as active against this mailbox must finish first, or this
+    # retry's own last_run_id write below would silently displace the guard's
+    # record of it, letting a concurrent automatic poll dispatch a second run
+    # against the same mailbox (Codex review finding).
+    if trigger.last_run_id:
+        prev = registry.get(trigger.last_run_id)
+        if prev is not None and prev.status == "running":
+            db.commit()
+            raise RetryError("A run against this mailbox is already in progress -- try again once it finishes.")
+
     uids = trigger_context.get("uids") or []
     try:
         workflow, version_id = build_trigger_workflow(run_row.workflow, db, org_id, set(uids), backend)
@@ -582,6 +593,12 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     # -- otherwise an automatic poll cycle running concurrently with this retry
     # has no way to know a run against this mailbox is already in flight.
     trigger.last_run_id = new_run.id
+    # A run is going out: clear any prior fault, same as _start_triggered_run's
+    # atomic advance -- otherwise a sticky workflow-kind error from a past
+    # failure keeps reporting a failure indefinitely despite this successful
+    # dispatch (Codex review finding).
+    trigger.last_error = None
+    trigger.last_error_kind = None
     db.commit()
     try:
         _executor.submit(

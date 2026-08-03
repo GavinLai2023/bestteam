@@ -190,8 +190,11 @@ export const api = {
     const qs = params.toString()
     return request(`/api/automation-results${qs ? `?${qs}` : ''}`)
   },
-  automationResultsSummary: (date) =>
-    request(`/api/automation-results/summary${date ? `?${new URLSearchParams({ date })}` : ''}`),
+  automationResultsSummary: (date) => {
+    const params = { tz_offset_minutes: new Date().getTimezoneOffset() }
+    if (date) params.date = date
+    return request(`/api/automation-results/summary?${new URLSearchParams(params)}`)
+  },
 
   // Model catalog
   modelCatalog: () => request('/api/model-catalog'),

@@ -33,8 +33,9 @@ customer nav is Build a team / My teams / Run a team / Activity):
   MaintenanceInboxSummary.jsx` fetching `GET /api/automation-results/summary`
   and `components/NeedsAttentionList.jsx` fetching `GET /api/automation-results
   ?needs_attention=true`; both render nothing for an org that isn't using this
-  template, and `NeedsAttentionList`'s "View run" jumps to the Runs tab and
-  opens that run's detail) and a Runs tab (`GET /api/runs`, filterable by
+  template, both refresh on the same 30s cadence while the tab is open (rather
+  than only on mount), and `NeedsAttentionList`'s "View run" jumps to the Runs
+  tab and opens that run's detail) and a Runs tab (`GET /api/runs`, filterable by
   team/manual-or-automatic/status; polls every 5s while a listed row is still
   `running`, guarded against a stale poll response clobbering a
   since-changed filter's results). Clicking a run opens
@@ -44,7 +45,11 @@ customer nav is Build a team / My teams / Run a team / Activity):
   also fetches that run's `GET /api/automation-results?run_id=` (renders
   nothing for a run with none, and refetches when a live run's terminal event
   arrives, since `normalize_run_result` only writes results after the run
-  finishes) and, for a `failed` run, shows a Retry button
+  finishes) and, for a `failed` run OR one whose live event stream just
+  emitted `run_failed` (the `status` prop alone is set once at click time by
+  `ActivityPage` and never updates while the panel stays open, so a run that
+  fails mid-view needs this second signal or Retry wouldn't appear until the
+  panel is closed and reopened), shows a Retry button
   (`POST /api/runs/{id}/retry`) that calls the `onRetried(newRunId)` prop on
   success -- `ActivityPage.jsx` wires this to select the newly created run,
   the same `setTab('runs')`/`setSelectedRun()` pattern `NeedsAttentionList`'s

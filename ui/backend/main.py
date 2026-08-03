@@ -710,11 +710,15 @@ def list_automation_results_endpoint(
 @app.get("/api/automation-results/summary")
 def automation_results_summary_endpoint(
     date: Optional[str] = None,
+    tz_offset_minutes: int = 0,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ):
     """Today's (or `date`, an ISO `YYYY-MM-DD` string) Property Maintenance
-    Inbox counters for the Activity page's summary card (spec section 6.2)."""
+    Inbox counters for the Activity page's summary card (spec section 6.2).
+    `tz_offset_minutes` is the browser's `Date.getTimezoneOffset()`, used to
+    bound `date` by the caller's local day instead of a UTC day (Codex
+    review finding) -- see `automation_results.summary_for_date`."""
     if date:
         try:
             day = _date.fromisoformat(date)
@@ -722,7 +726,7 @@ def automation_results_summary_endpoint(
             raise HTTPException(status_code=422, detail="date must be an ISO date (YYYY-MM-DD)") from exc
     else:
         day = datetime.now(timezone.utc).date()
-    return automation_results.summary_for_date(db, org.id, day)
+    return automation_results.summary_for_date(db, org.id, day, tz_offset_minutes=tz_offset_minutes)
 
 
 @app.post("/api/runs/ws-ticket")

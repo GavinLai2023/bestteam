@@ -138,11 +138,19 @@ original UID batch as a brand-new `Run` (`retry_of_run_id` set, history
 untouched): revalidates the current mailbox's host/username still match
 `trigger_context` (not just UIDVALIDITY -- a replaced mailbox could
 coincidentally share a UIDVALIDITY value), the mailbox still decrypts and
-connects, the workflow still builds, and the org's daily cap isn't already
-hit, raising `RetryError` (customer-facing message) otherwise. On dispatch it
-also sets `trigger.last_run_id` to the new run, the same field `poll_org`'s
-overlap guard reads, so an automatic poll cycle can see a manual retry is
-already in flight against the mailbox. Exposed as
+connects, the workflow still builds, the org's daily cap isn't already hit,
+and -- same overlap guard `poll_org` itself checks before touching the
+mailbox -- `trigger.last_run_id` isn't still a registered run that's actually
+running; any of these raises `RetryError` (customer-facing message). Without
+that last check, dispatching would silently overwrite `last_run_id` and
+un-register whatever run (e.g. a concurrent automatic poll) was actually in
+flight, letting a second automatic run start against the same mailbox once
+the retry finished first. On dispatch it sets `trigger.last_run_id` to the
+new run (registering itself with that same guard for the next poll cycle)
+and clears `last_error`/`last_error_kind`, mirroring
+`_start_triggered_run`'s "a run is going out: clear any prior fault" --
+without it a resolved workflow-kind error kept reporting failure
+indefinitely despite the successful retry. Exposed as
 `POST /api/runs/{run_id}/retry` in `main.py`. Known gaps (post-review,
 deliberately deferred -- see `docs/STATUS.md` Known issues): the
 running-retry-check + daily-cap-increment admission isn't atomic (a real fix
@@ -218,7 +226,13 @@ today" -- both would otherwise report `emails_read: 0`. `date` defaults to
 UTC "today" server-side when omitted -- there's no org-timezone concept
 anywhere in this app (consistent with `email_trigger.py`'s daily-cap reset,
 also UTC-based), so the frontend passes its own local date explicitly rather
-than relying on that default (`MaintenanceInboxSummary.jsx`).
+than relying on that default (`MaintenanceInboxSummary.jsx`). The endpoint
+also takes `tz_offset_minutes` (the browser's own `Date.getTimezoneOffset()`;
+`lib/api.js`'s `automationResultsSummary` always sends it) and
+`summary_for_date` uses it to bound the day by the caller's local midnight
+instead of UTC midnight -- passing a local date string alone still misdates
+rows created in a timezone-ahead-of-UTC org's first few local hours of a new
+day, since those rows' UTC timestamp is still the previous UTC date.
 
 ## Sync-to-async streaming bridge
 

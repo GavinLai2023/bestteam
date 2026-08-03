@@ -179,6 +179,29 @@ describe('RunDetail', () => {
     expect(await screen.findByText(/no recorded email batch to retry/)).toBeInTheDocument()
   })
 
+  it('shows the Retry button once a live run fails, without waiting for the panel to reopen', async () => {
+    // ActivityPage sets selectedRun.status at click time and never updates it
+    // while the panel stays open, so `status` alone stays 'running' after a
+    // live run fails mid-view -- the retry section must key off the run's own
+    // terminal event too (Codex review finding).
+    api.createWsTicket.mockResolvedValue({ ticket: 't' })
+
+    render(<RunDetail runId="run-1" status="running" />)
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument()
+
+    const ws = FakeWebSocket.instances.at(-1)
+    await act(async () => {
+      ws.emit({ type: 'run_failed', workflow: 'wf', agent: null, data: 'boom', usage: [] })
+    })
+
+    expect(await screen.findByText('Retry')).toBeInTheDocument()
+  })
+
   it('does not show a Retry button for a completed run', async () => {
     api.getRunTrace.mockResolvedValue({ events: [] })
 

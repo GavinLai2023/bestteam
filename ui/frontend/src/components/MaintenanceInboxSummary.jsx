@@ -21,15 +21,28 @@ function _todayLocal() {
   return `${yyyy}-${mm}-${dd}`
 }
 
+// Same cadence as NeedsAttentionList's own poll, so the two Automations-tab
+// cards go stale together rather than one refreshing while the other sits on
+// an old count until the page is remounted (Codex review finding).
+const REFRESH_INTERVAL_MS = 30_000
+
 export default function MaintenanceInboxSummary() {
   const [summary, setSummary] = useState(undefined) // undefined = still loading
   const [error, setError] = useState(false)
 
   useEffect(() => {
-    api
-      .automationResultsSummary(_todayLocal())
-      .then(setSummary)
-      .catch(() => setError(true))
+    const load = () => {
+      api
+        .automationResultsSummary(_todayLocal())
+        .then((data) => {
+          setSummary(data)
+          setError(false)
+        })
+        .catch(() => setError(true))
+    }
+    load()
+    const id = setInterval(load, REFRESH_INTERVAL_MS)
+    return () => clearInterval(id)
   }, [])
 
   if (error) return null // auxiliary card -- fail silently rather than block the page

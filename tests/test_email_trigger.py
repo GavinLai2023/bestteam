@@ -814,6 +814,70 @@ def test_retry_registers_itself_with_the_overlap_guard(db, monkeypatch):
     assert trigger.last_run_id == new_run_id
 
 
+def test_retry_rejects_while_a_run_is_still_registered_against_this_mailbox(db, monkeypatch):
+    # Same overlap guard poll_org enforces: if trigger.last_run_id already
+    # points at a running run (e.g. a concurrent automatic poll), a retry
+    # must not silently displace that registration by overwriting
+    # last_run_id -- or a later automatic poll would think the mailbox is
+    # free while that original run is still in flight (Codex review finding).
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    in_flight = registry.create("triage", "x", org_id=org.id, username="email-trigger")
+    trigger.last_run_id = in_flight.id
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="already in progress"):
+        retry_triggered_run(db, run_row)
+
+    assert recorder.calls == []
+    assert trigger.last_run_id == in_flight.id  # guard registration untouched
+
+
+def test_retry_proceeds_once_the_registered_run_is_no_longer_running(db, monkeypatch):
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    finished = registry.create("triage", "x", org_id=org.id, username="email-trigger")
+    registry.publish(finished.id, {"type": "run_completed", "workflow": "triage", "data": "done"})
+    trigger.last_run_id = finished.id
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)  # must not raise
+    assert trigger.last_run_id == new_run_id
+
+
+def test_retry_clears_a_sticky_trigger_error_on_successful_dispatch(db, monkeypatch):
+    # _start_triggered_run clears last_error/last_error_kind on a successful
+    # dispatch ("a run is going out: clear any prior fault") -- a successful
+    # retry dispatch must do the same, or a resolved workflow-kind error keeps
+    # showing indefinitely despite the successful retry (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
+    trigger.last_error_kind = "workflow"
+    db.commit()
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    retry_triggered_run(db, run_row)
+
+    assert trigger.last_error is None
+    assert trigger.last_error_kind is None
+
+
 def test_retry_rejects_a_run_with_no_trigger_context(db):
     org, trigger = _org_with_trigger(db, last_uid=45)
     row = _RunRow(id="manual-1", workflow="triage", input="hi", status="failed", org_id=org.id)

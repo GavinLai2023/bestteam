@@ -592,7 +592,29 @@
   `Organization.timezone` concept exists anywhere in this app and the UTC-day
   convention is consistent with `email_trigger.py`'s existing daily-cap
   reset; the `?date=` override already existed on the endpoint; the frontend
-  just wasn't using it. 903 backend + 86 frontend tests, lint/build green.
+  just wasn't using it.
+
+  **Third review pass** (Codex review against `main`, post-second-pass):
+  `RunDetail`'s Retry section now also keys off the run's own `run_failed`
+  trace event, not just the `status` prop `ActivityPage` set at click time —
+  a run that fails while its detail panel is still open no longer requires
+  closing and reopening the panel before Retry appears. `retry_triggered_run`
+  now checks the same overlap guard `poll_org` enforces before dispatching:
+  if `EmailTrigger.last_run_id` still points at a registered run that's
+  actually running, the retry is rejected rather than silently overwriting
+  that registration (which could otherwise let a concurrent automatic poll
+  dispatch a second run against the same mailbox once the retry finished
+  first) — and a successful retry dispatch now clears `last_error`/
+  `last_error_kind`, matching `_start_triggered_run`'s "a run is going out:
+  clear any prior fault" behavior, so a resolved workflow-kind error no
+  longer keeps reporting failure indefinitely. `GET /api/automation-results
+  /summary` now takes `tz_offset_minutes` (the browser's own
+  `Date.getTimezoneOffset()`) and bounds "today" by the caller's local day
+  instead of always UTC midnight-to-midnight — the prior local-date-only fix
+  still misdated rows created in a timezone-ahead-of-UTC org's first few
+  local hours of a new day. The summary card now also refreshes on the same
+  30s cadence as the adjacent needs-attention list, instead of only fetching
+  once on mount. 908 backend + 89 frontend tests, lint/build green.
 
 ## In Progress
 

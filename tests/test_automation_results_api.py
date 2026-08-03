@@ -159,6 +159,27 @@ def test_automation_results_summary_bad_date_is_422(client):
     assert resp.status_code == 422
 
 
+def test_automation_results_summary_applies_tz_offset_to_the_date_boundary(client):
+    # A row timestamped just after local midnight in UTC+10 but still on the
+    # previous UTC date must be counted under that local day once the
+    # caller's offset is passed (Codex review finding).
+    with open_test_db() as db:
+        org = get_or_create_org(db, "default")
+        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
+        db.commit()
+        row = _add_result(db, org_id=org.id, run_id="r1", source_key="a")
+        row.created_at = datetime(2026, 8, 2, 15, 0, tzinfo=timezone.utc)
+        db.commit()
+
+    without_offset = client.get("/api/automation-results/summary", params={"date": "2026-08-03"}).json()
+    assert without_offset["emails_read"] == 0
+
+    with_offset = client.get(
+        "/api/automation-results/summary", params={"date": "2026-08-03", "tz_offset_minutes": -600}
+    ).json()
+    assert with_offset["emails_read"] == 1
+
+
 # --- POST /api/runs/{id}/retry ------------------------------------------------
 
 
