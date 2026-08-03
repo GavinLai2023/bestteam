@@ -198,7 +198,13 @@ this itself from the run's own `tool_completed` trace events (`outcome ==
 data) while it's already streaming them, and passes it into normalization at
 the terminal event. A claimed-but-unconfirmed draft is downgraded to
 `draft_created: false` and forces `needs_attention: true` -- the model saying
-it drafted a reply doesn't make it so.
+it drafted a reply doesn't make it so. `Envelope.schema_version` (currently
+always `1`) is validated against the one supported version rather than
+accepted as any int -- `extra: "ignore"` would otherwise let a future
+incompatible schema's unknown fields get silently dropped instead of failing
+the envelope; an unsupported version gets the same whole-batch error-row
+treatment as an invalid enum. `draft_type` is length-capped like every other
+free-text payload field (it was the one field that wasn't).
 
 Read APIs (`main.py`): `GET /api/automation-results` (org-scoped, filterable
 by `run_id`/`needs_attention`/`status`/`result_type`, offset/limit/total --
@@ -208,7 +214,11 @@ automation-results section; `GET /api/automation-results/summary` backs the
 Activity page's daily counters card, including an `ever_used` flag (a cheap
 all-time existence check, separate from the day's counts) so the frontend can
 tell "this org has never used this template" apart from "used it, nothing
-today" -- both would otherwise report `emails_read: 0`.
+today" -- both would otherwise report `emails_read: 0`. `date` defaults to
+UTC "today" server-side when omitted -- there's no org-timezone concept
+anywhere in this app (consistent with `email_trigger.py`'s daily-cap reset,
+also UTC-based), so the frontend passes its own local date explicitly rather
+than relying on that default (`MaintenanceInboxSummary.jsx`).
 
 ## Sync-to-async streaming bridge
 

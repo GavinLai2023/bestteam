@@ -59,6 +59,29 @@ describe('RunDetail', () => {
     expect(api.getRunTrace).not.toHaveBeenCalled()
   })
 
+  it('refetches automation results once the live run reaches a terminal event', async () => {
+    api.createWsTicket.mockResolvedValue({ ticket: 't' })
+    api.listAutomationResults.mockResolvedValue({ results: [] })
+
+    render(<RunDetail runId="run-1" status="running" />)
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalledTimes(1))
+
+    const ws = FakeWebSocket.instances.at(-1)
+    await act(async () => {
+      ws.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'done', usage: [] })
+    })
+
+    // normalize_run_result only runs server-side after the terminal event, so
+    // the initial fetch (above) can't have seen it -- this second call is what
+    // actually picks up the automation results the server just wrote.
+    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalledTimes(2))
+  })
+
   it('fetches the persisted trace for a finished run', async () => {
     api.getRunTrace.mockResolvedValue({
       events: [
@@ -125,6 +148,21 @@ describe('RunDetail', () => {
     })
 
     expect(api.retryRun).toHaveBeenCalledWith('run-1')
+  })
+
+  it('calls onRetried with the new run id so the caller can navigate to it', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.retryRun.mockResolvedValue({ run_id: 'run-2' })
+    const onRetried = vi.fn()
+
+    render(<RunDetail runId="run-1" status="failed" onRetried={onRetried} />)
+
+    const button = await screen.findByText('Retry')
+    await act(async () => {
+      fireEvent.click(button)
+    })
+
+    expect(onRetried).toHaveBeenCalledWith('run-2')
   })
 
   it('shows an error banner when retry fails', async () => {

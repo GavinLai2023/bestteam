@@ -8,13 +8,26 @@ import { api } from '../lib/api'
 // for an org that uses it but has no results today -- most orgs on this
 // deployment don't use this vertical at all, so a blank/zero card would be
 // confusing rather than reassuring.
+// The backend defaults to a UTC calendar day when no `date` is given, which
+// shows the wrong day's counts around local midnight for an org far from
+// UTC (Codex review finding). There's no org-level timezone setting in this
+// app, so the fix is the browser's own local date rather than a new backend
+// feature -- the endpoint already accepts `date` for exactly this override.
+function _todayLocal() {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
 export default function MaintenanceInboxSummary() {
   const [summary, setSummary] = useState(undefined) // undefined = still loading
   const [error, setError] = useState(false)
 
   useEffect(() => {
     api
-      .automationResultsSummary()
+      .automationResultsSummary(_todayLocal())
       .then(setSummary)
       .catch(() => setError(true))
   }, [])

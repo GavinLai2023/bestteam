@@ -167,6 +167,35 @@ def test_structurally_broken_envelope_fails_safe(db):
     assert rows[0].status == "error"
 
 
+def test_unsupported_schema_version_fails_whole_envelope_with_error_rows(db):
+    """A future incompatible schema_version must not be silently accepted as
+    version 1 (extra: "ignore" would otherwise drop its unknown fields
+    quietly) -- fail the whole envelope, same as an invalid enum
+    (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    output = json.dumps({
+        "schema_version": 2, "result_type": "property_maintenance_email_batch",
+        "items": [_valid_item("42")],
+    })
+    run = _make_run(db, org_id=org.id, output=output, uids=[42, 43])
+    normalize_run_result(db, run)
+    rows = db.query(AutomationItemResult).all()
+    assert len(rows) == 2
+    assert all(r.status == "error" and r.needs_attention for r in rows)
+
+
+def test_draft_type_is_length_capped(db):
+    """Every other free-text field in the payload is capped -- draft_type
+    must be too, or a model could smuggle arbitrarily large text into it
+    (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42", action={"draft_created": False, "draft_type": "x" * 1000})
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run)
+    row = db.query(AutomationItemResult).one()
+    assert len(row.payload["action"]["draft_type"]) <= 300
+
+
 def test_totally_unparseable_output_is_left_alone(db):
     """Truncated/non-JSON text can't be identified as one of our envelopes at
     all -- there's no marker to key off, so this run is left untouched (it

@@ -142,12 +142,26 @@ class EnvelopeItem(BaseModel):
         return v
 
 
+SUPPORTED_SCHEMA_VERSION = 1
+
+
 class Envelope(BaseModel):
     schema_version: int = 1
     result_type: str
     items: List[EnvelopeItem] = Field(default_factory=list)
 
     model_config = {"extra": "ignore"}
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema_version(cls, v: int) -> int:
+        # `extra: "ignore"` means a newer, incompatible schema's unknown
+        # fields would otherwise be silently dropped rather than surfaced --
+        # fail the whole envelope instead so it gets the normal error-row
+        # treatment (Codex review finding).
+        if v != SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(f"unsupported schema_version {v!r}")
+        return v
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -195,6 +209,7 @@ def _reconciled_action(item: EnvelopeItem, confirmed_draft_message_ids: frozense
     action = item.action.model_dump()
     if action.get("draft_created") and item.message_id.strip() not in confirmed_draft_message_ids:
         action["draft_created"] = False
+    action["draft_type"] = _cap(action.get("draft_type"), _FIELD_MAX_CHARS)
     return action
 
 

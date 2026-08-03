@@ -42,9 +42,14 @@ customer nav is Build a team / My teams / Run a team / Activity):
   the same WebSocket `MonitorPage` uses, anything else fetches
   `GET /api/runs/{id}/trace` once (no live/historical merge); `RunDetail`
   also fetches that run's `GET /api/automation-results?run_id=` (renders
-  nothing for a run with none) and, for a `failed` run, shows a Retry button
-  (`POST /api/runs/{id}/retry`). See `ui/backend/CLAUDE.md` ("Granular trace
-  events, cancellation, and run history", "Property Maintenance Inbox").
+  nothing for a run with none, and refetches when a live run's terminal event
+  arrives, since `normalize_run_result` only writes results after the run
+  finishes) and, for a `failed` run, shows a Retry button
+  (`POST /api/runs/{id}/retry`) that calls the `onRetried(newRunId)` prop on
+  success -- `ActivityPage.jsx` wires this to select the newly created run,
+  the same `setTab('runs')`/`setSelectedRun()` pattern `NeedsAttentionList`'s
+  "View run" uses. See `ui/backend/CLAUDE.md` ("Granular trace events,
+  cancellation, and run history", "Property Maintenance Inbox").
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.

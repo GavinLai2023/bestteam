@@ -58,4 +58,23 @@ describe('MaintenanceInboxSummary', () => {
     await vi.waitFor(() => expect(api.automationResultsSummary).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
+
+  it("requests the browser's local date, not the backend's UTC default", async () => {
+    // The backend defaults to UTC "today" with no date param, which is the
+    // wrong calendar day around local midnight for an org far from UTC
+    // (Codex review finding) -- the frontend must pass its own local date.
+    api.automationResultsSummary.mockResolvedValue({
+      ever_used: true, emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
+    })
+
+    render(<MaintenanceInboxSummary />)
+
+    await vi.waitFor(() => expect(api.automationResultsSummary).toHaveBeenCalled())
+    const [dateArg] = api.automationResultsSummary.mock.calls[0]
+    expect(dateArg).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    const now = new Date()
+    const expected = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    expect(dateArg).toBe(expected)
+  })
 })

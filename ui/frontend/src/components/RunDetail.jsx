@@ -7,7 +7,7 @@ import '../pages/MonitorPage.css' // reuses .event/.event-*/.result styling
 // streams live over the same WebSocket MonitorPage uses; anything else reads
 // its persisted trace via GET /api/runs/{id}/trace -- no live/historical
 // merge, per the read endpoint's design (see docs/superpowers/specs).
-export default function RunDetail({ runId, status }) {
+export default function RunDetail({ runId, status, onRetried }) {
   const [events, setEvents] = useState([])
   const [error, setError] = useState(null)
   const [automationResults, setAutomationResults] = useState([])
@@ -18,7 +18,11 @@ export default function RunDetail({ runId, status }) {
   // Property Maintenance Inbox: this run's structured results, if any (most
   // runs have none -- only autonomous email-triggered runs whose output
   // parsed as one of these envelopes do). A no-op fetch/render for every
-  // other kind of run.
+  // other kind of run. Refetches on the terminal event too: normalize_run_result
+  // only runs server-side after run_completed/run_failed, so opening a still-
+  // running run's detail would otherwise leave this section empty until the
+  // whole component remounts (Codex review finding).
+  const finalEventType = events.find((e) => TERMINAL_TYPES.includes(e.type))?.type
   useEffect(() => {
     let ignore = false
     api
@@ -30,14 +34,15 @@ export default function RunDetail({ runId, status }) {
     return () => {
       ignore = true
     }
-  }, [runId])
+  }, [runId, finalEventType])
 
   const retry = async () => {
     setRetryState('retrying')
     setRetryError(null)
     try {
-      await api.retryRun(runId)
+      const { run_id: newRunId } = await api.retryRun(runId)
       setRetryState('idle')
+      onRetried?.(newRunId)
     } catch (e) {
       setRetryState('error')
       setRetryError(e.message)
@@ -85,7 +90,7 @@ export default function RunDetail({ runId, status }) {
     }
   }, [runId, status])
 
-  const finalEvent = events.find((e) => TERMINAL_TYPES.includes(e.type))
+  const finalEvent = events.find((e) => e.type === finalEventType)
 
   return (
     <div className="run-detail">

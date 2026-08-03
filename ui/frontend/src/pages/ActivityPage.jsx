@@ -202,7 +202,12 @@ export default function ActivityPage() {
                   Close
                 </button>
               </div>
-              <RunDetail key={selectedRun.id} runId={selectedRun.id} status={selectedRun.status} />
+              <RunDetail
+                key={selectedRun.id}
+                runId={selectedRun.id}
+                status={selectedRun.status}
+                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running' })}
+              />
             </section>
           )}
         </>

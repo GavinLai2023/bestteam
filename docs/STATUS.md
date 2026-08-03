@@ -573,8 +573,26 @@
   nothing for an org that has never used this template, instead of an
   always-present empty-looking card. Two lower-severity review findings were
   deliberately **not** fixed — see Known issues below (retry admission race,
-  retry-eligibility for a completed run with per-item errors). 901 backend +
-  83 frontend tests, lint/build green.
+  retry-eligibility for a completed run with per-item errors).
+
+  **Second review pass** (Codex review against `main`, post-hardening):
+  `Envelope.schema_version` now rejects anything other than the one supported
+  version instead of silently accepting an unrecognized future schema (whose
+  unknown fields `extra: "ignore"` would otherwise drop quietly) — an
+  unsupported version fails the whole envelope with the normal error-row
+  treatment. `draft_type` is now length-capped like every other free-text
+  payload field. `RunDetail.jsx` refetches `automation-results` when a live
+  run's terminal event arrives (previously only fetched once on mount, so
+  opening a still-running run's detail could leave the section empty forever
+  — `normalize_run_result` only writes after the run finishes) and a
+  successful retry now navigates the Activity page to the newly created run
+  instead of discarding its id. The Activity summary card's default date
+  moved from the backend's UTC "today" to the browser's local date — pushed
+  back on the review's literal ask (a per-org timezone setting) since no
+  `Organization.timezone` concept exists anywhere in this app and the UTC-day
+  convention is consistent with `email_trigger.py`'s existing daily-cap
+  reset; the `?date=` override already existed on the endpoint; the frontend
+  just wasn't using it. 903 backend + 86 frontend tests, lint/build green.
 
 ## In Progress
 
