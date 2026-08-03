@@ -265,7 +265,7 @@ def _needs_attention_for(
     )
 
 
-def _error_payload(reason: str) -> Dict[str, Any]:
+def _error_payload(reason: str, *, draft_created: bool = False) -> Dict[str, Any]:
     return {
         "classification": "unknown",
         "category": "unknown",
@@ -274,7 +274,7 @@ def _error_payload(reason: str) -> Dict[str, Any]:
         "extracted": {},
         "missing_information": [],
         "risk_reasons": [],
-        "action": {"draft_created": False, "draft_type": None},
+        "action": {"draft_created": draft_created, "draft_type": None},
         "human_reason": _cap(reason, _FIELD_MAX_CHARS),
     }
 
@@ -285,6 +285,7 @@ def normalize_run_result(
     *,
     confirmed_draft_message_ids: Optional[frozenset] = None,
     failed_tool_message_ids: Optional[frozenset] = None,
+    raw_output_override: Optional[str] = None,
 ) -> None:
     """Normalize one triggered run's output, if it declares itself a
     Property Maintenance Inbox batch result. Never raises -- normalization is
@@ -305,6 +306,13 @@ def normalize_run_result(
     `needs_attention` for that UID regardless of what the model's envelope
     item claims -- see `_needs_attention_for` (spec 9.5 "Tool failure ->
     needs_attention: yes"). Defaults to empty, same rationale as above.
+
+    `raw_output_override`: the real agent output text to parse, when
+    `run_row.output` itself has already been overwritten with a redacted
+    placeholder (`runtime.py` does this for a property-maintenance run before
+    this is ever called, so the raw text never touches `trace_events`/
+    `runs.output` -- Codex review finding). `None` (the default) means "use
+    `run_row.output` as-is", unchanged behavior for every other caller.
     """
     try:
         _normalize(
@@ -312,6 +320,7 @@ def normalize_run_result(
             run_row,
             frozenset(confirmed_draft_message_ids or ()),
             frozenset(failed_tool_message_ids or ()),
+            raw_output_override=raw_output_override,
         )
     except Exception:  # noqa: BLE001 -- normalization must never break a run
         _logger.exception("Automation result normalization failed for run %s", run_row.id)
@@ -321,11 +330,78 @@ def normalize_run_result(
             pass
 
 
+def _retry_family_run_ids(db: Session, run_row: Run) -> list:
+    """Every run id in `run_row`'s retry family: its root (walking back
+    through `retry_of_run_id` until `None`) plus every run reachable forward
+    from that root (a run can be retried more than once, so the family is a
+    tree, not just a straight line -- e.g. the original run is retried,
+    that retry fails, and the customer retries the *original* run again
+    rather than the failed retry, creating a sibling branch). `run_row`
+    itself is always included (root == run_row when it has never been
+    retried before)."""
+    root_id = run_row.id
+    current = run_row
+    while current.retry_of_run_id is not None:
+        parent = db.get(Run, current.retry_of_run_id)
+        if parent is None:
+            break
+        root_id = parent.id
+        current = parent
+
+    family = [root_id]
+    frontier = [root_id]
+    while frontier:
+        children = db.query(Run.id).filter(Run.retry_of_run_id.in_(frontier)).all()
+        frontier = [row.id for row in children if row.id not in family]
+        family.extend(frontier)
+    return family
+
+
+def already_drafted_uids(db: Session, run_row: Run) -> frozenset:
+    """The subset of `run_row`'s trigger-context UID batch that any run in
+    its retry family's normalized results confirm a real draft exists for
+    (`action.draft_created` true). `email_draft_reply` has no dedup -- it
+    unconditionally APPENDs a new draft -- so `email_trigger.retry_triggered_run`
+    uses this to exclude already-drafted messages from a retried batch;
+    otherwise resubmitting the whole original batch would create a second
+    draft for each one. Checking only `run_row`'s own results misses a UID
+    drafted by a *different* retry attempt off the same original run -- e.g.
+    the original run drafts UID 5 then crashes, a first retry (excluding 5)
+    drafts UID 6 then also fails, and the customer retries the *original*
+    run again (not that first retry) rather than waiting: that second retry
+    must still exclude both 5 (drafted by the original) and 6 (drafted by
+    the sibling first retry), even though neither is in the original run's
+    own results alone (Codex review finding). Requires every run in the
+    family to already be normalized (see
+    `normalize_run_result`), which now happens on every terminal path.
+    """
+    trigger_context = run_row.trigger_context or {}
+    uids = [str(u) for u in trigger_context.get("uids") or []]
+    if not uids:
+        return frozenset()
+    mailbox_credential_id = trigger_context.get("mailbox_credential_id")
+    uidvalidity = trigger_context.get("uidvalidity")
+    key_to_uid = {_source_key(mailbox_credential_id, uidvalidity, uid): uid for uid in uids}
+    rows = (
+        db.query(AutomationItemResult.source_key, AutomationItemResult.payload)
+        .filter(AutomationItemResult.run_id.in_(_retry_family_run_ids(db, run_row)))
+        .filter(AutomationItemResult.source_key.in_(key_to_uid.keys()))
+        .all()
+    )
+    return frozenset(
+        key_to_uid[source_key]
+        for source_key, payload in rows
+        if (payload.get("action") or {}).get("draft_created")
+    )
+
+
 def _normalize(
     db: Session,
     run_row: Run,
     confirmed_draft_message_ids: frozenset = frozenset(),
     failed_tool_message_ids: frozenset = frozenset(),
+    *,
+    raw_output_override: Optional[str] = None,
 ) -> None:
     trigger_context = run_row.trigger_context
     if not trigger_context or trigger_context.get("trigger_type") != "email":
@@ -345,7 +421,7 @@ def _normalize(
         for row in db.query(AutomationItemResult.source_key).filter_by(run_id=run_row.id)
     }
 
-    raw = _extract_json_object(run_row.output or "")
+    raw = _extract_json_object(raw_output_override if raw_output_override is not None else (run_row.output or ""))
     if raw is None or raw.get("result_type") != RESULT_TYPE_BATCH_MARKER:
         if trigger_context.get("result_contract") == RESULT_TYPE_BATCH_MARKER:
             # This run WAS dispatched against a workflow whose Response agent
@@ -361,6 +437,7 @@ def _normalize(
             _write_error_rows(
                 db, run_row, uids, existing_keys, mailbox_credential_id, uidvalidity,
                 reason="Result normalization failed: the automation's output didn't match the expected format.",
+                confirmed_draft_message_ids=confirmed_draft_message_ids,
             )
         # Otherwise: the model produced no parseable JSON with this marker,
         # and this workflow was never marked as using this vertical's
@@ -375,6 +452,7 @@ def _normalize(
         _write_error_rows(
             db, run_row, uids, existing_keys, mailbox_credential_id, uidvalidity,
             reason="Result normalization failed: the automation's output didn't match the expected format.",
+            confirmed_draft_message_ids=confirmed_draft_message_ids,
         )
         return
 
@@ -410,7 +488,15 @@ def _normalize(
                     result_type=ITEM_RESULT_TYPE,
                     status="error",
                     needs_attention=True,
-                    payload=_error_payload("The automation's output didn't include this message."),
+                    payload=_error_payload(
+                        "The automation's output didn't include this message.",
+                        # A model can omit a message id from its envelope after
+                        # already drafting a reply for it -- record.action stays
+                        # accurate to the mailbox even though the item itself is
+                        # an error row, so a retry (see already_drafted_uids)
+                        # doesn't try to draft it again (Codex review finding).
+                        draft_created=uid in confirmed_draft_message_ids,
+                    ),
                 )
             )
             continue
@@ -442,6 +528,7 @@ def _write_error_rows(
     uidvalidity: Any,
     *,
     reason: str,
+    confirmed_draft_message_ids: frozenset = frozenset(),
 ) -> None:
     rows_to_add = []
     for uid in uids:
@@ -457,7 +544,11 @@ def _write_error_rows(
                 result_type=ITEM_RESULT_TYPE,
                 status="error",
                 needs_attention=True,
-                payload=_error_payload(reason),
+                # A run that crashed/was cancelled with no parseable output can
+                # still have confirmed a real draft for some of these UIDs
+                # before it died -- record that so a retry (already_drafted_uids)
+                # doesn't re-run email_draft_reply for them (Codex review finding).
+                payload=_error_payload(reason, draft_created=uid in confirmed_draft_message_ids),
             )
         )
     if not rows_to_add:

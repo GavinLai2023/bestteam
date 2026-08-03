@@ -9,7 +9,12 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.automation_results import ITEM_RESULT_TYPE, normalize_run_result, summary_for_date
+from ui.backend.automation_results import (
+    ITEM_RESULT_TYPE,
+    already_drafted_uids,
+    normalize_run_result,
+    summary_for_date,
+)
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import AutomationItemResult, Run
 from ui.backend.db.orgs import get_or_create_org
@@ -385,3 +390,100 @@ def test_unclaimed_draft_is_unaffected_by_confirmation_set(db):
     row = db.query(AutomationItemResult).one()
     assert row.payload["action"]["draft_created"] is False
     assert row.needs_attention is False
+
+
+def test_envelope_less_failed_run_records_a_confirmed_draft_on_its_synthetic_error_row(db):
+    """A run that crashed with no parseable output can still have confirmed a
+    real draft for some UIDs before it died -- the synthetic error row for
+    that UID must say so, or a retry (already_drafted_uids) would think
+    nothing was drafted and resubmit it, creating a second draft in the
+    mailbox (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    run = Run(
+        id="run-1", workflow="property_maintenance_inbox_demo", input="triage",
+        output="The run failed due to an internal error.", status="failed",
+        org_id=org.id, username="email-trigger",
+        trigger_context={
+            "trigger_type": "email",
+            "mailbox_credential_id": 7,
+            "uidvalidity": 3,
+            "uids": [42, 43],
+            "folder": "INBOX",
+            "triggered_at": "2026-08-02T00:00:00+00:00",
+            "result_contract": "property_maintenance_email_batch",
+        },
+    )
+    db.add(run)
+    db.commit()
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"42"}))
+    rows = {r.source_key.split(":")[-1]: r for r in db.query(AutomationItemResult).all()}
+    assert rows["42"].payload["action"]["draft_created"] is True
+    assert rows["43"].payload["action"]["draft_created"] is False
+    # Still an error row needing a human look, regardless of the draft.
+    assert rows["42"].status == "error" and rows["42"].needs_attention is True
+
+
+def test_model_omitted_uid_records_a_confirmed_draft_too(db):
+    """Same trust boundary as above, for the 'envelope parsed but this UID
+    wasn't in it' fallback row (a different code path in _normalize)."""
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42")
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42, 43])
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"43"}))
+    rows = {r.source_key.split(":")[-1]: r for r in db.query(AutomationItemResult).all()}
+    assert rows["43"].status == "error"
+    assert rows["43"].payload["action"]["draft_created"] is True
+
+
+def test_already_drafted_uids_returns_only_confirmed_drafted_message_ids(db):
+    org = get_or_create_org(db, "acme")
+    items = [
+        _valid_item("42", action={"draft_created": True, "draft_type": "ack"}),
+        _valid_item("43", needs_human=False, status="processed", action={"draft_created": False, "draft_type": None}),
+    ]
+    run = _make_run(db, org_id=org.id, output=_envelope(items), uids=[42, 43])
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"42"}))
+    assert already_drafted_uids(db, run) == frozenset({"42"})
+
+
+def test_already_drafted_uids_is_empty_before_normalization(db):
+    # A run with no automation_item_results yet (e.g. normalization hasn't
+    # run, or hasn't reached that UID) must not be mistaken for "nothing
+    # drafted, safe to retry everything" vs. "unknown, be conservative" --
+    # today's contract is simply: no row means not-yet-confirmed.
+    org = get_or_create_org(db, "acme")
+    run = _make_run(db, org_id=org.id, output="", uids=[42])
+    assert already_drafted_uids(db, run) == frozenset()
+
+
+def test_already_drafted_uids_sees_a_sibling_retrys_confirmed_draft(db):
+    # A retry family is a tree, not always a straight line: the original run
+    # drafts UID 5 then crashes; a first retry (excluding 5) drafts UID 6
+    # then also fails; the customer retries the *original* run again rather
+    # than that first retry, creating a sibling branch off the same root.
+    # That second retry must still see UID 6's confirmed draft even though
+    # it isn't in the original run's own automation_item_results (Codex
+    # review finding).
+    org = get_or_create_org(db, "acme")
+    original = _make_run(
+        db, org_id=org.id, run_id="orig",
+        output=_envelope([_valid_item("5", action={"draft_created": True, "draft_type": "ack"})]),
+        uids=[5, 6],
+    )
+    normalize_run_result(db, original, confirmed_draft_message_ids=frozenset({"5"}))
+
+    sibling_retry = Run(
+        id="retry-1", workflow="property_maintenance_inbox_demo", input="triage",
+        output=_envelope([_valid_item("6", action={"draft_created": True, "draft_type": "ack"})]),
+        status="failed", org_id=org.id, username="email-trigger",
+        retry_of_run_id="orig",
+        trigger_context={**original.trigger_context, "uids": [6]},
+    )
+    db.add(sibling_retry)
+    db.commit()
+    normalize_run_result(db, sibling_retry, confirmed_draft_message_ids=frozenset({"6"}))
+
+    # A second retry off the ORIGINAL run (not off sibling_retry) must see
+    # both confirmed drafts -- 5 from the original itself, 6 from the
+    # sibling branch.
+    assert already_drafted_uids(db, original) == frozenset({"5", "6"})

@@ -131,6 +131,356 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_completed was published
 
 
+def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_not_flag_it():
+    """The adapter reports a rejected/not_found email tool call as
+    `success: True` (the call itself didn't raise) with an `outcome` that
+    says otherwise -- runtime.py's failed_tool_message_ids collector
+    previously only checked `success is False`, so a model that didn't
+    self-report the rejection in its envelope hid it (Codex review
+    finding)."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed", "summary": "s",
+            "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _RejectedToolThenCompletesWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(
+                type="tool_completed", workflow="wf", agent="a",
+                data={"tool": "email_read", "success": True, "outcome": "not_found", "message_id": "42"},
+            )
+            yield _TE(type="run_completed", workflow="wf", data=envelope)
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _RejectedToolThenCompletesWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    with Session() as s:
+        row = s.query(AutomationItemResult).filter_by(run_id=run.id).one()
+    # The envelope itself claims a routine, non-attention-needing item --
+    # only the trace's own not_found outcome forces this.
+    assert row.needs_attention is True
+
+
+def _triggered_run_context(uids):
+    return {
+        "trigger_type": "email", "mailbox_credential_id": 1, "uidvalidity": 1,
+        "uids": uids, "folder": "INBOX", "triggered_at": "2026-08-02T00:00:00+00:00",
+        "result_contract": "property_maintenance_email_batch",
+    }
+
+
+def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch():
+    """Spec 10.1: a UID batch must never silently disappear from
+    Needs-attention -- including when the run is cancelled, not just failed
+    outright. _mark_cancelled previously never normalized the run at all
+    (Codex review finding)."""
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    class _NeverStreamedWorkflow:
+        name = "w"
+
+        def stream(self, *args, **kwargs):
+            raise AssertionError("must not stream once cancellation was requested up front")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("w", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42, 43]),
+        ))
+        s.commit()
+    registry.request_cancel(run.id)
+
+    run_in_background(run.id, _NeverStreamedWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    with Session() as s:
+        rows = s.query(AutomationItemResult).filter_by(run_id=run.id).all()
+    assert len(rows) == 2
+    assert all(r.status == "error" and r.needs_attention for r in rows)
+
+
+def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch():
+    """Same spec 10.1 guarantee as above, for a run that crashes (e.g. a
+    compile failure) before workflow.stream() ever yields a single event --
+    the outer except-Exception fallback previously never normalized either
+    (Codex review finding)."""
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    class _BoomTriggeredWorkflow:
+        name = "boom_wf"
+
+        def stream(self, *args, **kwargs):
+            raise RuntimeError("internal compile detail")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _BoomTriggeredWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    with Session() as s:
+        rows = s.query(AutomationItemResult).filter_by(run_id=run.id).all()
+    assert len(rows) == 1
+    assert rows[0].status == "error" and rows[0].needs_attention is True
+
+
+def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_trace(monkeypatch):
+    """A property-maintenance run's agent output is derived from customer
+    email content (the envelope's free-text fields can quote it directly) --
+    the same trust boundary that already redacts tool_completed data for
+    email_find/email_read/email_draft_reply must also cover agent_completed
+    and the terminal run_completed event's raw text, or it leaks unredacted
+    into live WS broadcasts and persisted trace_events/runs.output (Codex
+    review finding). The structured result must still be correctly derived
+    from the real (unredacted) text -- the automation_item_results row below
+    proves normalization still saw it."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from ui.backend import runtime
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run, TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed",
+            "summary": "Tenant says: pipe under my sink burst, water everywhere, call 555-1234",
+            "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _TwoAgentWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(type="agent_completed", workflow="wf", agent="intake", data="raw email body quoted here")
+            yield _TE(type="agent_completed", workflow="wf", agent="responder", data=envelope)
+            yield _TE(type="run_completed", workflow="wf", data=envelope)
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    published_data = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") in ("agent_completed", "run_completed"):
+            published_data.append(event.get("data"))
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    run_in_background(run.id, _TwoAgentWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    assert published_data == [runtime._PM_TRACE_REDACTED] * 3  # 2 agent_completed + 1 run_completed
+
+    with Session() as s:
+        row = s.get(Run, run.id)
+        assert row.output == runtime._PM_TRACE_REDACTED
+        trace_rows = s.query(TraceEventRecord).filter_by(run_id=run.id, type="agent_completed").all()
+        assert all(json.loads(r.data) == runtime._PM_TRACE_REDACTED for r in trace_rows)
+        # Normalization still parsed the REAL (unredacted) envelope.
+        item = s.query(AutomationItemResult).filter_by(run_id=run.id).one()
+        assert item.status == "processed" and item.needs_attention is False
+
+
+def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_event(monkeypatch):
+    """Same ordering guarantee as the normal terminal path
+    (test_normalize_run_result_commits_before_the_terminal_event_is_published
+    above), for a cancelled run -- _mark_cancelled previously published
+    run_cancelled BEFORE committing/normalizing, so a live subscriber's
+    refetch could race ahead of the synthetic error rows (Codex review
+    finding)."""
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    class _NeverStreamedWorkflow:
+        name = "w"
+
+        def stream(self, *args, **kwargs):
+            raise AssertionError("must not stream once cancellation was requested up front")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("w", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+    registry.request_cancel(run.id)
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_cancelled":
+            with Session() as s:
+                rows_seen_at_publish_time.append(
+                    s.query(AutomationItemResult).filter_by(run_id=run_id).count()
+                )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    run_in_background(run.id, _NeverStreamedWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    assert rows_seen_at_publish_time == [1]  # already committed by the time run_cancelled was published
+
+
+def test_worker_exception_before_any_event_normalizes_before_publishing_run_failed(monkeypatch):
+    """Same ordering guarantee, for a pre-stream crash -- the outer
+    except-Exception fallback previously published run_failed BEFORE
+    committing/normalizing (Codex review finding)."""
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    class _BoomTriggeredWorkflow:
+        name = "boom_wf"
+
+        def stream(self, *args, **kwargs):
+            raise RuntimeError("internal compile detail")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_failed":
+            with Session() as s:
+                rows_seen_at_publish_time.append(
+                    s.query(AutomationItemResult).filter_by(run_id=run_id).count()
+                )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    run_in_background(run.id, _BoomTriggeredWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    assert rows_seen_at_publish_time == [1]  # already committed by the time run_failed was published
+
+
+def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(monkeypatch):
+    """terminal_seen was previously set to True BEFORE the terminal status
+    commit, so a DB error committing that status made the except-Exception
+    fallback believe a terminal event had already been published and skip
+    its own run_failed fallback -- leaving the run looking permanently
+    'running' to any live subscriber (Codex review finding)."""
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as SASession
+
+    from ui.backend.db import init_db, make_engine
+    from ui.backend.db.models import Run
+    from ui.backend.runtime import registry, run_in_background
+
+    class _CompletesWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield TraceEvent(type="run_started", workflow="wf", data=None)
+            yield TraceEvent(type="run_completed", workflow="wf", data="done")
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    run = registry.create("wf", "in")
+
+    orig_commit = SASession.commit
+    state = {"raised": False}
+
+    def flaky_commit(self):
+        for obj in list(self.dirty):
+            if isinstance(obj, Run) and obj.status in ("completed", "failed") and not state["raised"]:
+                state["raised"] = True
+                raise OperationalError("boom", {}, Exception("boom"))
+        return orig_commit(self)
+
+    monkeypatch.setattr(SASession, "commit", flaky_commit)
+
+    run_in_background(run.id, _CompletesWorkflow(), "in", engine=engine)
+
+    stored = registry.get(run.id)
+    failures = [e for e in stored.events if e["type"] == "run_failed"]
+    assert len(failures) == 1
+    completions = [e for e in stored.events if e["type"] == "run_completed"]
+    assert completions == []  # the terminal commit never actually landed
+
+
 # --- CR-010 -----------------------------------------------------------------
 
 

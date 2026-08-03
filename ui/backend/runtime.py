@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
-from .automation_results import normalize_run_result
+from .automation_results import RESULT_TYPE_BATCH_MARKER, normalize_run_result
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -29,6 +29,18 @@ _logger = logging.getLogger(__name__)
 
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
+
+# A property-maintenance-batch run's agent output is derived from customer
+# email content (the envelope's free-text `extracted`/`missing_information`/
+# `risk_reasons` fields can quote it directly) -- the same trust boundary that
+# already redacts tool_completed data for email_find/email_read/
+# email_draft_reply (adapters/langgraph_adapter.py) applies here too, so this
+# placeholder replaces the raw agent_completed/run_completed text before it's
+# ever published live or persisted to trace_events/runs.output (Codex review
+# finding). The structured result stays fully available via
+# automation_item_results -- normalize_run_result still gets the real text,
+# just never the trace/output columns.
+_PM_TRACE_REDACTED = "[redacted -- Property Maintenance Inbox response; see automation results for this run]"
 
 # A node's own buffered events (see adapters/langgraph_adapter.py) -- these
 # describe paid work already done by the time any of them is yielded, so a
@@ -193,6 +205,36 @@ def run_in_background(
     )
     terminal_seen = False
     seq = 0
+    # Declared here (not inside the streaming loop below) so every terminal
+    # path -- the loop's own run_completed/run_failed, _mark_cancelled, and
+    # the outer except-Exception fallback -- can see whatever trace evidence
+    # was collected before the run ended, even a cancellation or crash that
+    # happened before a single tool_completed event was ever yielded.
+    confirmed_draft_message_ids: set[str] = set()
+    failed_tool_message_ids: set[str] = set()
+
+    def _maybe_normalize(raw_output_override: Optional[str] = None) -> None:
+        # Property Maintenance Inbox (and any future vertical using the same
+        # envelope contract): turn this triggered run's output into immutable,
+        # queryable automation_item_results rows. A no-op for any run whose
+        # output isn't one of these envelopes -- see automation_results.py.
+        # Called from every terminal path (completed/failed/cancelled/crashed)
+        # so a batch that never reaches a parseable envelope still gets
+        # synthetic per-UID error rows instead of silently disappearing from
+        # Needs-attention (spec 10.1; Codex review finding). `raw_output_override`
+        # carries the real (unredacted) agent text for a property-maintenance
+        # run whose `run_row.output` has already been overwritten with
+        # `_PM_TRACE_REDACTED` by the time this runs -- normalization still
+        # needs the real JSON even though nothing else does.
+        if run_row is not None and run_row.trigger_context is not None:
+            normalize_run_result(
+                db,
+                run_row,
+                confirmed_draft_message_ids=confirmed_draft_message_ids,
+                failed_tool_message_ids=failed_tool_message_ids,
+                raw_output_override=raw_output_override,
+            )
+
     try:
         if db is not None:
             # Persist the run up front so usage_records/trace_events foreign
@@ -217,6 +259,11 @@ def run_in_background(
                 # before dispatch as a durable activity record; keep it.
                 run_row.workflow = getattr(workflow, "name", "") or run_row.workflow
             db.commit()
+        is_pm_contract_run = bool(
+            run_row is not None
+            and run_row.trigger_context
+            and run_row.trigger_context.get("result_contract") == RESULT_TYPE_BATCH_MARKER
+        )
         # The SDK has no notion of "queued" (it only starts once `.stream()`
         # begins), so this bookend is synthesized here -- published to the
         # live registry the same way every other event is, so a WS
@@ -237,14 +284,21 @@ def run_in_background(
             cancelled = TraceEvent(
                 type="run_cancelled", workflow=getattr(workflow, "name", ""), data="Run was cancelled."
             )
+            # Commit + normalize BEFORE publish/trace-record (not after, as
+            # this used to do) -- same ordering rationale as the streaming
+            # loop's run_completed/run_failed branch: a live subscriber that
+            # refetches automation-results the instant it observes the
+            # terminal event must never be able to race ahead of these rows
+            # (Codex review finding).
+            if db is not None and run_row is not None:
+                run_row.status = "cancelled"
+                run_row.output = cancelled.data
+                db.commit()
+                _maybe_normalize()
             registry.publish(run_id, dataclasses.asdict(cancelled))
             if db is not None:
                 _safe_record_trace_event(db, run_id=run_id, seq=seq, event=cancelled)
                 seq += 1
-                if run_row is not None:
-                    run_row.status = "cancelled"
-                    run_row.output = cancelled.data
-                    db.commit()
             terminal_seen = True
 
         if registry.cancel_requested(run_id):
@@ -253,9 +307,18 @@ def run_in_background(
             _mark_cancelled()
         else:
             stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
-            confirmed_draft_message_ids: set[str] = set()
-            failed_tool_message_ids: set[str] = set()
             for event in stream_iter:
+                raw_run_completed_output: Optional[str] = None
+                if is_pm_contract_run and event.type in ("agent_completed", "run_completed"):
+                    # `run_completed.data` is the same raw agent text as
+                    # `agent_completed.data` (core/workflow.py's `last_output`)
+                    # -- normalize_run_result still needs the real JSON, so
+                    # it's captured here before the event itself is redacted
+                    # for everyone else (live subscribers, trace_events,
+                    # runs.output).
+                    if event.type == "run_completed":
+                        raw_run_completed_output = event.data
+                    event.data = _PM_TRACE_REDACTED
                 payload = dataclasses.asdict(event)
                 if (
                     event.type == "tool_completed"
@@ -276,41 +339,42 @@ def run_in_background(
                     event.type == "tool_completed"
                     and isinstance(event.data, dict)
                     and event.data.get("tool") in ("email_read", "email_draft_reply")
-                    and event.data.get("success") is False
+                    and (
+                        event.data.get("success") is False
+                        or event.data.get("outcome") in ("not_found", "out_of_batch")
+                    )
                 ):
                     # Same trust boundary as confirmed_draft_message_ids above, for
                     # the opposite direction: a model's envelope can just as easily
                     # under-report a tool failure for a message id as it can
                     # over-claim a draft, so this run's own trace -- not the
                     # model's self-report -- is what forces needs_attention for
-                    # that UID (spec 9.5 "Tool failure -> needs_attention: yes";
-                    # Codex review finding).
+                    # that UID (spec 9.5 "Tool failure -> needs_attention: yes").
+                    # A `not_found`/`out_of_batch` outcome is reported as
+                    # `success: True` by the adapter (the call itself didn't
+                    # raise), but it's just as much a rejected/unresolved
+                    # action on that message id as a raised exception, so it
+                    # gets the same forced escalation (Codex review finding).
                     message_id = event.data.get("message_id")
                     if message_id:
                         failed_tool_message_ids.add(message_id)
                 if event.type in ("run_completed", "run_failed"):
-                    terminal_seen = True
                     if run_row is not None:
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
-                        run_row.output = event.data
+                        run_row.output = event.data  # already redacted above for a PM-contract run
+                        # Committed, and normalization run, BEFORE both
+                        # `terminal_seen = True` below and the terminal event's
+                        # publish further down -- the former so a commit
+                        # failure still lets the except-Exception fallback
+                        # publish a real run_failed event instead of silently
+                        # leaving the run "stuck" from a live subscriber's
+                        # perspective (Codex review finding), the latter so a
+                        # WS subscriber that refetches automation-results the
+                        # instant it observes run_completed/run_failed can
+                        # never race ahead of these rows.
                         db.commit()
-                        if run_row.trigger_context is not None:
-                            # Property Maintenance Inbox (and any future
-                            # vertical using the same envelope contract):
-                            # turn this triggered run's output into immutable,
-                            # queryable automation_item_results rows. A no-op
-                            # for any run whose output isn't one of these
-                            # envelopes -- see automation_results.py. Committed
-                            # BEFORE this terminal event is published below, so a
-                            # WS subscriber that refetches automation-results the
-                            # instant it observes run_completed/run_failed can
-                            # never race ahead of these rows (Codex review finding).
-                            normalize_run_result(
-                                db,
-                                run_row,
-                                confirmed_draft_message_ids=confirmed_draft_message_ids,
-                                failed_tool_message_ids=failed_tool_message_ids,
-                            )
+                        _maybe_normalize(raw_run_completed_output)
+                    terminal_seen = True
                 registry.publish(run_id, payload)
                 if db is not None:
                     _safe_record_trace_event(db, run_id=run_id, seq=seq, event=event)
@@ -375,15 +439,14 @@ def run_in_background(
         if not terminal_seen:
             message = "The run failed due to an internal error."
             failed_event = TraceEvent(type="run_failed", workflow=getattr(workflow, "name", ""), data=message)
-            registry.publish(run_id, dataclasses.asdict(failed_event))
-            if db is not None:
-                # `_safe_record_trace_event` rolls back internally on failure, so
-                # it self-heals a session left poisoned by whatever raised above.
-                _safe_record_trace_event(db, run_id=run_id, seq=seq, event=failed_event)
-            # Best-effort: the terminal event above is the hard CR-003
-            # guarantee; recording the failed status must never re-raise (the
-            # up-front persist may itself have failed, leaving the session
-            # needing a rollback), so a DB error here is logged and swallowed.
+            # Persist status + normalize BEFORE publish/trace-record (not
+            # after, as this used to do) -- same ordering rationale as the
+            # streaming loop's terminal branch and _mark_cancelled: a live
+            # subscriber that refetches automation-results the instant it
+            # observes run_failed must never be able to race ahead of these
+            # rows (Codex review finding). Still best-effort (swallowed on
+            # failure below) so the terminal event further down -- the hard
+            # CR-003 guarantee -- always gets published even if this fails.
             if db is not None and run_row is not None:
                 try:
                     db.rollback()
@@ -391,8 +454,20 @@ def run_in_background(
                     run_row.output = message
                     db.add(run_row)
                     db.commit()
+                    # A triggered run that fails before workflow.stream() ever
+                    # yields an event (e.g. a compile failure) previously
+                    # skipped normalization entirely, so its UID batch just
+                    # disappeared from Needs-attention instead of getting the
+                    # synthetic error rows spec 10.1 requires (Codex review
+                    # finding).
+                    _maybe_normalize()
                 except Exception:  # noqa: BLE001
                     _logger.warning("Could not persist failed status for run %s", run_id)
+            registry.publish(run_id, dataclasses.asdict(failed_event))
+            if db is not None:
+                # `_safe_record_trace_event` rolls back internally on failure, so
+                # it self-heals a session left poisoned by whatever raised above.
+                _safe_record_trace_event(db, run_id=run_id, seq=seq, event=failed_event)
     finally:
         if db is not None:
             db.close()

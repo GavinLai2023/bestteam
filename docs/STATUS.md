@@ -650,6 +650,109 @@
   `category`/`missing_information`/`risk_reasons`, previously visible only in
   the raw trace. 920 backend + 91 frontend tests, lint clean.
 
+  **Fifth review pass** (Codex review against `main`, post-fourth-pass):
+  `normalize_run_result` now runs on *every* terminal path, not just the
+  `run_completed`/`run_failed` branch of the streaming loop — a cancelled
+  triggered run (`_mark_cancelled`) and a run that crashes before the first
+  stream event (the outer exception fallback) previously left their UID batch
+  entirely absent from Needs-attention instead of getting the usual synthetic
+  error rows (spec 10.1's "a model-omitted UID must never silently
+  disappear" applies equally to a run that never reached the model at all).
+  `run_in_background` also now commits the terminal status *before* setting
+  `terminal_seen = True` on all three paths, so a commit failure on the
+  primary terminal write correctly falls through to the outer exception
+  handler's `run_failed` fallback instead of leaving the run looking
+  permanently "running" to a live subscriber. An `email_read`/
+  `email_draft_reply` tool outcome of `not_found`/`out_of_batch` now forces
+  `needs_attention` the same way an outright tool failure does — previously
+  only `success: false` was escalated, so a soft rejection stayed hidden
+  unless the model self-reported it. `retry_triggered_run` now excludes any
+  UID the original run already confirmed-drafted (new `already_drafted_uids`
+  helper, matched via each UID's mailbox/UIDVALIDITY-scoped `source_key`
+  against `AutomationItemResult.payload.action.draft_created`) before
+  resubmitting the batch, and rejects the retry outright if every UID already
+  has a confirmed draft — `email_draft_reply` has no dedup of its own, so
+  blindly resubmitting a partially-drafted batch risked a second draft in the
+  mailbox. That check depends on `AutomationItemResult` rows reliably
+  existing for a `failed` run's whole batch, which is what the
+  normalize-on-every-path fix above guarantees; the two synthetic-error-row
+  fallback paths in `_normalize`/`_write_error_rows` (unparseable output,
+  model-omitted UID) were also fixed to record `draft_created: true` when a
+  confirmed draft exists, since they previously hardcoded `false`
+  unconditionally and would have made `already_drafted_uids` silently wrong
+  for exactly the crash/omission cases it most needs to protect. Finally, the
+  overlap-check-through-dispatch section of both `poll_org` and
+  `retry_triggered_run` is now serialized behind a new per-org
+  `threading.Lock` (`_dispatch_lock`), with a fresh `SELECT` of
+  `EmailTrigger.last_run_id` inside the lock (`_current_last_run_id`, not
+  `db.refresh` — that would also discard each function's own pending
+  uncommitted daily-cap-reset change) rather than trusting a possibly-stale
+  ORM attribute from an object loaded before lock acquisition — closing a
+  real gap where two concurrent dispatches (retry-vs-poller, or
+  retry-vs-retry) could both pass the "no run already in flight for this
+  trigger" check and both fire against the same mailbox. This also closes the
+  narrower, previously-deferred "two near-simultaneous retry clicks on the
+  same run" race documented below (removed from Known issues) as a side
+  effect, since the second click's check is now serialized behind the
+  first's. 932 backend + 91 frontend tests, lint clean.
+
+  **Sixth review pass** (two Codex runs, one against `main` and one against
+  the working tree, post-fifth-pass): a property-maintenance run's raw agent
+  output (`agent_completed`/`run_completed`'s text, which the envelope's
+  free-text fields can quote directly from customer email) is now redacted
+  to a fixed placeholder before it ever reaches a live WS broadcast,
+  persisted `trace_events`, or `runs.output` — the same trust boundary
+  `tool_completed` already had for `email_find`/`email_read`/
+  `email_draft_reply`, applied in `runtime.py` since only it knows a run's
+  `trigger_context`; `normalize_run_result` still gets the real text via a
+  new `raw_output_override` parameter, so the structured result is
+  unaffected. `already_drafted_uids` now checks a run's whole **retry
+  family** (walk back to the root via `retry_of_run_id`, then forward to
+  every descendant — a tree, not always a line, since the *original* run can
+  be retried more than once), not just the one run being retried — a second
+  retry off the original, rather than off a first retry that also failed,
+  previously couldn't see what that first retry had already drafted. The
+  daily-cap check now has the same fresh-read/atomic-update treatment as the
+  `last_run_id` overlap guard: `_at_daily_cap` re-checks with a bare `SELECT`
+  right before dispatch inside the per-org lock (the earlier check is only a
+  fast-path to skip mailbox/workflow work when obviously already at cap),
+  and `retry_triggered_run`'s advance is now `UPDATE ... SET runs_today =
+  runs_today + 1` instead of a Python-level `+= 1` that could silently lose
+  a concurrent dispatch's increment for the same org. A retry's dispatched
+  input text is now built from the narrowed `retry_uids`, not reused from
+  the original run's `input` (which named the full original batch, including
+  any UID just excluded as already-drafted). If `_executor.submit` itself
+  raises in either `_start_triggered_run` or `retry_triggered_run`, the
+  worker never starts and so never normalizes either — both branches now
+  call `normalize_run_result` explicitly, or a declared batch was marked
+  failed with zero `automation_item_results` rows and silently vanished from
+  Needs-attention. One review finding was investigated and **not** applied:
+  a claimed nested-JSON-inside-a-markdown-fence parsing bug in
+  `_JSON_FENCE_RE` — verified false by direct reproduction (Python's `re` is
+  a backtracking engine, so `\{.*?\}` followed by the closing-fence literal
+  correctly extends past inner `}` characters until the whole pattern,
+  including the trailing ` ``` `, matches; a nested envelope parses
+  correctly). 940 backend + 91 frontend tests, lint clean.
+
+  **Seventh review pass** (two Codex runs, against `main` and the working
+  tree, post-sixth-pass): `retry_triggered_run`'s dispatch-time update now
+  requires `EmailTrigger.enabled` and the org still active, same guard as
+  `_start_triggered_run`'s own CAS — the previous unconditional update didn't
+  detect a customer disconnecting/replacing the mailbox (or an operator
+  deactivating the org) during this call's own pre-lock credential/mailbox
+  check, so a retry could dispatch a real `email_draft_reply` against a
+  mailbox the customer had already disconnected; a rejected CAS now rolls
+  back the pending new run row and raises a customer-facing `RetryError`
+  instead. The "a retry of this run is already in progress" and
+  already-drafted-UID checks are now re-run fresh immediately before
+  dispatch, inside the per-org lock — the equivalent checks further up
+  (before the mailbox connectivity check) are only a fast-path and can be
+  stale by the time execution reaches the lock: two retry requests racing
+  the same failed run could otherwise both pass on data that predates the
+  first one's own dispatch/normalization, and since `email_draft_reply` has
+  no dedup, both would create a duplicate draft. 943 backend + 91 frontend
+  tests, lint clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -711,15 +814,6 @@
   "no message found" for that id, scoped tools refuse ids outside the batch)
   rather than erroring the retry. Full per-UID existence pre-check deferred as
   an easy follow-up, not required for Release 1A's Definition of Done.
-
-- **Retry admission (running-retry check + daily-cap increment) isn't
-  atomic** — `retry_triggered_run` reads "no retry already running" and later
-  commits the increment in separate steps, so two near-simultaneous manual
-  retry clicks on the same run could both pass the check. A correct fix needs
-  either a DB row lock or a partial-unique-index migration on
-  `(retry_of_run_id) WHERE status = 'running'`; deferred as disproportionate
-  effort for a race that requires two simultaneous manual clicks (Codex
-  review finding, judged P2/low-likelihood).
 
 - **A `completed` run with per-item normalization errors has no retry path**
   — `retry_triggered_run` only accepts `status == "failed"` (tightened by the
