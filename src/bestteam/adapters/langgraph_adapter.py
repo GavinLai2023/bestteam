@@ -291,15 +291,20 @@ def _run_agent(
                         "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
                     )
                     result = f"Error calling tool '{call['name']}': {exc}"
-                    _emit(
-                        "tool_completed",
-                        {
-                            "tool": call["name"],
-                            "success": False,
-                            "duration_ms": int((time.monotonic() - start) * 1000),
-                            "summary": "Tool call failed",
-                        },
-                    )
+                    failure_data: Dict[str, Any] = {
+                        "tool": call["name"],
+                        "success": False,
+                        "duration_ms": int((time.monotonic() - start) * 1000),
+                        "summary": "Tool call failed",
+                    }
+                    if call["name"] in ("email_read", "email_draft_reply"):
+                        # Retain the bounded message id on failure too, same as a
+                        # successful call's redacted data -- otherwise a failed
+                        # email_read/email_draft_reply can't be correlated back to
+                        # its UID downstream (automation_results.py's per-UID
+                        # needs_attention enforcement, Codex review finding).
+                        failure_data["message_id"] = _bounded_message_id(call["args"])
+                    _emit("tool_completed", failure_data)
                 else:
                     extra_data = (
                         _redacted_email_tool_data(call["name"], call["args"], result)

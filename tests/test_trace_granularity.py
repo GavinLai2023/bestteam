@@ -274,6 +274,54 @@ def test_out_of_batch_rejection_is_not_recorded_as_a_successful_read_or_draft():
     assert "Rejected" in tool_completed.data["summary"]
 
 
+def test_failed_email_read_still_records_the_message_id():
+    # A raised exception (network error, malformed args, etc.) must not lose
+    # the UID -- automation_results.py's per-UID needs_attention enforcement
+    # needs it to correlate a tool failure back to its message (Codex review
+    # finding).
+    def email_read(message_id: str) -> str:
+        raise RuntimeError("IMAP connection reset")
+
+    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "42"})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+    assert tool_completed.data["message_id"] == "42"
+
+
+def test_failed_email_draft_reply_still_records_the_message_id():
+    def email_draft_reply(message_id: str, body: str) -> str:
+        raise RuntimeError("IMAP connection reset")
+
+    events = _email_tool_call_workflow(
+        email_draft_reply, "email_draft_reply", {"message_id": "42", "body": "ok"},
+    )
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+    assert tool_completed.data["message_id"] == "42"
+
+
+def test_failed_email_find_does_not_fabricate_a_message_id():
+    # email_find has no single message id to attach (it's a search) -- must
+    # not invent one from missing call args.
+    def email_find(query: str = "") -> str:
+        raise RuntimeError("IMAP connection reset")
+
+    events = _email_tool_call_workflow(email_find, "email_find", {"query": ""})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+    assert "message_id" not in tool_completed.data
+
+
+def test_failed_non_email_tool_is_unaffected():
+    def some_tool(text: str) -> str:
+        raise RuntimeError("boom")
+
+    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+    assert "message_id" not in tool_completed.data
+
+
 def test_message_id_is_length_bounded_in_the_trace():
     def email_read(message_id: str) -> str:
         return "From: a\nTo: b\nSubject: c\nDate: d\n\nbody"

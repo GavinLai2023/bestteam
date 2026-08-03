@@ -64,6 +64,73 @@ def test_post_completion_failure_does_not_publish_second_terminal_event():
     assert [e["type"] for e in terminal] == ["run_completed"]
 
 
+# --- Property Maintenance Inbox: normalization must commit before publish ---
+
+
+def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp_path, monkeypatch):
+    """A WS subscriber (RunDetail) refetches automation-results the instant it
+    observes run_completed/run_failed -- if that event were published before
+    normalize_run_result's own commit, the refetch could race ahead and see
+    an empty result set (Codex review finding)."""
+    import json
+
+    from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
+
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed", "summary": "s",
+            "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+    spec = Specification(
+        name="w",
+        agents=[AgentSpec(name="a", role="R", goal="g", model=f"fake:{envelope}")],
+        teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
+        workflow=WorkflowSpec(steps=["t"]),
+    )
+    wf = validate_specification(spec, source=tmp_path / "w.yaml")
+
+    run = registry.create("w", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context={
+                "trigger_type": "email", "mailbox_credential_id": 1, "uidvalidity": 1,
+                "uids": [42], "folder": "INBOX", "triggered_at": "2026-08-02T00:00:00+00:00",
+            },
+        ))
+        s.commit()
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_completed":
+            with Session() as s:
+                rows_seen_at_publish_time.append(
+                    s.query(AutomationItemResult).filter_by(run_id=run_id).count()
+                )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    run_in_background(run.id, wf, "in", engine=engine, org_id=1, username="email-trigger")
+
+    assert rows_seen_at_publish_time == [1]  # already committed by the time run_completed was published
+
+
 # --- CR-010 -----------------------------------------------------------------
 
 

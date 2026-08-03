@@ -35,6 +35,7 @@ from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store
+from .automation_results import RESULT_TYPE_BATCH_MARKER
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
 from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
@@ -237,6 +238,47 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     return workflow, record.current_version_id
 
 
+# The platform skill whose system prompt commits a workflow's Response agent to
+# emitting automation_results.RESULT_TYPE_BATCH_MARKER's JSON envelope (see
+# skills.py / ui/backend/workflows/property_maintenance_inbox_demo.yaml). Used
+# only to stamp `trigger_context["result_contract"]` below -- advisory metadata,
+# never anything build_trigger_workflow's actual run depends on.
+_PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response_v1"
+
+
+def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_name: str) -> bool:
+    """Best-effort: does this deployed workflow's config give any agent the
+    `property_maintenance_response_v1` skill?
+
+    A run's own trace/output can't tell us this after the fact for a run that
+    crashed before producing any JSON (`_normalize` can then only see a plain
+    failure string, indistinguishable from any other org's unrelated
+    email-trigger workflow output) -- so this is captured up front, from the
+    workflow config itself, and stamped into `trigger_context` at dispatch
+    time (below). That lets `automation_results._normalize` still synthesize
+    the spec-required per-UID error rows for an envelope-less *maintenance-
+    inbox* run, without also doing so for a crashed *unrelated* org's
+    email-trigger workflow that never declared this skill (Codex review
+    finding). A read failure here must never block dispatch -- this is
+    advisory only.
+    """
+    try:
+        record = (
+            db.query(WorkflowRecord)
+            .filter_by(name=workflow_name, org_id=org_id, status="deployed")
+            .one_or_none()
+        )
+        if record is None:
+            return False
+        agents = (record.config or {}).get("agents") or []
+        return any(
+            _PROPERTY_MAINTENANCE_RESPONSE_SKILL in (agent.get("skills") or [])
+            for agent in agents
+        )
+    except Exception:  # noqa: BLE001 -- advisory only, must never block dispatch
+        return False
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -389,6 +431,8 @@ def _start_triggered_run(
         "folder": "INBOX",
         "triggered_at": _utcnow().isoformat(),
     }
+    if _declares_property_maintenance_contract(db, trigger.org_id, trigger.workflow_name):
+        trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
     try:
         workflow, version_id = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling

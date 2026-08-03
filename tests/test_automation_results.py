@@ -274,6 +274,84 @@ def test_claimed_draft_is_kept_when_confirmed_by_trace(db):
     assert row.needs_attention is False
 
 
+def test_unclaimed_draft_is_upgraded_when_confirmed_by_trace(db):
+    """The model can just as easily under-report a draft it actually created
+    as over-claim one -- a trace-confirmed email_draft_reply call upgrades a
+    claimed-false action.draft_created to true, so the stored result (and the
+    daily summary's count) doesn't under-report a real mailbox side effect
+    (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    item = _valid_item(
+        "42", needs_human=False, status="processed",
+        action={"draft_created": False, "draft_type": None},
+    )
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"42"}))
+    row = db.query(AutomationItemResult).one()
+    assert row.payload["action"]["draft_created"] is True
+
+
+def test_failed_tool_call_forces_needs_attention_even_if_model_did_not_flag_it(db):
+    """Spec 9.5 'Tool failure -> needs_attention: yes' -- enforced server-side
+    from the run's own trace (runtime.py's failed_tool_message_ids), the same
+    trust boundary already applied to claimed drafts, so a model that doesn't
+    self-report a tool failure for a UID can't hide it (Codex review
+    finding)."""
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42", needs_human=False, status="processed", priority="routine")
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run, failed_tool_message_ids=frozenset({"42"}))
+    row = db.query(AutomationItemResult).one()
+    assert row.needs_attention is True
+
+
+def test_envelope_less_failed_run_with_declared_contract_gets_synthetic_error_rows(db):
+    """Spec 10.1: a UID batch must never silently disappear. A run that
+    crashed before producing any JSON output looks identical, from the
+    output alone, to an unrelated org's non-maintenance email-trigger
+    workflow -- trigger_context['result_contract'] (stamped at dispatch time,
+    see email_trigger._declares_property_maintenance_contract) is the
+    positive signal that this WAS a Property Maintenance Inbox batch, so it
+    still gets synthetic error rows instead of vanishing (Codex review
+    finding)."""
+    org = get_or_create_org(db, "acme")
+    run = Run(
+        id="run-1", workflow="property_maintenance_inbox_demo", input="triage",
+        output="The run failed due to an internal error.", status="failed",
+        org_id=org.id, username="email-trigger",
+        trigger_context={
+            "trigger_type": "email",
+            "mailbox_credential_id": 7,
+            "uidvalidity": 3,
+            "uids": [42, 43],
+            "folder": "INBOX",
+            "triggered_at": "2026-08-02T00:00:00+00:00",
+            "result_contract": "property_maintenance_email_batch",
+        },
+    )
+    db.add(run)
+    db.commit()
+    normalize_run_result(db, run)
+    rows = db.query(AutomationItemResult).all()
+    assert len(rows) == 2
+    assert all(r.status == "error" and r.needs_attention for r in rows)
+
+
+def test_envelope_less_failed_run_without_declared_contract_is_still_left_alone(db):
+    """Without the dispatch-time marker, an unparseable/failed output stays
+    indistinguishable from any other org's unrelated email-trigger workflow
+    -- must not start creating rows for it (would regress that workflow, see
+    the module docstring's 'Scoping note')."""
+    org = get_or_create_org(db, "acme")
+    run = _make_run(
+        db, org_id=org.id, output="The run failed due to an internal error.", uids=[42], run_id="run-1",
+    )
+    run.status = "failed"
+    db.commit()
+    normalize_run_result(db, run)
+    assert db.query(AutomationItemResult).count() == 0
+
+
 def test_summary_respects_the_callers_local_day_via_tz_offset(db):
     """Without tz_offset_minutes, a UTC+10 caller's first ~10 local hours of
     'today' are still the previous UTC date and got dropped from the summary

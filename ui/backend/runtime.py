@@ -254,12 +254,9 @@ def run_in_background(
         else:
             stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
             confirmed_draft_message_ids: set[str] = set()
+            failed_tool_message_ids: set[str] = set()
             for event in stream_iter:
                 payload = dataclasses.asdict(event)
-                registry.publish(run_id, payload)
-                if db is not None:
-                    _safe_record_trace_event(db, run_id=run_id, seq=seq, event=event)
-                    seq += 1
                 if (
                     event.type == "tool_completed"
                     and isinstance(event.data, dict)
@@ -275,6 +272,22 @@ def run_in_background(
                     message_id = event.data.get("message_id")
                     if message_id:
                         confirmed_draft_message_ids.add(message_id)
+                if (
+                    event.type == "tool_completed"
+                    and isinstance(event.data, dict)
+                    and event.data.get("tool") in ("email_read", "email_draft_reply")
+                    and event.data.get("success") is False
+                ):
+                    # Same trust boundary as confirmed_draft_message_ids above, for
+                    # the opposite direction: a model's envelope can just as easily
+                    # under-report a tool failure for a message id as it can
+                    # over-claim a draft, so this run's own trace -- not the
+                    # model's self-report -- is what forces needs_attention for
+                    # that UID (spec 9.5 "Tool failure -> needs_attention: yes";
+                    # Codex review finding).
+                    message_id = event.data.get("message_id")
+                    if message_id:
+                        failed_tool_message_ids.add(message_id)
                 if event.type in ("run_completed", "run_failed"):
                     terminal_seen = True
                     if run_row is not None:
@@ -287,10 +300,21 @@ def run_in_background(
                             # turn this triggered run's output into immutable,
                             # queryable automation_item_results rows. A no-op
                             # for any run whose output isn't one of these
-                            # envelopes -- see automation_results.py.
+                            # envelopes -- see automation_results.py. Committed
+                            # BEFORE this terminal event is published below, so a
+                            # WS subscriber that refetches automation-results the
+                            # instant it observes run_completed/run_failed can
+                            # never race ahead of these rows (Codex review finding).
                             normalize_run_result(
-                                db, run_row, confirmed_draft_message_ids=confirmed_draft_message_ids
+                                db,
+                                run_row,
+                                confirmed_draft_message_ids=confirmed_draft_message_ids,
+                                failed_tool_message_ids=failed_tool_message_ids,
                             )
+                registry.publish(run_id, payload)
+                if db is not None:
+                    _safe_record_trace_event(db, run_id=run_id, seq=seq, event=event)
+                    seq += 1
                 if db is not None and event.type == "agent_completed":
                     for entry in event.usage:
                         _safe_record_usage(

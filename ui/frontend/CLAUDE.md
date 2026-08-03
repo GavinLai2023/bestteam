@@ -45,15 +45,24 @@ customer nav is Build a team / My teams / Run a team / Activity):
   also fetches that run's `GET /api/automation-results?run_id=` (renders
   nothing for a run with none, and refetches when a live run's terminal event
   arrives, since `normalize_run_result` only writes results after the run
-  finishes) and, for a `failed` run OR one whose live event stream just
-  emitted `run_failed` (the `status` prop alone is set once at click time by
-  `ActivityPage` and never updates while the panel stays open, so a run that
-  fails mid-view needs this second signal or Retry wouldn't appear until the
-  panel is closed and reopened), shows a Retry button
-  (`POST /api/runs/{id}/retry`) that calls the `onRetried(newRunId)` prop on
-  success -- `ActivityPage.jsx` wires this to select the newly created run,
-  the same `setTab('runs')`/`setSelectedRun()` pattern `NeedsAttentionList`'s
-  "View run" uses. See `ui/backend/CLAUDE.md` ("Granular trace events,
+  finishes -- and now always writes/publishes in that order server-side,
+  closing a previous race where the refetch could arrive before the rows
+  existed; results include `classification`/`category`/`missing_information`/
+  `risk_reasons`, not just status/priority/summary/address/reason/draft) and,
+  for a `failed` run OR one whose live event stream just emitted `run_failed`
+  (the `status` prop alone is set once at click time by `ActivityPage` and
+  never updates while the panel stays open, so a run that fails mid-view
+  needs this second signal or Retry wouldn't appear until the panel is
+  closed and reopened) **and** is autonomous (`autonomous` prop, threaded
+  from `GET /api/runs`' own `autonomous` flag through `ActivityPage`'s
+  `selectedRun` -- a manual run has no `trigger_context` and always 400s from
+  `POST /api/runs/{id}/retry`, so Retry must not even render for one), shows
+  a Retry button that calls the `onRetried(newRunId)` prop on success --
+  `ActivityPage.jsx` wires this to select the newly created run (always
+  itself autonomous) with the same `setTab('runs')`/`setSelectedRun()`
+  pattern `NeedsAttentionList`'s "View run" uses (which also always passes
+  `autonomous: true`, since every automation result belongs to an autonomous
+  run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
   cancellation, and run history", "Property Maintenance Inbox").
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a

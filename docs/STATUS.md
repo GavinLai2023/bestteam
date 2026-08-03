@@ -616,6 +616,40 @@
   30s cadence as the adjacent needs-attention list, instead of only fetching
   once on mount. 908 backend + 89 frontend tests, lint/build green.
 
+  **Fourth review pass** (Codex review against `main`, post-third-pass): a
+  run that crashes (`run_failed`) before producing any JSON no longer drops
+  its whole UID batch from Needs-attention — `_start_triggered_run` now
+  stamps `trigger_context["result_contract"]` at dispatch time whenever the
+  deployed workflow's config gives an agent the `property_maintenance_response_v1`
+  skill (a positive, persisted signal a plain failure string can't carry),
+  and `_normalize` synthesizes the usual per-UID error rows for that case
+  instead of leaving the batch untouched; a workflow without that skill (an
+  unrelated org's `email_triage_reply` trigger, say) is still left alone, so
+  this doesn't regress the "only engage for a declared Property Maintenance
+  Inbox run" scoping decision. `action.draft_created` is now also *upgraded*
+  to `true` when the run's trace confirms a real `email_draft_reply` success
+  the model's envelope claimed `false` for (previously only the opposite —
+  downgrading a claimed-but-unconfirmed `true` — was reconciled), so a
+  mis-reporting model can no longer make the stored result and daily summary
+  under-count a draft that genuinely exists. A failed `email_read`/
+  `email_draft_reply` tool call now retains its (bounded) `message_id` in the
+  trace even on the exception path, and `runtime.py`/`automation_results.py`
+  use that to force `needs_attention` for the UID regardless of what the
+  model's own item claims (spec 9.5 "Tool failure -> needs_attention: yes"),
+  the same distrust-the-model boundary already applied to draft claims.
+  `normalize_run_result`'s commit now happens *before* the terminal event is
+  published to WS subscribers (previously after) — a live Run Detail could
+  otherwise refetch automation-results the instant it saw `run_completed`/
+  `run_failed` and race ahead of the rows actually being written, with no
+  retry to pick them up later. `RunDetail`'s Retry button is now gated on the
+  run being autonomous (`GET /api/runs`' existing `autonomous` flag, threaded
+  through `ActivityPage`'s `selectedRun`) — it previously rendered for any
+  failed run including manual ones, which always 400s since
+  `POST /api/runs/{id}/retry` requires a recorded `trigger_context`. The
+  automation-results card in Run Detail now also renders `classification`/
+  `category`/`missing_information`/`risk_reasons`, previously visible only in
+  the raw trace. 920 backend + 91 frontend tests, lint clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

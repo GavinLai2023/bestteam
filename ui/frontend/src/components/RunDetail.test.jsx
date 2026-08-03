@@ -136,11 +136,11 @@ describe('RunDetail', () => {
     expect(screen.queryByText('Automation results')).not.toBeInTheDocument()
   })
 
-  it('shows a Retry button for a failed run and calls the retry API on click', async () => {
+  it('shows a Retry button for a failed autonomous run and calls the retry API on click', async () => {
     api.getRunTrace.mockResolvedValue({ events: [] })
     api.retryRun.mockResolvedValue({ run_id: 'run-2' })
 
-    render(<RunDetail runId="run-1" status="failed" />)
+    render(<RunDetail runId="run-1" status="failed" autonomous />)
 
     const button = await screen.findByText('Retry')
     await act(async () => {
@@ -155,7 +155,7 @@ describe('RunDetail', () => {
     api.retryRun.mockResolvedValue({ run_id: 'run-2' })
     const onRetried = vi.fn()
 
-    render(<RunDetail runId="run-1" status="failed" onRetried={onRetried} />)
+    render(<RunDetail runId="run-1" status="failed" autonomous onRetried={onRetried} />)
 
     const button = await screen.findByText('Retry')
     await act(async () => {
@@ -169,7 +169,7 @@ describe('RunDetail', () => {
     api.getRunTrace.mockResolvedValue({ events: [] })
     api.retryRun.mockRejectedValue(new Error("This run has no recorded email batch to retry."))
 
-    render(<RunDetail runId="run-1" status="failed" />)
+    render(<RunDetail runId="run-1" status="failed" autonomous />)
 
     const button = await screen.findByText('Retry')
     await act(async () => {
@@ -179,14 +179,14 @@ describe('RunDetail', () => {
     expect(await screen.findByText(/no recorded email batch to retry/)).toBeInTheDocument()
   })
 
-  it('shows the Retry button once a live run fails, without waiting for the panel to reopen', async () => {
+  it('shows the Retry button once a live autonomous run fails, without waiting for the panel to reopen', async () => {
     // ActivityPage sets selectedRun.status at click time and never updates it
     // while the panel stays open, so `status` alone stays 'running' after a
     // live run fails mid-view -- the retry section must key off the run's own
     // terminal event too (Codex review finding).
     api.createWsTicket.mockResolvedValue({ ticket: 't' })
 
-    render(<RunDetail runId="run-1" status="running" />)
+    render(<RunDetail runId="run-1" status="running" autonomous />)
 
     await act(async () => {
       await Promise.resolve()
@@ -205,9 +205,44 @@ describe('RunDetail', () => {
   it('does not show a Retry button for a completed run', async () => {
     api.getRunTrace.mockResolvedValue({ events: [] })
 
-    render(<RunDetail runId="run-1" status="completed" />)
+    render(<RunDetail runId="run-1" status="completed" autonomous />)
 
     await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalled())
     expect(screen.queryByText('Retry')).not.toBeInTheDocument()
+  })
+
+  it('does not show a Retry button for a failed manual run', async () => {
+    // POST /api/runs/{id}/retry only accepts a run with a recorded
+    // trigger_context -- a manual run's retry attempt always 400s, so the
+    // button must not even be offered (Codex review finding).
+    api.getRunTrace.mockResolvedValue({ events: [] })
+
+    render(<RunDetail runId="run-1" status="failed" />)
+
+    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalled())
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument()
+  })
+
+  it('renders classification, category, missing information, and risk reasons', async () => {
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'run-1', status: 'needs_attention',
+        payload: {
+          classification: 'maintenance_request', category: 'plumbing',
+          priority: 'priority', summary: 'Tenant reports a leak.',
+          extracted: { property_address: '12 Example St' },
+          missing_information: ['callback_number', 'access_availability'],
+          risk_reasons: ['active_water_leak'],
+          human_reason: 'Missing callback number.', action: { draft_created: true },
+        },
+      }],
+    })
+
+    render(<RunDetail runId="run-1" status="completed" />)
+
+    expect(await screen.findByText('maintenance_request · plumbing')).toBeInTheDocument()
+    expect(screen.getByText('Missing: callback_number, access_availability')).toBeInTheDocument()
+    expect(screen.getByText('Risk: active_water_leak')).toBeInTheDocument()
   })
 })

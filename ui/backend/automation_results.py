@@ -205,10 +205,17 @@ def _reconciled_action(item: EnvelopeItem, confirmed_draft_message_ids: frozense
     id (reported via the run's own trace events, see runtime.py) confirms a
     draft actually exists. A claimed-but-unconfirmed draft downgrades to
     `draft_created: false` rather than showing a customer a draft that may not
-    exist."""
+    exist; symmetrically, a claimed-false that the trace actually confirms
+    upgrades to `draft_created: true` -- otherwise a model that mis-reports its
+    own successful draft call would have the stored result (and the daily
+    summary's count) under-report a draft that genuinely exists in the mailbox
+    (Codex review finding)."""
     action = item.action.model_dump()
-    if action.get("draft_created") and item.message_id.strip() not in confirmed_draft_message_ids:
+    confirmed = item.message_id.strip() in confirmed_draft_message_ids
+    if action.get("draft_created") and not confirmed:
         action["draft_created"] = False
+    elif not action.get("draft_created") and confirmed:
+        action["draft_created"] = True
     action["draft_type"] = _cap(action.get("draft_type"), _FIELD_MAX_CHARS)
     return action
 
@@ -231,19 +238,30 @@ def _item_payload(item: EnvelopeItem, confirmed_draft_message_ids: frozenset = f
     }
 
 
-def _needs_attention_for(item: EnvelopeItem, confirmed_draft_message_ids: frozenset = frozenset()) -> bool:
+def _needs_attention_for(
+    item: EnvelopeItem,
+    confirmed_draft_message_ids: frozenset = frozenset(),
+    failed_tool_message_ids: frozenset = frozenset(),
+) -> bool:
     """The server -- not the model -- enforces the hard rule that
     possible_emergency/unknown priority always needs a human (spec 9.3), that
-    an item status of needs_attention/error always does too, and that a
-    claimed-but-unconfirmed draft (see `_reconciled_action`) always does too."""
+    an item status of needs_attention/error always does too, that a
+    claimed-but-unconfirmed draft (see `_reconciled_action`) always does too,
+    and (spec 9.5 "Tool failure -> needs_attention: yes") that a confirmed
+    tool failure for this UID always does too -- the model's own envelope item
+    is trusted to self-report a tool failure it saw, but not relied on as the
+    only signal, the same trust boundary already applied to draft claims
+    (Codex review finding)."""
     unconfirmed_draft = (
         item.action.draft_created and item.message_id.strip() not in confirmed_draft_message_ids
     )
+    confirmed_tool_failure = item.message_id.strip() in failed_tool_message_ids
     return (
         item.needs_human
         or item.status in ("needs_attention", "error")
         or item.priority in _ALWAYS_NEEDS_ATTENTION_PRIORITIES
         or unconfirmed_draft
+        or confirmed_tool_failure
     )
 
 
@@ -262,7 +280,11 @@ def _error_payload(reason: str) -> Dict[str, Any]:
 
 
 def normalize_run_result(
-    db: Session, run_row: Run, *, confirmed_draft_message_ids: Optional[frozenset] = None
+    db: Session,
+    run_row: Run,
+    *,
+    confirmed_draft_message_ids: Optional[frozenset] = None,
+    failed_tool_message_ids: Optional[frozenset] = None,
 ) -> None:
     """Normalize one triggered run's output, if it declares itself a
     Property Maintenance Inbox batch result. Never raises -- normalization is
@@ -277,9 +299,20 @@ def normalize_run_result(
     model's claimed `action.draft_created` per item -- see `_reconciled_action`.
     Defaults to empty (no confirmed drafts), which is the safe default for any
     caller that hasn't collected trace evidence.
+
+    `failed_tool_message_ids`: the set of message ids this run's own trace
+    recorded a failed `email_read`/`email_draft_reply` call for. Forces
+    `needs_attention` for that UID regardless of what the model's envelope
+    item claims -- see `_needs_attention_for` (spec 9.5 "Tool failure ->
+    needs_attention: yes"). Defaults to empty, same rationale as above.
     """
     try:
-        _normalize(db, run_row, frozenset(confirmed_draft_message_ids or ()))
+        _normalize(
+            db,
+            run_row,
+            frozenset(confirmed_draft_message_ids or ()),
+            frozenset(failed_tool_message_ids or ()),
+        )
     except Exception:  # noqa: BLE001 -- normalization must never break a run
         _logger.exception("Automation result normalization failed for run %s", run_row.id)
         try:
@@ -288,7 +321,12 @@ def normalize_run_result(
             pass
 
 
-def _normalize(db: Session, run_row: Run, confirmed_draft_message_ids: frozenset = frozenset()) -> None:
+def _normalize(
+    db: Session,
+    run_row: Run,
+    confirmed_draft_message_ids: frozenset = frozenset(),
+    failed_tool_message_ids: frozenset = frozenset(),
+) -> None:
     trigger_context = run_row.trigger_context
     if not trigger_context or trigger_context.get("trigger_type") != "email":
         return
@@ -309,9 +347,25 @@ def _normalize(db: Session, run_row: Run, confirmed_draft_message_ids: frozenset
 
     raw = _extract_json_object(run_row.output or "")
     if raw is None or raw.get("result_type") != RESULT_TYPE_BATCH_MARKER:
-        # Not a Property Maintenance Inbox run's output (or the model produced
-        # no parseable JSON at all) -- this run never declared itself part of
-        # this vertical, so leave it alone entirely.
+        if trigger_context.get("result_contract") == RESULT_TYPE_BATCH_MARKER:
+            # This run WAS dispatched against a workflow whose Response agent
+            # carries the property_maintenance_response_v1 skill (stamped into
+            # trigger_context at dispatch time -- see
+            # email_trigger._declares_property_maintenance_contract), so an
+            # unparseable output -- including a plain failure string from a
+            # run that crashed before producing any JSON -- is still this
+            # vertical's batch, not free text from an unrelated org's
+            # email-trigger workflow. Spec 10.1: every UID in a declared batch
+            # gets a result row even when the run never reached a parseable
+            # envelope (Codex review finding).
+            _write_error_rows(
+                db, run_row, uids, existing_keys, mailbox_credential_id, uidvalidity,
+                reason="Result normalization failed: the automation's output didn't match the expected format.",
+            )
+        # Otherwise: the model produced no parseable JSON with this marker,
+        # and this workflow was never marked as using this vertical's
+        # contract -- an unrelated org's email-trigger workflow, left alone
+        # entirely.
         return
 
     try:
@@ -368,7 +422,7 @@ def _normalize(db: Session, run_row: Run, confirmed_draft_message_ids: frozenset
                 source_key=source_key,
                 result_type=ITEM_RESULT_TYPE,
                 status=item.status,
-                needs_attention=_needs_attention_for(item, confirmed_draft_message_ids),
+                needs_attention=_needs_attention_for(item, confirmed_draft_message_ids, failed_tool_message_ids),
                 payload=_item_payload(item, confirmed_draft_message_ids),
             )
         )

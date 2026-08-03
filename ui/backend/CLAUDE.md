@@ -173,26 +173,42 @@ Inbox: no Case/work-item entity in Phase 1").
 
 `automation_results.py::normalize_run_result(db, run_row)` is called from
 `runtime.py::run_in_background` right after a run with a `trigger_context`
-reaches `run_completed`/`run_failed`. It extracts a JSON object from the
+reaches `run_completed`/`run_failed` -- and, since that commit must be
+visible before any WS subscriber can react to the terminal event it's about
+to see, the call happens **before** `registry.publish` for that event, not
+after (a live Run Detail refetching automation-results the instant it
+observes `run_completed`/`run_failed` used to be able to race ahead of these
+rows with no retry to pick them up later). It extracts a JSON object from the
 run's final output (handling a ```json fence) and only proceeds if
 `result_type == "property_maintenance_email_batch"` -- any other
 `trigger_context`-bearing run (e.g. another org's plain `email_triage_reply`
 team, free-text output) is left completely untouched, so this never
-regresses unrelated email-trigger workflows. Once engaged: the whole
-envelope is validated via Pydantic (`Envelope`/`EnvelopeItem`; an enum/shape
-failure fails the *whole* batch, not per-item); each item is matched by
-`message_id` against `trigger_context["uids"]` (an id outside that set is
-logged and dropped -- the model can't expand its own scope); every UID in
-the batch gets exactly one `automation_item_results` row, including a
-synthesized `status="error", needs_attention=True` row for one the model
-omitted or for a whole-envelope validation failure (nothing silently
-disappears); `needs_attention` is server-computed
-(`possible_emergency`/`unknown` priority or `needs_attention`/`error` status
-always forces it, regardless of what the model itself claimed); and
-`payload` is length-capped and only ever holds the validated extraction
-fields -- never a raw email body. `source_key` is always server-generated
-(`mailbox:<credential-id>:uidvalidity:<value>:uid:<uid>`), so a model can
-never fabricate which input it claims to have processed. The
+regresses unrelated email-trigger workflows. The one exception: a run that
+crashed (`run_failed`) before producing any JSON at all looks identical, from
+the output alone, to that unrelated case -- so `_start_triggered_run` stamps
+`trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER` at dispatch
+time whenever the deployed workflow's config gives an agent the
+`property_maintenance_response_v1` skill
+(`email_trigger._declares_property_maintenance_contract`, a small independent
+`WorkflowRecord.config` read -- advisory only, never blocks dispatch on
+failure), and an unparseable output still gets the batch's synthesized
+error rows when that marker is present (`retry_triggered_run` carries it
+forward automatically, since its new `trigger_context` is spread from the
+original). Once engaged: the whole envelope is validated via Pydantic
+(`Envelope`/`EnvelopeItem`; an enum/shape failure fails the *whole* batch,
+not per-item); each item is matched by `message_id` against
+`trigger_context["uids"]` (an id outside that set is logged and dropped --
+the model can't expand its own scope); every UID in the batch gets exactly
+one `automation_item_results` row, including a synthesized
+`status="error", needs_attention=True` row for one the model omitted or for
+a whole-envelope/unparseable-output failure (nothing silently disappears);
+`needs_attention` is server-computed (`possible_emergency`/`unknown`
+priority, `needs_attention`/`error` status, or a confirmed tool failure for
+that UID -- see below -- always forces it, regardless of what the model
+itself claimed); and `payload` is length-capped and only ever holds the
+validated extraction fields -- never a raw email body. `source_key` is
+always server-generated (`mailbox:<credential-id>:uidvalidity:<value>:uid:<uid>`),
+so a model can never fabricate which input it claims to have processed. The
 `(run_id, source_key)` unique constraint makes a repeated normalize call (a
 duplicate completion callback, or calling it twice) a no-op for rows already
 written.
@@ -205,10 +221,21 @@ this itself from the run's own `tool_completed` trace events (`outcome ==
 "draft_created"`, from `adapters/langgraph_adapter.py`'s redacted email-tool
 data) while it's already streaming them, and passes it into normalization at
 the terminal event. A claimed-but-unconfirmed draft is downgraded to
-`draft_created: false` and forces `needs_attention: true` -- the model saying
-it drafted a reply doesn't make it so. `Envelope.schema_version` (currently
-always `1`) is validated against the one supported version rather than
-accepted as any int -- `extra: "ignore"` would otherwise let a future
+`draft_created: false` and forces `needs_attention: true`; symmetrically, a
+claimed-`false` that the trace confirms *did* succeed is upgraded to `true`
+-- the model can misreport in either direction, and a stored result (or the
+daily summary's count) under-reporting a draft that genuinely exists in the
+mailbox is just as wrong as over-reporting one that doesn't. The same trust
+boundary now covers tool *failure*, not just draft success: a failed
+`email_read`/`email_draft_reply` tool call retains its (bounded)
+`message_id` in the trace even on the exception path
+(`adapters/langgraph_adapter.py`), `runtime.py` collects those into a
+parallel `failed_tool_message_ids` set, and `normalize_run_result` forces
+`needs_attention` for that UID regardless of what the model's own item
+claims (spec 9.5 "Tool failure -> needs_attention: yes" -- previously only
+enforced by trusting the model to self-report it). `Envelope.schema_version`
+(currently always `1`) is validated against the one supported version rather
+than accepted as any int -- `extra: "ignore"` would otherwise let a future
 incompatible schema's unknown fields get silently dropped instead of failing
 the envelope; an unsupported version gets the same whole-batch error-row
 treatment as an invalid enum. `draft_type` is length-capped like every other

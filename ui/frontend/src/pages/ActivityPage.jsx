@@ -117,7 +117,10 @@ export default function ActivityPage() {
           <NeedsAttentionList
             onOpenRun={(runId) => {
               setTab('runs')
-              setSelectedRun({ id: runId, status: 'completed' })
+              // Every automation result belongs to an autonomous email-triggered
+              // run by construction (automation_item_results only exist for
+              // those), so Retry eligibility here is unconditional.
+              setSelectedRun({ id: runId, status: 'completed', autonomous: true })
             }}
           />
           <EmailTriggerActivity
@@ -179,7 +182,7 @@ export default function ActivityPage() {
                 <li key={run.id}>
                   <button
                     className="wizard-card session-card"
-                    onClick={() => setSelectedRun({ id: run.id, status: run.status })}
+                    onClick={() => setSelectedRun({ id: run.id, status: run.status, autonomous: run.autonomous })}
                   >
                     <h2>{run.workflow}</h2>
                     <div className="session-card-footer">
@@ -206,7 +209,9 @@ export default function ActivityPage() {
                 key={selectedRun.id}
                 runId={selectedRun.id}
                 status={selectedRun.status}
-                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running' })}
+                autonomous={selectedRun.autonomous}
+                // A retry always dispatches a new autonomous email-triggered run.
+                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
               />
             </section>
           )}

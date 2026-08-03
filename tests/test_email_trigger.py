@@ -284,6 +284,52 @@ def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
     assert run_row.trigger_context["triggered_at"]  # non-empty
 
 
+def test_poll_org_stamps_result_contract_when_workflow_declares_the_maintenance_skill(db, monkeypatch):
+    """automation_results._normalize needs a positive, persisted signal that a
+    run belongs to the Property Maintenance Inbox vertical for the case where
+    it crashes before producing any JSON output (indistinguishable, from the
+    output alone, from any other org's unrelated email-trigger workflow) --
+    trigger_context['result_contract'] is that signal, stamped from the
+    deployed workflow's own config at dispatch time (Codex review finding)."""
+    from ui.backend.db.models import Run
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert run_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_poll_org_does_not_stamp_result_contract_for_a_workflow_without_the_skill(db, monkeypatch):
+    from ui.backend.db.models import Run
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["email_triage_reply"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert "result_contract" not in run_row.trigger_context
+
+
 def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeypatch):
     """_start_triggered_run records the version the builder returned (bound to the
     config it built), NOT a fresh current_version_id re-query -- so a redeploy
@@ -764,6 +810,26 @@ def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
     assert db.get(_RunRow, run_row.id).status == "failed"
     assert db.get(_RunRow, run_row.id).retry_of_run_id is None
     assert len(recorder.calls) == 1
+
+
+def test_retry_carries_the_original_runs_result_contract_forward(db, monkeypatch):
+    """retry_triggered_run spreads the original run's trigger_context into the
+    new one -- if the original run was stamped as a Property Maintenance
+    Inbox batch (result_contract), the retry's run must be too, or a retry
+    that itself crashes before producing JSON would lose the signal
+    automation_results.py needs to still synthesize error rows for it."""
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
 
 
 def test_retry_rejects_uidvalidity_mismatch(db, monkeypatch):

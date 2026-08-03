@@ -7,7 +7,7 @@ import '../pages/MonitorPage.css' // reuses .event/.event-*/.result styling
 // streams live over the same WebSocket MonitorPage uses; anything else reads
 // its persisted trace via GET /api/runs/{id}/trace -- no live/historical
 // merge, per the read endpoint's design (see docs/superpowers/specs).
-export default function RunDetail({ runId, status, onRetried }) {
+export default function RunDetail({ runId, status, autonomous, onRetried }) {
   const [events, setEvents] = useState([])
   const [error, setError] = useState(null)
   const [automationResults, setAutomationResults] = useState([])
@@ -126,6 +126,18 @@ export default function RunDetail({ runId, status, onRetried }) {
                   {payload.priority && <span className="status-badge">{payload.priority}</span>}
                   <p>{payload.summary || '(no summary)'}</p>
                   <p className="hint">{payload.extracted?.property_address || 'Address not identified'}</p>
+                  {payload.classification && (
+                    <p className="hint">
+                      {payload.classification}
+                      {payload.category ? ` · ${payload.category}` : ''}
+                    </p>
+                  )}
+                  {payload.missing_information?.length > 0 && (
+                    <p className="hint">Missing: {payload.missing_information.join(', ')}</p>
+                  )}
+                  {payload.risk_reasons?.length > 0 && (
+                    <p className="hint">Risk: {payload.risk_reasons.join(', ')}</p>
+                  )}
                   {payload.human_reason && <p className="hint">Why: {payload.human_reason}</p>}
                   <p className="hint">{payload.action?.draft_created ? 'Draft created' : 'No draft created'}</p>
                 </li>
@@ -136,8 +148,11 @@ export default function RunDetail({ runId, status, onRetried }) {
       )}
       {/* finalEventType covers a run that fails WHILE this panel is open: ActivityPage's
           selectedRun.status is only set at click time, so `status` alone stays stale
-          at 'running' until the panel is closed and reopened (Codex review finding). */}
-      {(status === 'failed' || finalEventType === 'run_failed') && (
+          at 'running' until the panel is closed and reopened (Codex review finding).
+          `autonomous` gates out a manual run's failure -- POST /api/runs/{id}/retry
+          only accepts a run with a recorded trigger_context, so showing this for a
+          manual run always 400s (Codex review finding). */}
+      {(status === 'failed' || finalEventType === 'run_failed') && autonomous && (
         <section className="run-detail-retry">
           <button type="button" onClick={retry} disabled={retryState === 'retrying'}>
             {retryState === 'retrying' ? 'Retrying…' : 'Retry'}
