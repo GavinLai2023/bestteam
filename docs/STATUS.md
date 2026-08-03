@@ -550,8 +550,31 @@
   explicitly deferred: WP0 (real customer discovery/offline eval, needs live
   customers), WP6 (attachment reading, per-org Microsoft Graph/OAuth), and the
   guided Policy-Skill wizard form (an org's own policy skill can already be
-  authored today via the existing Advanced Skills CRUD). 891 backend + 82
-  frontend tests, lint/build green.
+  authored today via the existing Advanced Skills CRUD).
+
+  **Post-implementation review hardening** (Codex review against `main`):
+  email-tool trace redaction now correctly distinguishes a UID-scoped tool's
+  out-of-batch rejection from a real success (it used to mislabel a rejection
+  as "Read message"/"Draft reply saved"), and the model-controlled
+  `message_id` field is length-bounded before it reaches the trace.
+  `automation_results.py`'s `action.draft_created` is no longer trusted from
+  the model alone — `runtime.py` collects the run's own confirmed
+  `email_draft_reply` successes from its trace events and
+  `normalize_run_result` downgrades any claimed-but-unconfirmed draft to
+  `draft_created: false` + `needs_attention: true`. `retry_triggered_run` now
+  (a) only accepts a `failed` run (a `completed` run may already have real
+  mailbox side effects, so retrying it risked duplicate drafts), (b) checks
+  the current mailbox's host/username against `trigger_context`, not just
+  UIDVALIDITY (`OrgEmailCredential` is upserted per org, so the credential row
+  id alone never changes even when the mailbox is fully replaced), and (c)
+  registers itself on `EmailTrigger.last_run_id` so the poller's overlap guard
+  can see an in-flight manual retry. `GET /api/automation-results/summary`
+  gained an `ever_used` flag so the Activity page's summary card renders
+  nothing for an org that has never used this template, instead of an
+  always-present empty-looking card. Two lower-severity review findings were
+  deliberately **not** fixed — see Known issues below (retry admission race,
+  retry-eligibility for a completed run with per-item errors). 901 backend +
+  83 frontend tests, lint/build green.
 
 ## In Progress
 
@@ -614,6 +637,27 @@
   "no message found" for that id, scoped tools refuse ids outside the batch)
   rather than erroring the retry. Full per-UID existence pre-check deferred as
   an easy follow-up, not required for Release 1A's Definition of Done.
+
+- **Retry admission (running-retry check + daily-cap increment) isn't
+  atomic** — `retry_triggered_run` reads "no retry already running" and later
+  commits the increment in separate steps, so two near-simultaneous manual
+  retry clicks on the same run could both pass the check. A correct fix needs
+  either a DB row lock or a partial-unique-index migration on
+  `(retry_of_run_id) WHERE status = 'running'`; deferred as disproportionate
+  effort for a race that requires two simultaneous manual clicks (Codex
+  review finding, judged P2/low-likelihood).
+
+- **A `completed` run with per-item normalization errors has no retry path**
+  — `retry_triggered_run` only accepts `status == "failed"` (tightened by the
+  review hardening above, to close a duplicate-draft risk on a `completed`
+  run that already has real mailbox side effects). A run whose model output
+  failed *normalization* (invalid JSON/enum) still ends `completed` with every
+  item as a synthetic `error` row, and currently has no safe one-click retry
+  — doing that safely needs the backend to prove no real draft side effect
+  already happened for that batch (the `confirmed_draft_message_ids`
+  mechanism added above could back this, but isn't wired into retry
+  eligibility yet). Deferred as a follow-up, not implemented speculatively
+  (Codex review finding).
 
 ## Next steps / roadmap
 

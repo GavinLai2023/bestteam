@@ -247,3 +247,39 @@ def test_non_email_tool_summary_is_unaffected_by_redaction():
     events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["summary"] == "result: hello"
+
+
+def test_draft_reply_success_is_recorded_with_a_draft_created_outcome():
+    def email_draft_reply(message_id: str, body: str) -> str:
+        return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
+
+    events = _email_tool_call_workflow(
+        email_draft_reply, "email_draft_reply", {"message_id": "42", "body": "ok"},
+    )
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["outcome"] == "draft_created"
+    assert tool_completed.data["message_id"] == "42"
+
+
+def test_out_of_batch_rejection_is_not_recorded_as_a_successful_read_or_draft():
+    # A UID-scoped tool's rejection text (tools/email_client.py's _OUT_OF_BATCH)
+    # must never be mislabeled as "Read message"/"Draft reply saved" -- that
+    # would hide a real rejection behind an apparent success in the trace.
+    def email_read(message_id: str) -> str:
+        return "That message isn't part of this batch of new mail."
+
+    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "99"})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["outcome"] == "out_of_batch"
+    assert "Rejected" in tool_completed.data["summary"]
+
+
+def test_message_id_is_length_bounded_in_the_trace():
+    def email_read(message_id: str) -> str:
+        return "From: a\nTo: b\nSubject: c\nDate: d\n\nbody"
+
+    huge_id = "x" * 500
+    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": huge_id})
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert len(tool_completed.data["message_id"]) <= 65
+    assert huge_id not in tool_completed.data["summary"]

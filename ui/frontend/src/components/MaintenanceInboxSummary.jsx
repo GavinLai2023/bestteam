@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 
 // Today's Property Maintenance Inbox counters for the Activity page's
-// Automations tab (spec section 6.2). Renders nothing until loaded, and a
-// light "nothing processed yet today" line rather than an empty card when
-// the org has no maintenance-inbox results for today -- most orgs on this
+// Automations tab (spec section 6.2). Renders nothing until loaded, nothing
+// at all for an org that has never used this template (summary.ever_used),
+// and a light "nothing processed yet today" line rather than an empty card
+// for an org that uses it but has no results today -- most orgs on this
 // deployment don't use this vertical at all, so a blank/zero card would be
 // confusing rather than reassuring.
 export default function MaintenanceInboxSummary() {
@@ -20,6 +21,7 @@ export default function MaintenanceInboxSummary() {
 
   if (error) return null // auxiliary card -- fail silently rather than block the page
   if (summary === undefined) return null
+  if (!summary.ever_used) return null
 
   if (summary.emails_read === 0) {
     return (

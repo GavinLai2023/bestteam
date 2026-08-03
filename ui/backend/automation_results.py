@@ -179,7 +179,26 @@ def _source_key(mailbox_credential_id: Any, uidvalidity: Any, uid: str) -> str:
     return f"mailbox:{mailbox_credential_id}:uidvalidity:{uidvalidity}:uid:{uid}"
 
 
-def _item_payload(item: EnvelopeItem) -> Dict[str, Any]:
+_UNCONFIRMED_DRAFT_REASON = (
+    "The automation's output claimed a draft was created, but no successful "
+    "draft action was recorded for this message -- treat as not drafted."
+)
+
+
+def _reconciled_action(item: EnvelopeItem, confirmed_draft_message_ids: frozenset) -> Dict[str, Any]:
+    """Never trust `action.draft_created` from the model alone -- only a real,
+    successfully-executed `email_draft_reply` tool call for this exact message
+    id (reported via the run's own trace events, see runtime.py) confirms a
+    draft actually exists. A claimed-but-unconfirmed draft downgrades to
+    `draft_created: false` rather than showing a customer a draft that may not
+    exist."""
+    action = item.action.model_dump()
+    if action.get("draft_created") and item.message_id.strip() not in confirmed_draft_message_ids:
+        action["draft_created"] = False
+    return action
+
+
+def _item_payload(item: EnvelopeItem, confirmed_draft_message_ids: frozenset = frozenset()) -> Dict[str, Any]:
     extracted = item.extracted.model_dump()
     for key, value in extracted.items():
         if isinstance(value, str):
@@ -192,19 +211,24 @@ def _item_payload(item: EnvelopeItem) -> Dict[str, Any]:
         "extracted": extracted,
         "missing_information": _cap_list(item.missing_information, _LIST_MAX_ITEMS, _LIST_ITEM_MAX_CHARS),
         "risk_reasons": _cap_list(item.risk_reasons, _LIST_MAX_ITEMS, _LIST_ITEM_MAX_CHARS),
-        "action": item.action.model_dump(),
+        "action": _reconciled_action(item, confirmed_draft_message_ids),
         "human_reason": _cap(item.human_reason, _FIELD_MAX_CHARS),
     }
 
 
-def _needs_attention_for(item: EnvelopeItem) -> bool:
+def _needs_attention_for(item: EnvelopeItem, confirmed_draft_message_ids: frozenset = frozenset()) -> bool:
     """The server -- not the model -- enforces the hard rule that
-    possible_emergency/unknown priority always needs a human (spec 9.3), and
-    that an item status of needs_attention/error always does too."""
+    possible_emergency/unknown priority always needs a human (spec 9.3), that
+    an item status of needs_attention/error always does too, and that a
+    claimed-but-unconfirmed draft (see `_reconciled_action`) always does too."""
+    unconfirmed_draft = (
+        item.action.draft_created and item.message_id.strip() not in confirmed_draft_message_ids
+    )
     return (
         item.needs_human
         or item.status in ("needs_attention", "error")
         or item.priority in _ALWAYS_NEEDS_ATTENTION_PRIORITIES
+        or unconfirmed_draft
     )
 
 
@@ -222,16 +246,25 @@ def _error_payload(reason: str) -> Dict[str, Any]:
     }
 
 
-def normalize_run_result(db: Session, run_row: Run) -> None:
+def normalize_run_result(
+    db: Session, run_row: Run, *, confirmed_draft_message_ids: Optional[frozenset] = None
+) -> None:
     """Normalize one triggered run's output, if it declares itself a
     Property Maintenance Inbox batch result. Never raises -- normalization is
     auxiliary to the run's own (already-recorded) terminal status; a failure
     here must not affect it. Idempotent via the (run_id, source_key) unique
     constraint, so a repeated call (e.g. a duplicate completion callback)
     inserts nothing new for rows it already wrote.
+
+    `confirmed_draft_message_ids`: the set of message ids this run actually
+    executed a successful `email_draft_reply` tool call for (runtime.py
+    collects this from the run's own trace events). Used to reconcile the
+    model's claimed `action.draft_created` per item -- see `_reconciled_action`.
+    Defaults to empty (no confirmed drafts), which is the safe default for any
+    caller that hasn't collected trace evidence.
     """
     try:
-        _normalize(db, run_row)
+        _normalize(db, run_row, frozenset(confirmed_draft_message_ids or ()))
     except Exception:  # noqa: BLE001 -- normalization must never break a run
         _logger.exception("Automation result normalization failed for run %s", run_row.id)
         try:
@@ -240,7 +273,7 @@ def normalize_run_result(db: Session, run_row: Run) -> None:
             pass
 
 
-def _normalize(db: Session, run_row: Run) -> None:
+def _normalize(db: Session, run_row: Run, confirmed_draft_message_ids: frozenset = frozenset()) -> None:
     trigger_context = run_row.trigger_context
     if not trigger_context or trigger_context.get("trigger_type") != "email":
         return
@@ -320,8 +353,8 @@ def _normalize(db: Session, run_row: Run) -> None:
                 source_key=source_key,
                 result_type=ITEM_RESULT_TYPE,
                 status=item.status,
-                needs_attention=_needs_attention_for(item),
-                payload=_item_payload(item),
+                needs_attention=_needs_attention_for(item, confirmed_draft_message_ids),
+                payload=_item_payload(item, confirmed_draft_message_ids),
             )
         )
 
@@ -418,7 +451,18 @@ def summary_for_date(db: Session, org_id: int, day: _date) -> Dict[str, int]:
         )
         .all()
     )
+    # Cheap existence check (not scoped to `day`) so the caller can tell "this
+    # org has never used this template" apart from "used it, nothing today" --
+    # both would otherwise report emails_read == 0 (Codex review finding:
+    # every org saw a Property Maintenance Inbox card, not just ones using it).
+    ever_used = (
+        db.query(AutomationItemResult.id)
+        .filter(AutomationItemResult.org_id == org_id, AutomationItemResult.result_type == ITEM_RESULT_TYPE)
+        .first()
+        is not None
+    )
     summary = {
+        "ever_used": ever_used,
         "emails_read": len(rows),
         "maintenance_related": 0,
         "drafts_created": 0,

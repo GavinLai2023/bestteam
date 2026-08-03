@@ -219,3 +219,36 @@ def test_summary_and_lists_are_length_capped(db):
     assert len(row.payload["summary"]) <= 500
     assert len(row.payload["missing_information"]) <= 20
     assert all(len(v) <= 200 for v in row.payload["missing_information"])
+
+
+def test_claimed_draft_is_downgraded_without_trace_confirmation(db):
+    """The model can claim action.draft_created=True for any message id --
+    only a confirmed successful email_draft_reply tool call (passed in from
+    runtime.py's trace events) should be trusted (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42", needs_human=False, status="processed")
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run)  # no confirmed_draft_message_ids given
+    row = db.query(AutomationItemResult).one()
+    assert row.payload["action"]["draft_created"] is False
+    assert row.needs_attention is True  # unconfirmed draft always needs a human
+
+
+def test_claimed_draft_is_kept_when_confirmed_by_trace(db):
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42", needs_human=False, status="processed")
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"42"}))
+    row = db.query(AutomationItemResult).one()
+    assert row.payload["action"]["draft_created"] is True
+    assert row.needs_attention is False
+
+
+def test_unclaimed_draft_is_unaffected_by_confirmation_set(db):
+    org = get_or_create_org(db, "acme")
+    item = _valid_item("42", needs_human=False, status="processed", action={"draft_created": False, "draft_type": None})
+    run = _make_run(db, org_id=org.id, output=_envelope([item]), uids=[42])
+    normalize_run_result(db, run)
+    row = db.query(AutomationItemResult).one()
+    assert row.payload["action"]["draft_created"] is False
+    assert row.needs_attention is False

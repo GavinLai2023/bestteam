@@ -343,7 +343,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         db.commit()
         return
 
-    _start_triggered_run(db, trigger, new_uids, get_workflow, backend, cred.id)
+    _start_triggered_run(db, trigger, new_uids, get_workflow, backend, cred)
 
 
 def _trigger_input(uids) -> str:
@@ -355,7 +355,7 @@ def _trigger_input(uids) -> str:
 
 
 def _start_triggered_run(
-    db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend, mailbox_credential_id: int
+    db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend, cred
 ) -> None:
     """Start ONE run over a bounded batch of the detected UIDs.
 
@@ -366,18 +366,24 @@ def _start_triggered_run(
     is captured from the same record read that built the config so the run
     records exactly the version it executes.
 
-    `mailbox_credential_id` is stamped into the run's `trigger_context`
-    (below) so a later server-side result normalization or manual retry can
-    reconstruct exactly which mailbox/UIDVALIDITY/UID batch this run covers,
-    without trusting anything the model itself claims to have processed --
-    see `automation_results.py` and `docs/superpowers/specs/
+    `cred` (the org's `OrgEmailCredential` row) is stamped into the run's
+    `trigger_context` (below) so a later server-side result normalization or
+    manual retry can reconstruct exactly which mailbox/UIDVALIDITY/UID batch
+    this run covers, without trusting anything the model itself claims to
+    have processed -- see `automation_results.py` and `docs/superpowers/specs/
     2026-08-02-property-maintenance-inbox-phase-1-development-plan.md` section 11.1.
+    `mailbox_host`/`mailbox_username` (not just the row id) are stamped too:
+    `set_email_credentials` upserts one row per org, so the row id never
+    changes even when the customer replaces the mailbox entirely -- host/
+    username are what `retry_triggered_run` actually needs to detect that.
     """
     batch = sorted(new_uids)[:batch_size()]
     input_text = _trigger_input(batch)
     trigger_context = {
         "trigger_type": "email",
-        "mailbox_credential_id": mailbox_credential_id,
+        "mailbox_credential_id": cred.id,
+        "mailbox_host": cred.host,
+        "mailbox_username": cred.username,
         "uidvalidity": trigger.uidvalidity,
         "uids": batch,
         "folder": "INBOX",
@@ -486,18 +492,26 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     originally covered (spec section 11.2). Never mutates `run_row` itself --
     history stays immutable; the new run records `retry_of_run_id`.
 
-    Revalidates before dispatch: current UIDVALIDITY must still match the
-    original (a rebuilt/migrated mailbox invalidates the batch), the mailbox
-    credential must still work, the workflow must still build, and the org's
-    daily automatic-run cap must not already be hit. Raises `RetryError` with
-    a customer-facing message for any ineligibility; returns the new run id
-    on successful dispatch.
+    Revalidates before dispatch: the original run must have actually failed
+    (a `completed` run may already have real mailbox side effects -- e.g.
+    drafts saved -- so it is never eligible, only ever `failed`), the current
+    mailbox must still be the same one (host/username, not just its
+    UIDVALIDITY -- a replaced mailbox that coincidentally shares a UIDVALIDITY
+    value would otherwise pass), the mailbox credential must still work, the
+    workflow must still build, and the org's daily automatic-run cap must not
+    already be hit. Raises `RetryError` with a customer-facing message for any
+    ineligibility; returns the new run id on successful dispatch.
     """
     trigger_context = run_row.trigger_context
     if not trigger_context or trigger_context.get("trigger_type") != "email":
         raise RetryError("This run has no recorded email batch to retry.")
     if run_row.status == "running":
         raise RetryError("This run is still in progress.")
+    if run_row.status != "failed":
+        # Anything other than a failed run (completed, cancelled, ...) may
+        # already have real mailbox side effects for this batch -- retrying it
+        # risks duplicate drafts. Only a failed run is safe to redo.
+        raise RetryError("Only a failed run can be retried.")
     if (
         db.query(Run)
         .filter(Run.retry_of_run_id == run_row.id, Run.status == "running")
@@ -510,6 +524,13 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     cred = get_email_credentials(db, org_id)
     if cred is None:
         raise RetryError("Connect a mailbox before retrying.")
+    if (
+        cred.host != trigger_context.get("mailbox_host")
+        or cred.username != trigger_context.get("mailbox_username")
+    ):
+        raise RetryError(
+            "The connected mailbox has changed since this run -- this batch can no longer be safely retried."
+        )
     try:
         password = secret_store.decrypt(cred.password_encrypted)
         backend = _ImapBackend(
@@ -557,6 +578,10 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     )
     db.add(new_row)
     trigger.runs_today += 1
+    # Register with the same overlap guard poll_org checks (trigger.last_run_id)
+    # -- otherwise an automatic poll cycle running concurrently with this retry
+    # has no way to know a run against this mailbox is already in flight.
+    trigger.last_run_id = new_run.id
     db.commit()
     try:
         _executor.submit(

@@ -14,9 +14,9 @@ describe('MaintenanceInboxSummary', () => {
     vi.clearAllMocks()
   })
 
-  it('shows a light empty state when nothing was processed today', async () => {
+  it('shows a light empty state when the org uses this template but nothing was processed today', async () => {
     api.automationResultsSummary.mockResolvedValue({
-      emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      ever_used: true, emails_read: 0, maintenance_related: 0, drafts_created: 0,
       needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
     })
 
@@ -27,7 +27,7 @@ describe('MaintenanceInboxSummary', () => {
 
   it('shows the counters when the org has results today', async () => {
     api.automationResultsSummary.mockResolvedValue({
-      emails_read: 5, maintenance_related: 3, drafts_created: 2,
+      ever_used: true, emails_read: 5, maintenance_related: 3, drafts_created: 2,
       needs_attention: 1, possible_emergency: 1, skipped_non_maintenance: 2, errors: 0,
     })
 
@@ -36,6 +36,18 @@ describe('MaintenanceInboxSummary', () => {
     expect(await screen.findByText('Emails read')).toBeInTheDocument()
     expect(screen.getByText('5')).toBeInTheDocument()
     expect(screen.getByText('Needs attention')).toBeInTheDocument()
+  })
+
+  it('renders nothing for an org that has never used this template', async () => {
+    api.automationResultsSummary.mockResolvedValue({
+      ever_used: false, emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
+    })
+
+    const { container } = render(<MaintenanceInboxSummary />)
+
+    await vi.waitFor(() => expect(api.automationResultsSummary).toHaveBeenCalled())
+    expect(container).toBeEmptyDOMElement()
   })
 
   it('renders nothing on a fetch failure rather than blocking the page', async () => {

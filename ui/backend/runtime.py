@@ -253,12 +253,28 @@ def run_in_background(
             _mark_cancelled()
         else:
             stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
+            confirmed_draft_message_ids: set[str] = set()
             for event in stream_iter:
                 payload = dataclasses.asdict(event)
                 registry.publish(run_id, payload)
                 if db is not None:
                     _safe_record_trace_event(db, run_id=run_id, seq=seq, event=event)
                     seq += 1
+                if (
+                    event.type == "tool_completed"
+                    and isinstance(event.data, dict)
+                    and event.data.get("tool") == "email_draft_reply"
+                    and event.data.get("success")
+                    and event.data.get("outcome") == "draft_created"
+                ):
+                    # Ground truth for automation_results.py's normalization:
+                    # a model's envelope can CLAIM action.draft_created for any
+                    # message id, but only a real, successfully-executed
+                    # email_draft_reply tool call for that id counts -- see
+                    # adapters/langgraph_adapter.py's redacted tool_completed data.
+                    message_id = event.data.get("message_id")
+                    if message_id:
+                        confirmed_draft_message_ids.add(message_id)
                 if event.type in ("run_completed", "run_failed"):
                     terminal_seen = True
                     if run_row is not None:
@@ -272,7 +288,9 @@ def run_in_background(
                             # queryable automation_item_results rows. A no-op
                             # for any run whose output isn't one of these
                             # envelopes -- see automation_results.py.
-                            normalize_run_result(db, run_row)
+                            normalize_run_result(
+                                db, run_row, confirmed_draft_message_ids=confirmed_draft_message_ids
+                            )
                 if db is not None and event.type == "agent_completed":
                     for entry in event.usage:
                         _safe_record_usage(

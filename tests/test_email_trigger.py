@@ -274,6 +274,8 @@ def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
     assert run_row.trigger_context == {
         "trigger_type": "email",
         "mailbox_credential_id": cred.id,
+        "mailbox_host": cred.host,
+        "mailbox_username": cred.username,
         "uidvalidity": 3,
         "uids": [42, 45],
         "folder": "INBOX",
@@ -714,7 +716,8 @@ from ui.backend.email_trigger import RetryError, retry_triggered_run
 
 
 def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig-1",
-                              status="failed", mailbox_credential_id=None):
+                              status="failed", mailbox_credential_id=None,
+                              mailbox_host="imap.acme.com", mailbox_username="u@acme.com"):
     from ui.backend.db.email_credentials import get_email_credentials
 
     if mailbox_credential_id is None:
@@ -725,6 +728,8 @@ def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig
         trigger_context={
             "trigger_type": "email",
             "mailbox_credential_id": mailbox_credential_id,
+            "mailbox_host": mailbox_host,
+            "mailbox_username": mailbox_username,
             "uidvalidity": uidvalidity,
             "uids": list(uids),
             "folder": "INBOX",
@@ -769,6 +774,44 @@ def test_retry_rejects_uidvalidity_mismatch(db, monkeypatch):
 
     with pytest.raises(RetryError, match="UIDVALIDITY"):
         retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_a_completed_run(db):
+    # A completed run may already have real mailbox side effects (drafts) for
+    # this batch -- only a failed run is safe to redo (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org, status="completed")
+    with pytest.raises(RetryError, match="Only a failed run"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_when_the_mailbox_identity_has_changed(db, monkeypatch):
+    # A replaced mailbox could coincidentally share the original UIDVALIDITY --
+    # host/username must also still match (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(
+        db, org, uidvalidity=3, mailbox_host="imap.old-provider.com", mailbox_username="u@acme.com",
+    )
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    with pytest.raises(RetryError, match="mailbox has changed"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_registers_itself_with_the_overlap_guard(db, monkeypatch):
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert trigger.last_run_id == new_run_id
 
 
 def test_retry_rejects_a_run_with_no_trigger_context(db):

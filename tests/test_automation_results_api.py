@@ -135,6 +135,7 @@ def test_automation_results_summary_counts(client):
                     classification="unknown", source_key="c")
 
     body = client.get("/api/automation-results/summary").json()
+    assert body["ever_used"] is True
     assert body["emails_read"] == 3
     assert body["maintenance_related"] == 1
     assert body["skipped_non_maintenance"] == 1
@@ -142,6 +143,15 @@ def test_automation_results_summary_counts(client):
     assert body["drafts_created"] == 1
     assert body["needs_attention"] == 2
     assert body["errors"] == 1
+
+
+def test_automation_results_summary_ever_used_is_false_for_an_org_with_no_results(client):
+    # Distinguishes "never used this template" from "used it, nothing today"
+    # (Codex review finding: the frontend card must render nothing for the
+    # former, not an empty-looking card).
+    body = client.get("/api/automation-results/summary").json()
+    assert body["ever_used"] is False
+    assert body["emails_read"] == 0
 
 
 def test_automation_results_summary_bad_date_is_422(client):
@@ -194,6 +204,7 @@ def test_retry_run_succeeds_and_creates_new_run(client, monkeypatch):
         db.add(Run(
             id="r-orig", workflow="triage", input="triage this", status="failed", org_id=org.id,
             trigger_context={"trigger_type": "email", "mailbox_credential_id": cred.id,
+                              "mailbox_host": cred.host, "mailbox_username": cred.username,
                               "uidvalidity": 3, "uids": [42], "folder": "INBOX",
                               "triggered_at": "2026-08-01T00:00:00+00:00"},
         ))
@@ -223,6 +234,7 @@ def test_retry_run_uidvalidity_mismatch_is_400(client, monkeypatch):
         db.add(Run(
             id="r-orig", workflow="triage", input="x", status="failed", org_id=org.id,
             trigger_context={"trigger_type": "email", "mailbox_credential_id": cred.id,
+                              "mailbox_host": cred.host, "mailbox_username": cred.username,
                               "uidvalidity": 3, "uids": [42], "folder": "INBOX",
                               "triggered_at": "2026-08-01T00:00:00+00:00"},
         ))

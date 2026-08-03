@@ -127,24 +127,69 @@ def _summarize(value: Any, limit: int = 200) -> str:
 # 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2.
 _EMAIL_TOOLS_NEEDING_REDACTION = frozenset({"email_find", "email_read", "email_draft_reply"})
 
+# `message_id` is a model-controlled tool-call argument (not our own deterministic
+# text), so it needs the same length bound `_summarize()` gives everything else --
+# otherwise a model could smuggle an arbitrarily long/injected string into the
+# trace via this one field.
+_MESSAGE_ID_TRACE_CHARS = 64
 
-def _redacted_email_tool_summary(tool_name: str, call_args: Dict[str, Any], result: Any) -> str:
+# Mirrors tools/email_client.py's `_OUT_OF_BATCH` sentinel (a UID-scoped run's
+# email_read/email_draft_reply refuse any id outside the poller-detected batch).
+# Not imported directly to avoid the adapters layer depending on a specific
+# tools implementation -- see src/bestteam/tools/CLAUDE.md.
+_OUT_OF_BATCH_TEXT = "That message isn't part of this batch of new mail."
+
+
+def _bounded_message_id(call_args: Dict[str, Any]) -> str:
+    raw = str(call_args.get("message_id", ""))
+    return raw if len(raw) <= _MESSAGE_ID_TRACE_CHARS else f"{raw[:_MESSAGE_ID_TRACE_CHARS]}…"
+
+
+def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result: Any) -> Dict[str, Any]:
+    """Business-safe `tool_completed` data for an email tool: never the
+    subject/body/draft text, only outcome + a length-bounded message id.
+
+    `outcome` lets a caller (e.g. `automation_results.py`) distinguish a real
+    confirmed action (`"draft_created"`) from a call the tool itself refused
+    or that found nothing -- the result text alone is not enough to tell,
+    since a scoped tool's rejection text doesn't start with the same prefix
+    as its "not found" text.
+    """
     text = str(result)
     if tool_name == "email_find":
         if text.startswith("Found "):
             count = text.split(" ", 2)[1]
-            return f"Found {count} message(s)."
-        return "No messages found."
-    if tool_name == "email_read":
-        message_id = call_args.get("message_id", "")
-        if text.startswith("No message found"):
-            return f"No message found for id '{message_id}'."
-        return f"Read message '{message_id}'."
-    # email_draft_reply
-    message_id = call_args.get("message_id", "")
+            return {"summary": f"Found {count} message(s)."}
+        return {"summary": "No messages found."}
+
+    message_id = _bounded_message_id(call_args)
+    if text == _OUT_OF_BATCH_TEXT:
+        return {
+            "summary": f"Rejected: message '{message_id}' is outside this run's batch.",
+            "message_id": message_id,
+            "outcome": "out_of_batch",
+        }
     if text.startswith("No message found"):
-        return f"No message found for id '{message_id}'."
-    return f"Draft reply saved for message '{message_id}'."
+        return {
+            "summary": f"No message found for id '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "not_found",
+        }
+    if tool_name == "email_read":
+        return {"summary": f"Read message '{message_id}'.", "message_id": message_id, "outcome": "read"}
+    # email_draft_reply: both backends' success text starts with "Draft reply"
+    # (see tools/email_client.py's Graph/IMAP `draft_reply` implementations).
+    if text.startswith("Draft reply"):
+        return {
+            "summary": f"Draft reply saved for message '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "draft_created",
+        }
+    return {
+        "summary": f"Draft reply attempt for message '{message_id}' did not complete.",
+        "message_id": message_id,
+        "outcome": "unknown",
+    }
 
 
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
@@ -256,10 +301,10 @@ def _run_agent(
                         },
                     )
                 else:
-                    summary = (
-                        _redacted_email_tool_summary(call["name"], call["args"], result)
+                    extra_data = (
+                        _redacted_email_tool_data(call["name"], call["args"], result)
                         if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION
-                        else _summarize(result)
+                        else {"summary": _summarize(result)}
                     )
                     _emit(
                         "tool_completed",
@@ -267,7 +312,7 @@ def _run_agent(
                             "tool": call["name"],
                             "success": True,
                             "duration_ms": int((time.monotonic() - start) * 1000),
-                            "summary": summary,
+                            **extra_data,
                         },
                     )
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))

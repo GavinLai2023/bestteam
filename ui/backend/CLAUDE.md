@@ -123,17 +123,33 @@ previously-deferred item) is no longer deferred -- see "Sync-to-async
 streaming bridge" above.
 
 `_start_triggered_run` also stamps a `Run.trigger_context` JSON blob
-(mailbox credential id, UIDVALIDITY, the exact UID batch, folder, trigger
-time) -- the server's own record of what a triggered run covered, used by
-both automation-result normalization and `retry_triggered_run` below. Never
-trust a model's own claim about which messages it processed; this is that
-ground truth. `email_trigger.retry_triggered_run(db, run_row)` (spec section
-11.2) safely reruns a failed/errored triggered run over its exact original
-UID batch as a brand-new `Run` (`retry_of_run_id` set, history untouched):
-revalidates current UIDVALIDITY still matches, the mailbox still decrypts and
+(mailbox credential id, host, username, UIDVALIDITY, the exact UID batch,
+folder, trigger time) -- the server's own record of what a triggered run
+covered, used by both automation-result normalization and
+`retry_triggered_run` below. Never trust a model's own claim about which
+messages it processed; this is that ground truth. Host/username are stamped
+alongside the credential id because `set_email_credentials` upserts one row
+per org -- the row id alone never changes even when the org replaces its
+mailbox entirely, so it isn't a usable identity check on its own.
+`email_trigger.retry_triggered_run(db, run_row)` (spec section 11.2) safely
+reruns a **failed** (only -- never `completed`, which may already have real
+mailbox side effects like a saved draft) triggered run over its exact
+original UID batch as a brand-new `Run` (`retry_of_run_id` set, history
+untouched): revalidates the current mailbox's host/username still match
+`trigger_context` (not just UIDVALIDITY -- a replaced mailbox could
+coincidentally share a UIDVALIDITY value), the mailbox still decrypts and
 connects, the workflow still builds, and the org's daily cap isn't already
-hit, raising `RetryError` (customer-facing message) otherwise. Exposed as
-`POST /api/runs/{run_id}/retry` in `main.py`.
+hit, raising `RetryError` (customer-facing message) otherwise. On dispatch it
+also sets `trigger.last_run_id` to the new run, the same field `poll_org`'s
+overlap guard reads, so an automatic poll cycle can see a manual retry is
+already in flight against the mailbox. Exposed as
+`POST /api/runs/{run_id}/retry` in `main.py`. Known gaps (post-review,
+deliberately deferred -- see `docs/STATUS.md` Known issues): the
+running-retry-check + daily-cap-increment admission isn't atomic (a real fix
+needs a DB lock or partial-unique-index migration, disproportionate for a
+race that needs two simultaneous manual clicks), and a `completed` run whose
+output failed *normalization* (not a real engine failure) currently has no
+retry path at all.
 
 ## Property Maintenance Inbox (`automation_results.py`)
 
@@ -173,12 +189,26 @@ never fabricate which input it claims to have processed. The
 duplicate completion callback, or calling it twice) a no-op for rows already
 written.
 
+`action.draft_created` is also never trusted from the model alone (post-review
+hardening): `normalize_run_result(db, run_row, confirmed_draft_message_ids=)`
+takes the set of message ids the run *actually* got a successful
+`email_draft_reply` tool call for -- `runtime.py::run_in_background` collects
+this itself from the run's own `tool_completed` trace events (`outcome ==
+"draft_created"`, from `adapters/langgraph_adapter.py`'s redacted email-tool
+data) while it's already streaming them, and passes it into normalization at
+the terminal event. A claimed-but-unconfirmed draft is downgraded to
+`draft_created: false` and forces `needs_attention: true` -- the model saying
+it drafted a reply doesn't make it so.
+
 Read APIs (`main.py`): `GET /api/automation-results` (org-scoped, filterable
 by `run_id`/`needs_attention`/`status`/`result_type`, offset/limit/total --
 same convention as `GET /api/runs`, not the design spec's `cursor` wording)
 backs the Activity page's Needs-attention list and Run Detail's
 automation-results section; `GET /api/automation-results/summary` backs the
-Activity page's daily counters card.
+Activity page's daily counters card, including an `ever_used` flag (a cheap
+all-time existence check, separate from the day's counts) so the frontend can
+tell "this org has never used this template" apart from "used it, nothing
+today" -- both would otherwise report `emails_read: 0`.
 
 ## Sync-to-async streaming bridge
 
