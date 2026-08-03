@@ -218,7 +218,13 @@ never starts and so never normalizes either -- both submission-exception
 branches now call `normalize_run_result` explicitly after marking the run
 failed, or a declared batch would be marked failed with zero
 `automation_item_results` rows and silently vanish from Needs-attention
-(all four gaps above: Codex review findings).
+(all four gaps above: Codex review findings). In both branches,
+`normalize_run_result` is now called **before** `registry.publish`-ing the
+`run_failed` event -- same ordering rule as `run_in_background`'s normal
+terminal path below: publishing first left a window where a live Run Detail
+view reacting to the event could fetch zero automation rows before this
+commits them, with no later terminal transition to prompt a re-fetch (Codex
+review finding).
 
 `retry_triggered_run`'s dispatch-time `UPDATE` also requires
 `EmailTrigger.enabled` and the org still active in its `WHERE` clause,
@@ -290,7 +296,12 @@ error rows when that marker is present (`retry_triggered_run` carries it
 forward automatically, since its new `trigger_context` is spread from the
 original). Once engaged: the whole envelope is validated via Pydantic
 (`Envelope`/`EnvelopeItem`; an enum/shape failure fails the *whole* batch,
-not per-item); each item is matched by `message_id` against
+not per-item). A validation failure is logged as `loc`/`type` per error only
+-- never `exc`/`str(exc)` directly, since Pydantic's error repr embeds the
+offending input value, and a prompt-injected email could steer the model
+into putting body content or PII into an invalid enum/id field, putting raw
+customer content into server logs despite the trace redaction above (Codex
+review finding). Each item is matched by `message_id` against
 `trigger_context["uids"]` (an id outside that set is logged and dropped --
 the model can't expand its own scope); every UID in the batch gets exactly
 one `automation_item_results` row, including a synthesized
@@ -321,8 +332,13 @@ claimed-`false` that the trace confirms *did* succeed is upgraded to `true`
 daily summary's count) under-reporting a draft that genuinely exists in the
 mailbox is just as wrong as over-reporting one that doesn't. The same trust
 boundary now covers tool *failure*, not just draft success: a failed
-`email_read`/`email_draft_reply` tool call retains its (bounded)
-`message_id` in the trace even on the exception path
+`email_read`/`email_draft_reply` tool call retains its (bounded, and now
+stripped -- `_bounded_message_id` mirrors the email tools' own `.strip()`
+normalization, or a call made with whitespace-padded id like `" 42 "` would
+record that unstripped id in trace evidence while this comparison uses the
+envelope's stripped id, missing the match and leaving a real draft
+unrecognized as confirmed; Codex review finding) `message_id` in the trace
+even on the exception path
 (`adapters/langgraph_adapter.py`), `runtime.py` collects those into a
 parallel `failed_tool_message_ids` set, and `normalize_run_result` forces
 `needs_attention` for that UID regardless of what the model's own item

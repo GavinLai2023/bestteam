@@ -753,6 +753,26 @@
   no dedup, both would create a duplicate draft. 943 backend + 91 frontend
   tests, lint clean.
 
+  **Eighth review pass** (Codex run against `main`, post-seventh-pass): the
+  email tools' own `.strip()` normalization of `message_id` (`email_client.py`'s
+  `_read_impl`/`_draft_impl`) wasn't mirrored in the trace-evidence side —
+  `_bounded_message_id` now strips too, so a model calling with `" 42 "`
+  can't produce a trace `message_id` that fails to match the envelope's
+  (already-stripped) claimed id during normalization; the previous mismatch
+  meant a real draft could go unrecognized as confirmed, risking a duplicate
+  on retry. Both `_start_triggered_run`'s and `retry_triggered_run`'s
+  submission-failure branches now call `normalize_run_result` **before**
+  `registry.publish`-ing `run_failed`, matching the ordering already fixed in
+  the normal `runtime.py` terminal path — publishing first left a window
+  where a live Run Detail view reacting to the terminal event could fetch
+  zero `automation_item_results` rows, with no later terminal transition to
+  prompt a re-fetch. Pydantic's `ValidationError.__str__` embeds the
+  offending input value, so logging `exc` directly on an invalid envelope
+  could put raw customer content (a prompt-injected email steering the model
+  into putting body text into an invalid enum/id field) into server logs
+  despite the trace redaction; the warning now logs only `loc`/`type` per
+  error, never the value. 947 backend + 91 frontend tests, lint clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

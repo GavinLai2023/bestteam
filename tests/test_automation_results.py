@@ -160,6 +160,22 @@ def test_invalid_enum_fails_whole_envelope_with_error_rows_for_every_uid(db):
     assert all(r.status == "error" and r.needs_attention for r in rows)
 
 
+def test_validation_failure_does_not_log_the_offending_value(db, caplog):
+    """Pydantic's ValidationError repr embeds the offending input value. A
+    prompt-injected email can steer the model into putting body content or
+    PII into an invalid enum/id field, so logging str(exc) verbatim would put
+    raw customer content into server logs despite the trace redaction --
+    log only loc/type, never the value itself (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    sensitive = "landlord's phone is 555-1234, SSN 123-45-6789"
+    output = _envelope([_valid_item("42", classification=sensitive)])
+    run = _make_run(db, org_id=org.id, output=output, uids=[42])
+    with caplog.at_level("WARNING"):
+        normalize_run_result(db, run)
+    assert sensitive not in caplog.text
+    assert "classification" in caplog.text  # still identifies which field failed
+
+
 def test_structurally_broken_envelope_fails_safe(db):
     """Valid JSON, declares itself our result type, but 'items' isn't a list
     -- Pydantic validation fails, and every UID in the batch gets an error row

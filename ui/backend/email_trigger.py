@@ -588,9 +588,6 @@ def _start_triggered_run(
             "Couldn't start the automatic run. It won't be retried, but "
             "automatic runs will resume when new mail arrives."
         )
-        registry.publish(run.id, dataclasses.asdict(
-            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
-        ))
         run_row.status = "failed"
         run_row.output = message
         trigger.last_error = message
@@ -600,8 +597,15 @@ def _start_triggered_run(
         # never runs either -- without this, a declared property-maintenance
         # batch would be marked failed with no automation_item_results rows
         # at all and silently vanish from Needs-attention (Codex review
-        # finding).
+        # finding). Normalize BEFORE publishing run_failed -- a live Run
+        # Detail view can react to the terminal event immediately and would
+        # otherwise fetch zero automation rows before this commits them,
+        # with no later terminal transition to prompt a re-fetch (Codex
+        # review finding).
         normalize_run_result(db, run_row)
+        registry.publish(run.id, dataclasses.asdict(
+            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
+        ))
 
 
 class RetryError(Exception):
@@ -826,16 +830,18 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         except Exception:  # noqa: BLE001 -- submission itself must never raise out of this call
             _logger.exception("email trigger retry: failed to dispatch run %s for org %s", new_run.id, org_id)
             message = "Couldn't start the retry. Try again."
-            registry.publish(new_run.id, dataclasses.asdict(
-                TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
-            ))
             new_row.status = "failed"
             new_row.output = message
             db.commit()
             # Same rationale as _start_triggered_run's analogous branch: the
             # worker never started, so run_in_background never normalizes
-            # this run either (Codex review finding).
+            # this run either (Codex review finding). Normalize before
+            # publishing run_failed, same ordering fix as that branch (Codex
+            # review finding).
             normalize_run_result(db, new_row)
+            registry.publish(new_run.id, dataclasses.asdict(
+                TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
+            ))
         return new_run.id
 
 

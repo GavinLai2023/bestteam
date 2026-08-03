@@ -418,6 +418,47 @@ def test_start_triggered_run_normalizes_a_declared_batch_when_submit_raises(db, 
     assert all(r.status == "error" and r.needs_attention for r in rows)
 
 
+def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit_raises(db, monkeypatch):
+    """Same ordering guarantee as the normal terminal path (runtime.py): a
+    live Run Detail view can react to run_failed the instant it's published,
+    so normalize_run_result must commit BEFORE that publish, not after --
+    otherwise it can fetch zero automation rows with no later terminal
+    transition to prompt a re-fetch (Codex review finding)."""
+    from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_failed":
+            rows_seen_at_publish_time.append(
+                db.query(AutomationItemResult).filter_by(run_id=run_id).count()
+            )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
+
+
 def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     # If the customer disconnects/replaces the mailbox WHILE this cycle's
     # workflow is being built, org_settings.py/admin.py disable the trigger
@@ -861,6 +902,45 @@ def test_retry_carries_the_original_runs_result_contract_forward(db, monkeypatch
     new_run_id = retry_triggered_run(db, run_row)
     new_row = db.get(_RunRow, new_run_id)
     assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, monkeypatch):
+    """Same ordering fix as _start_triggered_run's analogous branch (Codex
+    review finding): normalize_run_result must commit before run_failed is
+    published when the retry's own dispatch submission fails."""
+    from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_failed":
+            rows_seen_at_publish_time.append(
+                db.query(AutomationItemResult).filter_by(run_id=run_id).count()
+            )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
+    assert db.get(_RunRow, new_run_id).status == "failed"
 
 
 def test_retry_rejects_uidvalidity_mismatch(db, monkeypatch):

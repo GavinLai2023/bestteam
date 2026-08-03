@@ -141,7 +141,13 @@ _OUT_OF_BATCH_TEXT = "That message isn't part of this batch of new mail."
 
 
 def _bounded_message_id(call_args: Dict[str, Any]) -> str:
-    raw = str(call_args.get("message_id", ""))
+    # Strip to match the email tools' own normalization (email_client.py's
+    # `_read_impl`/`_draft_impl` call `.strip()` before touching the mailbox).
+    # Without this, a model calling with " 42 " records that unstripped id in
+    # trace evidence, while automation_results.py compares the envelope's
+    # stripped "42" against it -- a real draft goes unrecognized as confirmed,
+    # risking a duplicate draft on retry (Codex review finding).
+    raw = str(call_args.get("message_id", "")).strip()
     return raw if len(raw) <= _MESSAGE_ID_TRACE_CHARS else f"{raw[:_MESSAGE_ID_TRACE_CHARS]}…"
 
 

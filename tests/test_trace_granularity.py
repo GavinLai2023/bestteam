@@ -331,3 +331,19 @@ def test_message_id_is_length_bounded_in_the_trace():
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert len(tool_completed.data["message_id"]) <= 65
     assert huge_id not in tool_completed.data["summary"]
+
+
+def test_message_id_is_stripped_in_the_trace_to_match_the_email_tools_own_normalization():
+    # email_client.py's _read_impl/_draft_impl call .strip() on message_id
+    # before touching the mailbox. If the trace kept the raw " 42 ", a later
+    # normalization pass comparing it against the model's own (stripped)
+    # claimed id would see a mismatch and fail to recognize a real draft as
+    # confirmed -- risking a duplicate draft on retry (Codex review finding).
+    def email_draft_reply(message_id: str, body: str) -> str:
+        return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
+
+    events = _email_tool_call_workflow(
+        email_draft_reply, "email_draft_reply", {"message_id": " 42 ", "body": "ok"},
+    )
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["message_id"] == "42"

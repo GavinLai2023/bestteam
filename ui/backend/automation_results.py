@@ -448,7 +448,13 @@ def _normalize(
     try:
         envelope = Envelope.model_validate(raw)
     except ValidationError as exc:
-        _logger.warning("Run %s: envelope failed validation: %s", run_row.id, exc)
+        # Not `exc`/`str(exc)` directly: Pydantic's error repr embeds the
+        # offending input value, and that value can be raw email content a
+        # prompt-injected message steered into an invalid enum/id field --
+        # this would put customer content into server logs (Codex review
+        # finding). loc/type alone identify the failure without repeating it.
+        error_summary = [{"loc": err.get("loc"), "type": err.get("type")} for err in exc.errors()]
+        _logger.warning("Run %s: envelope failed validation: %s", run_row.id, error_summary)
         _write_error_rows(
             db, run_row, uids, existing_keys, mailbox_credential_id, uidvalidity,
             reason="Result normalization failed: the automation's output didn't match the expected format.",
