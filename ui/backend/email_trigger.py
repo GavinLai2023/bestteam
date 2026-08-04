@@ -40,6 +40,7 @@ from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, 
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
 from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
+from .email_tools import spec_uses_email
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -279,10 +280,20 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     )
     if record is None:
         raise ValueError(f"No deployed team named '{name}' for org {org_id}")
+    # A trigger stays enabled across redeploys -- only a mailbox identity
+    # change disables it (disable_trigger_on_identity_change). If the team
+    # was redeployed to a version with no email tools/skills, dispatching
+    # would consume this cycle's UIDs and daily cap launching an unrelated
+    # team with an email-triage prompt, so refuse the same way a missing
+    # team does (no build, no state advanced upstream).
+    if not spec_uses_email(db, record.config, org_id):
+        raise ValueError(f"Deployed team '{name}' for org {org_id} no longer uses email")
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
-    skills = load_skills(db, org_id)
+    skills = load_skills(
+        db, org_id, workflow_version_id=record.current_version_id
+    )
     config = contain_workflow_config_for_load(record.config)
     ensure_workflow_cache_paths_for_source(config, source)
     workflow = _build_workflow(

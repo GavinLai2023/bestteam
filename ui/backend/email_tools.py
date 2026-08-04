@@ -42,7 +42,13 @@ _logger = logging.getLogger(__name__)
 EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
 
 
-def spec_uses_email(db: Session, spec_raw: Dict[str, Any], org_id: int) -> bool:
+def spec_uses_email(
+    db: Session,
+    spec_raw: Dict[str, Any],
+    org_id: int,
+    *,
+    workflow_version_id: int | None = None,
+) -> bool:
     """True if any agent in a Specification resolves to an email tool.
 
     Email tools reach an agent either directly (its `tools:`) or via a skill it
@@ -52,7 +58,9 @@ def spec_uses_email(db: Session, spec_raw: Dict[str, Any], org_id: int) -> bool:
     """
     from .skills import load_skills
 
-    skills = load_skills(db, org_id)
+    skills = load_skills(
+        db, org_id, workflow_version_id=workflow_version_id
+    )
     for agent in spec_raw.get("agents", []) or []:
         names = set(agent.get("tools", []) or [])
         for skill_name in agent.get("skills", []) or []:

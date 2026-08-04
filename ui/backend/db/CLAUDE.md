@@ -42,14 +42,21 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `workflow_versions` snapshot, and `config` is a mirror of that current
   version. Deploy no longer overwrites history in place — it appends a version
   via `db/workflows.py::publish_workflow_version` (P1-01/02/03).
+- `skill_versions` — immutable snapshots appended by
+  `db/skills.py::publish_skill_version` on every skill save. `skills` is the
+  stable library head: `current_version_id` selects the latest snapshot and
+  `config` remains its compatibility mirror. Migration `c4d5e6f7a8b9`
+  backfills every existing skill as v1 without changing its content and adds
+  the same `skill_versions.id` foreign keys on upgraded databases that
+  `create_all` produces for fresh databases (including retry repair when a
+  column exists without its constraint).
 - `workflow_versions` — immutable published snapshots of a workflow's `config`
   (`WorkflowVersion`; `id`, `workflow_id` FK, `version_number`, `config`,
   `created_by`, `created_at`; `(workflow_id, version_number)` unique). Deploy
   appends one row and moves the parent's `current_version_id`; a row is never
-  updated after insert. This freezes the **inline config blob only** —
-  standalone Skills/KBs/models are still resolved by name at load. Skill/KB
-  dependency records now exist (`workflow_dependencies`, below); model
-  resolution and content pinning are still deferred (P1-04 partial / P1-05).
+  updated after insert. This freezes the inline config blob; referenced skills
+  are frozen through the dependency's `resource_version_id` (below).
+  Standalone KBs/models are still resolved by name at load.
   Migration `c3f5a1b8e2d4` creates the table and backfills one v1 per existing workflow.
   Deleting a workflow head (`DELETE /api/config/workflows/{name}`) refuses
   (`409`) while any `Run` records one of its versions -- deletion removes the
@@ -65,7 +72,8 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 - `workflow_dependencies` — one typed row per (published version, skill|standalone-KB)
   it depends on (`WorkflowDependency`; `workflow_version_id` FK, `resource_kind`,
   `resource_name`, `resource_id` = the resolved `skills`/`knowledge_bases` id,
-  nullable; `(workflow_version_id, resource_kind, resource_name)` unique). Written
+  and `resource_version_id` = the immutable `skill_versions.id` for skills;
+  `(workflow_version_id, resource_kind, resource_name)` unique). Written
   once at deploy in `db/workflows.py::publish_workflow_version` via
   `db/dependencies.py::record_version_dependencies` (resolves names exactly as the
   loader: org skill shadows platform built-in; KBs org-scoped; a built-in tool /
@@ -74,14 +82,12 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   its own). The skill/KB `DELETE` guard now queries these rows by `resource_id`
   for the **current** version (`workflows_referencing`) instead of scanning JSON —
   non-regressing, and the stable id makes the platform-built-in-skill cross-org
-  case fall out without an all-orgs scan. Because the recorded id is resolved at
-  deploy, creating/updating an org skill re-points that org's current-version
-  skill dep rows for the same name (`reconcile_skill_dependencies`, under
-  `component_mutation_lock`) so a post-deploy override that shadows a platform
-  built-in doesn't leave the guard tracking the stale, shadowed id.
+  case fall out without an all-orgs scan. Skill dependencies are immutable:
+  editing a skill or creating an org override never rewrites a deployed team;
+  redeploy is the explicit opt-in to the then-current resolved skill version.
   Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's current
-  version. Model/tool deps and content/version pinning are still deferred (P1-04
-  recorded only skills+KBs; P1-05 for content pinning).
+  version; `c4d5e6f7a8b9` adds and backfills skill-version pins. Model/tool deps
+  and standalone-KB content pinning remain deferred.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

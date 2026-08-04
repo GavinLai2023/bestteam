@@ -1,7 +1,7 @@
 """automation_item_results table + runs.trigger_context/retry_of_run_id
 
 Revision ID: c1d2e3f4a5b6
-Revises: b8c9d0e1f2a3
+Revises: c4d5e6f7a8b9
 Create Date: 2026-08-02 00:00:00.000000
 
 Property Maintenance Inbox Release 1A (spec sections 5.3, 11.1). Guarded/
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 
 
 revision: str = "c1d2e3f4a5b6"
-down_revision: Union[str, Sequence[str], None] = "b8c9d0e1f2a3"
+down_revision: Union[str, Sequence[str], None] = "c4d5e6f7a8b9"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -40,6 +40,13 @@ const AUTOMATION_STATUS_LABELS = {
 }
 
 function resumePathFor(session) {
+  // A deployed workflow with no builder session (deployed straight through
+  // the admin Advanced/CRUD page, see builder.py's
+  // _synthetic_session_for_workflow) has no wizard flow to resume into --
+  // send it to Run a Team, pre-selected, instead.
+  if (session.id == null) {
+    return `/?workflow=${encodeURIComponent(session.specification_json?.name ?? '')}`
+  }
   return session.status === 'deployed' ? `/wizard/${session.id}/deploy` : `/wizard/${session.id}/confirm`
 }
 
@@ -123,7 +130,7 @@ export default function SessionsPage() {
                 const teamName = session.specification_json?.name
                 const isAutomated = trigger?.enabled && teamName && trigger.workflow_name === teamName
                 return (
-                  <li key={session.id} className="session-item">
+                  <li key={session.id ?? `workflow:${teamName}`} className="session-item">
                     <button className="wizard-card session-card" onClick={() => navigate(resumePathFor(session))}>
                       <h3>{teamName ?? session.intent_text}</h3>
                       <p className="subtitle">{descriptionFor(session)}</p>
@@ -140,9 +147,27 @@ export default function SessionsPage() {
                       <button
                         type="button"
                         className="session-delete-button"
+                        aria-label="Delete"
+                        title="Delete"
                         onClick={() => handleDelete(session)}
                       >
-                        Delete
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="16"
+                          height="16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                          <path d="M10 11v6" />
+                          <path d="M14 11v6" />
+                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                        </svg>
                       </button>
                     )}
                   </li>

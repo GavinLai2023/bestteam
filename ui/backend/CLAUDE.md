@@ -66,8 +66,11 @@ every endpoint follows:
   checked (`http_client.check_host_allowed`). The wizard shows the connect step
   only when the team uses email: `email_tools.spec_uses_email` resolves each
   agent's `tools` + skill tools and drives the `uses_email` flag on the builder
-  session response (soft prompt at Preview) and a hard gate in `deploy_session`
-  (an email team can't go live without a connected mailbox).
+  session response. Drafts use current skill heads; deployed/synthetic team
+  responses use the workflow's pinned skill versions, matching runtime. The
+  hard mailbox gate runs inside `component_mutation_lock` with validation and
+  publication, so a concurrent skill edit cannot change capability after the
+  check but before the pinned dependency is written.
 - Process-wide email env vars (`BESTTEAM_EMAIL_*`) remain the single-mailbox
   path for the SDK/CLI and single-org deployments, and are still **refused**
   on a multi-org deployment (CR-031): `db/orgs.py::ensure_email_single_org`
@@ -599,12 +602,10 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   against typed `workflow_dependencies` rows (populated at deploy by
   `record_version_dependencies`) instead of scanning deployed workflows' JSON;
   the check runs before any deletion/`rmtree`, naming the referencing team(s)
-  in the error. Because the recorded id is resolved at deploy, an org skill
-  *created after* a workflow deployed against a same-named platform built-in
-  re-points that org's current-version skill dep rows to the (now shadowing)
-  org skill — `dependencies.reconcile_skill_dependencies`, run from the skills
-  `PUT` under `component_mutation_lock` — so the guard tracks the id the runtime
-  actually loads, not the shadowed built-in. A workflow's inline KB likewise
+  in the error. A skill dependency also pins `resource_version_id`; editing a
+  platform/org skill or creating a same-named org override does not alter an
+  already-deployed team. Redeploying the team explicitly adopts the skill
+  version resolved then. A workflow's inline KB likewise
   shadows a same-named standalone KB, so the standalone isn't recorded as a
   dependency of that workflow.
   Both deploy points also reject (`400`) a workflow whose KB name — inline or
@@ -625,7 +626,7 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   guard uses typed rows keyed by stable `resource_id`); still deferred: the
   delete/deploy TOCTOU window (serialized via `component_mutation_lock`, not
   DB-enforced), model/built-in-tool dependency rows aren't recorded (no
-  consumer yet), and skill/KB **content** pinning to freeze behavior (P1-05).
+  consumer yet), and standalone-KB content pinning.
   P1-07/P1-08, data-architecture review; see
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
@@ -695,9 +696,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   `ConfigurationError` ("needs a real AI model") rather than the raw
   `NotImplementedError`.
 - **Skills library** (`ui/backend/skills.py` + `/api/config/skills` CRUD in `crud.py`)
-  — `load_skills(db)` queries all `SkillRecord` rows and returns `Dict[str, SkillSpec]`
-  keyed by name, used by `main.py`, `crud.py`, and `builder.py` to pass `extra_skills=`
-  to `_build_workflow()` (returns `{}` when no skills exist, backward compatible).
+  — every PUT appends an immutable `SkillVersion`, moves
+  `SkillRecord.current_version_id`, and exposes the current `version` plus
+  `GET /skills/{name}/versions` history. `load_skills(db)` returns current
+  heads for drafts/deploy validation/YAML; `load_skills(...,
+  workflow_version_id=)` returns only the exact skill versions pinned by that
+  deployed workflow. Both return `Dict[str, SkillSpec]` for `_build_workflow()`.
   `builder.py::_with_skill_catalog(db, text)` appends "Available skills..." list
   (name/description/tools) to the requirements text before `generate_specification()`,
   so the Solution Architect knows what skills exist for assignment to agents.

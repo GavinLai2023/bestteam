@@ -39,6 +39,7 @@ def test_init_db_creates_all_tables():
         "users",
         "knowledge_bases",
         "skills",
+        "skill_versions",
         "workflows",
         "workflow_versions",
         "workflow_dependencies",

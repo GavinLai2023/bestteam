@@ -80,6 +80,8 @@ customer nav is Build a team / My teams / Run a team / Activity):
   platform built-in tier), `none` (org-less). **A workflow is what the wizard
   and customer UI call an "AI team"**; this page uses the technical noun
   because it matches the JSON keys the operator is editing.
+  Skill rows show their current immutable version; saving appends a version,
+  while already-deployed teams keep their pinned version until redeployed.
 - **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
   — the six-stage Team Builder wizard, `components/WizardLayout.jsx` as the
   shared chrome:

@@ -574,6 +574,35 @@ def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
     assert sorted(p.name for p in active.iterdir()) == ["second.txt"]
 
 
+def test_skill_version_publish_is_serialized_with_team_deploys(client):
+    # Skill PUT and both workflow deploy paths share this lock. Holding it must
+    # block publication, preventing a deploy from pairing one skill head id
+    # with another content version during a concurrent admin edit.
+    import threading
+    import time
+
+    backend_crud.component_mutation_lock.acquire()
+    done = []
+
+    def _save_skill():
+        response = client.put(
+            "/api/config/skills/concurrent",
+            json={"instructions": "atomic", "tools": []},
+        )
+        done.append(response.status_code)
+
+    worker = threading.Thread(target=_save_skill)
+    worker.start()
+    try:
+        time.sleep(0.5)
+        assert done == [], "skill publication must wait for the deploy/component lock"
+    finally:
+        backend_crud.component_mutation_lock.release()
+
+    worker.join(timeout=5)
+    assert done == [200]
+
+
 def test_resolve_kb_upload_path_falls_back_for_flat_layout(tmp_path):
     # A manual-config / legacy KB with no CURRENT pointer is scanned as-is.
     from ui.backend.knowledge_bases import resolve_kb_upload_path
@@ -971,6 +1000,33 @@ def test_skill_crud_round_trip(client):
     assert client.get("/api/config/skills/research_skill").status_code == 404
 
 
+def test_skill_updates_append_visible_immutable_versions(client):
+    first = client.put(
+        "/api/config/skills/versioned",
+        json={"instructions": "First playbook.", "tools": []},
+    )
+    assert first.status_code == 200
+    assert first.json()["version"] == 1
+
+    second = client.put(
+        "/api/config/skills/versioned",
+        json={"instructions": "Second playbook.", "tools": []},
+    )
+    assert second.status_code == 200
+    assert second.json()["version"] == 2
+    assert client.get("/api/config/skills/versioned").json()["version"] == 2
+
+    history = client.get("/api/config/skills/versioned/versions")
+    assert history.status_code == 200
+    versions = history.json()
+    assert [row["version"] for row in versions] == [2, 1]
+    assert versions[0]["current"] is True
+    assert versions[0]["created_by"]
+    assert versions[0]["config"]["instructions"] == "Second playbook."
+    assert versions[1]["current"] is False
+    assert versions[1]["config"]["instructions"] == "First playbook."
+
+
 def test_skill_put_rejects_missing_instructions(client):
     resp = client.put("/api/config/skills/bad_skill", json={"description": "no instructions"})
     assert resp.status_code == 400
@@ -1136,7 +1192,7 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
     assert resp.status_code == 200
 
 
-def test_cached_workflow_picks_up_skill_update(client):
+def test_deployed_workflow_keeps_pinned_skill_until_redeploy(client):
     client.put(
         "/api/config/skills/greeting",
         json={"description": "How to greet", "instructions": "Say hello warmly.", "tools": []},
@@ -1165,8 +1221,12 @@ def test_cached_workflow_picks_up_skill_update(client):
         )
 
         wf2 = _get_workflow("skill_wf", db, get_org_id())
-        assert "Say hello formally." in wf2.steps[0].agents[0].backstory
+        assert "Say hello warmly." in wf2.steps[0].agents[0].backstory
         assert wf2 is not wf1
+
+        client.put("/api/config/workflows/skill_wf?org=default", json=workflow_config)
+        wf3 = _get_workflow("skill_wf", db, get_org_id())
+        assert "Say hello formally." in wf3.steps[0].agents[0].backstory
     finally:
         db_gen.close()
 
@@ -1182,9 +1242,9 @@ def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
     calls = []
     original = backend_main.load_skills
 
-    def counting_load_skills(db, org_id=None):
+    def counting_load_skills(db, org_id=None, **kwargs):
         calls.append(1)
-        return original(db, org_id)
+        return original(db, org_id, **kwargs)
 
     monkeypatch.setattr(backend_main, "load_skills", counting_load_skills)
 
@@ -1463,17 +1523,22 @@ def test_skill_dropped_from_current_version_becomes_deletable(client):
         "/api/config/workflows/redeploy_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g", "model": "fake:v2"}]),
     ).status_code == 200
+    from ui.backend.db.models import SkillVersion, WorkflowDependency
+    with open_test_db() as db:
+        pinned_version_id = db.query(WorkflowDependency.resource_version_id).filter_by(
+            resource_kind="skill", resource_name="s"
+        ).scalar()
     assert client.delete("/api/config/skills/s?org=default").status_code == 204
+    with open_test_db() as db:
+        retained = db.get(SkillVersion, pinned_version_id)
+        assert retained is not None
+        assert retained.skill_id is None
+        assert retained.config["instructions"] == "hi"
 
 
-def test_org_skill_created_after_deploy_reconciles_delete_guard(client):
-    # Deploy an org workflow against a platform skill "helper", then create an
-    # org-local "helper". At runtime the org skill shadows the built-in, so the
-    # guard must follow: deleting the in-use org skill 409s (its id is now
-    # recorded), while the shadowed, no-longer-used platform skill becomes
-    # deletable. Without reconciliation the guard would track the stale built-in
-    # id and allow deleting the in-use org skill -- a regression of the guard's
-    # core property.
+def test_org_skill_created_after_deploy_does_not_retarget_team(client):
+    # A deployed team is pinned to the platform skill it resolved. Creating an
+    # org-local same-named skill affects only future deploys, not this version.
     assert client.put(
         "/api/config/skills/helper",  # platform tier (org omitted -> org_id NULL)
         json={"instructions": "hi", "tools": []},
@@ -1488,12 +1553,12 @@ def test_org_skill_created_after_deploy_reconciles_delete_guard(client):
         "/api/config/skills/helper?org=default",
         json={"instructions": "hey", "tools": []},
     ).status_code == 200
-    # In-use org skill: blocked, naming the team.
-    resp = client.delete("/api/config/skills/helper?org=default")
+    # The new org skill is not used yet and can be deleted.
+    assert client.delete("/api/config/skills/helper?org=default").status_code == 204
+    # The pinned platform head remains protected by the current team version.
+    resp = client.delete("/api/config/skills/helper")
     assert resp.status_code == 409
     assert "helper_team" in resp.json()["detail"]
-    # Shadowed platform skill: no longer referenced by any current version -> deletable.
-    assert client.delete("/api/config/skills/helper").status_code == 204
 
 
 def test_inline_kb_shadowing_standalone_leaves_standalone_deletable(client, tmp_path):
