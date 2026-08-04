@@ -137,6 +137,21 @@ def test_out_of_batch_message_id_is_ignored_not_inserted(db):
     assert rows[0].source_key == "mailbox:7:uidvalidity:3:uid:42"
 
 
+def test_out_of_batch_message_id_is_not_logged_unbounded(db, caplog):
+    """An out-of-batch message_id is model-controlled -- a prompt-injected
+    email can steer the model into putting arbitrary body content into this
+    field. The warning must not put that raw, unbounded value into server
+    logs (Codex review finding)."""
+    org = get_or_create_org(db, "acme")
+    sensitive = "x" * 500 + " landlord's phone is 555-1234"
+    run = _make_run(db, org_id=org.id, output=_envelope([_valid_item(sensitive)]), uids=[42])
+    with caplog.at_level("WARNING"):
+        normalize_run_result(db, run)
+    assert sensitive not in caplog.text
+    assert "555-1234" not in caplog.text
+    assert "outside this batch" in caplog.text  # still logs that something was dropped
+
+
 def test_duplicate_message_id_keeps_first_only(db):
     org = get_or_create_org(db, "acme")
     output = _envelope([

@@ -60,6 +60,7 @@ _SUMMARY_MAX_CHARS = 500
 _FIELD_MAX_CHARS = 300
 _LIST_MAX_ITEMS = 20
 _LIST_ITEM_MAX_CHARS = 200
+_MESSAGE_ID_LOG_MAX_CHARS = 64
 
 
 def _cap(value: Optional[str], limit: int) -> Optional[str]:
@@ -466,9 +467,14 @@ def _normalize(
     for item in envelope.items:
         message_id = item.message_id.strip()
         if message_id not in set(uids):
+            # Bounded, not the raw value: an out-of-batch id is exactly the
+            # case where message_id is attacker-controlled -- a prompt-
+            # injected email can steer the model into putting arbitrary body
+            # text into this field, and it would otherwise land unbounded in
+            # server logs (Codex review finding).
             _logger.warning(
                 "Run %s: model output referenced message id %r outside this batch -- ignored",
-                run_row.id, message_id,
+                run_row.id, _cap(message_id, _MESSAGE_ID_LOG_MAX_CHARS),
             )
             continue
         if message_id in item_by_uid:

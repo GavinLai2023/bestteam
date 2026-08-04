@@ -302,8 +302,12 @@ offending input value, and a prompt-injected email could steer the model
 into putting body content or PII into an invalid enum/id field, putting raw
 customer content into server logs despite the trace redaction above (Codex
 review finding). Each item is matched by `message_id` against
-`trigger_context["uids"]` (an id outside that set is logged and dropped --
-the model can't expand its own scope); every UID in the batch gets exactly
+`trigger_context["uids"]` (an id outside that set is logged, capped to 64
+chars rather than the raw value -- `message_id` has no length cap on the
+Pydantic model and is entirely model-controlled, so an out-of-batch id is
+exactly the case a prompt-injected email could steer into arbitrary body
+text (Codex review finding) -- and dropped, so the model can't expand its
+own scope); every UID in the batch gets exactly
 one `automation_item_results` row, including a synthesized
 `status="error", needs_attention=True` row for one the model omitted or for
 a whole-envelope/unparseable-output failure (nothing silently disappears);

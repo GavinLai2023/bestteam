@@ -773,6 +773,15 @@
   despite the trace redaction; the warning now logs only `loc`/`type` per
   error, never the value. 947 backend + 91 frontend tests, lint clean.
 
+  **Ninth review pass** (Codex run against `main`, post-eighth-pass): the
+  out-of-batch `message_id` warning in `normalize_run_result` logged the raw,
+  unbounded envelope value with `%r` — since `EnvelopeItem.message_id` has no
+  length cap and is entirely model-controlled, a prompt-injected email could
+  steer the model into putting arbitrary body content into that field for an
+  id outside `trigger_context`'s UID batch, landing it unbounded in server
+  logs. The warning now logs a 64-char-capped value instead (reusing the
+  existing `_cap` helper). 948 backend tests, lint clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
