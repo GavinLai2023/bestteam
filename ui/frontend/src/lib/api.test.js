@@ -29,3 +29,22 @@ describe('request() error handling', () => {
     expect(err.status).toBeUndefined()
   })
 })
+
+describe('automationResultsSummary', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.restoreAllMocks()
+  })
+
+  it('sends the browser UTC offset so the backend can bound by the local day, not UTC (Codex review finding)', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-600) // UTC+10
+
+    await api.automationResultsSummary('2026-08-03')
+
+    const url = globalThis.fetch.mock.calls[0][0]
+    const params = new URL(url).searchParams
+    expect(params.get('date')).toBe('2026-08-03')
+    expect(params.get('tz_offset_minutes')).toBe('-600')
+  })
+})

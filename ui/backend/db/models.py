@@ -118,7 +118,12 @@ class KnowledgeBaseRecord(Base):
 
 
 class SkillRecord(Base):
-    """A Skill's `raw` config (the technical fields from `SkillSpec.to_raw()`)."""
+    """Stable head for a versioned Skill.
+
+    ``config`` mirrors the current SkillVersion for compatibility with existing
+    admin/library readers. Deployments never execute this mutable mirror: each
+    WorkflowDependency pins an immutable SkillVersion instead.
+    """
 
     __tablename__ = "skills"
     __table_args__ = (UniqueConstraint("org_id", "name", name="uq_skills_org_id_name"),)
@@ -132,6 +137,32 @@ class SkillRecord(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    current_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("skill_versions.id"), nullable=True
+    )
+
+
+class SkillVersion(Base):
+    """An immutable snapshot appended whenever a SkillRecord is saved."""
+
+    __tablename__ = "skill_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "skill_id", "version_number",
+            name="uq_skill_versions_skill_id_version_number",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Nullable intentionally: deleting an unused library head must not destroy
+    # version snapshots retained by superseded workflow versions/audit history.
+    skill_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("skills.id", ondelete="SET NULL"), nullable=True
+    )
+    version_number: Mapped[int]
+    config: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
 class WorkflowRecord(Base):
@@ -166,8 +197,8 @@ class WorkflowVersion(Base):
 
     Deploy appends one row (never updates an existing one) and points the
     parent WorkflowRecord.current_version_id at it; a Run references the exact
-    version it executed. This freezes the inline config blob only -- standalone
-    Skills/KBs/models are still resolved by name at load (P1-04/P1-05)."""
+    version it executed. The inline config and referenced SkillVersions are
+    frozen; standalone KBs/models are still resolved by name at load."""
 
     __tablename__ = "workflow_versions"
     __table_args__ = (
@@ -193,8 +224,8 @@ class WorkflowDependency(Base):
     on this resource?" and the skill/KB delete guard can RESTRICT by a precise
     resource_id instead of re-scanning every deployed workflow's JSON (P1-04).
     Written once per version (a version is immutable); resource_id is the resolved
-    SkillRecord/KnowledgeBaseRecord id (NULL only for a backfilled name that no
-    longer resolves -- harmless, such a ref can't build)."""
+    SkillRecord/KnowledgeBaseRecord id and resource_version_id freezes SkillVersion
+    content (NULL only for legacy/unresolved references)."""
 
     __tablename__ = "workflow_dependencies"
     __table_args__ = (
@@ -209,6 +240,11 @@ class WorkflowDependency(Base):
     resource_kind: Mapped[str]
     resource_name: Mapped[str]
     resource_id: Mapped[Optional[int]] = mapped_column(nullable=True)
+    # Populated for resource_kind="skill". The stable skill head id above is
+    # retained for reverse dependency/delete queries; this id freezes content.
+    resource_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("skill_versions.id"), nullable=True
+    )
 
 
 class OrgEmailCredential(Base):
@@ -336,6 +372,60 @@ class Run(Base):
     workflow_version_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("workflow_versions.id"), nullable=True
     )
+    # Server-generated context for an autonomous email-triggered run: mailbox
+    # credential id, IMAP UIDVALIDITY, the detected UID batch, folder, and
+    # trigger time (see email_trigger.py::_start_triggered_run). NULL for a
+    # manual/builder-sandbox run. Never trust a model's own claim about which
+    # UIDs it processed -- this is the server's own record of the batch, used
+    # both to validate the model's output (automation_results.py) and to
+    # revalidate eligibility for POST /api/runs/{id}/retry. See
+    # docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md
+    # section 11.1.
+    trigger_context: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # The run this run retried, if any -- lets the UI show a retry chain and
+    # keeps history immutable (a retry always creates a new row).
+    retry_of_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class AutomationItemResult(Base):
+    """One immutable, structured outcome for one input item of one Run.
+
+    Deliberately NOT a `Case`/`WorkOrder`/state machine (spec section 5.1):
+    this row describes what a Run did to one input, not an ongoing business
+    entity -- there is no status transition, owner, or close action. `payload`
+    holds only the minimal extracted/decision fields the vertical needs (never
+    a raw email body); `source_key` is always server-generated (see
+    `automation_results.py`), never taken from the model's own output, so a
+    model can't fabricate or spoof which input it claims to have processed.
+    See docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md
+    section 5.3.
+    """
+
+    __tablename__ = "automation_item_results"
+    __table_args__ = (
+        UniqueConstraint("run_id", "source_key", name="uq_automation_item_results_run_id_source_key"),
+        Index("ix_automation_item_results_org_id_created_at", "org_id", "created_at"),
+        Index(
+            "ix_automation_item_results_org_id_needs_attention_created_at",
+            "org_id", "needs_attention", "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    # Fixed to "email" in Release 1A (spec section 5.3) -- kept as a column
+    # rather than hardcoded so a future non-email automation source doesn't
+    # need a schema change.
+    source_type: Mapped[str] = mapped_column(default="email")
+    source_key: Mapped[str]
+    # Fixed to "property_maintenance_email" in Release 1A.
+    result_type: Mapped[str]
+    # processed | needs_attention | skipped | error
+    status: Mapped[str]
+    needs_attention: Mapped[bool] = mapped_column(default=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 

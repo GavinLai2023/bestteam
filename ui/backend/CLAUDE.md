@@ -16,7 +16,14 @@ every endpoint follows:
   data plus platform built-ins (`skills.org_id IS NULL`), and — only where
   `BESTTEAM_DEMO_WORKFLOWS` is on — the global YAML demo workflows.
   **Cross-org access is a 404** (and the WS stream closes 4404 ==
-  unknown-run) — existence is never revealed.
+  unknown-run) — existence is never revealed. This applies to an explicit
+  `run_id` passed to a list-style filter too, not just a path parameter:
+  `GET /api/runs?run_id=` and `GET /api/automation-results?run_id=` both
+  404 up front (before running the filtered query) when that id belongs to
+  another org or doesn't exist, rather than silently returning an empty
+  list — an empty list there would still let a caller distinguish "not
+  yours" from "doesn't exist" against the 404 every other explicit-id route
+  gives (Codex review finding).
 - Scoping is centralized: `get_current_org` (auth_api),
   `load_skills(db, org_id)` (org's own shadows a same-named built-in),
   `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in
@@ -59,8 +66,11 @@ every endpoint follows:
   checked (`http_client.check_host_allowed`). The wizard shows the connect step
   only when the team uses email: `email_tools.spec_uses_email` resolves each
   agent's `tools` + skill tools and drives the `uses_email` flag on the builder
-  session response (soft prompt at Preview) and a hard gate in `deploy_session`
-  (an email team can't go live without a connected mailbox).
+  session response. Drafts use current skill heads; deployed/synthetic team
+  responses use the workflow's pinned skill versions, matching runtime. The
+  hard mailbox gate runs inside `component_mutation_lock` with validation and
+  publication, so a concurrent skill edit cannot change capability after the
+  check but before the pinned dependency is written.
 - Process-wide email env vars (`BESTTEAM_EMAIL_*`) remain the single-mailbox
   path for the SDK/CLI and single-org deployments, and are still **refused**
   on a multi-org deployment (CR-031): `db/orgs.py::ensure_email_single_org`
@@ -121,6 +131,322 @@ poller mid-loop. Deferred: awaiting in-flight polling threads on shutdown (see
 `docs/STATUS.md`, Known issues). `RunRegistry` eviction (the other
 previously-deferred item) is no longer deferred -- see "Sync-to-async
 streaming bridge" above.
+
+`_start_triggered_run` also stamps a `Run.trigger_context` JSON blob
+(mailbox credential id, host, username, UIDVALIDITY, the exact UID batch,
+folder, trigger time) -- the server's own record of what a triggered run
+covered, used by both automation-result normalization and
+`retry_triggered_run` below. Never trust a model's own claim about which
+messages it processed; this is that ground truth. Host/username are stamped
+alongside the credential id because `set_email_credentials` upserts one row
+per org -- the row id alone never changes even when the org replaces its
+mailbox entirely, so it isn't a usable identity check on its own.
+`email_trigger.retry_triggered_run(db, run_row)` (spec section 11.2) safely
+reruns a **failed** (only -- never `completed`, which may already have real
+mailbox side effects like a saved draft) triggered run over its exact
+original UID batch as a brand-new `Run` (`retry_of_run_id` set, history
+untouched): revalidates the current mailbox's host/username still match
+`trigger_context` (not just UIDVALIDITY -- a replaced mailbox could
+coincidentally share a UIDVALIDITY value), the mailbox still decrypts and
+connects, the workflow still builds, the org's daily cap isn't already hit,
+and -- same overlap guard `poll_org` itself checks before touching the
+mailbox -- `trigger.last_run_id` isn't still a registered run that's actually
+running; any of these raises `RetryError` (customer-facing message). It also
+excludes any UID the original run already got a confirmed draft for
+(`already_drafted_uids(db, run_row)`, matched via each UID's
+mailbox/UIDVALIDITY-scoped `source_key` against
+`AutomationItemResult.payload.action.draft_created`) before resubmitting the
+batch, raising `RetryError` outright if every UID already has one --
+`email_draft_reply` has no dedup of its own, so blindly resubmitting a
+partially-drafted batch risked a second draft landing in the mailbox.
+`already_drafted_uids` checks every run in `run_row`'s **retry family**
+(`_retry_family_run_ids`: walk back through `retry_of_run_id` to the root,
+then forward to every run reachable from that root), not just `run_row`'s
+own results -- a retry family is a tree, not always a straight line, since
+the *original* run can be retried more than once (e.g. a first retry fails
+too, and the customer retries the original again rather than that failed
+retry, creating a sibling branch); checking only `run_row` would miss a UID
+a sibling branch already drafted (Codex review finding). The
+narrowed `retry_uids` list (not the original full batch) is what gets passed
+to `build_trigger_workflow` and into the new run's `trigger_context["uids"]`
+-- narrowing `trigger_context` too, not just the tool-visible UID set, is
+what keeps `normalize_run_result` on the *new* run from treating an
+intentionally-excluded already-drafted UID as "missing" and synthesizing a
+spurious error row for it under the new run id. This exclusion depends on
+`AutomationItemResult` rows reliably existing for the whole batch of any
+`failed` run, which is what "every terminal path normalizes" (below)
+guarantees -- including a run that never reached the model at all.
+
+The overlap-check-through-dispatch section of both `poll_org` and
+`retry_triggered_run` (the `last_run_id` read through the actual dispatch
+call) is serialized behind a per-org `threading.Lock`
+(`_dispatch_lock(org_id)`, a small lazily-created registry keyed by org id)
+so two concurrent dispatches -- retry-vs-poller, or retry-vs-retry -- can't
+both observe "no run in flight" and both fire against the same mailbox. The
+lock alone isn't sufficient: an ORM `trigger` object loaded before lock
+acquisition (a different `Session`, e.g. a different HTTP request or poll
+cycle) keeps whatever stale `last_run_id` value it had at load time even
+after another thread commits a newer one. `_current_last_run_id(db,
+trigger)` does a fresh column-only `SELECT` inside the lock instead --
+deliberately not `db.refresh(trigger)`, which would also discard each
+function's own pending uncommitted daily-cap-reset change made earlier in
+the same call, before the lock. On dispatch, `retry_triggered_run` sets
+`trigger.last_run_id` to the new run (registering itself with that same
+guard for the next poll cycle) and clears `last_error`/`last_error_kind`,
+mirroring `_start_triggered_run`'s "a run is going out: clear any prior
+fault" -- without it a resolved workflow-kind error kept reporting failure
+indefinitely despite the successful retry. Exposed as
+`POST /api/runs/{run_id}/retry` in `main.py`. The per-org lock also closes
+the previously-deferred, narrower "two near-simultaneous manual retry
+clicks on the same run" admission race (`docs/STATUS.md` Known issues no
+longer lists it) as a side effect, since the second click's check is now
+serialized behind the first's. Remaining known gap: a `completed` run whose
+output failed *normalization* (not a real engine failure) currently has no
+retry path at all -- see `docs/STATUS.md` Known issues.
+
+The daily cap has the same staleness problem as `last_run_id`: the check
+further up (before mailbox/workflow work -- a fast-path to skip unnecessary
+IMAP calls when obviously already at cap) reads a possibly-stale
+`trigger.runs_today`, so two dispatches that both read "under cap" before
+either committed its increment could both pass and push the count past the
+cap. `_at_daily_cap(db, trigger, today)` re-checks with a fresh `SELECT`
+immediately inside the lock, right before dispatch -- the actual gate.
+`retry_triggered_run`'s cap advance is also now a single atomic
+`UPDATE ... SET runs_today = runs_today + 1` (mirroring
+`_start_triggered_run`'s CAS), not a Python-level `trigger.runs_today += 1`
+-- the latter would silently lose a concurrent dispatch's increment for the
+same org instead of merely racing the cap check. `retry_triggered_run`'s
+retry input (`run_in_background`'s `input` argument and the new `Run.input`)
+is built from `retry_uids` (`_trigger_input(retry_uids)`), not reused from
+the original run's `input` -- the original text names every UID in the
+initial batch, including any just excluded by the already-drafted check, and
+passing that stale text would instruct the retrying agent to work on
+messages its own scoped tools then reject as out-of-batch instead of the
+UIDs that actually still need it. If submission itself fails (`_executor.submit`
+raises) in either `_start_triggered_run` or `retry_triggered_run`, the worker
+never starts and so never normalizes either -- both submission-exception
+branches now call `normalize_run_result` explicitly after marking the run
+failed, or a declared batch would be marked failed with zero
+`automation_item_results` rows and silently vanish from Needs-attention
+(all four gaps above: Codex review findings). In both branches,
+`normalize_run_result` is now called **before** `registry.publish`-ing the
+`run_failed` event -- same ordering rule as `run_in_background`'s normal
+terminal path below: publishing first left a window where a live Run Detail
+view reacting to the event could fetch zero automation rows before this
+commits them, with no later terminal transition to prompt a re-fetch (Codex
+review finding).
+
+`retry_triggered_run`'s dispatch-time `UPDATE` also requires
+`EmailTrigger.enabled` and the org still active in its `WHERE` clause,
+mirroring `_start_triggered_run`'s own CAS -- without it, a customer
+disconnecting/replacing the mailbox (or an operator deactivating the org)
+during this call's own pre-lock credential/mailbox check went undetected,
+and the retry would dispatch a real `email_draft_reply` against a mailbox
+the customer had already disconnected. A rejected CAS (`rowcount == 0`)
+discards the pending new run from the registry and rolls back the session
+(undoing the not-yet-committed new `Run` row too) before raising a
+customer-facing `RetryError`. The "retry already running"
+(`Run.retry_of_run_id == run_row.id, status == "running"`) and
+already-drafted-UID checks are also re-run fresh immediately before
+dispatch, inside the per-org lock -- the equivalent checks earlier in the
+function (before the mailbox connectivity check) are only a fast-path and
+can be stale by the time execution reaches the lock: two retry requests
+racing the same failed run could otherwise both pass those checks on data
+that predates the first one's own dispatch/normalization, and since
+`email_draft_reply` has no dedup, both would create a duplicate draft (both
+gaps: Codex review findings).
+
+## Property Maintenance Inbox (`automation_results.py`)
+
+The first vertical solution template (Release 1A of
+`docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`):
+a two-agent SEQUENTIAL Workflow template
+(`workflows/property_maintenance_inbox_demo.yaml`) built from three platform
+Skills (`email_input_security_core_v1`, `property_maintenance_intake_v1`,
+`property_maintenance_response_v1`, seeded in `skills.py`) on top of the
+existing email-trigger/draft-only toolkit above. `email_input_security_core_v1`
+is attached to BOTH agents, not just the Intake Analyst: the Response
+Coordinator never calls `email_find`/`email_read` itself, but it drafts from
+the Intake Analyst's free-text write-up, which can itself quote injected
+instructions from the original email -- without the same defenses, a
+malicious message could still steer the Response Coordinator even though it
+never reads the mailbox directly (Codex review finding). Deliberately **not** a
+`Case`/work-item entity -- see `docs/DECISIONS.md` ("Property Maintenance
+Inbox: no Case/work-item entity in Phase 1").
+
+`automation_results.py::normalize_run_result(db, run_row)` is called from
+`runtime.py::run_in_background` on **every** terminal path a run with a
+`trigger_context` can take -- not just the streaming loop's
+`run_completed`/`run_failed` branch, but also `_mark_cancelled()` (a
+cancelled run) and the outer exception-fallback handler (a crash before the
+first stream event) -- via a shared `_maybe_normalize()` closure so a
+cancelled or pre-stream-crash triggered run's UID batch never silently
+disappears from Needs-attention the way it used to (spec 10.1's "a
+model-omitted UID must never silently disappear" applies just as much to a
+run that never reached the model). Each of the three paths commits the
+terminal status to `run_row` *before* setting the loop's `terminal_seen`
+flag, not after -- so if that commit itself raises, `terminal_seen` is still
+`False` and the outer exception handler's own best-effort `run_failed`
+fallback (and its own `_maybe_normalize()` call) still runs, instead of the
+run looking permanently "running" to a live subscriber. And, since the
+commit must be visible before any WS subscriber can react to the terminal
+event it's about to see, each `_maybe_normalize()` call happens **before**
+`registry.publish` for that event, not after (a live Run Detail refetching
+automation-results the instant it observes the terminal event used to be
+able to race ahead of these rows with no retry to pick them up later). It
+extracts a JSON object from the
+run's final output (handling a ```json fence) and only proceeds if
+`result_type == "property_maintenance_email_batch"` -- any other
+`trigger_context`-bearing run (e.g. another org's plain `email_triage_reply`
+team, free-text output) is left completely untouched, so this never
+regresses unrelated email-trigger workflows. The one exception: a run that
+crashed (`run_failed`) before producing any JSON at all looks identical, from
+the output alone, to that unrelated case -- so `_start_triggered_run` stamps
+`trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER` at dispatch
+time whenever the deployed workflow's config gives an agent the
+`property_maintenance_response_v1` skill AND that name still resolves to the
+actual platform-tier skill row, not an org skill shadowing it
+(`email_trigger._declares_property_maintenance_contract` +
+`_resolves_to_platform_skill`, a small independent `WorkflowRecord.config`
+read -- advisory only, never blocks dispatch on failure; `skills.load_skills`
+intentionally lets an org's own skill shadow a same-named platform built-in,
+so a name-only check would wrongly redact/stamp an org's unrelated workflow
+that happens to name its own skill the same thing (Codex review finding)),
+and an unparseable output still gets the batch's synthesized
+error rows when that marker is present. `retry_triggered_run` does NOT just
+carry the marker forward from the original run's `trigger_context` -- it
+re-runs `_declares_property_maintenance_contract` against the workflow as
+CURRENTLY deployed and sets/clears the retry's own marker from that fresh
+result, so a workflow that gained or lost the maintenance skill between the
+original run and the retry gets the right redaction/normalization behavior
+either way, instead of a stale one carried over from dispatch time (Codex
+review finding). Once engaged: the whole envelope is validated via Pydantic
+(`Envelope`/`EnvelopeItem`; an enum/shape failure fails the *whole* batch,
+not per-item). A validation failure is logged as `loc`/`type` per error only
+-- never `exc`/`str(exc)` directly, since Pydantic's error repr embeds the
+offending input value, and a prompt-injected email could steer the model
+into putting body content or PII into an invalid enum/id field, putting raw
+customer content into server logs despite the trace redaction above (Codex
+review finding). Each item is matched by `message_id` against
+`trigger_context["uids"]` (an id outside that set is logged, capped to 64
+chars rather than the raw value -- `message_id` has no length cap on the
+Pydantic model and is entirely model-controlled, so an out-of-batch id is
+exactly the case a prompt-injected email could steer into arbitrary body
+text (Codex review finding) -- and dropped, so the model can't expand its
+own scope); every UID in the batch gets exactly
+one `automation_item_results` row, including a synthesized
+`status="error", needs_attention=True` row for one the model omitted or for
+a whole-envelope/unparseable-output failure (nothing silently disappears);
+`needs_attention` is server-computed (`possible_emergency`/`unknown`
+priority, `needs_attention`/`error` status, or a confirmed tool failure for
+that UID -- see below -- always forces it, regardless of what the model
+itself claimed); and `payload` is length-capped and only ever holds the
+validated extraction fields -- never a raw email body. `source_key` is
+always server-generated (`mailbox:<credential-id>:uidvalidity:<value>:uid:<uid>`),
+so a model can never fabricate which input it claims to have processed. The
+`(run_id, source_key)` unique constraint makes a repeated normalize call (a
+duplicate completion callback, or calling it twice) a no-op for rows already
+written.
+
+`action.draft_created` is also never trusted from the model alone (post-review
+hardening): `normalize_run_result(db, run_row, confirmed_draft_message_ids=)`
+takes the set of message ids the run *actually* got a successful
+`email_draft_reply` tool call for -- `runtime.py::run_in_background` collects
+this itself from the run's own `tool_completed` trace events (`outcome ==
+"draft_created"`, from `adapters/langgraph_adapter.py`'s redacted email-tool
+data) while it's already streaming them, and passes it into normalization at
+the terminal event. A claimed-but-unconfirmed draft is downgraded to
+`draft_created: false` and forces `needs_attention: true`; symmetrically, a
+claimed-`false` that the trace confirms *did* succeed is upgraded to `true`
+-- the model can misreport in either direction, and a stored result (or the
+daily summary's count) under-reporting a draft that genuinely exists in the
+mailbox is just as wrong as over-reporting one that doesn't. The same trust
+boundary now covers tool *failure*, not just draft success: a failed
+`email_read`/`email_draft_reply` tool call retains its (bounded, and now
+stripped -- `_bounded_message_id` mirrors the email tools' own `.strip()`
+normalization, or a call made with whitespace-padded id like `" 42 "` would
+record that unstripped id in trace evidence while this comparison uses the
+envelope's stripped id, missing the match and leaving a real draft
+unrecognized as confirmed; Codex review finding) `message_id` in the trace
+even on the exception path
+(`adapters/langgraph_adapter.py`), `runtime.py` collects those into a
+parallel `failed_tool_message_ids` set, and `normalize_run_result` forces
+`needs_attention` for that UID regardless of what the model's own item
+claims (spec 9.5 "Tool failure -> needs_attention: yes" -- previously only
+enforced by trusting the model to self-report it). The same collector also
+adds a UID whenever its `tool_completed` event reports `outcome in
+("not_found", "out_of_batch")` even though the call itself didn't raise --
+`_redacted_email_tool_data` labels those `success: True` since nothing
+exceptioned, so without this a soft rejection (a since-deleted message, a
+scope violation) stayed hidden from Needs-attention unless the model
+self-reported it too. `Envelope.schema_version`
+(currently always `1`) is validated against the one supported version rather
+than accepted as any int -- `extra: "ignore"` would otherwise let a future
+incompatible schema's unknown fields get silently dropped instead of failing
+the envelope; an unsupported version gets the same whole-batch error-row
+treatment as an invalid enum. `draft_type` is length-capped like every other
+free-text payload field (it was the one field that wasn't).
+
+A property-maintenance run's raw agent output (`agent_completed`'s `data`,
+and `run_completed`'s -- `core/workflow.py`'s `last_output`, the same text)
+is derived from customer email content -- the envelope's free-text
+`extracted`/`missing_information`/`risk_reasons` fields can quote it
+directly -- so it gets the same redaction boundary that already covers
+`tool_completed` for `email_find`/`email_read`/`email_draft_reply`
+(`_redacted_email_tool_data`), just applied one layer up in `runtime.py`
+instead of at the SDK/adapter layer (the SDK itself has no notion of
+"property maintenance"; only `runtime.py` knows a run's `trigger_context`).
+`run_in_background` computes `is_pm_contract_run` once, from
+`run_row.trigger_context["result_contract"]`, right after the run row is
+persisted; for such a run, every event whose type is in
+`_PM_REDACTED_EVENT_TYPES` -- `agent_completed`/`run_completed` plus, for a
+declared maintenance workflow that happens to use HIERARCHICAL mode,
+`subagent_started`/`subagent_completed`/`delegation_started`/
+`delegation_completed` (the manager/subordinate delegate exchange carries
+the same customer-email-derived text -- `task_summary`/`summary` -- and
+previously leaked around this boundary, Codex review finding) -- OR is a
+`tool_completed` event for the manager's own `delegate_to_<name>` tool call
+(`_is_delegate_tool_completed`; `adapters/langgraph_adapter.py`'s generic
+tool-calling loop emits this as a SECOND, separate event carrying the same
+subordinate `summary`, which the `on_event`-driven redaction above doesn't
+see -- Codex review finding; a non-delegate `tool_completed`, e.g.
+`email_read`, is unaffected) -- has its
+`data` overwritten with a fixed placeholder (`_PM_TRACE_REDACTED`)
+*before* `dataclasses.asdict(event)` is built for `registry.publish`/
+`_safe_record_trace_event` and before it lands in `run_row.output` -- so the
+raw text never touches a live WS broadcast, persisted `trace_events`, or
+`runs.output`. `normalize_run_result` still needs the real JSON: the
+`run_completed` branch captures `event.data` into a local before redacting
+it, then passes that through as `_maybe_normalize`'s new
+`raw_output_override` (threaded down to `normalize_run_result`/`_normalize`,
+which parses it instead of `run_row.output` when given) -- so the structured
+result is exactly as complete as before, only the trace/output columns lose
+the raw text. `agent_completed`'s `usage` is untouched by this (only `.data`
+is mutated), so usage metering is unaffected. Every other run (no
+`trigger_context`, or a `trigger_context` without the maintenance
+`result_contract`) is completely unaffected -- this is the same
+narrow-scoping discipline as the `result_contract` marker itself (Codex
+review finding).
+
+Read APIs (`main.py`): `GET /api/automation-results` (org-scoped, filterable
+by `run_id`/`needs_attention`/`status`/`result_type`, offset/limit/total --
+same convention as `GET /api/runs`, not the design spec's `cursor` wording)
+backs the Activity page's Needs-attention list and Run Detail's
+automation-results section; `GET /api/automation-results/summary` backs the
+Activity page's daily counters card, including an `ever_used` flag (a cheap
+all-time existence check, separate from the day's counts) so the frontend can
+tell "this org has never used this template" apart from "used it, nothing
+today" -- both would otherwise report `emails_read: 0`. `date` defaults to
+UTC "today" server-side when omitted -- there's no org-timezone concept
+anywhere in this app (consistent with `email_trigger.py`'s daily-cap reset,
+also UTC-based), so the frontend passes its own local date explicitly rather
+than relying on that default (`MaintenanceInboxSummary.jsx`). The endpoint
+also takes `tz_offset_minutes` (the browser's own `Date.getTimezoneOffset()`;
+`lib/api.js`'s `automationResultsSummary` always sends it) and
+`summary_for_date` uses it to bound the day by the caller's local midnight
+instead of UTC midnight -- passing a local date string alone still misdates
+rows created in a timezone-ahead-of-UTC org's first few local hours of a new
+day, since those rows' UTC timestamp is still the previous UTC date.
 
 ## Sync-to-async streaming bridge
 
@@ -276,12 +602,10 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   against typed `workflow_dependencies` rows (populated at deploy by
   `record_version_dependencies`) instead of scanning deployed workflows' JSON;
   the check runs before any deletion/`rmtree`, naming the referencing team(s)
-  in the error. Because the recorded id is resolved at deploy, an org skill
-  *created after* a workflow deployed against a same-named platform built-in
-  re-points that org's current-version skill dep rows to the (now shadowing)
-  org skill — `dependencies.reconcile_skill_dependencies`, run from the skills
-  `PUT` under `component_mutation_lock` — so the guard tracks the id the runtime
-  actually loads, not the shadowed built-in. A workflow's inline KB likewise
+  in the error. A skill dependency also pins `resource_version_id`; editing a
+  platform/org skill or creating a same-named org override does not alter an
+  already-deployed team. Redeploying the team explicitly adopts the skill
+  version resolved then. A workflow's inline KB likewise
   shadows a same-named standalone KB, so the standalone isn't recorded as a
   dependency of that workflow.
   Both deploy points also reject (`400`) a workflow whose KB name — inline or
@@ -302,7 +626,7 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   guard uses typed rows keyed by stable `resource_id`); still deferred: the
   delete/deploy TOCTOU window (serialized via `component_mutation_lock`, not
   DB-enforced), model/built-in-tool dependency rows aren't recorded (no
-  consumer yet), and skill/KB **content** pinning to freeze behavior (P1-05).
+  consumer yet), and standalone-KB content pinning.
   P1-07/P1-08, data-architecture review; see
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
 - **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
@@ -372,9 +696,12 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   `ConfigurationError` ("needs a real AI model") rather than the raw
   `NotImplementedError`.
 - **Skills library** (`ui/backend/skills.py` + `/api/config/skills` CRUD in `crud.py`)
-  — `load_skills(db)` queries all `SkillRecord` rows and returns `Dict[str, SkillSpec]`
-  keyed by name, used by `main.py`, `crud.py`, and `builder.py` to pass `extra_skills=`
-  to `_build_workflow()` (returns `{}` when no skills exist, backward compatible).
+  — every PUT appends an immutable `SkillVersion`, moves
+  `SkillRecord.current_version_id`, and exposes the current `version` plus
+  `GET /skills/{name}/versions` history. `load_skills(db)` returns current
+  heads for drafts/deploy validation/YAML; `load_skills(...,
+  workflow_version_id=)` returns only the exact skill versions pinned by that
+  deployed workflow. Both return `Dict[str, SkillSpec]` for `_build_workflow()`.
   `builder.py::_with_skill_catalog(db, text)` appends "Available skills..." list
   (name/description/tools) to the requirements text before `generate_specification()`,
   so the Solution Architect knows what skills exist for assignment to agents.

@@ -117,6 +117,87 @@ def _summarize(value: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
+# Email tools carry customer/tenant content (subject lines, body snippets,
+# drafted reply text) that a generic 200-char `_summarize()` would still leak
+# into the trace_events table and any log/UI that renders it. Special-cased
+# below so the *content* of a mailbox never reaches a trace event -- only
+# success/failure and counts/ids, derived from the call's own arguments
+# rather than parsed out of the tool's return text (robust to the return
+# text's exact wording changing). See docs/superpowers/specs/
+# 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2.
+_EMAIL_TOOLS_NEEDING_REDACTION = frozenset({"email_find", "email_read", "email_draft_reply"})
+
+# `message_id` is a model-controlled tool-call argument (not our own deterministic
+# text), so it needs the same length bound `_summarize()` gives everything else --
+# otherwise a model could smuggle an arbitrarily long/injected string into the
+# trace via this one field.
+_MESSAGE_ID_TRACE_CHARS = 64
+
+# Mirrors tools/email_client.py's `_OUT_OF_BATCH` sentinel (a UID-scoped run's
+# email_read/email_draft_reply refuse any id outside the poller-detected batch).
+# Not imported directly to avoid the adapters layer depending on a specific
+# tools implementation -- see src/bestteam/tools/CLAUDE.md.
+_OUT_OF_BATCH_TEXT = "That message isn't part of this batch of new mail."
+
+
+def _bounded_message_id(call_args: Dict[str, Any]) -> str:
+    # Strip to match the email tools' own normalization (email_client.py's
+    # `_read_impl`/`_draft_impl` call `.strip()` before touching the mailbox).
+    # Without this, a model calling with " 42 " records that unstripped id in
+    # trace evidence, while automation_results.py compares the envelope's
+    # stripped "42" against it -- a real draft goes unrecognized as confirmed,
+    # risking a duplicate draft on retry (Codex review finding).
+    raw = str(call_args.get("message_id", "")).strip()
+    return raw if len(raw) <= _MESSAGE_ID_TRACE_CHARS else f"{raw[:_MESSAGE_ID_TRACE_CHARS]}…"
+
+
+def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result: Any) -> Dict[str, Any]:
+    """Business-safe `tool_completed` data for an email tool: never the
+    subject/body/draft text, only outcome + a length-bounded message id.
+
+    `outcome` lets a caller (e.g. `automation_results.py`) distinguish a real
+    confirmed action (`"draft_created"`) from a call the tool itself refused
+    or that found nothing -- the result text alone is not enough to tell,
+    since a scoped tool's rejection text doesn't start with the same prefix
+    as its "not found" text.
+    """
+    text = str(result)
+    if tool_name == "email_find":
+        if text.startswith("Found "):
+            count = text.split(" ", 2)[1]
+            return {"summary": f"Found {count} message(s)."}
+        return {"summary": "No messages found."}
+
+    message_id = _bounded_message_id(call_args)
+    if text == _OUT_OF_BATCH_TEXT:
+        return {
+            "summary": f"Rejected: message '{message_id}' is outside this run's batch.",
+            "message_id": message_id,
+            "outcome": "out_of_batch",
+        }
+    if text.startswith("No message found"):
+        return {
+            "summary": f"No message found for id '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "not_found",
+        }
+    if tool_name == "email_read":
+        return {"summary": f"Read message '{message_id}'.", "message_id": message_id, "outcome": "read"}
+    # email_draft_reply: both backends' success text starts with "Draft reply"
+    # (see tools/email_client.py's Graph/IMAP `draft_reply` implementations).
+    if text.startswith("Draft reply"):
+        return {
+            "summary": f"Draft reply saved for message '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "draft_created",
+        }
+    return {
+        "summary": f"Draft reply attempt for message '{message_id}' did not complete.",
+        "message_id": message_id,
+        "outcome": "unknown",
+    }
+
+
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
     """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
     if usage_sink is None:
@@ -216,23 +297,33 @@ def _run_agent(
                         "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
                     )
                     result = f"Error calling tool '{call['name']}': {exc}"
-                    _emit(
-                        "tool_completed",
-                        {
-                            "tool": call["name"],
-                            "success": False,
-                            "duration_ms": int((time.monotonic() - start) * 1000),
-                            "summary": "Tool call failed",
-                        },
-                    )
+                    failure_data: Dict[str, Any] = {
+                        "tool": call["name"],
+                        "success": False,
+                        "duration_ms": int((time.monotonic() - start) * 1000),
+                        "summary": "Tool call failed",
+                    }
+                    if call["name"] in ("email_read", "email_draft_reply"):
+                        # Retain the bounded message id on failure too, same as a
+                        # successful call's redacted data -- otherwise a failed
+                        # email_read/email_draft_reply can't be correlated back to
+                        # its UID downstream (automation_results.py's per-UID
+                        # needs_attention enforcement, Codex review finding).
+                        failure_data["message_id"] = _bounded_message_id(call["args"])
+                    _emit("tool_completed", failure_data)
                 else:
+                    extra_data = (
+                        _redacted_email_tool_data(call["name"], call["args"], result)
+                        if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION
+                        else {"summary": _summarize(result)}
+                    )
                     _emit(
                         "tool_completed",
                         {
                             "tool": call["name"],
                             "success": True,
                             "duration_ms": int((time.monotonic() - start) * 1000),
-                            "summary": _summarize(result),
+                            **extra_data,
                         },
                     )
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))

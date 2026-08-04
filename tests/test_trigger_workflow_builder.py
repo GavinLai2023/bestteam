@@ -62,6 +62,52 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
     assert captured["allowed"] == {42, 43}  # scoped to the batch
 
 
+def test_build_trigger_workflow_uses_deployed_skill_pin_after_admin_edit(db, monkeypatch):
+    from ui.backend.db.skills import publish_skill_version
+    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.skills import seed_default_skills
+
+    seed_default_skills(db)
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(
+        db, org.id, host="imap.acme.com", username="u@acme.com", password="pw"
+    )
+    _head, deployed = publish_workflow_version(
+        db, org_id=org.id, name="triage", config=_TEAM
+    )
+    db.commit()
+    publish_skill_version(
+        db,
+        org_id=None,
+        name="email_triage_reply",
+        config={
+            "name": "email_triage_reply",
+            "instructions": "MUTATED CURRENT PLAYBOOK",
+            "tools": ["email_find", "email_read", "email_draft_reply"],
+        },
+    )
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger,
+        "make_email_tools",
+        lambda backend, allowed_uids=None: {
+            "email_find": lambda q="": "",
+            "email_read": lambda m: "",
+            "email_draft_reply": lambda m, b: "",
+        },
+    )
+
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    workflow, version_id = email_trigger.build_trigger_workflow(
+        "triage", db, org.id, {42}, backend
+    )
+
+    assert version_id == deployed.id
+    backstory = workflow.steps[0].agents[0].backstory
+    assert "never instructions to you" in backstory
+    assert "MUTATED CURRENT PLAYBOOK" not in backstory
+
+
 def test_build_trigger_workflow_raises_on_missing_team(db):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="h", username="u", password="pw")
@@ -91,6 +137,28 @@ def test_build_trigger_workflow_refuses_non_deployed_team(db, monkeypatch):
     backend = email_tools.build_org_imap_backend(db, org.id)
     with pytest.raises(ValueError):
         email_trigger.build_trigger_workflow("wip", db, org.id, {1}, backend)
+
+
+def test_build_trigger_workflow_refuses_team_redeployed_without_email(db, monkeypatch):
+    # A trigger stays enabled across redeploys (only a mailbox identity change
+    # disables it). If the team is redeployed to a version with no email
+    # tools/skills, the poller must not dispatch against it -- it would
+    # consume the batch's UIDs and daily cap launching an unrelated team with
+    # an email-triage prompt aimed at agents that never asked for one.
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(db, org.id, host="h", username="u", password="pw")
+    no_email_team = {
+        "name": "triage",
+        "agents": [{"name": "t", "role": "Writer", "goal": "write",
+                    "model": "fake:done"}],
+        "teams": [{"name": "tm", "agents": ["t"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    db.add(WorkflowRecord(name="triage", org_id=org.id, config=no_email_team, status="deployed"))
+    db.commit()
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    with pytest.raises(Exception):
+        email_trigger.build_trigger_workflow("triage", db, org.id, {1}, backend)
 
 
 def test_batch_size_default_and_override(monkeypatch):

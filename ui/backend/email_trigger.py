@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Tuple
@@ -35,9 +36,11 @@ from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store
+from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
-from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
+from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
+from .email_tools import spec_uses_email
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -57,6 +60,65 @@ _ERROR_KIND_WORKFLOW = "workflow"
 
 _UIDVALIDITY_RE = re.compile(rb"UIDVALIDITY (\d+)")
 _UIDNEXT_RE = re.compile(rb"UIDNEXT (\d+)")
+
+# Per-org dispatch lock: serializes the overlap-guard-check-through-dispatch
+# critical section of poll_org and retry_triggered_run against each other.
+# Both read `trigger.last_run_id`/the in-process registry, do real work (IMAP
+# round-trip, workflow build), and only then write last_run_id -- without a
+# lock spanning that whole section, two dispatches racing for the same org
+# (an automatic poll cycle and a manual retry, or two near-simultaneous
+# manual retries) could both observe "no active run" and both fire against
+# the same mailbox, risking duplicate drafts (Codex review finding). One org
+# never needs more than one dispatch decision in flight at a time, so this
+# does not affect throughput across different orgs.
+_dispatch_locks: dict[int, threading.Lock] = {}
+_dispatch_locks_guard = threading.Lock()
+
+
+def _dispatch_lock(org_id: int) -> threading.Lock:
+    with _dispatch_locks_guard:
+        lock = _dispatch_locks.get(org_id)
+        if lock is None:
+            lock = threading.Lock()
+            _dispatch_locks[org_id] = lock
+        return lock
+
+
+def _current_last_run_id(db: Session, trigger: EmailTrigger):
+    """A fresh read of `EmailTrigger.last_run_id`, bypassing whatever value
+    `trigger` already had cached from before this dispatch attempt acquired
+    `_dispatch_lock`. The lock alone only serializes code execution -- a
+    `trigger` ORM object fetched slightly earlier (e.g. poll_once's
+    `list_enabled_triggers` scan, or the trigger lookup earlier in
+    retry_triggered_run) keeps its already-loaded attribute values even after
+    another thread commits a newer one, so the overlap-guard check must
+    re-query this one column directly rather than trust `trigger.last_run_id`
+    (not `db.refresh(trigger)`, which would also discard this call's own
+    pending, not-yet-committed field changes like the daily-cap reset).
+    """
+    return db.execute(
+        select(EmailTrigger.last_run_id).where(EmailTrigger.id == trigger.id)
+    ).scalar_one()
+
+
+def _at_daily_cap(db: Session, trigger: EmailTrigger, today) -> bool:
+    """Fresh (uncached) re-check of the daily cap, taken right before dispatch
+    while holding `_dispatch_lock` -- same staleness rationale as
+    `_current_last_run_id`. The cap check further up (before the lock, before
+    the mailbox check/workflow build) is only a fast-path optimization to
+    skip unnecessary IMAP calls when obviously already at cap; without this
+    second check immediately before the atomic runs_today advance, two
+    dispatches that both read "under cap" before either committed its
+    increment could both proceed and push the count past the cap (Codex
+    review finding). `today` is the caller's already-computed `_today()`, so
+    a same-process date rollover is judged consistently with the earlier
+    check rather than re-derived here.
+    """
+    row = db.execute(
+        select(EmailTrigger.runs_today, EmailTrigger.runs_date).where(EmailTrigger.id == trigger.id)
+    ).one()
+    fresh_runs_today = 0 if row.runs_date != today else row.runs_today
+    return fresh_runs_today >= daily_cap()
 
 
 def _parse_status(data) -> Tuple[int, int]:
@@ -218,10 +280,20 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     )
     if record is None:
         raise ValueError(f"No deployed team named '{name}' for org {org_id}")
+    # A trigger stays enabled across redeploys -- only a mailbox identity
+    # change disables it (disable_trigger_on_identity_change). If the team
+    # was redeployed to a version with no email tools/skills, dispatching
+    # would consume this cycle's UIDs and daily cap launching an unrelated
+    # team with an email-triage prompt, so refuse the same way a missing
+    # team does (no build, no state advanced upstream).
+    if not spec_uses_email(db, record.config, org_id):
+        raise ValueError(f"Deployed team '{name}' for org {org_id} no longer uses email")
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
-    skills = load_skills(db, org_id)
+    skills = load_skills(
+        db, org_id, workflow_version_id=record.current_version_id
+    )
     config = contain_workflow_config_for_load(record.config)
     ensure_workflow_cache_paths_for_source(config, source)
     workflow = _build_workflow(
@@ -235,6 +307,71 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     # redeploy commits concurrently (a separate current_version_id re-query could
     # observe a newer version than the one built).
     return workflow, record.current_version_id
+
+
+# The platform skill whose system prompt commits a workflow's Response agent to
+# emitting automation_results.RESULT_TYPE_BATCH_MARKER's JSON envelope (see
+# skills.py / ui/backend/workflows/property_maintenance_inbox_demo.yaml). Used
+# only to stamp `trigger_context["result_contract"]` below -- advisory metadata,
+# never anything build_trigger_workflow's actual run depends on.
+_PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response_v1"
+
+
+def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_name: str) -> bool:
+    """Best-effort: does this deployed workflow's config give any agent the
+    ACTUAL platform `property_maintenance_response_v1` skill?
+
+    A run's own trace/output can't tell us this after the fact for a run that
+    crashed before producing any JSON (`_normalize` can then only see a plain
+    failure string, indistinguishable from any other org's unrelated
+    email-trigger workflow output) -- so this is captured up front, from the
+    workflow config itself, and stamped into `trigger_context` at dispatch
+    time (below). That lets `automation_results._normalize` still synthesize
+    the spec-required per-UID error rows for an envelope-less *maintenance-
+    inbox* run, without also doing so for a crashed *unrelated* org's
+    email-trigger workflow that never declared this skill (Codex review
+    finding). A read failure here must never block dispatch -- this is
+    advisory only.
+
+    A name match alone isn't enough: `load_skills` intentionally lets an
+    org's own skill shadow a same-named platform built-in, so an org that
+    happens to name (or repurpose) its own skill
+    `property_maintenance_response_v1` would otherwise get its unrelated
+    runs wrongly redacted and stamped with synthetic maintenance error rows
+    (Codex review finding). `_resolves_to_platform_skill` re-applies
+    `load_skills`' own shadowing precedence to confirm the name still
+    resolves to the platform-tier row.
+    """
+    try:
+        record = (
+            db.query(WorkflowRecord)
+            .filter_by(name=workflow_name, org_id=org_id, status="deployed")
+            .one_or_none()
+        )
+        if record is None:
+            return False
+        agents = (record.config or {}).get("agents") or []
+        declares_by_name = any(
+            _PROPERTY_MAINTENANCE_RESPONSE_SKILL in (agent.get("skills") or [])
+            for agent in agents
+        )
+        return declares_by_name and _resolves_to_platform_skill(
+            db, org_id, _PROPERTY_MAINTENANCE_RESPONSE_SKILL
+        )
+    except Exception:  # noqa: BLE001 -- advisory only, must never block dispatch
+        return False
+
+
+def _resolves_to_platform_skill(db: Session, org_id: int, skill_name: str) -> bool:
+    """True iff `skill_name`, resolved for `org_id` with the same
+    org-shadows-platform precedence `load_skills` uses, is actually the
+    platform-tier (`org_id IS NULL`) skill -- not an org skill of the same
+    name."""
+    org_record = db.query(SkillRecord).filter_by(name=skill_name, org_id=org_id).one_or_none()
+    if org_record is not None:
+        return False
+    platform_record = db.query(SkillRecord).filter_by(name=skill_name, org_id=None).one_or_none()
+    return platform_record is not None
 
 
 def _utcnow() -> datetime:
@@ -279,71 +416,83 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
     # registry (e.g. after a hard restart left its DB row stuck "running")
     # cannot actually be executing -- a DB-status check would wedge the
     # trigger forever in that case.
-    if trigger.last_run_id:
-        prev = registry.get(trigger.last_run_id)
-        if prev is not None and prev.status == "running":
+    #
+    # Held for this whole section, through the eventual _start_triggered_run
+    # dispatch below: the guard's check-then-act isn't atomic on its own, so
+    # without a lock spanning both the check and the dispatch, this poll cycle
+    # could race a concurrent retry_triggered_run call for the same org and
+    # both observe "no active run" (Codex review finding; see _dispatch_lock).
+    with _dispatch_lock(trigger.org_id):
+        last_run_id = _current_last_run_id(db, trigger)
+        if last_run_id:
+            prev = registry.get(last_run_id)
+            if prev is not None and prev.status == "running":
+                db.commit()
+                return
+
+        try:
+            cred = get_email_credentials(db, trigger.org_id)
+            if cred is None:
+                raise ConfigurationError(
+                    "No mailbox is connected -- reconnect it to resume automatic runs."
+                )
+            password = secret_store.decrypt(cred.password_encrypted)
+            backend = _ImapBackend(
+                host=cred.host,
+                user=cred.username,
+                password=password,
+                port=cred.port,
+                drafts=cred.drafts_folder,
+                restrict_to_public=True,  # customer-supplied host
+            )
+            uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
+        except (InvalidToken, secret_store.SecretsKeyError) as exc:
+            _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
+                            trigger.org_id, exc)
+            trigger.last_error = (
+                "The mailbox connection can't be read right now -- reconnect it to "
+                "resume automatic runs."
+            )
+            trigger.last_error_kind = _ERROR_KIND_MAILBOX
+            trigger.last_checked_at = _utcnow()
+            db.commit()
+            return
+        except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
+            _logger.warning("email trigger: poll failed for org %s: %s", trigger.org_id, exc)
+            trigger.last_error = _friendly_poll_error(exc)
+            trigger.last_error_kind = _ERROR_KIND_MAILBOX
+            trigger.last_checked_at = _utcnow()
             db.commit()
             return
 
-    try:
-        cred = get_email_credentials(db, trigger.org_id)
-        if cred is None:
-            raise ConfigurationError(
-                "No mailbox is connected -- reconnect it to resume automatic runs."
-            )
-        password = secret_store.decrypt(cred.password_encrypted)
-        backend = _ImapBackend(
-            host=cred.host,
-            user=cred.username,
-            password=password,
-            port=cred.port,
-            drafts=cred.drafts_folder,
-            restrict_to_public=True,  # customer-supplied host
-        )
-        uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
-    except (InvalidToken, secret_store.SecretsKeyError) as exc:
-        _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
-                        trigger.org_id, exc)
-        trigger.last_error = (
-            "The mailbox connection can't be read right now -- reconnect it to "
-            "resume automatic runs."
-        )
-        trigger.last_error_kind = _ERROR_KIND_MAILBOX
         trigger.last_checked_at = _utcnow()
-        db.commit()
-        return
-    except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
-        _logger.warning("email trigger: poll failed for org %s: %s", trigger.org_id, exc)
-        trigger.last_error = _friendly_poll_error(exc)
-        trigger.last_error_kind = _ERROR_KIND_MAILBOX
-        trigger.last_checked_at = _utcnow()
-        db.commit()
-        return
+        # A successful mailbox check is direct proof connectivity/credentials are
+        # fine, so a *mailbox*-kind error can auto-clear here. A *workflow*-kind
+        # error (or a legacy/unknown-kind row) must persist across empty polls
+        # (F5) -- an empty poll never rebuilds the workflow, so it proves nothing
+        # about whether the team still builds. Cleared only on a successful
+        # dispatch (below) or on (re-)enable (the API).
+        if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
+            trigger.last_error = None
+            trigger.last_error_kind = None
 
-    trigger.last_checked_at = _utcnow()
-    # A successful mailbox check is direct proof connectivity/credentials are
-    # fine, so a *mailbox*-kind error can auto-clear here. A *workflow*-kind
-    # error (or a legacy/unknown-kind row) must persist across empty polls
-    # (F5) -- an empty poll never rebuilds the workflow, so it proves nothing
-    # about whether the team still builds. Cleared only on a successful
-    # dispatch (below) or on (re-)enable (the API).
-    if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
-        trigger.last_error = None
-        trigger.last_error_kind = None
+        # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
+        # re-baseline to now, never reprocess.
+        if trigger.uidvalidity is None or trigger.uidvalidity != uidvalidity:
+            trigger.uidvalidity = uidvalidity
+            trigger.last_uid = max_uid
+            db.commit()
+            return
 
-    # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
-    # re-baseline to now, never reprocess.
-    if trigger.uidvalidity is None or trigger.uidvalidity != uidvalidity:
-        trigger.uidvalidity = uidvalidity
-        trigger.last_uid = max_uid
-        db.commit()
-        return
+        if not new_uids:
+            db.commit()
+            return
 
-    if not new_uids:
-        db.commit()
-        return
+        if _at_daily_cap(db, trigger, today):
+            db.commit()  # persist last_checked_at / error-clearing above; no dispatch
+            return
 
-    _start_triggered_run(db, trigger, new_uids, get_workflow, backend)
+        _start_triggered_run(db, trigger, new_uids, get_workflow, backend, cred)
 
 
 def _trigger_input(uids) -> str:
@@ -354,7 +503,9 @@ def _trigger_input(uids) -> str:
     )
 
 
-def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend) -> None:
+def _start_triggered_run(
+    db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend, cred
+) -> None:
     """Start ONE run over a bounded batch of the detected UIDs.
 
     Build the workflow FIRST (a build failure must consume no message and no
@@ -363,9 +514,32 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     allowed_uids, backend) -> (Workflow, Optional[int] version_id)`; the version
     is captured from the same record read that built the config so the run
     records exactly the version it executes.
+
+    `cred` (the org's `OrgEmailCredential` row) is stamped into the run's
+    `trigger_context` (below) so a later server-side result normalization or
+    manual retry can reconstruct exactly which mailbox/UIDVALIDITY/UID batch
+    this run covers, without trusting anything the model itself claims to
+    have processed -- see `automation_results.py` and `docs/superpowers/specs/
+    2026-08-02-property-maintenance-inbox-phase-1-development-plan.md` section 11.1.
+    `mailbox_host`/`mailbox_username` (not just the row id) are stamped too:
+    `set_email_credentials` upserts one row per org, so the row id never
+    changes even when the customer replaces the mailbox entirely -- host/
+    username are what `retry_triggered_run` actually needs to detect that.
     """
     batch = sorted(new_uids)[:batch_size()]
     input_text = _trigger_input(batch)
+    trigger_context = {
+        "trigger_type": "email",
+        "mailbox_credential_id": cred.id,
+        "mailbox_host": cred.host,
+        "mailbox_username": cred.username,
+        "uidvalidity": trigger.uidvalidity,
+        "uids": batch,
+        "folder": "INBOX",
+        "triggered_at": _utcnow().isoformat(),
+    }
+    if _declares_property_maintenance_contract(db, trigger.org_id, trigger.workflow_name):
+        trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
     try:
         workflow, version_id = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
@@ -387,7 +561,7 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
     run_row = Run(
         id=run.id, workflow=trigger.workflow_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
-        workflow_version_id=version_id,
+        workflow_version_id=version_id, trigger_context=trigger_context,
     )
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
@@ -449,14 +623,271 @@ def _start_triggered_run(db: Session, trigger: EmailTrigger, new_uids, get_workf
             "Couldn't start the automatic run. It won't be retried, but "
             "automatic runs will resume when new mail arrives."
         )
-        registry.publish(run.id, dataclasses.asdict(
-            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
-        ))
         run_row.status = "failed"
         run_row.output = message
         trigger.last_error = message
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
         db.commit()
+        # The worker never started, so run_in_background's own normalization
+        # never runs either -- without this, a declared property-maintenance
+        # batch would be marked failed with no automation_item_results rows
+        # at all and silently vanish from Needs-attention (Codex review
+        # finding). Normalize BEFORE publishing run_failed -- a live Run
+        # Detail view can react to the terminal event immediately and would
+        # otherwise fetch zero automation rows before this commits them,
+        # with no later terminal transition to prompt a re-fetch (Codex
+        # review finding).
+        normalize_run_result(db, run_row)
+        registry.publish(run.id, dataclasses.asdict(
+            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
+        ))
+
+
+class RetryError(Exception):
+    """A customer-facing reason a triggered run can't be retried right now.
+    `main.py`'s `POST /api/runs/{id}/retry` maps this to a 400/409."""
+
+
+def retry_triggered_run(db: Session, run_row: Run) -> str:
+    """Rebuild and dispatch a NEW run over the exact UID batch `run_row`
+    originally covered (spec section 11.2). Never mutates `run_row` itself --
+    history stays immutable; the new run records `retry_of_run_id`.
+
+    Revalidates before dispatch: the original run must have actually failed
+    (a `completed` run may already have real mailbox side effects -- e.g.
+    drafts saved -- so it is never eligible, only ever `failed`), the current
+    mailbox must still be the same one (host/username, not just its
+    UIDVALIDITY -- a replaced mailbox that coincidentally shares a UIDVALIDITY
+    value would otherwise pass), the mailbox credential must still work, the
+    workflow must still build, and the org's daily automatic-run cap must not
+    already be hit. Raises `RetryError` with a customer-facing message for any
+    ineligibility; returns the new run id on successful dispatch.
+    """
+    trigger_context = run_row.trigger_context
+    if not trigger_context or trigger_context.get("trigger_type") != "email":
+        raise RetryError("This run has no recorded email batch to retry.")
+    if run_row.status == "running":
+        raise RetryError("This run is still in progress.")
+    if run_row.status != "failed":
+        # Anything other than a failed run (completed, cancelled, ...) may
+        # already have real mailbox side effects for this batch -- retrying it
+        # risks duplicate drafts. Only a failed run is safe to redo.
+        raise RetryError("Only a failed run can be retried.")
+    # Fast-path only, both checks below: skip the mailbox connectivity check
+    # and workflow rebuild entirely for the common case of an obviously
+    # ineligible retry. Neither is the authoritative gate -- both are
+    # re-checked fresh, while holding the per-org dispatch lock, immediately
+    # before the actual dispatch further down (Codex review finding: a
+    # concurrent second retry racing this one could otherwise pass both
+    # checks here on data that predates the first retry's own
+    # dispatch/normalization).
+    if (
+        db.query(Run)
+        .filter(Run.retry_of_run_id == run_row.id, Run.status == "running")
+        .first()
+        is not None
+    ):
+        raise RetryError("A retry of this run is already in progress.")
+
+    # A failed run can still have drafted replies for some UIDs before a
+    # later message or tool failure ended it -- email_draft_reply has no
+    # dedup, so blindly resubmitting the whole original batch would create a
+    # second draft for each of those. Exclude anything the original run's own
+    # normalized results already confirm a draft for.
+    already_drafted = already_drafted_uids(db, run_row)
+    retry_uids = [u for u in (trigger_context.get("uids") or []) if str(u) not in already_drafted]
+    if not retry_uids:
+        raise RetryError("Every message in this batch already has a confirmed draft -- nothing left to retry.")
+
+    org_id = run_row.org_id
+    cred = get_email_credentials(db, org_id)
+    if cred is None:
+        raise RetryError("Connect a mailbox before retrying.")
+    if (
+        cred.host != trigger_context.get("mailbox_host")
+        or cred.username != trigger_context.get("mailbox_username")
+    ):
+        raise RetryError(
+            "The connected mailbox has changed since this run -- this batch can no longer be safely retried."
+        )
+    try:
+        password = secret_store.decrypt(cred.password_encrypted)
+        backend = _ImapBackend(
+            host=cred.host, user=cred.username, password=password,
+            port=cred.port, drafts=cred.drafts_folder, restrict_to_public=True,
+        )
+        uidvalidity, _max_uid = mailbox_state(backend)
+    except (InvalidToken, secret_store.SecretsKeyError) as exc:
+        raise RetryError("The mailbox connection can't be read right now -- reconnect it and try again.") from exc
+    except Exception as exc:  # noqa: BLE001 -- always a friendly message outward
+        raise RetryError("Couldn't reach the mailbox to verify it before retrying.") from exc
+
+    if uidvalidity != trigger_context.get("uidvalidity"):
+        raise RetryError(
+            "The mailbox has changed since this run (its UIDVALIDITY no longer matches) "
+            "-- this batch can no longer be safely retried."
+        )
+
+    trigger = get_email_trigger(db, org_id)
+    if trigger is None:
+        raise RetryError("No automatic-run configuration exists for this team anymore.")
+    today = _today()
+    if trigger.runs_date != today:
+        trigger.runs_today = 0
+        trigger.runs_date = today
+    if trigger.runs_today >= daily_cap():
+        db.commit()
+        raise RetryError("Today's automatic-run limit has been reached -- try again tomorrow.")
+
+    # Same overlap guard poll_org enforces -- held for this whole section,
+    # through the eventual dispatch below, via the same per-org lock poll_org
+    # uses: the check-then-act here isn't atomic on its own, so without a lock
+    # spanning both the check and the last_run_id write, this retry could race
+    # a concurrent poll cycle (or another concurrent retry) for the same org
+    # and both observe "no active run", both dispatch, and both create
+    # mailbox drafts while only one is represented by the guard afterward
+    # (Codex review finding; see _dispatch_lock).
+    with _dispatch_lock(org_id):
+        last_run_id = _current_last_run_id(db, trigger)
+        if last_run_id:
+            prev = registry.get(last_run_id)
+            if prev is not None and prev.status == "running":
+                db.commit()
+                raise RetryError(
+                    "A run against this mailbox is already in progress -- try again once it finishes."
+                )
+
+        if _at_daily_cap(db, trigger, today):
+            # The check further up is only a fast-path (skip mailbox/workflow
+            # work when obviously already at cap); this fresh re-check, taken
+            # while holding the lock right before dispatch, is what actually
+            # closes the race -- two dispatches for this org that both read
+            # "under cap" before either committed its increment could
+            # otherwise both pass and push the count past the cap (Codex
+            # review finding).
+            db.commit()
+            raise RetryError("Today's automatic-run limit has been reached -- try again tomorrow.")
+
+        # Re-check "retry already running" and already-drafted freshly, now
+        # that this call holds the per-org dispatch lock -- the equivalent
+        # checks further up (before mailbox I/O) are only a fast-path and can
+        # be stale by the time execution reaches here: a second concurrent
+        # retry of the SAME run could pass both on data that predates the
+        # first retry's dispatch/normalization, and since email_draft_reply
+        # has no dedup, both would then create a duplicate draft (Codex
+        # review finding).
+        if (
+            db.query(Run)
+            .filter(Run.retry_of_run_id == run_row.id, Run.status == "running")
+            .first()
+            is not None
+        ):
+            db.commit()
+            raise RetryError("A retry of this run is already in progress.")
+
+        already_drafted = already_drafted_uids(db, run_row)
+        retry_uids = [u for u in (trigger_context.get("uids") or []) if str(u) not in already_drafted]
+        if not retry_uids:
+            db.commit()
+            raise RetryError("Every message in this batch already has a confirmed draft -- nothing left to retry.")
+        input_text = _trigger_input(retry_uids)
+
+        try:
+            workflow, version_id = build_trigger_workflow(run_row.workflow, db, org_id, set(retry_uids), backend)
+        except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since the original run
+            raise RetryError(
+                f"Couldn't rebuild the team '{run_row.workflow}' -- it may have been changed or removed."
+            ) from exc
+
+        new_run = registry.create(run_row.workflow, input_text, org_id=org_id, username=TRIGGER_USERNAME)
+        # Narrowed to retry_uids (not the original full batch): a UID already
+        # confirmed drafted is excluded from what this new run is even allowed to
+        # touch (build_trigger_workflow's allowed_uids above), and its
+        # trigger_context must agree, or normalize_run_result would treat that
+        # already-handled UID as "missing" from this run's envelope and wrongly
+        # synthesize a needs_attention error row for it under the new run id.
+        new_trigger_context = {**trigger_context, "uids": retry_uids, "triggered_at": _utcnow().isoformat()}
+        # Recompute, don't just carry over: the original run's result_contract
+        # can be stale by the time it's retried if the deployed workflow (or a
+        # same-named skill) changed in between -- carrying it over verbatim
+        # would either leave a now-maintenance workflow's output unredacted or
+        # wrongly redact/normalize a workflow that no longer declares the
+        # contract (Codex review finding).
+        if _declares_property_maintenance_contract(db, org_id, run_row.workflow):
+            new_trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
+        else:
+            new_trigger_context.pop("result_contract", None)
+        new_row = Run(
+            id=new_run.id, workflow=run_row.workflow, input=input_text,
+            status="running", org_id=org_id, username=TRIGGER_USERNAME,
+            workflow_version_id=version_id, trigger_context=new_trigger_context,
+            retry_of_run_id=run_row.id,
+        )
+        db.add(new_row)
+        # Atomic SQL-level advance (mirrors _start_triggered_run's CAS), not a
+        # Python-level `trigger.runs_today += 1` -- the latter reads whatever
+        # value this call's own `trigger` object was loaded with (before the
+        # lock) and would silently lose a concurrent dispatch's increment for
+        # the same org instead of just racing the cap check. Also requires
+        # the trigger to still be enabled and the org still active, same as
+        # _start_triggered_run's own CAS -- without this guard, a customer
+        # disconnecting/replacing the mailbox (or an operator deactivating
+        # the org) during this call's own pre-lock credential/mailbox check
+        # would go undetected, and this retry would dispatch a real
+        # email_draft_reply against a mailbox the customer already
+        # disconnected (Codex review finding).
+        advanced = db.execute(
+            update(EmailTrigger)
+            .where(
+                EmailTrigger.id == trigger.id,
+                EmailTrigger.enabled.is_(True),
+                EmailTrigger.org_id.in_(select(Organization.id).where(Organization.active.is_(True))),
+            )
+            .values(
+                runs_today=EmailTrigger.runs_today + 1,
+                # Register with the same overlap guard poll_org checks
+                # (trigger.last_run_id) -- otherwise an automatic poll cycle
+                # running concurrently with this retry has no way to know a
+                # run against this mailbox is already in flight.
+                last_run_id=new_run.id,
+                # A run is going out: clear any prior fault, same as
+                # _start_triggered_run's atomic advance -- otherwise a sticky
+                # workflow-kind error from a past failure keeps reporting a
+                # failure indefinitely despite this successful dispatch
+                # (Codex review finding).
+                last_error=None,
+                last_error_kind=None,
+            )
+        ).rowcount
+        if not advanced:
+            registry.discard(new_run.id)
+            db.rollback()
+            raise RetryError(
+                "Automatic runs were turned off for this mailbox while the retry was being "
+                "prepared -- reconnect it and try again."
+            )
+        db.commit()
+        try:
+            _executor.submit(
+                run_in_background, new_run.id, workflow, input_text,
+                engine=db.get_bind(), org_id=org_id, username=TRIGGER_USERNAME,
+            )
+        except Exception:  # noqa: BLE001 -- submission itself must never raise out of this call
+            _logger.exception("email trigger retry: failed to dispatch run %s for org %s", new_run.id, org_id)
+            message = "Couldn't start the retry. Try again."
+            new_row.status = "failed"
+            new_row.output = message
+            db.commit()
+            # Same rationale as _start_triggered_run's analogous branch: the
+            # worker never started, so run_in_background never normalizes
+            # this run either (Codex review finding). Normalize before
+            # publishing run_failed, same ordering fix as that branch (Codex
+            # review finding).
+            normalize_run_result(db, new_row)
+            registry.publish(new_run.id, dataclasses.asdict(
+                TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
+            ))
+        return new_run.id
 
 
 def poll_once(get_workflow: Callable, session_factory=None) -> None:

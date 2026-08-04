@@ -12,6 +12,9 @@ vi.mock('../lib/api', () => ({
     emailTriggerActivity: vi.fn(),
     createWsTicket: vi.fn(),
     getRunTrace: vi.fn(),
+    automationResultsSummary: vi.fn(),
+    listAutomationResults: vi.fn(),
+    retryRun: vi.fn(),
   },
 }))
 
@@ -28,6 +31,11 @@ describe('ActivityPage', () => {
     api.listWorkflows.mockResolvedValue({ workflows: ['wf-a', 'wf-b'] })
     api.getEmailTrigger.mockResolvedValue({ enabled: false })
     api.emailTriggerActivity.mockResolvedValue({ runs: [] })
+    api.automationResultsSummary.mockResolvedValue({
+      emails_read: 0, maintenance_related: 0, drafts_created: 0,
+      needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
+    })
+    api.listAutomationResults.mockResolvedValue({ results: [] })
   })
 
   it('defaults to the Automations tab', async () => {
@@ -174,6 +182,73 @@ describe('ActivityPage', () => {
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
     expect(api.listRuns).toHaveBeenCalledWith({ manual: false })
+  })
+
+  it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {
+    api.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'run-42', status: 'needs_attention', needs_attention: true,
+        created_at: '2026-08-02T10:00:00Z',
+        payload: {
+          priority: 'possible_emergency', summary: 'Active leak.',
+          extracted: { property_address: '12 Example St' },
+          human_reason: null, action: { draft_created: false },
+        },
+      }],
+    })
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.listRuns.mockResolvedValue({ runs: [] })
+    Element.prototype.scrollIntoView = vi.fn()
+
+    renderPage()
+    const viewRunButton = await screen.findByText('View run')
+
+    await act(async () => {
+      fireEvent.click(viewRunButton)
+    })
+
+    expect(await screen.findByText('Runs')).toHaveClass('active')
+    expect(screen.getByText('Run run-42')).toBeInTheDocument()
+  })
+
+  it('opens a needs-attention item at its real, persisted status -- not an assumed "completed" -- so Retry renders for a run that actually failed', async () => {
+    // A dispatch failure still synthesizes needs_attention error rows for its
+    // UIDs (see ui/backend/CLAUDE.md), so a needs-attention item's run is not
+    // guaranteed to be `completed`. Hardcoding that status used to
+    // permanently hide the Retry button for exactly this case (Codex review
+    // finding).
+    api.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'run-42', status: 'error', needs_attention: true,
+        created_at: '2026-08-02T10:00:00Z',
+        payload: {
+          priority: 'possible_emergency', summary: 'Dispatch failed.',
+          extracted: { property_address: '12 Example St' },
+          human_reason: null, action: { draft_created: false },
+        },
+      }],
+    })
+    api.getRunTrace.mockResolvedValue({ events: [] })
+    api.listRuns.mockImplementation((filters) =>
+      Promise.resolve({
+        runs:
+          filters?.run_id === 'run-42'
+            ? [{ id: 'run-42', workflow: 'wf-a', status: 'failed', started_at: '2026-08-02T10:00:00Z', autonomous: true }]
+            : [],
+      }),
+    )
+    Element.prototype.scrollIntoView = vi.fn()
+
+    renderPage()
+    const viewRunButton = await screen.findByText('View run')
+
+    await act(async () => {
+      fireEvent.click(viewRunButton)
+    })
+
+    expect(await screen.findByText('Run run-42')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(api.listRuns).toHaveBeenCalledWith({ run_id: 'run-42', limit: 1 })
   })
 
   it('scrolls the run detail panel into view when a run is selected', async () => {

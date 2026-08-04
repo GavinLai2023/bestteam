@@ -148,6 +148,42 @@ def test_get_run_trace_unknown_run_is_404(client):
     assert resp.status_code == 404
 
 
+def test_list_runs_by_run_id_cross_org_is_404(client):
+    """An explicit run_id lookup on GET /api/runs is a targeted probe, not a
+    passive filter -- a run belonging to another org must 404 like
+    GET /api/runs/{id}, not silently return an empty `runs` list (Codex
+    review finding: that would let a caller distinguish "not yours" from
+    "doesn't exist" by diffing it against a real 404 elsewhere)."""
+    with open_test_db() as db:
+        db.add(Run(id="other-org-run", workflow="w", input="in", status="completed", org_id=999999))
+        db.commit()
+
+    resp = client.get("/api/runs", params={"run_id": "other-org-run"})
+
+    assert resp.status_code == 404
+
+
+def test_list_runs_by_run_id_unknown_is_404(client):
+    resp = client.get("/api/runs", params={"run_id": "does-not-exist"})
+
+    assert resp.status_code == 404
+
+
+def test_list_runs_by_run_id_returns_that_run_for_its_own_org(client):
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(Run(id="r-2", workflow="wf-b", input="in", status="failed", org_id=org_id, username="test"))
+        db.commit()
+
+    resp = client.get("/api/runs", params={"run_id": "r-1"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert [r["id"] for r in body["runs"]] == ["r-1"]
+
+
 def test_list_runs_started_at_is_utc_qualified(client):
     org_id = get_org_id()
     with open_test_db() as db:

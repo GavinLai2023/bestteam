@@ -77,6 +77,7 @@ export default function AdvancedPage() {
     kind.orgScope === 'optional' && org === PLATFORM_TIER
       ? items.filter((it) => it.org == null)
       : items
+  const selectedItem = visibleItems.find((it) => itemId(kind, it) === selectedId)
 
   useEffect(() => {
     activeKeyRef.current = activeKey
@@ -273,6 +274,9 @@ export default function AdvancedPage() {
                     <button className={id === selectedId ? 'active' : ''} onClick={() => select(id)}>
                       {id}
                       {item.status && <span className="status-badge">{item.status}</span>}
+                      {activeKey === 'skills' && item.version != null && (
+                        <span className="status-badge">v{item.version}</span>
+                      )}
                     </button>
                   </li>
                 )
@@ -332,7 +336,15 @@ export default function AdvancedPage() {
             </>
           ) : (
             <>
-              <h2>{selectedId}</h2>
+              <h2>
+                {selectedId}
+                {activeKey === 'skills' && selectedItem?.version != null && ` · v${selectedItem.version}`}
+              </h2>
+              {activeKey === 'skills' && (
+                <p className="hint">
+                  Saving appends a version. Deployed teams keep their pinned version until you redeploy them.
+                </p>
+              )}
               {error && <p className="banner banner-error">{error}</p>}
               {message && <p className="banner banner-success">{message}</p>}
               <textarea rows={18} value={jsonText} onChange={(e) => setJsonText(e.target.value)} spellCheck={false} />

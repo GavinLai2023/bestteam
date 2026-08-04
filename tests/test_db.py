@@ -39,6 +39,7 @@ def test_init_db_creates_all_tables():
         "users",
         "knowledge_bases",
         "skills",
+        "skill_versions",
         "workflows",
         "workflow_versions",
         "workflow_dependencies",
@@ -49,6 +50,7 @@ def test_init_db_creates_all_tables():
         "trace_events",
         "usage_records",
         "org_email_credentials",
+        "automation_item_results",
     }
 
 

@@ -27,16 +27,50 @@ customer nav is Build a team / My teams / Run a team / Activity):
   silently no-op or target the previous run. Live events render via the
   shared `lib/traceEvents.js` helpers (`EVENT_LABELS`/`RESULT_LABELS`/
   `TERMINAL_TYPES`/`renderEventData`), also used by `components/RunDetail.jsx`.
-- **`/activity`** — `pages/ActivityPage.jsx`: an Automations tab (unchanged,
-  `components/EmailTriggerActivity.jsx`) and a Runs tab (`GET /api/runs`,
-  filterable by team/manual-or-automatic/status; polls every 5s while a
-  listed row is still `running`, guarded against a stale poll response
-  clobbering a since-changed filter's results). Clicking a run opens
+- **`/activity`** — `pages/ActivityPage.jsx`: an Automations tab
+  (`components/EmailTriggerActivity.jsx`, plus — for the Property Maintenance
+  Inbox vertical template, see `ui/backend/CLAUDE.md` — `components/
+  MaintenanceInboxSummary.jsx` fetching `GET /api/automation-results/summary`
+  and `components/NeedsAttentionList.jsx` fetching `GET /api/automation-results
+  ?needs_attention=true`; both render nothing for an org that isn't using this
+  template, both refresh on the same 30s cadence while the tab is open (rather
+  than only on mount), and `NeedsAttentionList`'s "View run" jumps to the Runs
+  tab and opens that run's detail -- `ActivityPage`'s `onOpenRun` looks up the
+  run's real, persisted status via `GET /api/runs?run_id=` (org-scoped, DB-backed,
+  unlike `GET /api/runs/{id}`'s in-memory-registry-only route) before opening it,
+  falling back to `completed` only if that lookup itself fails; a needs-attention
+  item's run is not guaranteed to have completed -- a dispatch failure still
+  synthesizes needs_attention error rows for its UIDs -- so hardcoding `completed`
+  used to permanently hide the Retry button for one that actually failed (Codex
+  review finding)) and a Runs tab (`GET /api/runs`, filterable by
+  team/manual-or-automatic/status; polls every 5s while a listed row is still
+  `running`, guarded against a stale poll response clobbering a
+  since-changed filter's results). Clicking a run opens
   `components/RunDetail.jsx` in a panel: a `running` run streams live over
   the same WebSocket `MonitorPage` uses, anything else fetches
-  `GET /api/runs/{id}/trace` once (no live/historical merge). See
-  `ui/backend/CLAUDE.md` ("Granular trace events, cancellation, and run
-  history").
+  `GET /api/runs/{id}/trace` once (no live/historical merge); `RunDetail`
+  also fetches that run's `GET /api/automation-results?run_id=` (renders
+  nothing for a run with none, and refetches when a live run's terminal event
+  arrives, since `normalize_run_result` only writes results after the run
+  finishes -- and now always writes/publishes in that order server-side,
+  closing a previous race where the refetch could arrive before the rows
+  existed; results include `classification`/`category`/`missing_information`/
+  `risk_reasons`, not just status/priority/summary/address/reason/draft) and,
+  for a `failed` run OR one whose live event stream just emitted `run_failed`
+  (the `status` prop alone is set once at click time by `ActivityPage` and
+  never updates while the panel stays open, so a run that fails mid-view
+  needs this second signal or Retry wouldn't appear until the panel is
+  closed and reopened) **and** is autonomous (`autonomous` prop, threaded
+  from `GET /api/runs`' own `autonomous` flag through `ActivityPage`'s
+  `selectedRun` -- a manual run has no `trigger_context` and always 400s from
+  `POST /api/runs/{id}/retry`, so Retry must not even render for one), shows
+  a Retry button that calls the `onRetried(newRunId)` prop on success --
+  `ActivityPage.jsx` wires this to select the newly created run (always
+  itself autonomous) with the same `setTab('runs')`/`setSelectedRun()`
+  pattern `NeedsAttentionList`'s "View run" uses (which also always passes
+  `autonomous: true`, since every automation result belongs to an autonomous
+  run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
+  cancellation, and run history", "Property Maintenance Inbox").
 - **`/advanced`** — `pages/AdvancedPage.jsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.
@@ -46,6 +80,8 @@ customer nav is Build a team / My teams / Run a team / Activity):
   platform built-in tier), `none` (org-less). **A workflow is what the wizard
   and customer UI call an "AI team"**; this page uses the technical noun
   because it matches the JSON keys the operator is editing.
+  Skill rows show their current immutable version; saving appends a version,
+  while already-deployed teams keep their pinned version until redeployed.
 - **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
   — the six-stage Team Builder wizard, `components/WizardLayout.jsx` as the
   shared chrome:

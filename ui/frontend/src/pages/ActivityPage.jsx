@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
+import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
+import NeedsAttentionList from '../components/NeedsAttentionList'
 import RunDetail from '../components/RunDetail'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -110,12 +112,35 @@ export default function ActivityPage() {
       </div>
 
       {tab === 'automations' && (
-        <EmailTriggerActivity
-          onViewRuns={() => {
-            setFilters((f) => ({ ...f, manual: 'false' }))
-            setTab('runs')
-          }}
-        />
+        <>
+          <MaintenanceInboxSummary />
+          <NeedsAttentionList
+            onOpenRun={(runId) => {
+              setTab('runs')
+              // Every automation result belongs to an autonomous email-triggered
+              // run by construction (automation_item_results only exist for
+              // those). But the run itself is NOT guaranteed to have completed --
+              // a dispatch failure still synthesizes needs_attention error rows
+              // for its UIDs (see ui/backend/CLAUDE.md) -- so `status` must come
+              // from the real, persisted row, not be assumed `completed`: that
+              // assumption used to permanently hide the Retry button for a
+              // needs-attention item that came from a genuinely failed run
+              // (Codex review finding). `autonomous` stays unconditionally true.
+              api
+                .listRuns({ run_id: runId, limit: 1 })
+                .then((d) => {
+                  setSelectedRun({ id: runId, status: d.runs[0]?.status ?? 'completed', autonomous: true })
+                })
+                .catch(() => setSelectedRun({ id: runId, status: 'completed', autonomous: true }))
+            }}
+          />
+          <EmailTriggerActivity
+            onViewRuns={() => {
+              setFilters((f) => ({ ...f, manual: 'false' }))
+              setTab('runs')
+            }}
+          />
+        </>
       )}
 
       {tab === 'runs' && (
@@ -168,7 +193,7 @@ export default function ActivityPage() {
                 <li key={run.id}>
                   <button
                     className="wizard-card session-card"
-                    onClick={() => setSelectedRun({ id: run.id, status: run.status })}
+                    onClick={() => setSelectedRun({ id: run.id, status: run.status, autonomous: run.autonomous })}
                   >
                     <h2>{run.workflow}</h2>
                     <div className="session-card-footer">
@@ -191,7 +216,14 @@ export default function ActivityPage() {
                   Close
                 </button>
               </div>
-              <RunDetail key={selectedRun.id} runId={selectedRun.id} status={selectedRun.status} />
+              <RunDetail
+                key={selectedRun.id}
+                runId={selectedRun.id}
+                status={selectedRun.status}
+                autonomous={selectedRun.autonomous}
+                // A retry always dispatches a new autonomous email-triggered run.
+                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
+              />
             </section>
           )}
         </>
