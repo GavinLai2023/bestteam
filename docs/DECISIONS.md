@@ -130,3 +130,49 @@ Append new entries at the bottom using this template:
   - Recall is single-stage BM25 (no rerank/expansion) and semantic/procedural
     records aren't auto-deduped — accepted trade-offs for the in-house MVP,
     tracked in `STATUS.md`.
+
+## Property Maintenance Inbox: no `Case`/work-item entity in Phase 1
+
+- **Status**: Accepted
+- **Context**: The first vertical solution template for a property
+  management pilot needed a way to answer "what did the AI do with today's
+  maintenance emails" without turning the platform into a property
+  management system. The natural-seeming design is a `MaintenanceCase` /
+  `WorkOrder` with a status lifecycle (new → in progress → resolved), an
+  owner, and a close action.
+- **Decision**: Release 1A introduces a generic, **immutable**
+  `automation_item_results` table (one row per input item per Run — `status`,
+  `needs_attention`, a capped/validated `payload`) instead of any
+  business-entity table. There is no state machine, no owner/assignment, no
+  close/reopen action, and no cross-run aggregation of "this tenant's
+  ongoing issue." A result row describes what one Run did to one input; it
+  never becomes true "case data" a human is expected to advance.
+- **Reasons**:
+  - A `Case`/`WorkOrder` immediately implies a lifecycle, ownership, SLAs,
+    and eventually leases/properties/vendors/invoices as first-class
+    entities — a property-management-system rewrite of this platform's
+    scope, not an incremental automation feature.
+  - The platform's job is to process one input well and hand the human a
+    clear, auditable "here's what happened" record; long-running business
+    state is the customer's existing PMS's job, not this platform's.
+  - `automation_item_results` is deliberately vertical-agnostic (`source_type`,
+    `result_type` columns) so the same infrastructure can back a future
+    consulting/quoting/invoice-inbox template without a new table.
+- **Consequences**:
+  - The Activity page's Needs-attention list has no Approve/Assign/Close
+    buttons by design — a customer reviews and sends drafts in their own
+    mailbox and continues business process in their existing PMS.
+  - Server-side normalization (`ui/backend/automation_results.py`) only
+    engages for a run whose output parses as JSON declaring itself this
+    vertical's envelope (`result_type ==
+    "property_maintenance_email_batch"`); every other org's existing,
+    unrelated email-trigger workflow (free-text output) is completely
+    unaffected. This is a narrower reading than a literal "always synthesize
+    an error result for every trigger run" — see the result module's own
+    docstring for the reasoning.
+  - If pilot data later shows customers genuinely lack a usable PMS and need
+    the platform to track state across days, that is a distinct, larger
+    product decision (Case/work-item entity) to be made on its own — not a
+    silent scope-creep of the email-automation feature. See
+    `docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`
+    section 5.

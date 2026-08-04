@@ -31,3 +31,6 @@ ui/frontend/dist/
 # Per-deployment SQLite database + builder session workspaces (ui/backend)
 ui/backend/data/
 *.db
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, reports)
+.superpowers/

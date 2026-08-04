@@ -124,6 +124,26 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   migration `c3f5a1b8e2d4`) records the exact immutable `workflow_versions`
   snapshot a production run executed (P1-03/P1-15); NULL for sandbox test-runs
   (they run the session spec, not a published version) and pre-migration rows.
+- `automation_item_results` (`AutomationItemResult`) — one immutable row per
+  input item per Run for a vertical solution template (Property Maintenance
+  Inbox is the first; Release 1A). Deliberately not a `Case`/work-item table
+  (`docs/DECISIONS.md`): no status transitions, no owner, no close action.
+  `org_id`/`run_id` FKs, `source_type` (fixed `"email"` today), a
+  server-generated `source_key` (never taken from a model's own output --
+  see `ui/backend/automation_results.py`), `result_type`, `status`
+  (`processed | needs_attention | skipped | error`), `needs_attention`, and a
+  length-capped/validated `payload` JSON that never holds a raw email body.
+  `UniqueConstraint(run_id, source_key)` makes writing the same item twice
+  (e.g. a duplicate completion callback) a no-op; indexed on
+  `(org_id, created_at)` and `(org_id, needs_attention, created_at)` for the
+  Activity page's summary/Needs-attention queries. `runs.trigger_context`
+  (JSON, nullable) and `runs.retry_of_run_id` (migration `c1d2e3f4a5b6`,
+  chained after `b8c9d0e1f2a3`) are the companion `Run` columns: the former
+  is the server's own record of an autonomous email-triggered run's
+  mailbox/UIDVALIDITY/UID batch (set by `email_trigger.py::_start_triggered_run`),
+  the latter links a manually-retried run back to the one it retried
+  (`email_trigger.py::retry_triggered_run`) -- a retry always inserts a new
+  `runs` row, never mutates the original.
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing

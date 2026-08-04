@@ -105,6 +105,13 @@ def db(monkeypatch):
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()
+    # `_declares_property_maintenance_contract` resolves `property_maintenance_
+    # response_v1` against the actual platform SkillRecord (Codex review
+    # finding) -- several tests below declare that name in a workflow config
+    # and expect the contract to be recognized, which now requires the row
+    # to actually exist.
+    from ui.backend.skills import seed_default_skills
+    seed_default_skills(session)
     yield session
     session.close()
 
@@ -255,6 +262,111 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 
+def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
+    """Run.trigger_context is the server's own record of exactly which
+    mailbox/UIDVALIDITY/UID batch a triggered run covers -- automation result
+    normalization and manual retry both depend on it (spec section 11.1)."""
+    from ui.backend.db.email_credentials import get_email_credentials
+    from ui.backend.db.models import Run
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    cred = get_email_credentials(db, org.id)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert run_row.trigger_context == {
+        "trigger_type": "email",
+        "mailbox_credential_id": cred.id,
+        "mailbox_host": cred.host,
+        "mailbox_username": cred.username,
+        "uidvalidity": 3,
+        "uids": [42, 45],
+        "folder": "INBOX",
+        "triggered_at": run_row.trigger_context["triggered_at"],  # timestamp, checked for presence only
+    }
+    assert run_row.trigger_context["triggered_at"]  # non-empty
+
+
+def test_poll_org_stamps_result_contract_when_workflow_declares_the_maintenance_skill(db, monkeypatch):
+    """automation_results._normalize needs a positive, persisted signal that a
+    run belongs to the Property Maintenance Inbox vertical for the case where
+    it crashes before producing any JSON output (indistinguishable, from the
+    output alone, from any other org's unrelated email-trigger workflow) --
+    trigger_context['result_contract'] is that signal, stamped from the
+    deployed workflow's own config at dispatch time (Codex review finding)."""
+    from ui.backend.db.models import Run
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert run_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_platform_one(db, monkeypatch):
+    """`load_skills` intentionally lets an org's own skill shadow a same-named
+    platform built-in. A name-only check can't tell the two apart, so an org
+    that names its own, unrelated skill `property_maintenance_response_v1`
+    would otherwise get this run wrongly redacted and stamped with synthetic
+    maintenance error rows (Codex review finding) -- the org-shadowed skill
+    must NOT count as the platform contract."""
+    from ui.backend.db.models import Run, SkillRecord
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    db.add(SkillRecord(
+        name="property_maintenance_response_v1", org_id=org.id,
+        config={"description": "unrelated org skill", "instructions": "do something else"},
+    ))
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert "result_contract" not in run_row.trigger_context
+
+
+def test_poll_org_does_not_stamp_result_contract_for_a_workflow_without_the_skill(db, monkeypatch):
+    from ui.backend.db.models import Run
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["email_triage_reply"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert "result_contract" not in run_row.trigger_context
+
+
 def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeypatch):
     """_start_triggered_run records the version the builder returned (bound to the
     config it built), NOT a fresh current_version_id re-query -- so a redeploy
@@ -310,6 +422,78 @@ def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch
     monkeypatch.setattr(email_trigger, "check_mailbox", _track)
     poll_org(db, trigger, _no_workflow)
     assert calls == [1]  # mailbox was actually checked -- guard didn't wedge
+
+
+def test_start_triggered_run_normalizes_a_declared_batch_when_submit_raises(db, monkeypatch):
+    """The worker never starts when submission itself raises, so
+    run_in_background's own normalization never runs either -- without an
+    explicit normalize_run_result call here, a declared property-maintenance
+    batch would be marked failed with no automation_item_results rows at all
+    and silently vanish from Needs-attention (Codex review finding)."""
+    from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = trigger.last_run_id
+    rows = db.query(AutomationItemResult).filter_by(run_id=run_id).all()
+    assert len(rows) == 2  # one per UID in the batch (42, 45)
+    assert all(r.status == "error" and r.needs_attention for r in rows)
+
+
+def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit_raises(db, monkeypatch):
+    """Same ordering guarantee as the normal terminal path (runtime.py): a
+    live Run Detail view can react to run_failed the instant it's published,
+    so normalize_run_result must commit BEFORE that publish, not after --
+    otherwise it can fetch zero automation rows with no later terminal
+    transition to prompt a re-fetch (Codex review finding)."""
+    from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_failed":
+            rows_seen_at_publish_time.append(
+                db.query(AutomationItemResult).filter_by(run_id=run_id).count()
+            )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
 
 
 def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
@@ -678,4 +862,658 @@ def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypa
     assert recorder.calls == []          # no run dispatched
     assert trigger.last_uid == 41        # UID baseline NOT advanced
     assert trigger.runs_today == 0
+
+
+# --- retry_triggered_run: safe manual retry of a triggered run (spec 11.2) --
+
+from ui.backend.db.models import Run as _RunRow
+from ui.backend.email_trigger import RetryError, retry_triggered_run
+
+
+def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig-1",
+                              status="failed", mailbox_credential_id=None,
+                              mailbox_host="imap.acme.com", mailbox_username="u@acme.com"):
+    from ui.backend.db.email_credentials import get_email_credentials
+
+    if mailbox_credential_id is None:
+        mailbox_credential_id = get_email_credentials(db, org.id).id
+    row = _RunRow(
+        id=run_id, workflow="triage", input="triage this batch",
+        status=status, org_id=org.id, username="email-trigger",
+        trigger_context={
+            "trigger_type": "email",
+            "mailbox_credential_id": mailbox_credential_id,
+            "mailbox_host": mailbox_host,
+            "mailbox_username": mailbox_username,
+            "uidvalidity": uidvalidity,
+            "uids": list(uids),
+            "folder": "INBOX",
+            "triggered_at": "2026-08-01T00:00:00+00:00",
+        },
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert new_run_id != run_row.id
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.retry_of_run_id == run_row.id
+    assert new_row.trigger_context["uids"] == [42, 43]
+    assert new_row.status == "running"
+    # Original row is untouched -- history stays immutable.
+    assert db.get(_RunRow, run_row.id).status == "failed"
+    assert db.get(_RunRow, run_row.id).retry_of_run_id is None
+    assert len(recorder.calls) == 1
+
+
+def test_retry_recomputes_result_contract_from_the_currently_deployed_workflow(db, monkeypatch):
+    """retry_triggered_run must NOT blindly spread the original run's
+    result_contract into the new one -- it has to re-derive it from the
+    workflow's CURRENT deployed config, the same way _start_triggered_run
+    does for a fresh dispatch, or a retry can carry a stale signal (Codex
+    review finding: see the next two tests for the drift directions this
+    guards against). This test is the steady-state case: still declared."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_workflow(db, monkeypatch):
+    """The original run dispatched BEFORE the workflow declared the platform
+    maintenance skill (no result_contract stamped). By retry time the
+    workflow was redeployed to add that skill -- the retry must pick up the
+    contract, not silently keep the original run's unstamped state, or its
+    output would go unredacted despite now being a real maintenance run
+    (Codex review finding)."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    assert "result_contract" not in run_row.trigger_context
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_retry_drops_a_stale_maintenance_contract_when_the_workflow_no_longer_declares_it(db, monkeypatch):
+    """The original run was stamped result_contract, but by retry time the
+    workflow was redeployed to a config that no longer declares the platform
+    maintenance skill -- the retry must NOT carry the stale contract
+    forward, or an unrelated run's output would be wrongly redacted and
+    normalized as a maintenance batch (Codex review finding)."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["some_other_skill"]}]},
+    )
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert "result_contract" not in new_row.trigger_context
+
+
+def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, monkeypatch):
+    """Same ordering fix as _start_triggered_run's analogous branch (Codex
+    review finding): normalize_run_result must commit before run_failed is
+    published when the retry's own dispatch submission fails."""
+    from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+
+    class _BoomExecutor:
+        def submit(self, *a, **kw):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
+
+    rows_seen_at_publish_time = []
+    orig_publish = registry.publish
+
+    def spy_publish(run_id, event):
+        if event.get("type") == "run_failed":
+            rows_seen_at_publish_time.append(
+                db.query(AutomationItemResult).filter_by(run_id=run_id).count()
+            )
+        orig_publish(run_id, event)
+
+    monkeypatch.setattr(registry, "publish", spy_publish)
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
+    assert db.get(_RunRow, new_run_id).status == "failed"
+
+
+def test_retry_rejects_uidvalidity_mismatch(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    # Mailbox was rebuilt/migrated since the original run -- current validity differs.
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (9, 45))
+
+    with pytest.raises(RetryError, match="UIDVALIDITY"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_a_completed_run(db):
+    # A completed run may already have real mailbox side effects (drafts) for
+    # this batch -- only a failed run is safe to redo (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org, status="completed")
+    with pytest.raises(RetryError, match="Only a failed run"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_when_the_mailbox_identity_has_changed(db, monkeypatch):
+    # A replaced mailbox could coincidentally share the original UIDVALIDITY --
+    # host/username must also still match (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(
+        db, org, uidvalidity=3, mailbox_host="imap.old-provider.com", mailbox_username="u@acme.com",
+    )
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    with pytest.raises(RetryError, match="mailbox has changed"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_registers_itself_with_the_overlap_guard(db, monkeypatch):
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert trigger.last_run_id == new_run_id
+
+
+def test_retry_rejects_while_a_run_is_still_registered_against_this_mailbox(db, monkeypatch):
+    # Same overlap guard poll_org enforces: if trigger.last_run_id already
+    # points at a running run (e.g. a concurrent automatic poll), a retry
+    # must not silently displace that registration by overwriting
+    # last_run_id -- or a later automatic poll would think the mailbox is
+    # free while that original run is still in flight (Codex review finding).
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    in_flight = registry.create("triage", "x", org_id=org.id, username="email-trigger")
+    trigger.last_run_id = in_flight.id
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="already in progress"):
+        retry_triggered_run(db, run_row)
+
+    assert recorder.calls == []
+    assert trigger.last_run_id == in_flight.id  # guard registration untouched
+
+
+def test_retry_proceeds_once_the_registered_run_is_no_longer_running(db, monkeypatch):
+    from ui.backend.runtime import registry
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    finished = registry.create("triage", "x", org_id=org.id, username="email-trigger")
+    registry.publish(finished.id, {"type": "run_completed", "workflow": "triage", "data": "done"})
+    trigger.last_run_id = finished.id
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)  # must not raise
+    assert trigger.last_run_id == new_run_id
+
+
+def test_retry_clears_a_sticky_trigger_error_on_successful_dispatch(db, monkeypatch):
+    # _start_triggered_run clears last_error/last_error_kind on a successful
+    # dispatch ("a run is going out: clear any prior fault") -- a successful
+    # retry dispatch must do the same, or a resolved workflow-kind error keeps
+    # showing indefinitely despite the successful retry (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
+    trigger.last_error_kind = "workflow"
+    db.commit()
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    retry_triggered_run(db, run_row)
+
+    assert trigger.last_error is None
+    assert trigger.last_error_kind is None
+
+
+def test_retry_rejects_a_run_with_no_trigger_context(db):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    row = _RunRow(id="manual-1", workflow="triage", input="hi", status="failed", org_id=org.id)
+    db.add(row)
+    db.commit()
+    with pytest.raises(RetryError, match="no recorded email batch"):
+        retry_triggered_run(db, row)
+
+
+def test_retry_rejects_a_still_running_run(db):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org, status="running")
+    with pytest.raises(RetryError, match="still in progress"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_rejects_when_a_retry_is_already_running(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    run_row = _completed_triggered_run(db, org)
+    db.add(_RunRow(
+        id="retry-in-flight", workflow="triage", input="x", status="running",
+        org_id=org.id, retry_of_run_id=run_row.id,
+    ))
+    db.commit()
+    with pytest.raises(RetryError, match="already in progress"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_respects_daily_cap(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    trigger.runs_today = daily_cap()
+    trigger.runs_date = datetime.now(timezone.utc).date().isoformat()
+    db.commit()
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    with pytest.raises(RetryError, match="limit"):
+        retry_triggered_run(db, run_row)
+
+
+def test_retry_reports_unbuildable_workflow(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+
+    def _boom(name, db_, org_id, allowed_uids, backend):
+        raise ValueError("team not found")
+
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _boom)
+    with pytest.raises(RetryError, match="triage"):
+        retry_triggered_run(db, run_row)
     assert trigger.last_run_id is None
+
+
+def _confirm_draft(db, run_row, message_id):
+    """Normalize `run_row` with a claimed-and-confirmed draft for `message_id`,
+    as if the original run had actually called email_draft_reply for it before
+    later failing -- the state already_drafted_uids reads."""
+    import json
+
+    from ui.backend.automation_results import normalize_run_result
+
+    run_row.output = json.dumps({
+        "schema_version": 1, "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": message_id, "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed", "summary": "s",
+            "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": True, "draft_type": "ack"},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+    db.commit()
+    normalize_run_result(db, run_row, confirmed_draft_message_ids=frozenset({message_id}))
+
+
+def test_retry_excludes_uids_with_a_confirmed_draft_from_the_previous_attempt(db, monkeypatch):
+    # email_draft_reply has no dedup -- resubmitting a UID the original run
+    # already drafted a reply for would create a second draft in the mailbox
+    # (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    _confirm_draft(db, run_row, "42")
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    calls = []
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.trigger_context["uids"] == [43]
+    assert calls[0][2] == {43}  # allowed_uids passed to build_trigger_workflow
+
+
+def test_retry_rejects_when_every_uid_already_has_a_confirmed_draft(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+    _confirm_draft(db, run_row, "42")
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="already has a confirmed draft"):
+        retry_triggered_run(db, run_row)
+    assert recorder.calls == []
+
+
+def test_retry_input_text_reflects_the_narrowed_batch_not_the_original(db, monkeypatch):
+    # run_row.input names the full original batch, including any UID just
+    # excluded by the already-drafted check -- passing that stale text would
+    # instruct the retrying agent to process a message its own scoped tools
+    # then reject as out-of-batch, wasting the retry instead of covering the
+    # UID that actually still needs it (Codex review finding).
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    _confirm_draft(db, run_row, "42")
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    _, args, _kwargs = recorder.calls[0]
+    submitted_input_text = args[2]
+    assert "42" not in submitted_input_text
+    assert "43" in submitted_input_text
+    new_row = db.get(_RunRow, new_run_id)
+    assert "42" not in new_row.input
+    assert "43" in new_row.input
+
+
+def test_retry_daily_cap_recheck_inside_lock_catches_a_stale_early_pass(db, monkeypatch):
+    """The early cap check (before mailbox/workflow work, a fast-path
+    optimization only) reads whatever `trigger.runs_today` this call's own
+    ORM object was loaded with -- it can pass on a stale snapshot. Only the
+    fresh, uncached recheck taken inside the dispatch lock right before
+    dispatch actually prevents exceeding the cap when another dispatch's
+    increment (a concurrent session, simulated here) lands in between
+    (Codex review finding)."""
+    from ui.backend.db.models import EmailTrigger
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    today = datetime.now(timezone.utc).date().isoformat()
+    trigger.runs_today = daily_cap() - 1
+    trigger.runs_date = today
+    db.commit()
+
+    # A concurrent dispatch (a different session/request) consumes the last
+    # remaining slot. `trigger`'s already-loaded runs_today stays stale in
+    # memory -- only a fresh SELECT would see this.
+    Session2 = session_factory(db.get_bind())
+    with Session2() as db2:
+        other = db2.query(EmailTrigger).filter_by(org_id=org.id).one()
+        other.runs_today = daily_cap()
+        db2.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="limit"):
+        retry_triggered_run(db, run_row)
+    assert recorder.calls == []
+
+
+def test_poll_org_daily_cap_recheck_inside_lock_catches_a_stale_early_pass(db, monkeypatch):
+    """Symmetric to the retry-side test above, for poll_org's own early
+    cap check vs. its fresh recheck inside the dispatch lock."""
+    from ui.backend.db.models import EmailTrigger
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    today = datetime.now(timezone.utc).date().isoformat()
+    trigger.runs_today = daily_cap() - 1
+    trigger.runs_date = today
+    db.commit()
+
+    Session2 = session_factory(db.get_bind())
+    with Session2() as db2:
+        other = db2.query(EmailTrigger).filter_by(org_id=org.id).one()
+        other.runs_today = daily_cap()
+        db2.commit()
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert recorder.calls == []
+    assert trigger.last_run_id is None
+
+
+def test_retry_dispatch_blocks_on_the_same_per_org_lock_poll_org_uses(db, monkeypatch):
+    """The overlap-guard check and the last_run_id write aren't atomic on
+    their own -- a per-org lock (_dispatch_lock) must span both, in both
+    poll_org and retry_triggered_run, or the two could race for the same org
+    and both dispatch against the same mailbox (Codex review finding).
+    Externally holding the org's dispatch lock (the same one poll_org uses)
+    must block a concurrent retry until it's released."""
+    import threading
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    lock = email_trigger._dispatch_lock(org.id)
+    lock.acquire()
+    result = {}
+
+    def do_retry():
+        result["run_id"] = retry_triggered_run(db, run_row)
+
+    t = threading.Thread(target=do_retry)
+    t.start()
+    try:
+        t.join(timeout=0.3)
+        assert result == {}, "retry must not dispatch while the org's dispatch lock is held"
+    finally:
+        lock.release()
+
+    t.join(timeout=2)
+    assert result.get("run_id") is not None
+
+
+def test_poll_org_blocks_on_the_per_org_dispatch_lock(db, monkeypatch):
+    """Symmetric to the retry-side test above: poll_org must also acquire
+    _dispatch_lock around its overlap-check-through-dispatch section, or a
+    manual retry could win the DB write while a poll cycle's own dispatch is
+    mid-flight, unobserved by the guard (Codex review finding)."""
+    import threading
+
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    lock = email_trigger._dispatch_lock(org.id)
+    lock.acquire()
+
+    def do_poll():
+        poll_org(db, trigger, _fake_workflow_getter([]))
+
+    t = threading.Thread(target=do_poll)
+    t.start()
+    try:
+        t.join(timeout=0.3)
+        assert recorder.calls == [], "poll_org must not dispatch while the org's dispatch lock is held"
+    finally:
+        lock.release()
+
+    t.join(timeout=2)
+    assert len(recorder.calls) == 1
+
+
+def test_retry_discards_if_the_trigger_is_disabled_before_the_atomic_advance(db, monkeypatch):
+    """Unlike _start_triggered_run, retry_triggered_run's dispatch update
+    previously had no enabled/active guard at all -- a customer
+    disconnecting/replacing the mailbox (or an operator deactivating the
+    org) between this call's own pre-lock credential check and the atomic
+    dispatch advance went undetected, and the retry would dispatch a real
+    email_draft_reply against a mailbox the customer already disconnected
+    (Codex review finding). Injected via a concurrent session disabling the
+    trigger right as registry.create() is called, inside the dispatch lock,
+    immediately before the CAS."""
+    from ui.backend.db import session_factory
+    from ui.backend.db.models import EmailTrigger
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    Session2 = session_factory(db.get_bind())
+    real_create = email_trigger.registry.create
+
+    def create_then_disable(*a, **k):
+        run = real_create(*a, **k)
+        with Session2() as db2:
+            other = db2.query(EmailTrigger).filter_by(org_id=org.id).one()
+            other.enabled = False
+            db2.commit()
+        return run
+
+    monkeypatch.setattr(email_trigger.registry, "create", create_then_disable)
+
+    with pytest.raises(RetryError, match="turned off"):
+        retry_triggered_run(db, run_row)
+
+    assert recorder.calls == []  # never dispatched
+    assert db.query(_RunRow).filter_by(retry_of_run_id=run_row.id).first() is None  # no leaked run row
+
+
+def test_retry_rechecks_already_drafted_freshly_inside_the_lock(db, monkeypatch):
+    """The already-drafted check further up (before mailbox I/O) is only a
+    fast-path -- a concurrent retry of the SAME run that dispatches and
+    confirms a draft in the window between that check and the dispatch lock
+    must still be caught by the fresh recheck inside the lock, or this call
+    would resubmit a UID the concurrent retry just drafted (Codex review
+    finding)."""
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+
+    def mailbox_state_then_confirm_draft(backend):
+        # Simulates a concurrent retry (a different request) dispatching and
+        # confirming a draft for the only UID in this batch, in the window
+        # between this call's own fast-path check and its mailbox check.
+        _confirm_draft(db, run_row, "42")
+        return (3, 45)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", mailbox_state_then_confirm_draft)
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="already has a confirmed draft"):
+        retry_triggered_run(db, run_row)
+    assert recorder.calls == []
+
+
+def test_retry_rechecks_retry_already_running_freshly_inside_the_lock(db, monkeypatch):
+    """Same fast-path-vs-lock staleness as the already-drafted recheck above,
+    for the 'a retry of this run is already in progress' guard: a concurrent
+    retry of the SAME run dispatched in the window between this call's own
+    fast-path check and the dispatch lock must still be caught (Codex review
+    finding)."""
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+
+    def mailbox_state_then_start_concurrent_retry(backend):
+        db.add(_RunRow(
+            id="concurrent-retry", workflow="triage", input="x", status="running",
+            org_id=org.id, retry_of_run_id=run_row.id,
+        ))
+        db.commit()
+        return (3, 45)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", mailbox_state_then_start_concurrent_retry)
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    with pytest.raises(RetryError, match="already in progress"):
+        retry_triggered_run(db, run_row)
+    assert recorder.calls == []
