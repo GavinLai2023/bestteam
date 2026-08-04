@@ -35,7 +35,14 @@ customer nav is Build a team / My teams / Run a team / Activity):
   ?needs_attention=true`; both render nothing for an org that isn't using this
   template, both refresh on the same 30s cadence while the tab is open (rather
   than only on mount), and `NeedsAttentionList`'s "View run" jumps to the Runs
-  tab and opens that run's detail) and a Runs tab (`GET /api/runs`, filterable by
+  tab and opens that run's detail -- `ActivityPage`'s `onOpenRun` looks up the
+  run's real, persisted status via `GET /api/runs?run_id=` (org-scoped, DB-backed,
+  unlike `GET /api/runs/{id}`'s in-memory-registry-only route) before opening it,
+  falling back to `completed` only if that lookup itself fails; a needs-attention
+  item's run is not guaranteed to have completed -- a dispatch failure still
+  synthesizes needs_attention error rows for its UIDs -- so hardcoding `completed`
+  used to permanently hide the Retry button for one that actually failed (Codex
+  review finding)) and a Runs tab (`GET /api/runs`, filterable by
   team/manual-or-automatic/status; polls every 5s while a listed row is still
   `running`, guarded against a stale poll response clobbering a
   since-changed filter's results). Clicking a run opens

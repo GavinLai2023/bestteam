@@ -288,10 +288,15 @@ crashed (`run_failed`) before producing any JSON at all looks identical, from
 the output alone, to that unrelated case -- so `_start_triggered_run` stamps
 `trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER` at dispatch
 time whenever the deployed workflow's config gives an agent the
-`property_maintenance_response_v1` skill
-(`email_trigger._declares_property_maintenance_contract`, a small independent
-`WorkflowRecord.config` read -- advisory only, never blocks dispatch on
-failure), and an unparseable output still gets the batch's synthesized
+`property_maintenance_response_v1` skill AND that name still resolves to the
+actual platform-tier skill row, not an org skill shadowing it
+(`email_trigger._declares_property_maintenance_contract` +
+`_resolves_to_platform_skill`, a small independent `WorkflowRecord.config`
+read -- advisory only, never blocks dispatch on failure; `skills.load_skills`
+intentionally lets an org's own skill shadow a same-named platform built-in,
+so a name-only check would wrongly redact/stamp an org's unrelated workflow
+that happens to name its own skill the same thing (Codex review finding)),
+and an unparseable output still gets the batch's synthesized
 error rows when that marker is present (`retry_triggered_run` carries it
 forward automatically, since its new `trigger_context` is spread from the
 original). Once engaged: the whole envelope is validated via Pydantic
@@ -372,8 +377,20 @@ instead of at the SDK/adapter layer (the SDK itself has no notion of
 "property maintenance"; only `runtime.py` knows a run's `trigger_context`).
 `run_in_background` computes `is_pm_contract_run` once, from
 `run_row.trigger_context["result_contract"]`, right after the run row is
-persisted; for such a run, every `agent_completed`/`run_completed` event's
-`data` is overwritten with a fixed placeholder (`_PM_TRACE_REDACTED`)
+persisted; for such a run, every event whose type is in
+`_PM_REDACTED_EVENT_TYPES` -- `agent_completed`/`run_completed` plus, for a
+declared maintenance workflow that happens to use HIERARCHICAL mode,
+`subagent_started`/`subagent_completed`/`delegation_started`/
+`delegation_completed` (the manager/subordinate delegate exchange carries
+the same customer-email-derived text -- `task_summary`/`summary` -- and
+previously leaked around this boundary, Codex review finding) -- OR is a
+`tool_completed` event for the manager's own `delegate_to_<name>` tool call
+(`_is_delegate_tool_completed`; `adapters/langgraph_adapter.py`'s generic
+tool-calling loop emits this as a SECOND, separate event carrying the same
+subordinate `summary`, which the `on_event`-driven redaction above doesn't
+see -- Codex review finding; a non-delegate `tool_completed`, e.g.
+`email_read`, is unaffected) -- has its
+`data` overwritten with a fixed placeholder (`_PM_TRACE_REDACTED`)
 *before* `dataclasses.asdict(event)` is built for `registry.publish`/
 `_safe_record_trace_event` and before it lands in `run_row.output` -- so the
 raw text never touches a live WS broadcast, persisted `trace_events`, or

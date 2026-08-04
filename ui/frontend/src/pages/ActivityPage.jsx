@@ -119,8 +119,19 @@ export default function ActivityPage() {
               setTab('runs')
               // Every automation result belongs to an autonomous email-triggered
               // run by construction (automation_item_results only exist for
-              // those), so Retry eligibility here is unconditional.
-              setSelectedRun({ id: runId, status: 'completed', autonomous: true })
+              // those). But the run itself is NOT guaranteed to have completed --
+              // a dispatch failure still synthesizes needs_attention error rows
+              // for its UIDs (see ui/backend/CLAUDE.md) -- so `status` must come
+              // from the real, persisted row, not be assumed `completed`: that
+              // assumption used to permanently hide the Retry button for a
+              // needs-attention item that came from a genuinely failed run
+              // (Codex review finding). `autonomous` stays unconditionally true.
+              api
+                .listRuns({ run_id: runId, limit: 1 })
+                .then((d) => {
+                  setSelectedRun({ id: runId, status: d.runs[0]?.status ?? 'completed', autonomous: true })
+                })
+                .catch(() => setSelectedRun({ id: runId, status: 'completed', autonomous: true }))
             }}
           />
           <EmailTriggerActivity

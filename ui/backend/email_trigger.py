@@ -39,7 +39,7 @@ from . import secret_store
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
-from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
+from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
@@ -308,7 +308,7 @@ _PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response_v1"
 
 def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_name: str) -> bool:
     """Best-effort: does this deployed workflow's config give any agent the
-    `property_maintenance_response_v1` skill?
+    ACTUAL platform `property_maintenance_response_v1` skill?
 
     A run's own trace/output can't tell us this after the fact for a run that
     crashed before producing any JSON (`_normalize` can then only see a plain
@@ -321,6 +321,15 @@ def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_n
     email-trigger workflow that never declared this skill (Codex review
     finding). A read failure here must never block dispatch -- this is
     advisory only.
+
+    A name match alone isn't enough: `load_skills` intentionally lets an
+    org's own skill shadow a same-named platform built-in, so an org that
+    happens to name (or repurpose) its own skill
+    `property_maintenance_response_v1` would otherwise get its unrelated
+    runs wrongly redacted and stamped with synthetic maintenance error rows
+    (Codex review finding). `_resolves_to_platform_skill` re-applies
+    `load_skills`' own shadowing precedence to confirm the name still
+    resolves to the platform-tier row.
     """
     try:
         record = (
@@ -331,12 +340,27 @@ def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_n
         if record is None:
             return False
         agents = (record.config or {}).get("agents") or []
-        return any(
+        declares_by_name = any(
             _PROPERTY_MAINTENANCE_RESPONSE_SKILL in (agent.get("skills") or [])
             for agent in agents
         )
+        return declares_by_name and _resolves_to_platform_skill(
+            db, org_id, _PROPERTY_MAINTENANCE_RESPONSE_SKILL
+        )
     except Exception:  # noqa: BLE001 -- advisory only, must never block dispatch
         return False
+
+
+def _resolves_to_platform_skill(db: Session, org_id: int, skill_name: str) -> bool:
+    """True iff `skill_name`, resolved for `org_id` with the same
+    org-shadows-platform precedence `load_skills` uses, is actually the
+    platform-tier (`org_id IS NULL`) skill -- not an org skill of the same
+    name."""
+    org_record = db.query(SkillRecord).filter_by(name=skill_name, org_id=org_id).one_or_none()
+    if org_record is not None:
+        return False
+    platform_record = db.query(SkillRecord).filter_by(name=skill_name, org_id=None).one_or_none()
+    return platform_record is not None
 
 
 def _utcnow() -> datetime:

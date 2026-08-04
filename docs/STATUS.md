@@ -782,6 +782,43 @@
   logs. The warning now logs a 64-char-capped value instead (reusing the
   existing `_cap` helper). 948 backend tests, lint clean.
 
+  **Tenth review pass** (Codex run against `main`, post-ninth-pass): three
+  findings. (1) The PM-contract trace redaction (`runtime.py`) only covered
+  `agent_completed`/`run_completed` — a declared maintenance workflow using
+  HIERARCHICAL mode also emits `subagent_started`/`subagent_completed`/
+  `delegation_started`/`delegation_completed` events carrying the same
+  customer-email-derived text (the manager's delegated task, the
+  subordinate's raw output), which leaked around the redaction boundary; all
+  six event types are now redacted uniformly. (2) `_declares_property_
+  maintenance_contract` (`email_trigger.py`) matched the
+  `property_maintenance_response_v1` skill name only, but `load_skills`
+  intentionally lets an org's own skill shadow a same-named platform
+  built-in — an org that named its own, unrelated skill the same thing would
+  get its runs wrongly redacted and stamped with synthetic maintenance error
+  rows; a new `_resolves_to_platform_skill` re-applies `load_skills`' own
+  shadowing precedence to confirm the name still resolves to the
+  platform-tier (`org_id IS NULL`) row before stamping the contract. (3)
+  `ActivityPage.jsx`'s Needs-attention "View run" always opened the run at a
+  hardcoded `status: 'completed'`, but a dispatch failure still synthesizes
+  needs_attention error rows for its UIDs — that hardcoding permanently hid
+  the Retry button for a needs-attention item that came from a genuinely
+  failed run. `GET /api/runs` gained an org-scoped `run_id` filter (the
+  existing `GET /api/runs/{id}` route only ever sees the in-memory registry,
+  unreliable for a historical run), and `onOpenRun` now looks up the real
+  persisted status before opening the panel. 950 backend + 92 frontend
+  tests, lint clean.
+
+  **Eleventh review pass** (Codex run against `main`, post-tenth-pass): the
+  tenth pass's HIERARCHICAL redaction fix (`_PM_REDACTED_EVENT_TYPES`) missed
+  a second leak path -- the manager's `delegate_to_<name>` tool call also
+  produces its OWN `tool_completed` event (`adapters/langgraph_adapter.py`'s
+  generic tool-calling loop, distinct from the `on_event`-driven
+  subagent_completed/delegation_completed events already covered), whose
+  `summary` is the same raw subordinate output. `runtime.py` now also
+  redacts a `tool_completed` event whose `tool` starts with `delegate_to_`
+  (`_is_delegate_tool_completed`); a non-delegate `tool_completed` (e.g.
+  `email_read`) is unaffected. 951 backend tests, lint clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

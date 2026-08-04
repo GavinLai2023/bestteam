@@ -42,6 +42,40 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 # just never the trace/output columns.
 _PM_TRACE_REDACTED = "[redacted -- Property Maintenance Inbox response; see automation results for this run]"
 
+# If a declared maintenance workflow uses HIERARCHICAL mode, the manager's
+# delegate/subordinate exchange carries the same customer-email-derived text
+# as agent_completed/run_completed (delegation_started/subagent_started's
+# `task_summary` is the manager's own free-text hand-off, and
+# subagent_completed/delegation_completed's `summary` is the subordinate's
+# raw output) -- all four must be redacted for a PM-contract run too, or that
+# content leaks around the boundary above (Codex review finding).
+_PM_REDACTED_EVENT_TYPES = frozenset(
+    {
+        "agent_completed",
+        "run_completed",
+        "subagent_started",
+        "subagent_completed",
+        "delegation_started",
+        "delegation_completed",
+    }
+)
+
+
+def _is_delegate_tool_completed(event: TraceEvent) -> bool:
+    """True for the MANAGER's own `tool_completed` event from calling a
+    `delegate_to_<name>` tool (`adapters/langgraph_adapter.py`'s generic
+    tool-calling loop, not the `on_event`-driven subagent_completed/
+    delegation_completed events above) -- its `summary` is the same raw
+    subordinate output `_PM_REDACTED_EVENT_TYPES` already redacts, just
+    reaching the trace through a second, separate event (Codex review
+    finding)."""
+    return (
+        event.type == "tool_completed"
+        and isinstance(event.data, dict)
+        and str(event.data.get("tool", "")).startswith("delegate_to_")
+    )
+
+
 # A node's own buffered events (see adapters/langgraph_adapter.py) -- these
 # describe paid work already done by the time any of them is yielded, so a
 # cancellation check must be deferred across all of them until that node's
@@ -309,7 +343,9 @@ def run_in_background(
             stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
             for event in stream_iter:
                 raw_run_completed_output: Optional[str] = None
-                if is_pm_contract_run and event.type in ("agent_completed", "run_completed"):
+                if is_pm_contract_run and (
+                    event.type in _PM_REDACTED_EVENT_TYPES or _is_delegate_tool_completed(event)
+                ):
                     # `run_completed.data` is the same raw agent text as
                     # `agent_completed.data` (core/workflow.py's `last_output`)
                     # -- normalize_run_result still needs the real JSON, so

@@ -611,6 +611,7 @@ def retry_run(
 
 @app.get("/api/runs")
 def list_runs(
+    run_id: Optional[str] = None,
     workflow: Optional[str] = None,
     status: Optional[str] = None,
     manual: Optional[bool] = None,
@@ -628,8 +629,16 @@ def list_runs(
     Bounded (`limit`/`offset`, default 50, max 200): autonomous runs
     accumulate indefinitely, so an unbounded query would grow DB work,
     response size, and browser memory without limit as an org's history
-    grows. `total` is returned so a future "load more"/pager can work off it."""
+    grows. `total` is returned so a future "load more"/pager can work off it.
+
+    `run_id`: this DB-backed, org-scoped route (unlike `GET /api/runs/{id}`,
+    which only ever sees the in-memory registry) is how the Activity page's
+    Needs-attention list resolves a specific run's real, persisted status
+    before opening it -- it must never assume `completed` for a run that
+    could actually be `failed` (Codex review finding)."""
     query = db.query(Run).filter(Run.org_id == org.id)
+    if run_id:
+        query = query.filter(Run.id == run_id)
     if workflow:
         query = query.filter(Run.workflow == workflow)
     if status:

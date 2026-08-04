@@ -344,6 +344,170 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
         assert item.status == "processed" and item.needs_attention is False
 
 
+def test_pm_contract_run_redacts_hierarchical_delegate_events(monkeypatch):
+    """If a declared maintenance workflow uses HIERARCHICAL mode, the
+    manager/subordinate delegate exchange (delegation_started/subagent_started's
+    `task_summary`, subagent_completed/delegation_completed's `summary`)
+    carries the same customer-email-derived text as agent_completed/
+    run_completed -- the redaction boundary previously covered only the
+    latter two, leaking the former around it (Codex review finding)."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from ui.backend import runtime
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import Run, TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed",
+            "summary": "ok", "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _HierarchicalWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(
+                type="delegation_started", workflow="wf", agent="manager",
+                data={"to": "responder", "task_summary": "tenant says pipe burst, call 555-1234"},
+            )
+            yield _TE(
+                type="subagent_started", workflow="wf", agent="responder",
+                data={"task_summary": "tenant says pipe burst, call 555-1234"},
+            )
+            yield _TE(
+                type="subagent_completed", workflow="wf", agent="responder",
+                data={"success": True, "summary": "drafted reply quoting tenant's phone 555-1234"},
+            )
+            yield _TE(
+                type="delegation_completed", workflow="wf", agent="manager",
+                data={"to": "responder", "summary": "drafted reply quoting tenant's phone 555-1234"},
+            )
+            yield _TE(type="run_completed", workflow="wf", data=envelope)
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _HierarchicalWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    with Session() as s:
+        trace_rows = (
+            s.query(TraceEventRecord)
+            .filter(TraceEventRecord.run_id == run.id)
+            .filter(TraceEventRecord.type.in_(
+                ["delegation_started", "subagent_started", "subagent_completed", "delegation_completed"]
+            ))
+            .all()
+        )
+        assert len(trace_rows) == 4
+        for row in trace_rows:
+            assert json.loads(row.data) == runtime._PM_TRACE_REDACTED
+
+    live_events = registry.get(run.id).events
+    for event in live_events:
+        if event["type"] in ("delegation_started", "subagent_started", "subagent_completed", "delegation_completed"):
+            assert event["data"] == runtime._PM_TRACE_REDACTED
+
+
+def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(monkeypatch):
+    """The manager's `delegate_to_<name>` call also produces its OWN
+    `tool_completed` event (`adapters/langgraph_adapter.py`'s generic
+    tool-calling loop, separate from the `on_event`-driven subagent_completed/
+    delegation_completed events) whose `summary` is the same raw subordinate
+    output -- this second event path was still leaking it unredacted (Codex
+    review finding). A non-delegate tool_completed (e.g. email_read) must stay
+    untouched."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from ui.backend import runtime
+    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db.models import Run, TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed",
+            "summary": "ok", "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _HierarchicalWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(
+                type="tool_completed", workflow="wf", agent="intake",
+                data={"tool": "email_read", "success": True, "outcome": "read", "message_id": "42"},
+            )
+            yield _TE(
+                type="tool_completed", workflow="wf", agent="manager",
+                data={
+                    "tool": "delegate_to_responder", "success": True, "duration_ms": 5,
+                    "summary": "drafted reply quoting tenant's phone 555-1234",
+                },
+            )
+            yield _TE(type="run_completed", workflow="wf", data=envelope)
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _HierarchicalWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    with Session() as s:
+        trace_rows = (
+            s.query(TraceEventRecord)
+            .filter(TraceEventRecord.run_id == run.id, TraceEventRecord.type == "tool_completed")
+            .order_by(TraceEventRecord.seq)
+            .all()
+        )
+        assert len(trace_rows) == 2
+        # email_read (not a delegate call) is untouched.
+        assert json.loads(trace_rows[0].data) == {
+            "tool": "email_read", "success": True, "outcome": "read", "message_id": "42",
+        }
+        # delegate_to_responder is redacted.
+        assert json.loads(trace_rows[1].data) == runtime._PM_TRACE_REDACTED
+
+    live_events = registry.get(run.id).events
+    delegate_events = [e for e in live_events if e["type"] == "tool_completed" and e.get("agent") == "manager"]
+    assert len(delegate_events) == 1
+    assert delegate_events[0]["data"] == runtime._PM_TRACE_REDACTED
+
+
 def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_event(monkeypatch):
     """Same ordering guarantee as the normal terminal path
     (test_normalize_run_result_commits_before_the_terminal_event_is_published

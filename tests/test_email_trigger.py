@@ -105,6 +105,13 @@ def db(monkeypatch):
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()
+    # `_declares_property_maintenance_contract` resolves `property_maintenance_
+    # response_v1` against the actual platform SkillRecord (Codex review
+    # finding) -- several tests below declare that name in a workflow config
+    # and expect the contract to be recognized, which now requires the row
+    # to actually exist.
+    from ui.backend.skills import seed_default_skills
+    seed_default_skills(session)
     yield session
     session.close()
 
@@ -308,6 +315,36 @@ def test_poll_org_stamps_result_contract_when_workflow_declares_the_maintenance_
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
     assert run_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_platform_one(db, monkeypatch):
+    """`load_skills` intentionally lets an org's own skill shadow a same-named
+    platform built-in. A name-only check can't tell the two apart, so an org
+    that names its own, unrelated skill `property_maintenance_response_v1`
+    would otherwise get this run wrongly redacted and stamped with synthetic
+    maintenance error rows (Codex review finding) -- the org-shadowed skill
+    must NOT count as the platform contract."""
+    from ui.backend.db.models import Run, SkillRecord
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    db.add(SkillRecord(
+        name="property_maintenance_response_v1", org_id=org.id,
+        config={"description": "unrelated org skill", "instructions": "do something else"},
+    ))
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    run_id = recorder.calls[0][1][0]
+    run_row = db.get(Run, run_id)
+    assert "result_contract" not in run_row.trigger_context
 
 
 def test_poll_org_does_not_stamp_result_contract_for_a_workflow_without_the_skill(db, monkeypatch):
