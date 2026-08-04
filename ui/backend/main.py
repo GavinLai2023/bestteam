@@ -636,6 +636,16 @@ def list_runs(
     Needs-attention list resolves a specific run's real, persisted status
     before opening it -- it must never assume `completed` for a run that
     could actually be `failed` (Codex review finding)."""
+    if run_id:
+        # An explicit run_id lookup is a targeted probe, not a filter over
+        # this org's own history -- if it belongs to another org (or doesn't
+        # exist), that must be a 404, same as GET /api/runs/{id}, not a 200
+        # with an empty list, or a caller could distinguish "not yours" from
+        # "doesn't exist" by comparing an empty `results` against a real 404
+        # elsewhere (Codex review finding).
+        owner_row = db.query(Run.org_id).filter(Run.id == run_id).one_or_none()
+        if owner_row is None or owner_row[0] != org.id:
+            raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
     query = db.query(Run).filter(Run.org_id == org.id)
     if run_id:
         query = query.filter(Run.id == run_id)
@@ -691,6 +701,14 @@ def list_automation_results_endpoint(
     Detail's automation-results section (spec section 12.1). Never returns raw
     email bodies; `payload` is the capped, validated extraction already
     written by `automation_results.normalize_run_result`."""
+    if run_id:
+        # Same explicit-lookup-is-a-404 rule as GET /api/runs?run_id= above --
+        # an empty `results` list here would let a caller confirm a run_id
+        # exists (just not in their org) by diffing it against a real 404
+        # elsewhere (Codex review finding).
+        owner_row = db.query(Run.org_id).filter(Run.id == run_id).one_or_none()
+        if owner_row is None or owner_row[0] != org.id:
+            raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
     rows, total = automation_results.list_automation_results(
         db, org.id, run_id=run_id,
         needs_attention=needs_attention, status=status, result_type=result_type,

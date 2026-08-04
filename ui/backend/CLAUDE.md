@@ -16,7 +16,14 @@ every endpoint follows:
   data plus platform built-ins (`skills.org_id IS NULL`), and — only where
   `BESTTEAM_DEMO_WORKFLOWS` is on — the global YAML demo workflows.
   **Cross-org access is a 404** (and the WS stream closes 4404 ==
-  unknown-run) — existence is never revealed.
+  unknown-run) — existence is never revealed. This applies to an explicit
+  `run_id` passed to a list-style filter too, not just a path parameter:
+  `GET /api/runs?run_id=` and `GET /api/automation-results?run_id=` both
+  404 up front (before running the filtered query) when that id belongs to
+  another org or doesn't exist, rather than silently returning an empty
+  list — an empty list there would still let a caller distinguish "not
+  yours" from "doesn't exist" against the 404 every other explicit-id route
+  gives (Codex review finding).
 - Scoping is centralized: `get_current_org` (auth_api),
   `load_skills(db, org_id)` (org's own shadows a same-named built-in),
   `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in
@@ -254,7 +261,13 @@ a two-agent SEQUENTIAL Workflow template
 (`workflows/property_maintenance_inbox_demo.yaml`) built from three platform
 Skills (`email_input_security_core_v1`, `property_maintenance_intake_v1`,
 `property_maintenance_response_v1`, seeded in `skills.py`) on top of the
-existing email-trigger/draft-only toolkit above. Deliberately **not** a
+existing email-trigger/draft-only toolkit above. `email_input_security_core_v1`
+is attached to BOTH agents, not just the Intake Analyst: the Response
+Coordinator never calls `email_find`/`email_read` itself, but it drafts from
+the Intake Analyst's free-text write-up, which can itself quote injected
+instructions from the original email -- without the same defenses, a
+malicious message could still steer the Response Coordinator even though it
+never reads the mailbox directly (Codex review finding). Deliberately **not** a
 `Case`/work-item entity -- see `docs/DECISIONS.md` ("Property Maintenance
 Inbox: no Case/work-item entity in Phase 1").
 
@@ -297,9 +310,14 @@ intentionally lets an org's own skill shadow a same-named platform built-in,
 so a name-only check would wrongly redact/stamp an org's unrelated workflow
 that happens to name its own skill the same thing (Codex review finding)),
 and an unparseable output still gets the batch's synthesized
-error rows when that marker is present (`retry_triggered_run` carries it
-forward automatically, since its new `trigger_context` is spread from the
-original). Once engaged: the whole envelope is validated via Pydantic
+error rows when that marker is present. `retry_triggered_run` does NOT just
+carry the marker forward from the original run's `trigger_context` -- it
+re-runs `_declares_property_maintenance_contract` against the workflow as
+CURRENTLY deployed and sets/clears the retry's own marker from that fresh
+result, so a workflow that gained or lost the maintenance skill between the
+original run and the retry gets the right redaction/normalization behavior
+either way, instead of a stale one carried over from dispatch time (Codex
+review finding). Once engaged: the whole envelope is validated via Pydantic
 (`Envelope`/`EnvelopeItem`; an enum/shape failure fails the *whole* batch,
 not per-item). A validation failure is logged as `loc`/`type` per error only
 -- never `exc`/`str(exc)` directly, since Pydantic's error repr embeds the

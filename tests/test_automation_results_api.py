@@ -122,6 +122,28 @@ def test_list_automation_results_filters_by_run_id(client):
     assert body["results"][0]["run_id"] == "r1"
 
 
+def test_list_automation_results_by_run_id_is_404_for_other_orgs_run(client):
+    """An explicit run_id lookup is a targeted probe, not a passive filter --
+    a run belonging to another org must 404, the same as GET /api/runs/{id},
+    not silently return an empty `results` list (Codex review finding: that
+    would let a caller distinguish "not yours" from "doesn't exist" by
+    diffing it against a real 404 elsewhere)."""
+    with open_test_db() as db:
+        org = get_or_create_org(db, "default")
+        other = get_or_create_org(db, "other")
+        db.add(Run(id="r-other", workflow="w", input="x", status="completed", org_id=other.id))
+        db.commit()
+        _add_result(db, org_id=other.id, run_id="r-other")
+
+    resp = client.get("/api/automation-results", params={"run_id": "r-other"})
+    assert resp.status_code == 404
+
+
+def test_list_automation_results_by_run_id_is_404_for_an_unknown_run(client):
+    resp = client.get("/api/automation-results", params={"run_id": "no-such-run"})
+    assert resp.status_code == 404
+
+
 def test_automation_results_summary_counts(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")

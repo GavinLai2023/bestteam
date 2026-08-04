@@ -796,6 +796,16 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         # already-handled UID as "missing" from this run's envelope and wrongly
         # synthesize a needs_attention error row for it under the new run id.
         new_trigger_context = {**trigger_context, "uids": retry_uids, "triggered_at": _utcnow().isoformat()}
+        # Recompute, don't just carry over: the original run's result_contract
+        # can be stale by the time it's retried if the deployed workflow (or a
+        # same-named skill) changed in between -- carrying it over verbatim
+        # would either leave a now-maintenance workflow's output unredacted or
+        # wrongly redact/normalize a workflow that no longer declares the
+        # contract (Codex review finding).
+        if _declares_property_maintenance_contract(db, org_id, run_row.workflow):
+            new_trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
+        else:
+            new_trigger_context.pop("result_contract", None)
         new_row = Run(
             id=new_run.id, workflow=run_row.workflow, input=input_text,
             status="running", org_id=org_id, username=TRIGGER_USERNAME,

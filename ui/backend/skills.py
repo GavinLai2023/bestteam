@@ -83,11 +83,14 @@ DEFAULT_SKILLS: List[SkillSpec] = [
     # Workflow Version already in production never drifts. Assigned to
     # agents per docs/superpowers/specs/
     # 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md
-    # section 7: the Intake Analyst gets email_input_security_core_v1 +
+    # section 7: both agents get email_input_security_core_v1 (the Response
+    # Coordinator too, since the Intake Analyst's write-up it drafts from can
+    # itself quote injected instructions from the original email -- Codex
+    # review finding). The Intake Analyst additionally gets
     # property_maintenance_intake_v1 (which is where its email_find/email_read
     # tools come from -- a skill's `tools` merge into the agent that uses it);
-    # the Response Coordinator gets property_maintenance_response_v1 (its
-    # email_draft_reply comes from there). Neither agent's tool list should
+    # the Response Coordinator additionally gets property_maintenance_response_v1
+    # (its email_draft_reply comes from there). Neither agent's tool list should
     # ever be edited to add the other side's tool: that would break the
     # "Intake never drafts, Response never re-reads mail" boundary the spec
     # requires (section 7, WP1 acceptance).

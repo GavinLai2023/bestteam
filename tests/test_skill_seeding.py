@@ -184,3 +184,10 @@ def test_property_maintenance_inbox_demo_workflow_enforces_tool_boundary(db_sess
     response_tools = {t.__name__ for t in response_agent.tools}
     assert intake_tools == {"email_find", "email_read"}
     assert response_tools == {"email_draft_reply"}
+    # The Response Coordinator drafts from the Intake Analyst's write-up,
+    # which can itself quote injected instructions from the original email --
+    # it needs the same prompt-injection defenses email_input_security_core_v1
+    # gives the Intake Analyst, not just property_maintenance_response_v1's
+    # drafting policy (Codex review finding).
+    assert "SECURITY RULES FOR EMAIL INPUT" in response_agent.backstory
+    assert "SECURITY RULES FOR EMAIL INPUT" in intake_agent.backstory

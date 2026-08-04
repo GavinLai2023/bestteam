@@ -819,6 +819,29 @@
   (`_is_delegate_tool_completed`); a non-delegate `tool_completed` (e.g.
   `email_read`) is unaffected. 951 backend tests, lint clean.
 
+  **Twelfth review pass** (Codex run against working tree, post-eleventh-pass
+  commit): three findings. (1) `retry_triggered_run` was spreading the
+  original run's `trigger_context` (including a stale `result_contract`)
+  into the retry's new run instead of recomputing it against the workflow
+  actually redeployed since -- a workflow that gained or lost the platform
+  maintenance skill between the original run and the retry would then get
+  the wrong redaction/normalization behavior; it now re-derives
+  `result_contract` via `_declares_property_maintenance_contract` at retry
+  time, same as a fresh dispatch. (2) the demo template's Response
+  Coordinator only had `property_maintenance_response_v1`, not
+  `email_input_security_core_v1` -- since it drafts from the Intake
+  Analyst's write-up (which can itself quote injected instructions from the
+  original email), it needed the same prompt-injection defenses, not just
+  the Intake Analyst; both platform agents now carry the security skill.
+  (3) `GET /api/runs` and `GET /api/automation-results`, when given an
+  explicit `run_id` for a run belonging to another org, returned HTTP 200
+  with an empty list instead of a 404 -- inconsistent with the org
+  multi-tenancy contract (`ui/backend/CLAUDE.md`'s "cross-org access is a
+  404, existence is never revealed") and distinguishable from a real 404
+  elsewhere; both routes now 404 an explicit cross-org/unknown `run_id`
+  before running the list query. 958 backend + 92 frontend tests, lint
+  clean.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

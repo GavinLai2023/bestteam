@@ -38,7 +38,7 @@ agents:
       ["callback_number", "access_availability"], "risk_reasons": [],
       "action": {"draft_created": true, "draft_type": "acknowledgement_and_questions"},
       "needs_human": true, "human_reason": "Active leak; missing callback number and access availability."}]}
-    skills: [property_maintenance_response_v1]
+    skills: [email_input_security_core_v1, property_maintenance_response_v1]
 
 teams:
   - name: maintenance_inbox_team

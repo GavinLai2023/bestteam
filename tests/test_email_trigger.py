@@ -921,13 +921,20 @@ def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
     assert len(recorder.calls) == 1
 
 
-def test_retry_carries_the_original_runs_result_contract_forward(db, monkeypatch):
-    """retry_triggered_run spreads the original run's trigger_context into the
-    new one -- if the original run was stamped as a Property Maintenance
-    Inbox batch (result_contract), the retry's run must be too, or a retry
-    that itself crashes before producing JSON would lose the signal
-    automation_results.py needs to still synthesize error rows for it."""
+def test_retry_recomputes_result_contract_from_the_currently_deployed_workflow(db, monkeypatch):
+    """retry_triggered_run must NOT blindly spread the original run's
+    result_contract into the new one -- it has to re-derive it from the
+    workflow's CURRENT deployed config, the same way _start_triggered_run
+    does for a fresh dispatch, or a retry can carry a stale signal (Codex
+    review finding: see the next two tests for the drift directions this
+    guards against). This test is the steady-state case: still declared."""
+    from ui.backend.db.workflows import publish_workflow_version
+
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
     db.commit()
@@ -941,14 +948,72 @@ def test_retry_carries_the_original_runs_result_contract_forward(db, monkeypatch
     assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
 
 
+def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_workflow(db, monkeypatch):
+    """The original run dispatched BEFORE the workflow declared the platform
+    maintenance skill (no result_contract stamped). By retry time the
+    workflow was redeployed to add that skill -- the retry must pick up the
+    contract, not silently keep the original run's unstamped state, or its
+    output would go unredacted despite now being a real maintenance run
+    (Codex review finding)."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    assert "result_contract" not in run_row.trigger_context
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
+
+
+def test_retry_drops_a_stale_maintenance_contract_when_the_workflow_no_longer_declares_it(db, monkeypatch):
+    """The original run was stamped result_contract, but by retry time the
+    workflow was redeployed to a config that no longer declares the platform
+    maintenance skill -- the retry must NOT carry the stale contract
+    forward, or an unrelated run's output would be wrongly redacted and
+    normalized as a maintenance batch (Codex review finding)."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uidvalidity=3)
+    run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["some_other_skill"]}]},
+    )
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    new_row = db.get(_RunRow, new_run_id)
+    assert "result_contract" not in new_row.trigger_context
+
+
 def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, monkeypatch):
     """Same ordering fix as _start_triggered_run's analogous branch (Codex
     review finding): normalize_run_result must commit before run_failed is
     published when the retry's own dispatch submission fails."""
     from ui.backend.automation_results import AutomationItemResult
+    from ui.backend.db.workflows import publish_workflow_version
     from ui.backend.runtime import registry
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+    )
     run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
     run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
     db.commit()
