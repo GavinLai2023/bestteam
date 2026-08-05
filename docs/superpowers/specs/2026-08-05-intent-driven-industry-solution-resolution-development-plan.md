@@ -508,7 +508,17 @@ Matcher 返回后必须验证：
 - clarification 数量和文本长度受限；
 - 不能包含任意 HTML、链接或内部 Prompt；
 - 没有候选时 `template_id` 必须为 NULL；
-- 匹配失败安全回退到 generative，不产生 500。
+- 匹配失败安全回退到 generative，不产生 500；
+- **`mode == "template_plus_extension"` 在 Release 2A.1/2A.2 一律拒绝**：
+  Matcher 的 Pydantic schema（§9.2）技术上允许模型返回这个值，但 §24 决策 #5
+  已明确该 build mode 不进入首个 Release。服务端验证必须把 Matcher 自报的
+  `template_plus_extension` 视为不支持的模式，**降级为 `generative`**（而不是
+  静默当作 `template_guided` 处理——模型选它说明它认为匹配的 Template 覆盖不了
+  全部需求，如果服务端强行套用纯 Policy 定制，等于用一个已知覆盖不全的模板糊弄
+  用户，比直接走 generative 更危险），并把这一步计入 §16.4 审计的
+  "失败类别"。§12.2 中"`build_mode == template_plus_extension`"的 Specification
+  Endpoint 分支是为未来 Release 预留的架构占位，2A.1/2A.2 不会有 Session 真正
+  进入该分支。
 
 ### 9.4 置信度路由
 
@@ -520,6 +530,14 @@ Matcher 返回后必须验证：
 - 高风险歧义：无论分数都要求澄清。
 
 这些阈值必须配置化，并通过离线 Intent 数据集校准。LLM 的自报 confidence 不能视为统计概率，只能作为受评估的路由信号。
+
+> **候选数为 1 时的 margin 规则（评审补充）：** Release 2A.1/2A.2 只发布
+> `property_maintenance_inbox` 一个 Template，尚无 `horizontal` Template（§17
+> WP3），因此候选集合大小为 1 是主线场景，不是边界情况——"第一候选比第二候选
+> 至少高 0.15" 在这种情况下必须有明确定义，不能留给实现者猜。规则：**只有一个
+> 候选时，第二候选置信度按 `0` 处理**，margin 条件恒成立，路由只看
+> `confidence >= 0.85` 这一个条件。候选数为 0 时已由 §9.3"没有候选时
+> `template_id` 必须为 NULL"覆盖，直接进入 generative。
 
 ### 9.5 澄清策略
 
@@ -575,11 +593,30 @@ Blueprint 的 JSON Contract 中保留 `model_slot` 字段（如 `"fast_tool_user
 
 ### 10.3 Organization Policy Skill
 
-建议 Skill 名称使用稳定、不可冲突的内部格式：
+建议 Skill 名称使用稳定、不可冲突的内部格式，**延续**
+`docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`
+§8.2 已经采用、并已写进已发布 YAML 注释的
+`<org_slug>_maintenance_policy_v1` 风格（下划线分隔 + `_v1` 版本后缀），只是把
+写死的 `maintenance` 换成通用的 `template_slug`，不引入新的双下划线分隔符：
 
 ```text
-org_<org_id>__<template_slug>__policy
+<org_slug>_<template_slug>_policy_v1
 ```
+
+> **评审补充（命名一致性）：** 原稿的 `org_<org_id>__<template_slug>__policy`
+> 与 Release 1A 已经在 `ui/backend/workflows/property_maintenance_inbox_demo.yaml`
+> 头部注释里指导实施者手工创建的 `<org_slug>_maintenance_policy_v1` 是两套不
+> 兼容的命名规则。若不统一，一个已经通过旧的 Advanced Skills CRUD 手工建过
+> Policy Skill 的试用组织，第一次跑新的 template-guided 流程时会得到第二个、
+> 名字不同但用途重复的 Policy Skill，造成困惑。因此改为对齐并泛化已发布的
+> 命名风格，而不是另起一套。`org_id` 在这里不是必需的：`Organization` 目前
+> 没有可变更 name 的 Admin 接口（`admin_api.py` 的 `PATCH /orgs/{name}` 只做
+> 启用/停用），Skill 名称本身也已经通过 `(org_id, name)` 唯一约束天然按组织
+> 隔离，用 `org_slug` 和现有约定保持一致即可。WP6 实现时，如果目标组织已经
+> 存在字面量为 `<org_slug>_maintenance_policy_v1` 的 Skill（Release 1A 手工
+> 流程遗留），首次为该组织的 `property_maintenance_inbox` 做 template-guided
+> 合成时应把它的内容作为新 `<org_slug>_property_maintenance_inbox_policy_v1`
+> 的初始素材来源之一，而不是无视它、静默新建一个功能重叠的 Skill。
 
 每次 Policy 更新都通过现有 Skill Version 机制追加不可变版本。Workflow 发布时继续使用现有 `WorkflowDependency` 固定精确 SkillVersion。
 
@@ -663,8 +700,10 @@ Inbox 列出的所有 Policy 字段（办公时间、紧急电话、语气、分
 当前 `property_maintenance_inbox_demo.yaml` 继续保留为开发 Fixture。新增正式数据库 Template Version，内容基于现有 Release 1A：
 
 - Industry：`property_management`；
-- Intake Analyst；
-- Response Coordinator；
+- Maintenance Intake Analyst（`role:` 精确匹配已发布的
+  `property_maintenance_inbox_demo.yaml`，不是简写的 "Intake Analyst"）；
+- Maintenance Response Coordinator（同上，精确匹配 "Response Coordinator"
+  会与已发布 role 不一致）；
 - `SEQUENTIAL`；
 - 平台 Skills：
   - `email_input_security_core_v1`
@@ -1053,7 +1092,8 @@ An improved setup is available.
 
 - 新增 `ui/backend/template_composer.py`
 - `ui/backend/skills.py`
-- `ui/backend/db/workflows.py`（复用现有 `record_version_dependencies`，见 §10.5）
+- `ui/backend/db/dependencies.py`（`record_version_dependencies` 定义于此，
+  `db/workflows.py` 只是调用方——复用方式见 §10.5）
 - `ui/backend/builder.py`：`POST /{id}/specification`（`submit_specification`）
   与 `POST /{id}/solution`（`submit_solution_feedback`，见 §7.4 术语澄清）
   两个既有端点都要在 `build_mode == template_guided` 时改走 Composer。
@@ -1127,16 +1167,24 @@ WP0 Contract / Intent Dataset
   ├─> WP3 First Template Content
   └─> WP4 Resolution Schema
 
-WP1 + WP4
+WP1
   └─> WP2 Template Repository/API
-        └─> WP5 SolutionResolver/Builder
-              └─> WP6 Composer/Conformance
-                    └─> WP7 Customer UI
-                    └─> WP8 Admin UI
+
+WP2 + WP4
+  └─> WP5 SolutionResolver/Builder
+        └─> WP6 Composer/Conformance
+              └─> WP7 Customer UI
+              └─> WP8 Admin UI
 
 WP3 + WP5 + WP6 + WP7
   └─> WP9 Evaluation / Shadow / Pilot
 ```
+
+> **评审修正：** 原图把 WP2（Template Repository/Admin API）挂在 WP4（Resolution
+> Schema）之下，但 WP2 的交付物（Head CRUD、Draft validate、发布、候选查询、
+> Admin 鉴权）不消费 Matcher/Resolution schema，只需要 WP1 的表存在即可开工；
+> 真正需要 WP4（Matcher 调用、Pydantic schema）的是 WP5。按原图排期会不必要地
+> 阻塞 WP2，或误导团队以为 WP2 依赖 WP4。
 
 建议 Release 划分：
 
@@ -1359,8 +1407,10 @@ Release 2A.1 按以下结论实施，不再视为开放问题：
    structured-output 模型，不引入独立的 Resolver 专属模型配置。理由：
    `generate_requirements`/`generate_specification` 已经是
    `model.with_structured_output(PydanticModel)` 这一套机制
-   （`src/bestteam/core/requirements.py:65`、
-   `src/bestteam/core/specification.py:239`），Matcher 遵循同一模式最省心；
+   （`src/bestteam/core/requirements.py:75`、
+   `src/bestteam/core/specification.py:257`——分别是各自函数体内实际调用
+   `with_structured_output` 的那一行，函数定义本身在 65/239 行），Matcher
+   遵循同一模式最省心；
    独立模型选择留给以后真的出现"匹配质量需要比生成质量更强模型"的证据时再加。
 4. **Confidence 阈值和候选 margin** — 使用 §9.4 已给出的初始值（高置信度
    `confidence ≥ 0.85` 且领先第二名 `≥ 0.15`；中等置信度
