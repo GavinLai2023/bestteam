@@ -321,6 +321,7 @@ flowchart TD
 | `industry_slug` | String | 行业或 `horizontal` |
 | `status` | String | `draft` / `published` / `deprecated` |
 | `current_version_id` | Nullable FK | 当前发布版本 |
+| `operator_disabled` | Boolean, default False | Kill switch：与 `status` 独立，运营可以不改变 publish 生命周期、瞬间让一个已发布 Template 停止被候选过滤命中 |
 | `created_at` | DateTime | 创建时间 |
 | `updated_at` | DateTime | 更新时间 |
 
@@ -354,8 +355,9 @@ flowchart TD
 |---|---|---|
 | `build_mode` | Nullable String | `template_guided` / `template_plus_extension` / `generative` |
 | `solution_template_version_id` | Nullable FK | 选中的不可变版本 |
-| `solution_resolution_json` | Nullable JSON | 匹配结果和 clarification 状态 |
+| `solution_resolution_json` | Nullable JSON | 匹配结果和 clarification 状态，`status` 取值见下 |
 | `template_answers_json` | Nullable JSON | 结构化 Policy Answers |
+| `resolution_seq` | Integer, default 0 | 乐观并发计数器，见 §16.2 |
 
 保持现有六阶段 `status` 不变：
 
@@ -366,7 +368,7 @@ intent → requirements → spec → solution → testing → deployed
 澄清属于 `requirements` 阶段内的子状态，保存在 `solution_resolution_json.status`，避免破坏现有 resume 和路由逻辑。
 
 > **术语澄清（实现前必读）：** 现有 `status == "solution"` 与
-> `POST /api/builder/{session_id}/solution`（`ui/backend/builder.py:479`
+> `POST /api/builder/sessions/{session_id}/solution`（`ui/backend/builder.py:479`
 > `submit_solution_feedback`）指的是既有的"Stage 4 Specification 反馈/精修"阶段，
 > 与本方案的 `SolutionResolver` / `Solution Template` / `Solution Resolution`
 > 是两个无关概念，只是恰好共享中英文"方案/solution"这个词。本方案新增的匹配
@@ -377,6 +379,30 @@ intent → requirements → spec → solution → testing → deployed
 > `submit_solution_feedback` 入口，因此 WP6 除了 `/specification` 也需要改造这个
 > 既有端点，让 `build_mode == template_guided` 时调用 Template Composer 而不是
 > `generate_specification`。
+
+> **`solution_resolution_json.status` 取值（评审补充）：** 三个值，与
+> `build_mode` 的写入时机严格对应：
+>
+> | `status` | 含义 | 此时 `build_mode` |
+> |---|---|---|
+> | `needs_clarification` | Matcher 要求澄清，等待用户回答后重新 resolve | 仍为 NULL |
+> | `resolved` | 匹配到具体 Template，走 template-guided | `template_guided` |
+> | `generative_fallback` | 无可靠匹配或匹配失败安全回退 | `generative` |
+>
+> Matcher 原始输出的 `mode` 字段（§9.2，四值 `Literal` 含
+> `template_plus_extension`）不能直接原样写入 `status`——`template_plus_extension`
+> 已被 §9.3 降级为 `generative`（决策 #5），对应写入 `status="generative_fallback"`；
+> Matcher 返回 `needs_clarification` 时原样写入 `status="needs_clarification"`
+> 且 `build_mode` 保持 NULL，直到澄清完成后重新 resolve 产出 `resolved` 或
+> `generative_fallback` 才写 `build_mode`。
+
+> **并发 resolve 控制（评审补充，配合 §16.2）：** `resolution_seq` 每次
+> `resolve-solution` 请求开始时先原子 `+1` 并读回新值（`UPDATE ... SET
+> resolution_seq = resolution_seq + 1 RETURNING resolution_seq`），请求处理完
+> 成后写回 `solution_resolution_json`/`build_mode` 前，必须在同一事务里确认
+> `resolution_seq` 仍等于自己持有的值（`WHERE resolution_seq = :my_seq`）；不
+> 匹配说明期间有更新的请求已经写入，本次写入直接丢弃（no-op），前端据此提示
+> "结果已更新，请刷新"而不是覆盖用户后来的答案。
 
 ### 7.5 Workflow Version Provenance
 
@@ -454,7 +480,8 @@ Template 内容必须在发布时通过：
 - Pydantic schema；
 - 现有 `Specification` 验证；
 - Skill/Tool 依赖解析；
-- Model slot 验证；
+- 每个 Agent 的固定 `spec` 字符串在当前 Model Catalog 中有效（§10.2，不是抽象
+  Model Slot 解析）；
 - guardrail 一致性验证；
 - 行业和 slug 检查。
 
@@ -469,8 +496,11 @@ Template 内容必须在发布时通过：
 - `status == published`；
 - `industry_slug == organization.industry_slug`，或为 `horizontal`；
 - 当前 Template Version 有效；
-- 用户组织有权使用；
 - Template 未被 operator kill switch 禁用。
+
+> Release 2A.1 不引入独立的组织级 entitlement/订阅系统（§24 决策 #8）：
+> "组织是否有权使用"完全由上面的行业匹配条件决定，不存在额外的授权检查。
+> 商业化/entitlement 是独立的后续产品决策。
 
 缺少连接器不应直接移除候选。它可能意味着“匹配，但部署前需要连接邮箱”。
 
@@ -576,8 +606,12 @@ LLM 可以帮助从自然语言答案提取结构化 Policy，但不能自由改
 （`builder.py::_with_model_catalog`）。为一个只有一个 Template 的首个 Release
 构建通用的 Slot 解析引擎，属于本文档 CLAUDE.md 强调的"不需要的灵活性"。
 
-Blueprint 的 JSON Contract 中保留 `model_slot` 字段（如 `"fast_tool_user"`)
-仅作为**未来扩展的占位符**，第一版 Composer 不解析它。实际做法：
+**Blueprint 的 JSON Contract 不包含 `model_slot` 或任何等价的占位字段。** 早期
+草稿曾建议保留一个未使用的 `model_slot` 字段"仅作为未来扩展的占位符"，但这与
+本节前一段刚引用的"不需要的灵活性"论证自相矛盾——一个当前代码不读、不写、
+没有校验规则的 schema 字段就是投机性配置，字段本身廉价不是保留它的理由。
+JSON 字段随时可以在真正需要时新增，不需要迁移，因此没有理由提前占位。实际
+做法：
 
 1. 发布 `property_maintenance_inbox` Template Version（WP3）时，管理员为
    Blueprint 中每个 Agent 直接填入一个已在当前 Model Catalog 中存在的具体
@@ -673,12 +707,17 @@ Generative Workflow 保持现有名称解析行为；只有 Template 锁定依�
 > **已核实：** `WorkflowDependency`（`ui/backend/db/models.py`，`id,
 > workflow_version_id, resource_kind, resource_name, resource_id,
 > resource_version_id`，唯一约束 `(workflow_version_id, resource_kind,
-> resource_name)`）已经原生支持"资源名 → 精确 SkillVersion id"的绑定，是
-> `record_version_dependencies` 现有的落库表。本节不需要新表或新列，WP6
-> 只需要在 Template-guided 部署路径上，把 Template Version 记录的锁定
-> `SkillVersion.id` 直接作为 `resource_version_id` 传给现有的
-> `record_version_dependencies`，跳过它当前"按名称在 org/platform 之间解析"
-> 的默认路径即可。
+> resource_name)`）已经原生支持"资源名 → 精确 SkillVersion id"的绑定，本节
+> 不需要新表或新列。但 `record_version_dependencies`（`ui/backend/db/dependencies.py:61-63`，
+> 签名 `(db, *, version_id, org_id, raw)`）目前没有 bindings 参数：它总是从
+> `raw["agents"][*]["skills"]` 里的名称出发，用
+> `SkillRecord.name.in_(skill_names)` 按名称查库解析 `resource_id`/
+> `resource_version_id`（同文件 76-88 行），没有任何入口可以传入一个预先解析好
+> 的 `SkillVersion.id` 让它跳过按名称解析。WP6 必须**扩展这个函数签名**（或新增
+> 一个接受显式 bindings 的姊妹函数），让 Template-guided 部署路径可以传入
+> `{skill_name: locked_skill_version_id}` 并直接写入 `resource_version_id`，
+> 跳过按名称解析——这与前一段"需要扩展现有发布 primitive"的结论一致，不是
+> "零代码改动"。
 
 ### 10.6 Policy Schema 字段类型（决策 #7，见 §24）
 
@@ -729,7 +768,7 @@ BESTTEAM_DEMO_WORKFLOWS=1
 建议：
 
 ```http
-POST /api/builder/{session_id}/resolve-solution
+POST /api/builder/sessions/{session_id}/resolve-solution
 ```
 
 请求：
@@ -764,13 +803,17 @@ POST /api/builder/{session_id}/resolve-solution
 现有：
 
 ```http
-POST /api/builder/{session_id}/specification
+POST /api/builder/sessions/{session_id}/specification
 ```
 
 调整为：
 
 - `build_mode == template_guided`：调用 Template Composer；
-- `build_mode == template_plus_extension`：先 compose，再由受限 Architect 扩展并执行 conformance；
+- `build_mode == template_plus_extension`：**Release 2A.1/2A.2 中此分支不可达**——
+  §9.3 服务端验证已把 Matcher 自报的 `template_plus_extension` 降级为
+  `generative`，`build_mode` 永远不会被写成这个值（见决策 #5，§24）。这里列出
+  只是为未来 Release 预留的架构占位，实现 WP6 时不需要真的写"先 compose 再由
+  受限 Architect 扩展"的逻辑；
 - `build_mode == generative`：保持当前 `generate_specification`；
 - resolution 未完成时拒绝直接进入 template-guided specification；
 - 管理员/测试直接提交 Specification 的现有路径保持兼容。
@@ -780,14 +823,15 @@ POST /api/builder/{session_id}/specification
 可以合并进 Resolution Endpoint，或新增：
 
 ```http
-PUT /api/builder/{session_id}/template-answers
+PUT /api/builder/sessions/{session_id}/template-answers
 ```
 
 第一版建议合并，减少 Wizard 往返和状态组合。后端仍应把 Resolution Answers 与 Policy Answers 分开存储。
 
 ### 12.4 Platform Admin API
 
-建议新增：
+**Release 2A.1 范围**（WP3 的 seed 脚本必须通过这些端点完成 dogfooding，不允许绕过
+API 直接写库——否则这套 API 在 2A.1 里没有任何真实调用方）：
 
 ```http
 GET    /api/config/solution-templates
@@ -795,6 +839,15 @@ POST   /api/config/solution-templates
 GET    /api/config/solution-templates/{slug}
 PUT    /api/config/solution-templates/{slug}/draft
 POST   /api/config/solution-templates/{slug}/publish
+PATCH  /api/config/solution-templates/{slug}/kill-switch
+```
+
+`kill-switch` 写 §7.2 新增的 `operator_disabled` 字段，与 publish 生命周期无关。
+
+**推迟到 Release 2A.2**（与 WP8 Admin UI 一起交付，2A.1 里没有第二个 Version
+或真实废弃场景可以练习）：
+
+```http
 POST   /api/config/solution-templates/{slug}/deprecate
 GET    /api/config/solution-templates/{slug}/versions
 ```
@@ -908,6 +961,16 @@ ui/frontend/src/components/SolutionClarification.jsx
 - 已部署 Workflow 继续引用原 Template Version；
 - 删除 Head 不得级联删除历史 Version；优先使用 deprecate。
 
+> **与现有 Skill/Workflow admin CRUD 的差异（评审补充）：** `ui/backend/CLAUDE.md`
+> 记录的现有约定是"save is deploy"——Skill 的每次 PUT 直接追加不可变 Version，
+> Workflow 的每次 PUT 直接写 `status="deployed"`，都没有单独的 draft 阶段。
+> Template 在这里刻意采用不同的两阶段（draft 可变 + 显式 publish）模式，原因
+> 是爆炸半径不同：一次 Skill/Workflow 保存只影响发起这次保存的那一个组织；
+> 一次 Template 保存如果直接生效，会立刻改变**所有**正在匹配该行业的组织看到
+> 的候选结果——半成品或有错字的 Draft 一旦"save is deploy"就是平台级事故，而
+> 不是单组织事故。两阶段模式让管理员可以反复编辑、校验 Draft，只有确认无误后
+> 才用一次显式 Publish 把爆炸半径从"平台"变成"这一个已验证的不可变 Version"。
+
 ### 15.2 新建 Team
 
 Resolver 默认使用当前已发布版本，并把精确 ID 写入 BuilderSession。即使管理员之后发布 v2，该 Session 继续使用原 v1，除非重新解析或用户明确重新开始。
@@ -944,7 +1007,8 @@ An improved setup is available.
 - 模型超时、格式错误或未知 ID：安全回退到 generative，或提示重试；
 - 不产生半写入 Template 选择；
 - Resolution 保存必须事务化；
-- 同一 Session 并发 resolve 使用乐观版本或请求序列，避免旧响应覆盖新答案。
+- 同一 Session 并发 resolve 使用 `builder_sessions.resolution_seq` 做乐观并发
+  控制（字段定义和 CAS 规则见 §7.4），避免旧响应覆盖新答案。
 
 ### 16.3 Composer 失败
 
@@ -981,9 +1045,10 @@ An improved setup is available.
 
 - Property Management Intent 数据集；
 - 正例、反例、歧义例和跨行业例；
-- `property_maintenance_inbox` Template Contract；
-- Policy Schema；
-- 用户行为摘要；
+- `property_maintenance_inbox` Template Contract 草案（matching_profile/
+  workflow_blueprint/guardrails 等 §8 结构的具体内容，Policy Schema 字段类型
+  规范本身已由 §10.6 统一定义，此处只是套用该规范填出 Property Maintenance
+  的具体字段——WP3 负责把这份草案落地为真正 published 的 DB Template Version）；
 - 初始匹配和澄清验收标准。
 
 建议至少包含：
@@ -1021,22 +1086,27 @@ An improved setup is available.
 - `ui/backend/main.py`
 - `ui/backend/auth_api.py`
 
-交付：
+交付（Release 2A.1 范围，见 §12.4）：
 
 - Head CRUD；
 - Draft validate；
 - immutable publish；
-- version history；
-- deprecate；
+- kill switch 开关（`operator_disabled`）；
 - candidate query；
 - platform-admin-only 权限；
 - 被引用版本的删除保护。
 
+推迟到 2A.2（与 WP8 一起）：version history、deprecate。
+
 ### WP3 — Property Maintenance 正式 Template Seed
+
+**依赖：** WP1（`solution_templates`/`solution_template_versions` 表必须先存在，
+见 §18 依赖修正）、WP2（seed 脚本通过 Admin API 完成，见 §12.4）。
 
 **主要位置：**
 
-- 新增 Template seed module 或 migration data seed；
+- 新增 Template seed 脚本（调用 WP2 的 Admin API：create → draft → publish，
+  不绕过 API 直接写库）；
 - 复用 `ui/backend/skills.py`；
 - 保留现有 Demo YAML。
 
@@ -1045,9 +1115,11 @@ An improved setup is available.
 - 第一个 published Template Version；
 - Blueprint；
 - matcher examples/negative examples；
-- Policy Schema；
+- Property Maintenance 场景下具体填充的 Policy Schema 内容（字段类型规范本身
+  已由 §10.6/WP0 的 Template Contract 统一定义，WP3 只产出这一个 Template 的
+  实际字段值，不重新设计 schema 格式）；
 - Guardrails；
-- Behavior Summary；
+- Behavior Summary（同上，格式由 WP0 Contract 定义，内容由 WP3 填充）；
 - seed 幂等性测试。
 
 ### WP4 — Core Resolution Schema 与 Matcher
@@ -1092,8 +1164,8 @@ An improved setup is available.
 
 - 新增 `ui/backend/template_composer.py`
 - `ui/backend/skills.py`
-- `ui/backend/db/dependencies.py`（`record_version_dependencies` 定义于此，
-  `db/workflows.py` 只是调用方——复用方式见 §10.5）
+- `ui/backend/db/dependencies.py`（`record_version_dependencies` 定义于此，需要
+  扩展签名以接受显式 bindings，`db/workflows.py` 只是调用方——见 §10.5）
 - `ui/backend/builder.py`：`POST /{id}/specification`（`submit_specification`）
   与 `POST /{id}/solution`（`submit_solution_feedback`，见 §7.4 术语澄清）
   两个既有端点都要在 `build_mode == template_guided` 时改走 Composer。
@@ -1107,7 +1179,8 @@ An improved setup is available.
 - Specification composition；
 - conformance validator；
 - locked platform SkillVersion dependency bindings（复用现有
-  `WorkflowDependency`，见 §10.5）；
+  `WorkflowDependency` 表结构，扩展 `record_version_dependencies` 接受显式
+  bindings，见 §10.5）；
 - Deploy-time revalidation；
 - WorkflowVersion provenance。
 
@@ -1164,11 +1237,11 @@ An improved setup is available.
 ```text
 WP0 Contract / Intent Dataset
   ├─> WP1 Data Model
-  ├─> WP3 First Template Content
   └─> WP4 Resolution Schema
 
 WP1
   └─> WP2 Template Repository/API
+        └─> WP3 First Template Content
 
 WP2 + WP4
   └─> WP5 SolutionResolver/Builder
@@ -1180,11 +1253,18 @@ WP3 + WP5 + WP6 + WP7
   └─> WP9 Evaluation / Shadow / Pilot
 ```
 
-> **评审修正：** 原图把 WP2（Template Repository/Admin API）挂在 WP4（Resolution
-> Schema）之下，但 WP2 的交付物（Head CRUD、Draft validate、发布、候选查询、
-> Admin 鉴权）不消费 Matcher/Resolution schema，只需要 WP1 的表存在即可开工；
-> 真正需要 WP4（Matcher 调用、Pydantic schema）的是 WP5。按原图排期会不必要地
-> 阻塞 WP2，或误导团队以为 WP2 依赖 WP4。
+> **评审修正（第一轮）：** 原图把 WP2（Template Repository/Admin API）挂在
+> WP4（Resolution Schema）之下，但 WP2 的交付物（Head CRUD、Draft validate、
+> 发布、候选查询、Admin 鉴权）不消费 Matcher/Resolution schema，只需要 WP1 的
+> 表存在即可开工；真正需要 WP4（Matcher 调用、Pydantic schema）的是 WP5。按
+> 原图排期会不必要地阻塞 WP2，或误导团队以为 WP2 依赖 WP4。
+>
+> **评审修正（第二轮）：** 原图把 WP3（Template Seed）挂在 WP0 下面，与 WP1
+> 并列，暗示两者可并行开工。但 WP3 的种子脚本要写入的
+> `solution_templates`/`solution_template_versions` 表由 WP1 的迁移创建，且
+> §12.4 已改为要求 WP3 通过 WP2 的 Admin API（create → draft → publish）完成
+> seed，不能绕过 API 直接写库——因此 WP3 实际依赖 WP1 **和** WP2，不是 WP0 的
+> 平行分支。
 
 建议 Release 划分：
 
@@ -1337,14 +1417,26 @@ Shadow 数据不得包含未最小化的敏感 Intent 副本；BuilderSession �
 
 ```text
 BESTTEAM_SOLUTION_RESOLVER_MODE=off|shadow|enabled
-BESTTEAM_SOLUTION_RESOLVER_INDUSTRIES=property_management
+BESTTEAM_SOLUTION_RESOLVER_PILOT_ORGS=<comma-separated org slugs, optional>
 ```
 
 行为：
 
 - `off`：完全使用当前 generative Builder；
 - `shadow`：计算并记录，不改变用户流程；
-- `enabled`：允许 template-guided 和 clarification 路径。
+- `enabled`：允许 template-guided 和 clarification 路径。若同时设置了
+  `PILOT_ORGS`，只有列表中的组织实际获得 `enabled` 行为，其余组织继续走
+  `shadow`；不设置 `PILOT_ORGS` 时 `enabled` 对所有组织生效——这一个变量同时
+  服务 §17 WP9 的"pilot feature flag"和 §18 Release 2A.3 的"试用组织启用"，
+  不是两套独立机制。
+
+> **评审补充（去掉冗余的行业开关）：** 原稿还有一个
+> `BESTTEAM_SOLUTION_RESOLVER_INDUSTRIES=property_management` 独立开关，用来
+> 限制生效行业。但决策 #2（§24）已经把 Release 2A.1-2A.3 限定为只发布一个
+> 行业的一个 Template，行业范围已经完全由"哪些 Template 被 `published`"决定
+> （§9.1 候选过滤），再加一个环境变量重复限制同一件事，属于 CLAUDE.md
+> "不需要的灵活性"——真正需要按行业细粒度灰度时（多个行业都已发布 Template），
+> 再引入这个维度是一个有真实需求驱动的独立决策，不提前加。
 
 回滚到 `off` 不删除已有 Workflow、Template Version 或 provenance。已经部署的组织 Workflow 继续运行。
 
@@ -1391,8 +1483,11 @@ Phase 2A 完成必须满足：
 ## 24. 决策确认（原"开放决策"，已在本次评审中逐条确定）
 
 原文档留了 10 个开放问题并给出一份"保守选择"清单，但清单只覆盖了其中 5 项，
-另外 5 项（#1、#4、#6、#7、#10）没有给出可执行的具体结论。本次评审逐条补齐，
-Release 2A.1 按以下结论实施，不再视为开放问题：
+另外 4 项（#1、#4、#6、#7）没有给出可执行的具体结论。第 10 项虽然也没有被
+那份清单覆盖，但它的答案其实已经隐含在 §9.1 未改动过的候选过滤规则里——不是
+真正悬而未决，只是从没有人把它写成一句明确的话；本次一并写清楚，避免读者
+误以为它和 #1/#4/#6/#7 一样是新拍板的决策。本次评审逐条补齐，Release 2A.1
+按以下结论实施，不再视为开放问题：
 
 1. **组织行业来源** — Onboarding 时问一次简单的行业 picklist（含"暂不确定"
    选项，`industry_source="onboarding"`）；Platform Admin 可随时在
@@ -1433,7 +1528,7 @@ Release 2A.1 按以下结论实施，不再视为开放问题：
    published` + kill switch（§9.1）。商业化是独立的后续产品决策。
 9. **管理员 Template UI 是否进入 2A.1** — 不进入。2A.1 只提供 §12.4 的
    JSON CRUD/发布 API 和 WP3 的 seed 脚本；图形化 Advanced 页面 Tab（WP8）
-   排在 2A.2 之后，与 §17 建议实施顺序一致。
+   排在 2A.2 之后，与 §18 建议实施顺序一致。
 10. **横向方案是否与一个垂直行业同时生效** — 是，且这早已是 §9.1 候选过滤
     规则本身隐含的行为（`industry_slug == organization.industry_slug` 或
     `horizontal`）：组织仍然只有一个主要行业（决策 #2），但 Resolver 的候选
