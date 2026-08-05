@@ -844,8 +844,8 @@ PATCH  /api/config/solution-templates/{slug}/kill-switch
 
 `kill-switch` 写 §7.2 新增的 `operator_disabled` 字段，与 publish 生命周期无关。
 
-**推迟到 Release 2A.2**（与 WP8 Admin UI 一起交付，2A.1 里没有第二个 Version
-或真实废弃场景可以练习）：
+**推迟到 Release 2A.3**（与 WP8 Admin UI 一起交付——决策 #9 已明确 WP8 排在
+2A.2 之后，见 §24，2A.1/2A.2 都没有第二个 Version 或真实废弃场景可以练习）：
 
 ```http
 POST   /api/config/solution-templates/{slug}/deprecate
@@ -1096,7 +1096,7 @@ An improved setup is available.
 - platform-admin-only 权限；
 - 被引用版本的删除保护。
 
-推迟到 2A.2（与 WP8 一起）：version history、deprecate。
+推迟到 2A.3（与 WP8 一起，见决策 #9）：version history、deprecate。
 
 ### WP3 — Property Maintenance 正式 Template Seed
 
@@ -1312,6 +1312,7 @@ WP3 + WP5 + WP6 + WP7
 
 - 当前行业 + 明确维修 Intent → Maintenance Template；
 - 当前行业 + 所有邮件 Intent → 不错误匹配 Maintenance；
+- `operator_disabled == true` 的 Template 不出现在候选列表（kill switch）；
 - 模糊邮件 Intent → clarification；
 - 非维修物业 Intent → negative example 生效；
 - 无候选 → generative；
@@ -1372,6 +1373,7 @@ WP3 + WP5 + WP6 + WP7
 - Prompt injection 不能请求隐藏 Blueprint；
 - Template API 只有 platform admin 可写；
 - deprecated Template 不用于新 Session；
+- `operator_disabled` Template 不用于新 Session，即使 `status == published`；
 - 历史 Run 仍可追溯 deprecated Version；
 - Policy 文本不能改变 Tool 权限。
 
