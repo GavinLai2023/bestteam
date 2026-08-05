@@ -347,6 +347,15 @@ flowchart TD
 
 版本发布后不可修改。编辑 Template 必须创建新 Version。
 
+> **并发 publish 的 version_number 计算（评审补充）：** 计算"下一个
+> `version_number`"（`MAX(version_number) + 1`）和插入新 Version 必须在**同一个
+> 数据库事务**内完成，不能先查询、提交、再插入。本项目是 SQLite（`ui/backend/
+> db/CLAUDE.md`：写操作占用整库锁），只要读取 MAX 和写入 INSERT 处在同一个未
+> 提交事务里，SQLite 自身的整库写锁就足以串行化两个管理员同时发布同一个
+> Template 的请求，不需要额外的行锁语法；第二个请求会等第一个事务提交后才能
+> 开始读取，天然拿到正确的下一个号。这条只是把隐含在 SQLite 事务模型里的行为
+> 明确写出来，避免实现者写成"先 SELECT 提交、再 INSERT"这种两阶段写法。
+
 ### 7.4 Builder Session 扩展
 
 在 `builder_sessions` 增加：
@@ -396,13 +405,21 @@ intent → requirements → spec → solution → testing → deployed
 > 且 `build_mode` 保持 NULL，直到澄清完成后重新 resolve 产出 `resolved` 或
 > `generative_fallback` 才写 `build_mode`。
 
-> **并发 resolve 控制（评审补充，配合 §16.2）：** `resolution_seq` 每次
-> `resolve-solution` 请求开始时先原子 `+1` 并读回新值（`UPDATE ... SET
-> resolution_seq = resolution_seq + 1 RETURNING resolution_seq`），请求处理完
-> 成后写回 `solution_resolution_json`/`build_mode` 前，必须在同一事务里确认
-> `resolution_seq` 仍等于自己持有的值（`WHERE resolution_seq = :my_seq`）；不
-> 匹配说明期间有更新的请求已经写入，本次写入直接丢弃（no-op），前端据此提示
-> "结果已更新，请刷新"而不是覆盖用户后来的答案。
+> **并发 resolve 控制（评审补充，配合 §16.2）：** `resolution_seq` 用**两个独立
+> 的短事务**，中间跨越耗时的 LLM Matcher 调用——不能把两步放进同一个事务，
+> 否则事务会在 LLM 调用的整个耗时期间持有写锁：本项目是 SQLite（`ui/backend/
+> db/CLAUDE.md`：写操作占用整库锁），一次多秒的 Matcher 调用如果跨在一个未提交
+> 事务里，会顺带阻塞其他所有并发写请求，不只是同一个 Session 的并发 resolve。
+> 正确顺序：
+>
+> 1. 请求开始时，独立事务里执行 `UPDATE ... SET resolution_seq =
+>    resolution_seq + 1 RETURNING resolution_seq` 并立即 `COMMIT`，拿到本次
+>    请求持有的 `my_seq`；
+> 2. 调用 Matcher（不持有任何锁）；
+> 3. 请求处理完成、准备写回 `solution_resolution_json`/`build_mode` 时，开启
+>    第二个独立事务，`WHERE resolution_seq = :my_seq` 校验后写入并 `COMMIT`；
+>    不匹配说明期间有更新的请求已经写入，本次写入直接丢弃（no-op），前端据此
+>    提示"结果已更新，请刷新"而不是覆盖用户后来的答案。
 
 ### 7.5 Workflow Version Provenance
 
@@ -552,22 +569,50 @@ Matcher 返回后必须验证：
 
 ### 9.4 置信度路由
 
-初始建议：
+路由规则按固定优先级顺序求值（第一条命中就停止，不是三条独立 OR 条件）：
 
-- 高置信度：`confidence >= 0.85` 且第一候选比第二候选至少高 `0.15`；
-- 中等置信度：`0.55 <= confidence < 0.85`，或候选差距不足；
-- 低置信度：`confidence < 0.55`，进入 generative；
-- 高风险歧义：无论分数都要求澄清。
+```text
+if confidence >= 0.85 and margin >= 0.15:
+    高置信度 → template_guided
+elif confidence >= 0.55:
+    中等置信度 → clarification
+else:
+    低置信度 → generative
+```
+
+`confidence >= 0.85` 但 `margin < 0.15` 的情况会在第一条判断失败后落入第二条
+（中等置信度分支），不是一个未定义的重叠状态——这就是"候选差距不足"这句话在
+实践中发生的地方：分数够高，但不足以确信选对了候选，所以按中等置信度处理，
+不是按低置信度处理。
+
+> **评审补充（去掉无信号来源的"高风险歧义"规则）：** 早期草稿在这三条之外还有
+> 第四条"高风险歧义：无论分数都要求澄清"，但整份文档没有任何地方定义"高风险
+> 歧义"由什么信号触发——不在 §9.2 的 `SolutionResolution` schema 里，不在 §9.3
+> 验证清单里，不在 §6 架构图的分支里，§24 决策 #4 重新确认阈值时也没有提到它。
+> 一个没有输入信号的规则永远不可能触发，等于死代码，因此从 2A.1/2A.2 的路由
+> 规则里删除。如果未来出现真实需要单独强制澄清的场景（例如候选 Template 之间
+> 存在已知的高风险混淆对），应该先定义清楚触发信号是什么，再作为一个新的、有
+> 明确输入的规则加回来，而不是先加一句没有实现基础的话。
 
 这些阈值必须配置化，并通过离线 Intent 数据集校准。LLM 的自报 confidence 不能视为统计概率，只能作为受评估的路由信号。
 
 > **候选数为 1 时的 margin 规则（评审补充）：** Release 2A.1/2A.2 只发布
 > `property_maintenance_inbox` 一个 Template，尚无 `horizontal` Template（§17
-> WP3），因此候选集合大小为 1 是主线场景，不是边界情况——"第一候选比第二候选
-> 至少高 0.15" 在这种情况下必须有明确定义，不能留给实现者猜。规则：**只有一个
-> 候选时，第二候选置信度按 `0` 处理**，margin 条件恒成立，路由只看
-> `confidence >= 0.85` 这一个条件。候选数为 0 时已由 §9.3"没有候选时
-> `template_id` 必须为 NULL"覆盖，直接进入 generative。
+> WP3 的范围决定，不是 §24 决策 #2——决策 #2 只约束组织的 `industry_slug` 是
+> 单值列，跟平台一共发布几个 Template 是两件事），因此候选集合大小为 1 是主线
+> 场景，不是边界情况——"第一候选比第二候选至少高 0.15" 在这种情况下必须有明确
+> 定义，不能留给实现者猜。规则：**只有一个候选时，第二候选置信度按 `0` 处理**，
+> margin 条件恒成立，路由只看 `confidence >= 0.85` 这一个条件。候选数为 0 时
+> 已由 §9.3"没有候选时 `template_id` 必须为 NULL"覆盖，直接进入 generative。
+>
+> **多候选时的 margin 目前无法实现（评审补充，遗留给未来 Release）：** §9.2
+> 的 `SolutionResolution` schema 只返回一个 `template_id`/`confidence` 对，没有
+> 任何字段能表达"第二候选是谁、置信度多少"。上面的 `候选数为 1` 规则只解决了
+> 2A.1-2A.3 这个唯一会发生的场景；一旦第二个 Template（例如某个 `horizontal`
+> Template）真正发布，字面意义上的 margin 检查将无法实现——需要先扩展 Matcher
+> 的输出 schema（例如返回按置信度排序的候选列表），这是一个有真实需求驱动时
+> 才该做的独立设计决策，本方案不在此提前设计，只是明确记录这个已知限制，避免
+> 被误当作"已经支持多候选"。
 
 ### 9.5 澄清策略
 
@@ -576,7 +621,11 @@ Matcher 返回后必须验证：
 - 使用业务语言和业务选项；
 - 不提 Template 名称；
 - 最多两轮；
-- 两轮后仍不确定时进入 generative 或人工/高级配置路径；
+- 两轮后仍不确定时进入 generative（不是"人工/高级配置路径"——`solution_
+  resolution_json.status` 只有 §7.4 定义的三个值，没有第四个"待人工介入"状态，
+  §19.2 的验收测试也明确断言"两轮仍不确定 → generative"；人工介入在 2A.1/2A.2
+  只体现为管理员之后能在现有 Advanced 页面里看到并调整生成结果，不是 Resolver
+  自己的一个终态）；
 - 用户回答追加到 Requirements/Resolution Context，不覆盖原 Intent。
 
 ## 10. Template-guided Specification Composition
@@ -680,7 +729,13 @@ Policy 指令使用确定性 renderer 生成，客户文本始终放入清晰的
 
 - 必需 Agent 存在；
 - Agent 使用的 Tool 不超出允许集合；
-- 必需平台 Skills 存在且未被组织同名 Skill shadow；
+- 必需平台 Skills 存在且未被组织同名 Skill shadow（评审补充：这条检查的
+  真正适用场景是 Preview/Test 路径——§10.3 那里临时 SkillSpec 是通过现有
+  按名称解析的 `extra_skills` 加载路径注入的，同名 shadow 在那里是真实风险；
+  Deploy 路径已经按 §10.5 用精确 `SkillVersion.id` 绑定，构造上就不会被同名
+  Skill 替换，这条检查在 Deploy 时是恒真的防御性复查，不是 Deploy 路径唯一的
+  防线——conformance validator 必须在 Preview/Test 的临时 Skill 注入之后、
+  Deploy 的精确绑定之前都跑一遍，不能只在 Deploy 时跑一次）；
 - Team mode 和 Agent 顺序符合锁定规则；
 - 禁止 Tool 不存在；
 - 邮件发送 Tool 不存在；
@@ -809,14 +864,19 @@ POST /api/builder/sessions/{session_id}/specification
 调整为：
 
 - `build_mode == template_guided`：调用 Template Composer；
-- `build_mode == template_plus_extension`：**Release 2A.1/2A.2 中此分支不可达**——
-  §9.3 服务端验证已把 Matcher 自报的 `template_plus_extension` 降级为
-  `generative`，`build_mode` 永远不会被写成这个值（见决策 #5，§24）。这里列出
-  只是为未来 Release 预留的架构占位，实现 WP6 时不需要真的写"先 compose 再由
-  受限 Architect 扩展"的逻辑；
 - `build_mode == generative`：保持当前 `generate_specification`；
 - resolution 未完成时拒绝直接进入 template-guided specification；
 - 管理员/测试直接提交 Specification 的现有路径保持兼容。
+
+> **评审补充（去掉不可达分支的实现描述）：** 早期草稿这里还列了一条
+> `build_mode == template_plus_extension` 分支，说明它"先 compose，再由受限
+> Architect 扩展"。但 §9.3 已经把 Matcher 自报的 `template_plus_extension`
+> 在写入 `build_mode` 之前就降级为 `generative`（决策 #5，§24），所以
+> `build_mode` 在 2A.1/2A.2 永远不会等于这个值——WP6 不需要为一个不可达的值写
+> 任何分发逻辑。保留一段描述"届时会怎么做"的实现文字，属于 §10.2 已经指出并
+> 删除过的同一类"不需要的灵活性"（那里删的是 `model_slot` 占位字段，这里是
+> 一段占位实现描述，性质相同）；真正需要支持这个 build mode 时，应该在有真实
+> 需求的那个 Release 里重新设计，而不是现在先写一份没有代码会执行的描述。
 
 ### 12.3 Policy Answers Endpoint
 
@@ -840,9 +900,22 @@ GET    /api/config/solution-templates/{slug}
 PUT    /api/config/solution-templates/{slug}/draft
 POST   /api/config/solution-templates/{slug}/publish
 PATCH  /api/config/solution-templates/{slug}/kill-switch
+DELETE /api/config/solution-templates/{slug}
 ```
 
 `kill-switch` 写 §7.2 新增的 `operator_disabled` 字段，与 publish 生命周期无关。
+每次成功 `publish` 把 `operator_disabled` 重置为 `False`：publish 是一次显式
+"这个版本现在应该生效"的动作，不应该被一次可能发生在很久以前、admin 早已忘记
+的测试期 kill-switch 操作悄悄抵消（评审补充：早期草稿没有说明 publish 与
+kill-switch 的交互，导致一个在 draft 阶段被临时禁用过的 Template 发布后可能
+毫无提示地对 Resolver 永久不可见）。
+
+`DELETE` 复用现有 `workflows` head 删除的护栏模式（`ui/backend/db/CLAUDE.md`）：
+若该 Template 的任意 Version 曾被 `workflow_versions.solution_template_version_id`
+引用，拒绝并返回 `409`（删除 Head 会连带丢失历史 Version，破坏已部署 Workflow
+的 provenance）；一个从未发布过、或发布过但从未被实际部署引用的 Template 可以
+直接删除。这一条是 WP2"被引用版本的删除保护"交付物实际对应的端点（评审补充：
+早期草稿承诺了删除保护，却从没有在 API 列表里给出被保护的 DELETE 端点本身）。
 
 **推迟到 Release 2A.3**（与 WP8 Admin UI 一起交付——决策 #9 已明确 WP8 排在
 2A.2 之后，见 §24，2A.1/2A.2 都没有第二个 Version 或真实废弃场景可以练习）：
@@ -947,9 +1020,19 @@ ui/frontend/src/components/SolutionClarification.jsx
 如果 Property Management 组织明确提出一个 Tradies 方案：
 
 - 不静默加载 `trades_and_field_services` Template；
-- 询问该需求是其自身业务的一部分还是不同业务；
-- 由管理员或用户确认组织行业扩展后才能使用；
-- 在 Phase 2A 单行业模型下，可以进入 generative 路径，而不是越权使用跨行业模板。
+- 询问该需求是其自身业务的一部分还是不同业务。
+
+**Phase 2A（本方案覆盖的全部 Release）实际行为：** 进入 generative 路径，不
+越权使用跨行业模板，也不改写 `industry_slug`。`organizations.industry_slug`
+是单值列（§24 决策 #2），Phase 2A 没有"行业扩展"这个状态可以确认或存储——
+
+> **评审补充（澄清"行业扩展"是未来占位，不是本方案交付物）：** 早期草稿在
+> generative fallback 之外还写了"由管理员或用户确认组织行业扩展后才能使用"，
+> 读起来像是本方案要实现一个允许组织同时属于两个行业的确认流程，但 §7.1/§24
+> 决策 #2 从头到尾都只有一个单值 `industry_slug`，没有任何字段能表达"扩展"后
+> 的第二个行业。这句话描述的是一个多行业 schema（`organization_industries`
+> 关联表，§7.1 已提到"若未来确认需要"）才能支持的能力，本方案不实现，因此
+> 从当前行为里删除，只保留 Phase 2A 实际会发生的 generative fallback。
 
 ## 15. Template Version 与升级
 
@@ -1004,7 +1087,13 @@ An improved setup is available.
 
 ### 16.2 Matcher 失败
 
-- 模型超时、格式错误或未知 ID：安全回退到 generative，或提示重试；
+- **超时**（网络/推理耗时）：视为瞬时故障，最多重试一次，仍失败则回退到
+  generative（与 §9.3"匹配失败安全回退到 generative"一致，重试只是失败判定
+  前的一次额外尝试，不改变最终必须回退这一结论，避免网络抖动就把一个明确的
+  Property Maintenance Intent 误判成"无匹配"，拖累 §24 决策 #4 的 shadow-mode
+  precision 指标）；
+- **格式错误或未知 ID**：模型确定性地给出了不可用的结果，重试大概率复现同样
+  的错误，不重试，直接回退到 generative；
 - 不产生半写入 Template 选择；
 - Resolution 保存必须事务化；
 - 同一 Session 并发 resolve 使用 `builder_sessions.resolution_seq` 做乐观并发
@@ -1230,7 +1319,7 @@ An improved setup is available.
 - operator runbook；
 - Template authoring guide；
 - rollback guide；
-- `docs/STATUS.md`、`docs/DECISIONS.md` 和各目录 `AGENTS.md` 更新。
+- `docs/STATUS.md`、`docs/DECISIONS.md` 和各目录 `CLAUDE.md` 更新。
 
 ## 18. 建议实施顺序
 
@@ -1432,13 +1521,16 @@ BESTTEAM_SOLUTION_RESOLVER_PILOT_ORGS=<comma-separated org slugs, optional>
   服务 §17 WP9 的"pilot feature flag"和 §18 Release 2A.3 的"试用组织启用"，
   不是两套独立机制。
 
-> **评审补充（去掉冗余的行业开关）：** 原稿还有一个
+> **评审补充（去掉冗余的行业开关，引用修正）：** 原稿还有一个
 > `BESTTEAM_SOLUTION_RESOLVER_INDUSTRIES=property_management` 独立开关，用来
-> 限制生效行业。但决策 #2（§24）已经把 Release 2A.1-2A.3 限定为只发布一个
-> 行业的一个 Template，行业范围已经完全由"哪些 Template 被 `published`"决定
-> （§9.1 候选过滤），再加一个环境变量重复限制同一件事，属于 CLAUDE.md
-> "不需要的灵活性"——真正需要按行业细粒度灰度时（多个行业都已发布 Template），
-> 再引入这个维度是一个有真实需求驱动的独立决策，不提前加。
+> 限制生效行业。但 §17 WP3 的范围（Release 2A.1-2A.3 只 seed 一个
+> `property_maintenance_inbox` Template）才是"只有一个行业生效"的真正原因——
+> §24 决策 #2 只约束组织的 `industry_slug` 是单值列，跟平台一共发布几个行业的
+> Template 是两个独立问题，不能作为这里的依据（上一轮修复误引了决策 #2，这里
+> 更正）。行业范围实际由"哪些 Template 被 `published`"决定（§9.1 候选过滤），
+> 再加一个环境变量重复限制同一件事，属于 CLAUDE.md "不需要的灵活性"——真正需要
+> 按行业细粒度灰度时（多个行业都已发布 Template），再引入这个维度是一个有真实
+> 需求驱动的独立决策，不提前加。
 
 回滚到 `off` 不删除已有 Workflow、Template Version 或 provenance。已经部署的组织 Workflow 继续运行。
 
@@ -1544,9 +1636,9 @@ Phase 2A 完成必须满足：
 - `docs/STATUS.md`；
 - `docs/DECISIONS.md`；
 - `docs/team_builder_methodology.md`；
-- `ui/backend/AGENTS.md`；
-- `ui/backend/db/AGENTS.md`；
-- `ui/frontend/AGENTS.md`；
+- `ui/backend/CLAUDE.md`；
+- `ui/backend/db/CLAUDE.md`；
+- `ui/frontend/CLAUDE.md`；
 - Template Authoring Guide；
 - Solution Resolver Evaluation Guide；
 - Operator rollout/rollback Runbook；
