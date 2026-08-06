@@ -58,7 +58,7 @@ export interface BuilderSession {
   specification_json?: Specification | null
   feedback_history?: FeedbackHistoryEntry[]
   uses_email?: boolean
-  workflow_id?: string | null
+  workflow_id?: number | null
   updated_at: string
 }
 

@@ -267,7 +267,7 @@ describe('SessionsPage draft deletion', () => {
   })
 
   it('does not show a Delete button for a session linked to a live team', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: '7' })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: 7 })] })
 
     renderPage()
 
@@ -336,7 +336,7 @@ describe('SessionsPage session-less deployed workflows', () => {
 
   it('shows a card for a deployed workflow with no builder session', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: '3', specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
@@ -346,7 +346,7 @@ describe('SessionsPage session-less deployed workflows', () => {
 
   it('does not show a Delete button for a session-less deployed workflow', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: '3', specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
@@ -357,7 +357,7 @@ describe('SessionsPage session-less deployed workflows', () => {
 
   it('clicking a session-less deployed workflow card goes to Run a Team pre-selected, not a wizard page', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: '3', specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
