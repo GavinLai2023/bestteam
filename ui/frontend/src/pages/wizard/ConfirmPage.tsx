@@ -4,8 +4,9 @@ import BulletEditor from '../../components/BulletEditor'
 import ModelPicker from '../../components/ModelPicker'
 import TeamFlow from '../../components/TeamFlow'
 import { api } from '../../lib/api'
+import type { Requirements, WizardOutletContext } from '../../lib/types'
 
-const EMPTY_REQUIREMENTS = {
+const EMPTY_REQUIREMENTS: Requirements = {
   summary: '',
   pain_points: [],
   goals: [],
@@ -15,20 +16,20 @@ const EMPTY_REQUIREMENTS = {
 }
 
 export default function ConfirmPage() {
-  const { session, setSession, loading, sessionId } = useOutletContext()
+  const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
 
   const [model, setModel] = useState('')
   const [feedback, setFeedback] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   const [showRequirements, setShowRequirements] = useState(false)
-  const [reqDraft, setReqDraft] = useState(EMPTY_REQUIREMENTS)
+  const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
   const [reqModel, setReqModel] = useState('')
   const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
-  const [reqError, setReqError] = useState(null)
+  const [reqError, setReqError] = useState<string | null>(null)
 
   useEffect(() => {
     if (session?.requirements_json) {
@@ -62,11 +63,11 @@ export default function ConfirmPage() {
     setBusy(true)
     setError(null)
     try {
-      const updated = await api.submitSolution(sessionId, { feedback: feedback.trim(), model })
+      const updated = await api.submitSolution(sessionId!, { feedback: feedback.trim(), model })
       setSession(updated)
       setFeedback('')
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -77,10 +78,10 @@ export default function ConfirmPage() {
     setReqBusy(true)
     setReqError(null)
     try {
-      const updated = await api.submitRequirements(sessionId, { requirements: reqDraft })
+      const updated = await api.submitRequirements(sessionId!, { requirements: reqDraft })
       setSession(updated)
     } catch (e) {
-      setReqError(e.message)
+      setReqError((e as Error).message)
     } finally {
       setReqBusy(false)
     }
@@ -91,11 +92,11 @@ export default function ConfirmPage() {
     setReqBusy(true)
     setReqError(null)
     try {
-      const updated = await api.submitRequirements(sessionId, { model: reqModel, feedback: reqFeedback.trim() })
+      const updated = await api.submitRequirements(sessionId!, { model: reqModel, feedback: reqFeedback.trim() })
       setSession(updated)
       setReqFeedback('')
     } catch (e) {
-      setReqError(e.message)
+      setReqError((e as Error).message)
     } finally {
       setReqBusy(false)
     }

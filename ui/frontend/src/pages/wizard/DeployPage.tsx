@@ -3,13 +3,14 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailConnect from '../../components/EmailConnect'
 import EmailTriggerToggle from '../../components/EmailTriggerToggle'
 import { api } from '../../lib/api'
+import type { WizardOutletContext } from '../../lib/types'
 
 export default function DeployPage() {
-  const { session, setSession, loading, sessionId } = useOutletContext()
+  const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
 
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [emailConnected, setEmailConnected] = useState(false)
 
   if (loading) return <p className="hint">Loading…</p>
@@ -36,10 +37,10 @@ export default function DeployPage() {
     setBusy(true)
     setError(null)
     try {
-      const updated = await api.deploySession(sessionId)
+      const updated = await api.deploySession(sessionId!)
       setSession(updated)
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy(false)
     }

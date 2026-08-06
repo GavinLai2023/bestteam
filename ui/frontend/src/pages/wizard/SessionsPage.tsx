@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
+import type { BuilderSession, EmailTrigger } from '../../lib/types'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
 
@@ -16,30 +17,30 @@ const RESUMABLE_STATUSES = new Set(['spec', 'solution', 'testing', 'deployed'])
 // than three technical-sounding statuses.
 const STATUS_ORDER = ['deployed', 'in_progress']
 
-const STATUS_LABELS = {
+const STATUS_LABELS: Record<string, string> = {
   deployed: 'Live',
   in_progress: 'In Progress',
 }
 
-const STATUS_EXPLANATIONS = {
+const STATUS_EXPLANATIONS: Record<string, string> = {
   deployed: 'Live -- this team is deployed and ready for your organization to use.',
   in_progress: "Still being built -- you're designing, reviewing, or trying out this team before making it live.",
 }
 
-function bucketFor(status) {
+function bucketFor(status: string) {
   return status === 'deployed' ? 'deployed' : 'in_progress'
 }
 
 // Short forms of EmailTriggerActivity's STATUS_LABELS, for a one-line card
 // tag rather than a full status block (see the Activity page for the full view).
-const AUTOMATION_STATUS_LABELS = {
+const AUTOMATION_STATUS_LABELS: Record<string, string> = {
   active: 'Automation on — watching for new email',
   paused_cap: 'Automation paused — daily limit reached',
   error: 'Automation problem — checking mailbox',
   disabled: 'Automation paused',
 }
 
-function resumePathFor(session) {
+function resumePathFor(session: BuilderSession) {
   // A deployed workflow with no builder session (deployed straight through
   // the admin Advanced/CRUD page, see builder.py's
   // _synthetic_session_for_workflow) has no wizard flow to resume into --
@@ -54,25 +55,25 @@ function resumePathFor(session) {
 // non-technical reader) if the architect produced one, else the customer's
 // original prompt -- that's an intent statement, not a description of what
 // the team does, but it's better than nothing while a session is mid-flow.
-function descriptionFor(session) {
+function descriptionFor(session: BuilderSession) {
   return session.specification_json?.teams?.[0]?.friendly_description || session.intent_text
 }
 
 export default function SessionsPage() {
   const navigate = useNavigate()
-  const [sessions, setSessions] = useState([])
+  const [sessions, setSessions] = useState<BuilderSession[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   // The org has at most one automatic trigger (see EmailTriggerToggle); a
   // missing/failed fetch just means no card gets the tag (best-effort).
-  const [trigger, setTrigger] = useState(null)
-  const [openStatus, setOpenStatus] = useState(null)
+  const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
+  const [openStatus, setOpenStatus] = useState<string | null>(null)
 
   useEffect(() => {
     api
       .listSessions()
       .then((data) => setSessions(data.sessions.filter((s) => RESUMABLE_STATUSES.has(s.status))))
-      .catch((e) => setError(e.message))
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
     api.getEmailTrigger().then(setTrigger).catch(() => {})
   }, [])
@@ -82,14 +83,14 @@ export default function SessionsPage() {
     sessions: sessions.filter((s) => bucketFor(s.status) === bucket),
   })).filter((group) => group.sessions.length > 0)
 
-  const handleDelete = async (session) => {
+  const handleDelete = async (session: BuilderSession) => {
     const label = session.specification_json?.name ?? session.intent_text
     if (!window.confirm(`Delete "${label}"? This can't be undone.`)) return
     try {
-      await api.deleteSession(session.id)
+      await api.deleteSession(session.id!)
       setSessions((prev) => prev.filter((s) => s.id !== session.id))
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     }
   }
 

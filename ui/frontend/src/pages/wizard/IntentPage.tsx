@@ -4,18 +4,21 @@ import { api } from '../../lib/api'
 import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
 
-const STAGE_LABELS = {
+const STAGE_LABELS: Record<string, string> = {
   creating: 'Setting things up…',
   requirements: 'Getting to know your business…',
   specification: 'Putting your team together…',
 }
 
-const UPLOAD_LABELS = {
+const UPLOAD_LABELS: Record<string, string> = {
   transcribing: 'Transcribing interview…',
   extracting: 'Extracting key points…',
 }
 
 const ACCEPTED_AUDIO = '.mp3,.mp4,.m4a,.wav,.webm,.mpeg,.mpga'
+
+type Stage = null | 'creating' | 'requirements' | 'specification'
+type UploadStage = null | 'transcribing' | 'extracting' | 'done'
 
 export default function IntentPage() {
   const navigate = useNavigate()
@@ -28,16 +31,16 @@ export default function IntentPage() {
   const [intentText, setIntentText] = useState('')
   const [asIsText, setAsIsText] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [stage, setStage] = useState(null) // null | 'creating' | 'requirements' | 'specification'
-  const [error, setError] = useState(null)
-  const [sessionId, setSessionId] = useState(null)
+  const [stage, setStage] = useState<Stage>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [sessionId, setSessionId] = useState<string | null>(null)
 
-  const fileInputRef = useRef(null)
-  const [uploadStage, setUploadStage] = useState(null) // null | 'transcribing' | 'extracting' | 'done'
-  const [uploadError, setUploadError] = useState(null)
-  const [transcript, setTranscript] = useState(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploadStage, setUploadStage] = useState<UploadStage>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [transcript, setTranscript] = useState<string | null>(null)
 
-  const handleFileUpload = async (e) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || catalogLoading || catalogUnavailable) return
     e.target.value = '' // reset so the same file can be re-selected
@@ -48,7 +51,7 @@ export default function IntentPage() {
     // After 5 s, advance the label to hint the extraction phase is underway.
     const timer = setTimeout(
       () => setUploadStage((s) => (s === 'transcribing' ? 'extracting' : s)),
-      5000
+      5000,
     )
     try {
       const result = await api.transcribeInterview(file, pickDefaultModel(entries))
@@ -58,20 +61,20 @@ export default function IntentPage() {
       setSessionId(null) // force a fresh session with the new intent text
       setUploadStage('done')
     } catch (err) {
-      setUploadError(err.message)
+      setUploadError((err as Error).message)
       setUploadStage(null)
     } finally {
       clearTimeout(timer)
     }
   }
 
-  const buildSpecification = async (id) => {
+  const buildSpecification = async (id: string) => {
     setStage('specification')
     try {
       await api.submitSpecification(id, { model: pickDefaultModel(entries) })
       navigate(`/wizard/${id}/preview`)
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
       setSubmitting(false)
       setStage(null)
     }
@@ -91,12 +94,14 @@ export default function IntentPage() {
         id = session.id
         setSessionId(id)
       } catch (e) {
-        setError(e.message)
+        setError((e as Error).message)
         setSubmitting(false)
         setStage(null)
         return
       }
     }
+
+    if (!id) return
 
     // Best-effort: the Requirements summary is a nice-to-have internal
     // artifact. /specification degrades gracefully (falls back to the raw
@@ -163,7 +168,7 @@ export default function IntentPage() {
           onClick={() => fileInputRef.current?.click()}
           disabled={submitting || isUploading || catalogLoading || catalogUnavailable}
         >
-          {UPLOAD_LABELS[uploadStage] ?? (uploadStage === 'done' ? 'Replace recording' : 'Upload interview recording')}
+          {UPLOAD_LABELS[uploadStage ?? ''] ?? (uploadStage === 'done' ? 'Replace recording' : 'Upload interview recording')}
         </button>
         <input
           ref={fileInputRef}
@@ -224,7 +229,7 @@ export default function IntentPage() {
           disabled={!intentText.trim() || submitting || isUploading || catalogLoading || catalogUnavailable}
         >
           {submitting
-            ? STAGE_LABELS[stage] ?? 'Starting…'
+            ? STAGE_LABELS[stage ?? ''] ?? 'Starting…'
             : catalogLoading
               ? 'Loading available models…'
               : 'Start building my team'}

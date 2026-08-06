@@ -1,18 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ComponentType } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import EmailConnect from '../../components/EmailConnect'
+import EmailConnectRaw from '../../components/EmailConnect'
 import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
+import type { TraceEvent, WizardOutletContext } from '../../lib/types'
+
+// EmailConnect isn't converted to TypeScript until Task 8. Until then, tsc
+// infers its untyped destructured `{ onChange, onStatusChange }` parameter
+// as a *required* object type (both props are optional at runtime -- the
+// component calls them with `?.()`), so rendering it with no props here
+// (as the current JSX does) would otherwise fail to compile. This narrows
+// the inferred type back to optional, matching actual runtime behavior; no
+// change to EmailConnect.jsx itself.
+const EmailConnect = EmailConnectRaw as ComponentType<{
+  onChange?: () => void
+  onStatusChange?: (connected: boolean) => void
+}>
+
+type Status = 'idle' | 'running' | 'completed' | 'failed'
 
 export default function PreviewPage() {
-  const { session, loading, sessionId } = useOutletContext()
+  const { session, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
 
   const [input, setInput] = useState('')
-  const [events, setEvents] = useState([])
-  const [status, setStatus] = useState('idle') // idle | running | completed | failed
-  const [error, setError] = useState(null)
-  const wsRef = useRef(null)
+  const [events, setEvents] = useState<TraceEvent[]>([])
+  const [status, setStatus] = useState<Status>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => () => wsRef.current?.close(), [])
 
@@ -36,17 +52,17 @@ export default function PreviewPage() {
   const spec = session.specification_json
   const agentsByName = Object.fromEntries((spec.agents ?? []).map((a) => [a.name, a]))
 
-  const friendlyName = (agentName) => {
+  const friendlyName = (agentName: string) => {
     const agent = agentsByName[agentName]
     return agent?.display_name || agentName
   }
 
-  const titleFor = (event) => {
+  const titleFor = (event: TraceEvent) => {
     switch (event.type) {
       case 'run_started':
         return 'Your team got started'
       case 'agent_completed':
-        return `${friendlyName(event.agent)} finished their part`
+        return `${friendlyName(event.agent ?? '')} finished their part`
       case 'run_completed':
         return 'All done!'
       case 'run_failed':
@@ -64,13 +80,13 @@ export default function PreviewPage() {
     wsRef.current?.close()
 
     try {
-      const { run_id: runId } = await api.createTestRun(sessionId, input.trim())
+      const { run_id: runId } = await api.createTestRun(sessionId!, input.trim())
 
       const { ticket } = await api.createWsTicket()
       const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
       wsRef.current = ws
-      ws.onmessage = (message) => {
-        const event = JSON.parse(message.data)
+      ws.onmessage = (message: MessageEvent<string>) => {
+        const event = JSON.parse(message.data) as TraceEvent
         setEvents((prev) => [...prev, event])
         if (event.type === 'run_completed') setStatus('completed')
         if (event.type === 'run_failed') setStatus('failed')
@@ -89,7 +105,7 @@ export default function PreviewPage() {
         })
       }
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
       setStatus('idle')
     }
   }
@@ -141,7 +157,11 @@ export default function PreviewPage() {
           {events.map((event, i) => (
             <li key={i} className={`activity-card ${event.type}`}>
               <p className="activity-title">{titleFor(event)}</p>
-              {event.data && <p className="activity-body">{event.data}</p>}
+              {event.data && (
+                <p className="activity-body">
+                  {typeof event.data === 'string' ? event.data : JSON.stringify(event.data)}
+                </p>
+              )}
             </li>
           ))}
         </ul>
