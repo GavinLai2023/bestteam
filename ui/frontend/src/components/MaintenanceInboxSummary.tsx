@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 
+type Summary = Awaited<ReturnType<typeof api.automationResultsSummary>>
+
 // Today's Property Maintenance Inbox counters for the Activity page's
 // Automations tab (spec section 6.2). Renders nothing until loaded, nothing
 // at all for an org that has never used this template (summary.ever_used),
@@ -13,7 +15,7 @@ import { api } from '../lib/api'
 // UTC (Codex review finding). There's no org-level timezone setting in this
 // app, so the fix is the browser's own local date rather than a new backend
 // feature -- the endpoint already accepts `date` for exactly this override.
-function _todayLocal() {
+function _todayLocal(): string {
   const now = new Date()
   const yyyy = now.getFullYear()
   const mm = String(now.getMonth() + 1).padStart(2, '0')
@@ -27,7 +29,7 @@ function _todayLocal() {
 const REFRESH_INTERVAL_MS = 30_000
 
 export default function MaintenanceInboxSummary() {
-  const [summary, setSummary] = useState(undefined) // undefined = still loading
+  const [summary, setSummary] = useState<Summary | undefined>(undefined) // undefined = still loading
   const [error, setError] = useState(false)
 
   useEffect(() => {

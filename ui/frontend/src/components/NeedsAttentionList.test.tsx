@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import NeedsAttentionList from './NeedsAttentionList'
 import { api } from '../lib/api'
+import type { AutomationResult } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -9,18 +10,19 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
-const RESULT = {
+const mockedApi = vi.mocked(api)
+
+const RESULT: AutomationResult = {
   id: 1,
   run_id: 'run-42',
   status: 'needs_attention',
-  needs_attention: true,
   created_at: '2026-08-02T10:00:00Z',
   payload: {
     priority: 'possible_emergency',
     summary: 'Active leak under the kitchen sink.',
     extracted: { property_address: '12 Example St, Unit 3' },
     human_reason: 'Active leak; missing callback number.',
-    action: { draft_created: true, draft_type: 'acknowledgement' },
+    action: { draft_created: true },
   },
 }
 
@@ -30,16 +32,16 @@ describe('NeedsAttentionList', () => {
   })
 
   it('renders nothing when there is nothing to review', async () => {
-    api.listAutomationResults.mockResolvedValue({ results: [] })
+    mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
 
     const { container } = render(<NeedsAttentionList />)
 
-    await vi.waitFor(() => expect(api.listAutomationResults).toHaveBeenCalledWith({ needs_attention: true, limit: 20 }))
+    await vi.waitFor(() => expect(mockedApi.listAutomationResults).toHaveBeenCalledWith({ needs_attention: true, limit: 20 }))
     expect(container).toBeEmptyDOMElement()
   })
 
   it('shows each item with priority, summary, address, and reason', async () => {
-    api.listAutomationResults.mockResolvedValue({ results: [RESULT] })
+    mockedApi.listAutomationResults.mockResolvedValue({ results: [RESULT] })
 
     render(<NeedsAttentionList />)
 
@@ -51,7 +53,7 @@ describe('NeedsAttentionList', () => {
   })
 
   it('falls back to "Address not identified" when no address was extracted', async () => {
-    api.listAutomationResults.mockResolvedValue({
+    mockedApi.listAutomationResults.mockResolvedValue({
       results: [{ ...RESULT, payload: { ...RESULT.payload, extracted: {} } }],
     })
 
@@ -61,7 +63,7 @@ describe('NeedsAttentionList', () => {
   })
 
   it('clicking "View run" calls onOpenRun with the result\'s run_id', async () => {
-    api.listAutomationResults.mockResolvedValue({ results: [RESULT] })
+    mockedApi.listAutomationResults.mockResolvedValue({ results: [RESULT] })
     const onOpenRun = vi.fn()
 
     render(<NeedsAttentionList onOpenRun={onOpenRun} />)
@@ -75,7 +77,7 @@ describe('NeedsAttentionList', () => {
   })
 
   it('shows an error banner when the list fails to load', async () => {
-    api.listAutomationResults.mockRejectedValue(new Error('boom'))
+    mockedApi.listAutomationResults.mockRejectedValue(new Error('boom'))
 
     render(<NeedsAttentionList />)
 

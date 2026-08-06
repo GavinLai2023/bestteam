@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
+import type { EmailTrigger } from '../lib/types'
 
-const STATUS_META = {
+interface EmailTriggerActivityProps {
+  onViewRuns?: () => void
+}
+
+const STATUS_META: Record<string, { badge: string; text: string }> = {
   active: { badge: 'Active', text: 'Watching for new email.' },
   off: { badge: 'Off', text: 'Automatic runs are turned off.' },
   disabled: { badge: 'Paused', text: 'Paused by the operator.' },
@@ -22,8 +27,8 @@ const REFRESH_INTERVAL_MS = 30_000
 // configured one. Recent autonomous runs live on the Runs tab (filter:
 // "Automatic only") instead of being duplicated here; `onViewRuns` jumps
 // there pre-filtered.
-export default function EmailTriggerActivity({ onViewRuns }) {
-  const [trigger, setTrigger] = useState(undefined) // undefined = still loading
+export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivityProps) {
+  const [trigger, setTrigger] = useState<EmailTrigger | undefined>(undefined) // undefined = still loading
   const [statusFailed, setStatusFailed] = useState(false)
 
   useEffect(() => {

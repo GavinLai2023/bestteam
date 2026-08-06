@@ -18,6 +18,8 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
+const mockedApi = vi.mocked(api)
+
 const renderPage = () =>
   render(
     <MemoryRouter>
@@ -28,25 +30,26 @@ const renderPage = () =>
 describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    api.listWorkflows.mockResolvedValue({ workflows: ['wf-a', 'wf-b'] })
-    api.getEmailTrigger.mockResolvedValue({ enabled: false })
-    api.emailTriggerActivity.mockResolvedValue({ runs: [] })
-    api.automationResultsSummary.mockResolvedValue({
+    mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf-a', 'wf-b'] })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'off', daily_cap: 0 })
+    mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })
+    mockedApi.automationResultsSummary.mockResolvedValue({
+      ever_used: false,
       emails_read: 0, maintenance_related: 0, drafts_created: 0,
       needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
     })
-    api.listAutomationResults.mockResolvedValue({ results: [] })
+    mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
   })
 
   it('defaults to the Automations tab', async () => {
     renderPage()
 
     expect(await screen.findByText('Automations')).toHaveClass('active')
-    expect(api.listRuns).not.toHaveBeenCalled()
+    expect(mockedApi.listRuns).not.toHaveBeenCalled()
   })
 
   it('switching to the Runs tab lists runs and lets you filter', async () => {
-    api.listRuns.mockResolvedValue({
+    mockedApi.listRuns.mockResolvedValue({
       runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
 
@@ -56,18 +59,18 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
-    expect(api.listRuns).toHaveBeenCalledWith({})
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({})
 
-    api.listRuns.mockResolvedValue({ runs: [] })
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Team'), { target: { value: 'wf-b' } })
     })
 
-    expect(api.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
   })
 
   it('shows a run\'s start time as "DD MMM YYYY, h:mm AM/PM"', async () => {
-    api.listRuns.mockResolvedValue({
+    mockedApi.listRuns.mockResolvedValue({
       runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T14:05:00', autonomous: false }],
     })
 
@@ -85,7 +88,7 @@ describe('ActivityPage', () => {
 
   it('refreshes the run list while a run is still shown as running', async () => {
     vi.useFakeTimers()
-    api.listRuns
+    mockedApi.listRuns
       .mockResolvedValueOnce({
         runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
@@ -108,21 +111,21 @@ describe('ActivityPage', () => {
     })
 
     expect(screen.getByText('completed', { selector: '.status-badge' })).toBeInTheDocument()
-    expect(api.listRuns).toHaveBeenCalledTimes(2)
+    expect(mockedApi.listRuns).toHaveBeenCalledTimes(2)
   })
 
   it('ignores a stale poll response that resolves after the filters changed', async () => {
     vi.useFakeTimers()
-    let resolveStalePoll
+    let resolveStalePoll: (value: { runs: unknown[] }) => void
     const stalePollPromise = new Promise((resolve) => {
       resolveStalePoll = resolve
     })
 
-    api.listRuns
+    mockedApi.listRuns
       .mockResolvedValueOnce({
         runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
-      .mockReturnValueOnce(stalePollPromise)
+      .mockReturnValueOnce(stalePollPromise as ReturnType<typeof api.listRuns>)
       .mockResolvedValueOnce({
         runs: [{ id: 'r2', workflow: 'wf-b', status: 'completed', started_at: '2026-07-31T11:05:00Z', autonomous: false }],
       })
@@ -164,14 +167,15 @@ describe('ActivityPage', () => {
   })
 
   it('"View automatic runs" on the Automations tab jumps to the Runs tab filtered to Automatic only', async () => {
-    api.getEmailTrigger.mockResolvedValue({
+    mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true,
       workflow_name: 'wf-a',
       status: 'active',
+      daily_cap: 0,
       last_checked_at: null,
       last_error: null,
     })
-    api.listRuns.mockResolvedValue({ runs: [] })
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
 
     renderPage()
     const viewRunsButton = await screen.findByText('View automatic runs')
@@ -181,23 +185,23 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(api.listRuns).toHaveBeenCalledWith({ manual: false })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false })
   })
 
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {
-    api.listAutomationResults.mockResolvedValue({
+    mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
-        id: 1, run_id: 'run-42', status: 'needs_attention', needs_attention: true,
+        id: 1, run_id: 'run-42', status: 'needs_attention',
         created_at: '2026-08-02T10:00:00Z',
         payload: {
           priority: 'possible_emergency', summary: 'Active leak.',
           extracted: { property_address: '12 Example St' },
-          human_reason: null, action: { draft_created: false },
+          human_reason: undefined, action: { draft_created: false },
         },
       }],
     })
-    api.getRunTrace.mockResolvedValue({ events: [] })
-    api.listRuns.mockResolvedValue({ runs: [] })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
     Element.prototype.scrollIntoView = vi.fn()
 
     renderPage()
@@ -217,19 +221,19 @@ describe('ActivityPage', () => {
     // guaranteed to be `completed`. Hardcoding that status used to
     // permanently hide the Retry button for exactly this case (Codex review
     // finding).
-    api.listAutomationResults.mockResolvedValue({
+    mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
-        id: 1, run_id: 'run-42', status: 'error', needs_attention: true,
+        id: 1, run_id: 'run-42', status: 'error',
         created_at: '2026-08-02T10:00:00Z',
         payload: {
           priority: 'possible_emergency', summary: 'Dispatch failed.',
           extracted: { property_address: '12 Example St' },
-          human_reason: null, action: { draft_created: false },
+          human_reason: undefined, action: { draft_created: false },
         },
       }],
     })
-    api.getRunTrace.mockResolvedValue({ events: [] })
-    api.listRuns.mockImplementation((filters) =>
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.listRuns.mockImplementation((filters) =>
       Promise.resolve({
         runs:
           filters?.run_id === 'run-42'
@@ -248,14 +252,14 @@ describe('ActivityPage', () => {
 
     expect(await screen.findByText('Run run-42')).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
-    expect(api.listRuns).toHaveBeenCalledWith({ run_id: 'run-42', limit: 1 })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ run_id: 'run-42', limit: 1 })
   })
 
   it('scrolls the run detail panel into view when a run is selected', async () => {
-    api.listRuns.mockResolvedValue({
+    mockedApi.listRuns.mockResolvedValue({
       runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
-    api.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
     const scrollIntoView = vi.fn()
     Element.prototype.scrollIntoView = scrollIntoView
 
@@ -273,10 +277,10 @@ describe('ActivityPage', () => {
   })
 
   it('clicking a run opens its detail via getRunTrace', async () => {
-    api.listRuns.mockResolvedValue({
+    mockedApi.listRuns.mockResolvedValue({
       runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
-    api.getRunTrace.mockResolvedValue({ events: [{ seq: 0, type: 'run_completed', agent: null, data: 'done' }] })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [{ type: 'run_completed', agent: undefined, data: 'done' }] })
 
     renderPage()
     await act(async () => {
@@ -289,6 +293,6 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Final output')).toBeInTheDocument()
-    expect(api.getRunTrace).toHaveBeenCalledWith('r1')
+    expect(mockedApi.getRunTrace).toHaveBeenCalledWith('r1')
   })
 })

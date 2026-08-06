@@ -1,19 +1,33 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import type { OrgEmailStatus } from '../lib/types'
+
+interface EmailConnectProps {
+  onChange?: () => void
+  onStatusChange?: (connected: boolean) => void
+}
+
+interface EmailForm {
+  host: string
+  username: string
+  password: string
+  port: number | string
+  drafts: string
+}
 
 // Connect / test / rotate / disconnect the org's mailbox for the email tools.
 // Shown inside the wizard only when the team uses email (session.uses_email).
 // `onChange` fires after a successful connect/disconnect (a parent may clear its
 // own error). `onStatusChange` fires with the current connected boolean whenever
 // it's known, so the Deploy gate can disable launch until a mailbox is connected.
-export default function EmailConnect({ onChange, onStatusChange }) {
-  const [status, setStatus] = useState(null) // {connected, host, username, ...} | null
+export default function EmailConnect({ onChange, onStatusChange }: EmailConnectProps) {
+  const [status, setStatus] = useState<OrgEmailStatus | null>(null) // {connected, host, username, ...} | null
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({ host: '', username: '', password: '', port: 993, drafts: '' })
-  const [testResult, setTestResult] = useState(null) // {ok, error} | null
-  const [error, setError] = useState(null)
-  const [busy, setBusy] = useState('') // '' | 'test' | 'save' | 'clear'
+  const [form, setForm] = useState<EmailForm>({ host: '', username: '', password: '', port: 993, drafts: '' })
+  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'' | 'test' | 'save' | 'clear'>('')
   // Port + drafts live under "Advanced settings": a non-technical user (Gmail,
   // Outlook) never needs them, and a visible number field invites the
   // scroll-wheel-changes-993-to-994 mistake.
@@ -27,7 +41,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
       setStatus(s)
       onStatusChange?.(!!s.connected)
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setLoading(false)
     }
@@ -38,7 +52,8 @@ export default function EmailConnect({ onChange, onStatusChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const field = (k) => (e) => setForm({ ...form, [k]: e.target.value })
+  const field = (k: keyof EmailForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm({ ...form, [k]: e.target.value })
 
   const payload = () => ({
     host: form.host.trim(),
@@ -53,7 +68,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
     try {
       setTestResult(await api.testOrgEmail(payload()))
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy('')
     }
@@ -69,7 +84,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
       await refresh()
       onChange?.()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy('')
     }
@@ -82,7 +97,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
       await refresh()
       onChange?.()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy('')
     }
@@ -91,6 +106,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
   // Prefill from the existing connection when reconnecting (password is
   // write-only, so it stays blank).
   const startReconnect = () => {
+    if (!status) return
     setForm({
       host: status.host || '',
       username: status.username || '',
@@ -99,7 +115,7 @@ export default function EmailConnect({ onChange, onStatusChange }) {
       drafts: status.drafts || '',
     })
     // Reveal Advanced if this connection used non-default values, so they're visible.
-    setShowAdvanced((status.port && status.port !== 993) || !!status.drafts)
+    setShowAdvanced(Boolean((status.port && status.port !== 993) || status.drafts))
     setEditing(true)
   }
 

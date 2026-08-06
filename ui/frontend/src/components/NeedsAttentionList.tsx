@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
+import type { AutomationResult } from '../lib/types'
+
+interface NeedsAttentionListProps {
+  onOpenRun?: (runId: string) => void
+}
 
 // Same cadence as EmailTriggerActivity's own poll -- see that component for
 // the rationale (the backend's own trigger poller checks mail on its own
 // schedule; refreshing faster just shows stale data sooner).
 const REFRESH_INTERVAL_MS = 30_000
 
-const PRIORITY_LABELS = {
+const PRIORITY_LABELS: Record<string, string> = {
   possible_emergency: 'Possible emergency',
   priority: 'Priority',
   routine: 'Routine',
@@ -21,8 +26,8 @@ const PRIORITY_LABELS = {
 // the customer reviews/sends in their own mailbox and continues in their
 // existing PMS. `onOpenRun(runId)` lets the caller jump to that run's detail
 // (e.g. by switching the Activity page to its Runs tab).
-export default function NeedsAttentionList({ onOpenRun }) {
-  const [results, setResults] = useState(undefined) // undefined = still loading
+export default function NeedsAttentionList({ onOpenRun }: NeedsAttentionListProps) {
+  const [results, setResults] = useState<AutomationResult[] | undefined>(undefined) // undefined = still loading
   const [error, setError] = useState(false)
 
   useEffect(() => {
@@ -57,7 +62,7 @@ export default function NeedsAttentionList({ onOpenRun }) {
             <li key={result.id} className="needs-attention-item">
               <div className="needs-attention-item-header">
                 <span className={`status-badge priority-${payload.priority || 'unknown'}`}>
-                  {PRIORITY_LABELS[payload.priority] ?? payload.priority ?? 'Unknown'}
+                  {PRIORITY_LABELS[payload.priority ?? ''] ?? payload.priority ?? 'Unknown'}
                 </span>
                 <span className="hint">{formatDateTime(result.created_at)}</span>
               </div>

@@ -1,15 +1,20 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import type { EmailTrigger } from '../lib/types'
+
+interface EmailTriggerToggleProps {
+  workflowName: string
+}
 
 // Org-level opt-in: run this deployed email team automatically on new mail.
 // Off by default; shown on the Deploy page once the team is live.
-export default function EmailTriggerToggle({ workflowName }) {
-  const [trigger, setTrigger] = useState(null)
+export default function EmailTriggerToggle({ workflowName }: EmailTriggerToggleProps) {
+  const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    api.getEmailTrigger().then(setTrigger).catch((e) => setError(e.message))
+    api.getEmailTrigger().then(setTrigger).catch((e: Error) => setError(e.message))
   }, [])
 
   if (!trigger) return error ? <p className="banner banner-error">{error}</p> : null
@@ -22,7 +27,7 @@ export default function EmailTriggerToggle({ workflowName }) {
     try {
       setTrigger(await api.setEmailTrigger({ workflow_name: workflowName, enabled: !onForThis }))
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setBusy(false)
     }

@@ -1,22 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ComponentType } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import EmailConnectRaw from '../../components/EmailConnect'
+import EmailConnect from '../../components/EmailConnect'
 import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
 import type { TraceEvent, WizardOutletContext } from '../../lib/types'
-
-// EmailConnect isn't converted to TypeScript until Task 8. Until then, tsc
-// infers its untyped destructured `{ onChange, onStatusChange }` parameter
-// as a *required* object type (both props are optional at runtime -- the
-// component calls them with `?.()`), so rendering it with no props here
-// (as the current JSX does) would otherwise fail to compile. This narrows
-// the inferred type back to optional, matching actual runtime behavior; no
-// change to EmailConnect.jsx itself.
-const EmailConnect = EmailConnectRaw as ComponentType<{
-  onChange?: () => void
-  onStatusChange?: (connected: boolean) => void
-}>
 
 type Status = 'idle' | 'running' | 'completed' | 'failed'
 

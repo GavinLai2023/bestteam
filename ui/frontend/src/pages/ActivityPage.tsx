@@ -5,6 +5,7 @@ import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
 import RunDetail from '../components/RunDetail'
+import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
 
@@ -16,8 +17,20 @@ const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 // change.
 const RUN_POLL_INTERVAL_MS = 5000
 
-function runsQueryParams(filters) {
-  const params = {}
+interface Filters {
+  workflow: string
+  manual: '' | 'true' | 'false'
+  status: string
+}
+
+interface SelectedRun {
+  id: string
+  status: string
+  autonomous: boolean
+}
+
+function runsQueryParams(filters: Filters) {
+  const params: Record<string, string | boolean> = {}
   if (filters.workflow) params.workflow = filters.workflow
   if (filters.manual === 'true') params.manual = true
   if (filters.manual === 'false') params.manual = false
@@ -26,15 +39,15 @@ function runsQueryParams(filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState('automations') // automations | runs
-  const [workflows, setWorkflows] = useState([])
-  const [runs, setRuns] = useState([])
+  const [tab, setTab] = useState<'automations' | 'runs'>('automations') // automations | runs
+  const [workflows, setWorkflows] = useState<string[]>([])
+  const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [filters, setFilters] = useState({ workflow: '', manual: '', status: '' })
-  const [selectedRun, setSelectedRun] = useState(null) // { id, status } | null
+  const [error, setError] = useState<string | null>(null)
+  const [filters, setFilters] = useState<Filters>({ workflow: '', manual: '', status: '' })
+  const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
   const hasRunningRun = runs.some((run) => run.status === 'running')
-  const runDetailRef = useRef(null)
+  const runDetailRef = useRef<HTMLElement>(null)
 
   // The run list can be long -- opening the detail panel below it (it's
   // rendered after the list) would otherwise leave it off-screen when the
@@ -60,7 +73,7 @@ export default function ActivityPage() {
         setRuns(d.runs)
         setError(null)
       })
-      .catch((e) => {
+      .catch((e: Error) => {
         if (!ignore) setError(e.message)
       })
       .finally(() => {
@@ -162,7 +175,7 @@ export default function ActivityPage() {
             </label>
             <label>
               Trigger
-              <select value={filters.manual} onChange={(e) => setFilters((f) => ({ ...f, manual: e.target.value }))}>
+              <select value={filters.manual} onChange={(e) => setFilters((f) => ({ ...f, manual: e.target.value as Filters['manual'] }))}>
                 <option value="">Manual + automatic</option>
                 <option value="true">Manual only</option>
                 <option value="false">Automatic only</option>
