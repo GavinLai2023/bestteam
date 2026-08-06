@@ -40,21 +40,21 @@ beforeEach(() => {
 
 describe('RequireOrgMember', () => {
   it('redirects a platform operator to /advanced', () => {
-    useMe.mockReturnValue({ me: { is_admin: true }, loading: false, isAdmin: true })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: true, username: 'x', org: null }, loading: false, isAdmin: true })
     renderOrgMemberGuard('/')
     expect(screen.getByText('advanced-home')).toBeInTheDocument()
     expect(screen.queryByText('customer-home')).not.toBeInTheDocument()
   })
 
   it('renders the customer route for an org member', () => {
-    useMe.mockReturnValue({ me: { is_admin: false }, loading: false, isAdmin: false })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
     renderOrgMemberGuard('/')
     expect(screen.getByText('customer-home')).toBeInTheDocument()
     expect(screen.queryByText('advanced-home')).not.toBeInTheDocument()
   })
 
   it('renders nothing while the role is still loading', () => {
-    useMe.mockReturnValue({ me: null, loading: true, isAdmin: false })
+    vi.mocked(useMe).mockReturnValue({ me: null, loading: true, isAdmin: false })
     renderOrgMemberGuard('/')
     expect(screen.queryByText('customer-home')).not.toBeInTheDocument()
     expect(screen.queryByText('advanced-home')).not.toBeInTheDocument()
@@ -63,14 +63,14 @@ describe('RequireOrgMember', () => {
 
 describe('RequireAdmin', () => {
   it('renders the admin route for a platform operator', () => {
-    useMe.mockReturnValue({ me: { is_admin: true }, loading: false, isAdmin: true })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: true, username: 'x', org: null }, loading: false, isAdmin: true })
     renderAdminGuard('/advanced')
     expect(screen.getByText('advanced-home')).toBeInTheDocument()
     expect(screen.queryByText('customer-home')).not.toBeInTheDocument()
   })
 
   it('redirects an org member away from an admin route to /', () => {
-    useMe.mockReturnValue({ me: { is_admin: false }, loading: false, isAdmin: false })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
     renderAdminGuard('/advanced')
     expect(screen.getByText('customer-home')).toBeInTheDocument()
     expect(screen.queryByText('advanced-home')).not.toBeInTheDocument()
