@@ -1,8 +1,14 @@
+import type { AgentSpec } from '../lib/types'
+
+interface EmployeeCardProps {
+  agent?: AgentSpec
+}
+
 // A "virtual employee" card -- avatar placeholder + friendly job title +
 // one-line description. Falls back to the technical agent fields
 // (`name`/`role`/`goal`) if the Solution Architect didn't fill in the
 // friendly `display_name`/`friendly_description`.
-export default function EmployeeCard({ agent }) {
+export default function EmployeeCard({ agent }: EmployeeCardProps) {
   if (!agent) return null
 
   const name = agent.display_name || agent.name

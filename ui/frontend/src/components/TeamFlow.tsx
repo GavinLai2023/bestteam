@@ -1,7 +1,12 @@
 import { Fragment } from 'react'
 import EmployeeCard from './EmployeeCard'
+import type { Specification, TeamMode } from '../lib/types'
 
-const MODE_LABELS = {
+interface TeamFlowProps {
+  specification?: Specification | null
+}
+
+const MODE_LABELS: Record<TeamMode, string> = {
   sequential: 'Step by step',
   parallel: 'All at once',
   hierarchical: 'Led by a manager',
@@ -11,7 +16,7 @@ const MODE_LABELS = {
 // Specification: one block per team (in workflow-step order), showing the
 // manager (for hierarchical teams) and the agents who do the work, with no
 // technical jargon -- just job titles and one-line descriptions.
-export default function TeamFlow({ specification }) {
+export default function TeamFlow({ specification }: TeamFlowProps) {
   if (!specification) return null
 
   const agentsByName = Object.fromEntries((specification.agents ?? []).map((agent) => [agent.name, agent]))

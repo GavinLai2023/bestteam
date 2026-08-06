@@ -1,5 +1,10 @@
 import { Link, useLocation, useParams } from 'react-router-dom'
+import type { BuilderSession } from '../lib/types'
 import './WizardProgress.css'
+
+interface WizardProgressProps {
+  session: BuilderSession | null
+}
 
 const STEPS = [
   { stage: 'intent', label: 'Your challenge' },
@@ -8,7 +13,7 @@ const STEPS = [
   { stage: 'deploy', label: 'Go live' },
 ]
 
-function pathFor(stage, sessionId) {
+function pathFor(stage: string, sessionId: string | undefined) {
   if (stage === 'intent') return '/wizard'
   return `/wizard/${sessionId}/${stage}`
 }
@@ -17,13 +22,13 @@ function pathFor(stage, sessionId) {
 // Intent stage hasn't created one yet) determines which later stages are
 // reachable -- a customer can always look back, but can't skip ahead of
 // what's actually been generated.
-export default function WizardProgress({ session }) {
+export default function WizardProgress({ session }: WizardProgressProps) {
   const { sessionId } = useParams()
   const location = useLocation()
 
   const currentStage = location.pathname === '/wizard' ? 'intent' : location.pathname.split('/').pop()
 
-  const unlocked = {
+  const unlocked: Record<string, boolean> = {
     intent: true,
     preview: Boolean(session?.specification_json),
     confirm: Boolean(session?.specification_json),
