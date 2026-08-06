@@ -228,6 +228,8 @@ function MonitorPage() {
       {finalEvent && (
         <section className={`result result-${finalEvent.type}`}>
           <h2>{RESULT_LABELS[finalEvent.type]}</h2>
+          {/* Safe: terminal-event `data` is guaranteed to be a string by the backend's
+              event-emission contract, unlike PreviewPage.tsx's more defensive handling. */}
           <p>{finalEvent.data as string}</p>
         </section>
       )}

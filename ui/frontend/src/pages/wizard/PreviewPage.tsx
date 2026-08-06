@@ -144,6 +144,11 @@ export default function PreviewPage() {
           {events.map((event, i) => (
             <li key={i} className={`activity-card ${event.type}`}>
               <p className="activity-title">{titleFor(event)}</p>
+              {/* Stringifies rather than crashes if `event.data` is ever a non-string
+                  object here (unverified in practice) -- unlike MonitorPage/RunDetail's
+                  `data as string` cast, which is safe because it only renders `data` for
+                  terminal events, where the backend's event-emission contract guarantees
+                  a string. */}
               {event.data && (
                 <p className="activity-body">
                   {typeof event.data === 'string' ? event.data : JSON.stringify(event.data)}

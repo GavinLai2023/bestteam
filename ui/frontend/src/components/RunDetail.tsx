@@ -121,6 +121,8 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
       {finalEvent && (
         <section className={`result result-${finalEvent.type}`}>
           <h3>{RESULT_LABELS[finalEvent.type]}</h3>
+          {/* Safe: terminal-event `data` is guaranteed to be a string by the backend's
+              event-emission contract, unlike PreviewPage.tsx's more defensive handling. */}
           <p>{finalEvent.data as string}</p>
         </section>
       )}
