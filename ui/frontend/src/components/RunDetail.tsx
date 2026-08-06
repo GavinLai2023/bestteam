@@ -1,19 +1,29 @@
 import { useEffect, useRef, useState } from 'react'
 import { WS_BASE, api } from '../lib/api'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
+import type { AutomationResult, TraceEvent } from '../lib/types'
 import '../pages/MonitorPage.css' // reuses .event/.event-*/.result styling
+
+interface RunDetailProps {
+  runId: string
+  status: string
+  autonomous: boolean
+  onRetried?: (newRunId: string) => void
+}
+
+type RetryState = 'idle' | 'retrying' | 'error'
 
 // A run's event timeline, for the Activity page's Runs tab. A `running` run
 // streams live over the same WebSocket MonitorPage uses; anything else reads
 // its persisted trace via GET /api/runs/{id}/trace -- no live/historical
 // merge, per the read endpoint's design (see docs/superpowers/specs).
-export default function RunDetail({ runId, status, autonomous, onRetried }) {
-  const [events, setEvents] = useState([])
-  const [error, setError] = useState(null)
-  const [automationResults, setAutomationResults] = useState([])
-  const [retryState, setRetryState] = useState('idle') // idle | retrying | error
-  const [retryError, setRetryError] = useState(null)
-  const wsRef = useRef(null)
+export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
+  const [events, setEvents] = useState<TraceEvent[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [automationResults, setAutomationResults] = useState<AutomationResult[]>([])
+  const [retryState, setRetryState] = useState<RetryState>('idle')
+  const [retryError, setRetryError] = useState<string | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
 
   // Property Maintenance Inbox: this run's structured results, if any (most
   // runs have none -- only autonomous email-triggered runs whose output
@@ -45,7 +55,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }) {
       onRetried?.(newRunId)
     } catch (e) {
       setRetryState('error')
-      setRetryError(e.message)
+      setRetryError((e as Error).message)
     }
   }
 
@@ -61,13 +71,13 @@ export default function RunDetail({ runId, status, autonomous, onRetried }) {
           if (cancelled) return
           const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
           wsRef.current = ws
-          ws.onmessage = (message) => {
-            const event = JSON.parse(message.data)
+          ws.onmessage = (message: MessageEvent<string>) => {
+            const event = JSON.parse(message.data) as TraceEvent
             setEvents((prev) => [...prev, event])
           }
           ws.onerror = () => setError("Couldn't stream this run.")
         } catch (e) {
-          if (!cancelled) setError(e.message)
+          if (!cancelled) setError((e as Error).message)
         }
       })()
       return () => {
@@ -82,7 +92,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }) {
       .then((data) => {
         if (!ignore) setEvents(data.events)
       })
-      .catch((e) => {
+      .catch((e: Error) => {
         if (!ignore) setError(e.message)
       })
     return () => {
@@ -111,7 +121,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }) {
       {finalEvent && (
         <section className={`result result-${finalEvent.type}`}>
           <h3>{RESULT_LABELS[finalEvent.type]}</h3>
-          <p>{finalEvent.data}</p>
+          <p>{finalEvent.data as string}</p>
         </section>
       )}
       {automationResults.length > 0 && (
@@ -132,11 +142,11 @@ export default function RunDetail({ runId, status, autonomous, onRetried }) {
                       {payload.category ? ` · ${payload.category}` : ''}
                     </p>
                   )}
-                  {payload.missing_information?.length > 0 && (
-                    <p className="hint">Missing: {payload.missing_information.join(', ')}</p>
+                  {(payload.missing_information?.length ?? 0) > 0 && (
+                    <p className="hint">Missing: {payload.missing_information!.join(', ')}</p>
                   )}
-                  {payload.risk_reasons?.length > 0 && (
-                    <p className="hint">Risk: {payload.risk_reasons.join(', ')}</p>
+                  {(payload.risk_reasons?.length ?? 0) > 0 && (
+                    <p className="hint">Risk: {payload.risk_reasons!.join(', ')}</p>
                   )}
                   {payload.human_reason && <p className="hint">Why: {payload.human_reason}</p>}
                   <p className="hint">{payload.action?.draft_created ? 'Draft created' : 'No draft created'}</p>

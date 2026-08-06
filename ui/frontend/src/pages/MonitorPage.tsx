@@ -2,28 +2,32 @@ import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { API_BASE, WS_BASE, api } from '../lib/api'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
+import type { TraceEvent } from '../lib/types'
 import './MonitorPage.css'
 
 const NON_PROGRESS_TYPES = ['run_queued', 'run_started']
 const STALE_HINT_SECONDS = 20
 
+type Status = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unreachable'
+type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected'
+
 function MonitorPage() {
   const [searchParams] = useSearchParams()
-  const [workflows, setWorkflows] = useState([])
+  const [workflows, setWorkflows] = useState<string[]>([])
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
-  const [events, setEvents] = useState([])
-  const [status, setStatus] = useState('idle') // idle | running | completed | failed | cancelled | unreachable
-  const [error, setError] = useState(null)
-  const [connectionStatus, setConnectionStatus] = useState('idle') // idle | connecting | connected | disconnected
+  const [events, setEvents] = useState<TraceEvent[]>([])
+  const [status, setStatus] = useState<Status>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('idle')
   const [cancelling, setCancelling] = useState(false)
   const [hasRunId, setHasRunId] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [secondsSinceLastEvent, setSecondsSinceLastEvent] = useState(0)
-  const wsRef = useRef(null)
-  const runIdRef = useRef(null)
-  const runStartedAtRef = useRef(null)
-  const lastEventAtRef = useRef(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const runIdRef = useRef<string | null>(null)
+  const runStartedAtRef = useRef<number | null>(null)
+  const lastEventAtRef = useRef<number | null>(null)
 
   useEffect(() => {
     api.listWorkflows()
@@ -36,7 +40,7 @@ function MonitorPage() {
           setSelected(data.workflows[0])
         }
       })
-      .catch((err) => {
+      .catch((err: { status?: number; message: string }) => {
         // A rejection with an HTTP status means the backend answered (e.g. a
         // 403 for a platform operator with no org) -- it is reachable, so show
         // the real reason rather than the misleading "is uvicorn running?".
@@ -97,8 +101,8 @@ function MonitorPage() {
       const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
       wsRef.current = ws
       ws.onopen = () => setConnectionStatus('connected')
-      ws.onmessage = (message) => {
-        const event = JSON.parse(message.data)
+      ws.onmessage = (message: MessageEvent<string>) => {
+        const event = JSON.parse(message.data) as TraceEvent
         lastEventAtRef.current = Date.now()
         setEvents((prev) => [...prev, event])
         if (event.type === 'run_completed') setStatus('completed')
@@ -117,7 +121,7 @@ function MonitorPage() {
         setStatus((current) => (current === 'running' ? 'unreachable' : current))
       }
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
       setStatus('idle')
       setConnectionStatus('idle')
     }
@@ -129,7 +133,7 @@ function MonitorPage() {
     try {
       await api.cancelRun(runIdRef.current)
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
       setCancelling(false)
     }
   }
@@ -224,7 +228,7 @@ function MonitorPage() {
       {finalEvent && (
         <section className={`result result-${finalEvent.type}`}>
           <h2>{RESULT_LABELS[finalEvent.type]}</h2>
-          <p>{finalEvent.data}</p>
+          <p>{finalEvent.data as string}</p>
         </section>
       )}
     </div>

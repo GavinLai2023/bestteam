@@ -15,6 +15,8 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
+const mockedApi = vi.mocked(api)
+
 const renderPage = () =>
   render(
     <MemoryRouter>
@@ -23,7 +25,13 @@ const renderPage = () =>
   )
 
 class FakeWebSocket {
-  constructor(url) {
+  static instances: FakeWebSocket[] = []
+  url: string
+  readyState: number
+  onopen?: () => void
+  onmessage?: (event: { data: string }) => void
+
+  constructor(url: string) {
     this.url = url
     this.readyState = 0
     FakeWebSocket.instances.push(this)
@@ -31,20 +39,19 @@ class FakeWebSocket {
   close() {
     this.readyState = 3
   }
-  send(message) {
+  send(message: string) {
     FakeWebSocket.instances.at(-1)?.onopen?.()
     void message
   }
-  emit(event) {
+  emit(event: unknown) {
     this.onmessage?.({ data: JSON.stringify(event) })
   }
 }
-FakeWebSocket.instances = []
 
 async function startARun() {
-  api.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
-  api.createRun.mockResolvedValue({ run_id: 'run-1' })
-  api.createWsTicket.mockResolvedValue({ ticket: 't' })
+  mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
+  mockedApi.createRun.mockResolvedValue({ run_id: 'run-1' })
+  mockedApi.createWsTicket.mockResolvedValue({ ticket: 't' })
 
   renderPage()
   await screen.findByRole('option', { name: 'wf' })
@@ -65,9 +72,9 @@ describe('MonitorPage backend error handling', () => {
   })
 
   it('shows the server error detail, not "unreachable", when the backend returns an HTTP error', async () => {
-    const err = new Error('Platform operators do not belong to an organization')
+    const err = new Error('Platform operators do not belong to an organization') as Error & { status?: number }
     err.status = 403
-    api.listWorkflows.mockRejectedValue(err)
+    mockedApi.listWorkflows.mockRejectedValue(err)
 
     renderPage()
 
@@ -78,7 +85,7 @@ describe('MonitorPage backend error handling', () => {
   })
 
   it('shows "Can\'t reach the backend" on a genuine network failure (no HTTP status)', async () => {
-    api.listWorkflows.mockRejectedValue(new TypeError('Failed to fetch'))
+    mockedApi.listWorkflows.mockRejectedValue(new TypeError('Failed to fetch'))
 
     renderPage()
 
@@ -92,7 +99,7 @@ describe('MonitorPage run waiting UX', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     FakeWebSocket.instances = []
-    window.WebSocket = FakeWebSocket
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket
   })
 
   afterEach(() => {
@@ -105,7 +112,7 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.getByText('Connecting…')).toBeInTheDocument()
 
     await act(async () => {
-      ws.onopen()
+      ws!.onopen!()
     })
 
     expect(screen.getByText('Connected')).toBeInTheDocument()
@@ -117,18 +124,18 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
 
     await act(async () => {
-      ws.emit({ type: 'run_started', workflow: 'wf', agent: null, data: null, usage: [] })
+      ws!.emit({ type: 'run_started', workflow: 'wf', agent: null, data: null, usage: [] })
     })
     expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
 
     await act(async () => {
-      ws.emit({ type: 'agent_started', workflow: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
+      ws!.emit({ type: 'agent_started', workflow: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
     })
     expect(screen.queryByText('Waiting for the agent/model…')).not.toBeInTheDocument()
   })
 
   it('shows a Stop button while running that calls cancelRun', async () => {
-    api.cancelRun.mockResolvedValue({ status: 'cancel_requested' })
+    mockedApi.cancelRun.mockResolvedValue(undefined)
     await startARun()
 
     const stopButton = screen.getByText('Stop')
@@ -137,7 +144,7 @@ describe('MonitorPage run waiting UX', () => {
       await Promise.resolve()
     })
 
-    expect(api.cancelRun).toHaveBeenCalledWith('run-1')
+    expect(mockedApi.cancelRun).toHaveBeenCalledWith('run-1')
     expect(screen.getByText('Stopping…')).toBeInTheDocument()
   })
 
@@ -145,7 +152,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws.emit({ type: 'run_cancelled', workflow: 'wf', agent: null, data: 'Run was cancelled.', usage: [] })
+      ws!.emit({ type: 'run_cancelled', workflow: 'wf', agent: null, data: 'Run was cancelled.', usage: [] })
     })
 
     expect(screen.getByText('Run cancelled')).toBeInTheDocument()
@@ -153,14 +160,14 @@ describe('MonitorPage run waiting UX', () => {
   })
 
   it('does not show Stop until the new run id exists (avoids a stale-target race)', async () => {
-    api.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
-    let resolveCreateRun
-    api.createRun.mockReturnValue(
+    mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
+    let resolveCreateRun: (value: { run_id: string }) => void
+    mockedApi.createRun.mockReturnValue(
       new Promise((resolve) => {
         resolveCreateRun = resolve
       }),
     )
-    api.createWsTicket.mockResolvedValue({ ticket: 't' })
+    mockedApi.createWsTicket.mockResolvedValue({ ticket: 't' })
 
     renderPage()
     await screen.findByRole('option', { name: 'wf' })
@@ -184,7 +191,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws.emit({
+      ws!.emit({
         type: 'tool_completed',
         workflow: 'wf',
         agent: 'a',
