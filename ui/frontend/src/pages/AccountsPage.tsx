@@ -1,24 +1,26 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import type { AdminOrg, AdminUser } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
 import './AccountsPage.css'
 
-// Admin-only org/user management: create orgs, deactivate/reactivate them, and
-// manage each org's single member login. Granting admin and the whole
-// platform-account lifecycle stay CLI-only, so platform accounts are shown
-// read-only. The backend enforces admin on every /api/admin call regardless.
+interface UserDraft {
+  username: string
+  password: string
+  confirm: string
+}
+
 export default function AccountsPage() {
-  const [orgs, setOrgs] = useState([])
-  const [users, setUsers] = useState([])
+  const [orgs, setOrgs] = useState<AdminOrg[]>([])
+  const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [message, setMessage] = useState(null)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
 
   const [newOrgName, setNewOrgName] = useState('')
   const [newOrgDisplay, setNewOrgDisplay] = useState('')
-  // Per-org create-user drafts, keyed by org name: { [org]: {username, password} }.
-  const [drafts, setDrafts] = useState({})
+  const [drafts, setDrafts] = useState<Record<string, UserDraft>>({})
 
   const reload = () =>
     Promise.all([api.adminOrgs(), api.adminUsers()]).then(([o, u]) => {
@@ -28,16 +30,11 @@ export default function AccountsPage() {
 
   useEffect(() => {
     reload()
-      .catch((e) => setError(e.message))
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
   }, [])
 
-  // Resolves to true iff the MUTATION succeeded (callers clear their form only
-  // then). A failed mutation keeps the entered values (review r-ext2 #5); a
-  // mutation that succeeds but whose list-refresh fails still counts as success
-  // -- clearing the form and showing a distinct refresh warning rather than a
-  // "creation failed" that invites a duplicate retry (review r-ext3).
-  const run = (promise, okMessage) => {
+  const run = (promise: Promise<unknown>, okMessage?: string): Promise<boolean> => {
     setError(null)
     setMessage(null)
     return promise.then(
@@ -52,14 +49,14 @@ export default function AccountsPage() {
             return true
           },
         ),
-      (e) => {
+      (e: Error) => {
         setError(e.message)
         return false
       },
     )
   }
 
-  const createOrg = (e) => {
+  const createOrg = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!newOrgName.trim()) return
     run(api.createAdminOrg(newOrgName.trim(), newOrgDisplay.trim()), `Created '${newOrgName.trim()}'.`).then(
@@ -72,17 +69,17 @@ export default function AccountsPage() {
     )
   }
 
-  const toggleActive = (org) => {
+  const toggleActive = (org: AdminOrg) => {
     if (org.active && !window.confirm(`Deactivate '${org.name}'? Its user won't be able to log in.`)) return
     run(api.setOrgActive(org.name, !org.active))
   }
 
-  const emptyDraft = { username: '', password: '', confirm: '' }
-  const draftFor = (org) => drafts[org] || emptyDraft
-  const setDraft = (org, patch) =>
+  const emptyDraft: UserDraft = { username: '', password: '', confirm: '' }
+  const draftFor = (org: string) => drafts[org] || emptyDraft
+  const setDraft = (org: string, patch: Partial<UserDraft>) =>
     setDrafts((d) => ({ ...d, [org]: { ...draftFor(org), ...patch } }))
 
-  const createUser = (e, org) => {
+  const createUser = (e: React.FormEvent<HTMLFormElement>, org: string) => {
     e.preventDefault()
     const { username, password, confirm } = draftFor(org)
     if (!username.trim() || !password) return
@@ -96,19 +93,19 @@ export default function AccountsPage() {
     })
   }
 
-  const resetPassword = (username) => {
+  const resetPassword = (username: string) => {
     const pw = window.prompt(`New password for '${username}'`)
     if (!pw) return
     run(api.resetAdminUserPassword(username, pw), `Password reset for '${username}'.`)
   }
 
-  const moveUser = (username) => {
+  const moveUser = (username: string) => {
     const to = window.prompt(`Move '${username}' to which organization?`)
     if (!to || !to.trim()) return
     run(api.moveAdminUser(username, to.trim()))
   }
 
-  const removeUser = (username) => {
+  const removeUser = (username: string) => {
     if (!window.confirm(`Delete user '${username}'? This also purges their memory.`)) return
     run(api.deleteAdminUser(username), `Deleted '${username}'.`)
   }
@@ -163,13 +160,13 @@ export default function AccountsPage() {
 
               {org.member ? (
                 <>
-                  <button type="button" className="btn" onClick={() => resetPassword(org.member)}>
+                  <button type="button" className="btn" onClick={() => resetPassword(org.member!)}>
                     Reset password
                   </button>
-                  <button type="button" className="btn" onClick={() => moveUser(org.member)}>
+                  <button type="button" className="btn" onClick={() => moveUser(org.member!)}>
                     Move
                   </button>
-                  <button type="button" className="btn btn-danger" onClick={() => removeUser(org.member)}>
+                  <button type="button" className="btn btn-danger" onClick={() => removeUser(org.member!)}>
                     Delete
                   </button>
                 </>

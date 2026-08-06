@@ -1,19 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import type { AdminOrg, ConfigItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
 
-// `orgScope` mirrors what the backend requires on each item route:
-//   required -- ?org= or 422 (crud.py::_resolve_org_id)
-//   optional -- omitted means the platform built-in tier (skills only)
-//   none     -- resource isn't org-scoped at all; hide the selector
 const PLATFORM_TIER = '__platform__'
 
-// Ordered whole-then-parts: the deployable unit, then what it's built from,
-// then read-only reference. A workflow is what the wizard and the customer UI
-// call an "AI team"; this page is operator-only, so it uses the noun that
-// matches the JSON keys, the API path, and the YAML.
-const KINDS = [
+interface Kind {
+  key: string
+  label: string
+  idField: string
+  editableField: string | null
+  orgScope: 'required' | 'optional' | 'none'
+  readOnly?: boolean
+}
+
+const KINDS: Kind[] = [
   { key: 'workflows', label: 'Workflows', idField: 'name', editableField: 'config', orgScope: 'required' },
   { key: 'skills', label: 'Skills', idField: 'name', editableField: 'config', orgScope: 'optional' },
   { key: 'knowledge_bases', label: 'Knowledge bases', idField: 'name', editableField: 'config', orgScope: 'required' },
@@ -21,58 +23,45 @@ const KINDS = [
   { key: 'model-catalog', label: 'Model catalog', idField: 'spec', editableField: null, orgScope: 'none' },
 ]
 
-function itemId(kind, item) {
-  return item[kind.idField]
+function itemId(kind: Kind, item: ConfigItem): string {
+  return String(item[kind.idField])
 }
 
-function defaultOrgFor(kind, orgs) {
+function defaultOrgFor(kind: Kind, orgs: AdminOrg[]): string | null {
   if (kind.orgScope === 'none') return null
   if (kind.orgScope === 'optional') return PLATFORM_TIER
   return orgs.length ? orgs[0].name : null
 }
 
-function editableJson(kind, item) {
-  if (kind.editableField) return item[kind.editableField] ?? {}
+function editableJson(kind: Kind, item: ConfigItem): ConfigItem {
+  if (kind.editableField) return (item[kind.editableField] as ConfigItem) ?? {}
   const rest = { ...item }
   delete rest[kind.idField]
   return rest
 }
 
-// "Advanced" view: raw JSON CRUD over `/api/config/...`, for fine-tuning an
-// already-deployed configuration. Hidden behind its own nav entry -- the
-// wizard is the primary way to build a team.
 export default function AdvancedPage() {
   const [activeKey, setActiveKey] = useState(KINDS[0].key)
-  const [items, setItems] = useState([])
-  const [selectedId, setSelectedId] = useState(null)
+  const [items, setItems] = useState<ConfigItem[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [jsonText, setJsonText] = useState('')
   const [newId, setNewId] = useState('')
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [message, setMessage] = useState(null)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [createMode, setCreateMode] = useState('manual') // 'manual' | 'upload'
-  const [uploadFiles, setUploadFiles] = useState([])
+  const [createMode, setCreateMode] = useState<'manual' | 'upload'>('manual')
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
-  const [orgs, setOrgs] = useState([])
-  const [org, setOrg] = useState(null) // an org name, PLATFORM_TIER, or null
+  const [orgs, setOrgs] = useState<AdminOrg[]>([])
+  const [org, setOrg] = useState<string | null>(null)
 
-  const kind = KINDS.find((k) => k.key === activeKey)
+  const kind = KINDS.find((k) => k.key === activeKey)!
   const activeKeyRef = useRef(activeKey)
-  // Monotonic load token: a list response is only applied if it's the most
-  // recent request, so a slow response for a previous org/tab can't overwrite
-  // the current one (and can't leave a stale item selectable for a mutation
-  // that would then target the wrong org).
   const loadSeq = useRef(0)
 
-  // What actually goes on the wire: the platform tier is expressed by omitting
-  // `?org=` entirely, and org-less resources never send it.
-  const apiOrg = kind.orgScope === 'none' || org === PLATFORM_TIER ? undefined : org
+  const apiOrg = kind.orgScope === 'none' || org === PLATFORM_TIER ? undefined : (org ?? undefined)
 
-  // The skills list can't ask the API for "built-ins only" -- omitting ?org=
-  // means unfiltered there, so it returns every org's skills. Narrow to the
-  // platform tier here, otherwise saving a listed org skill would silently
-  // write a built-in copy of it instead.
   const visibleItems =
     kind.orgScope === 'optional' && org === PLATFORM_TIER
       ? items.filter((it) => it.org == null)
@@ -92,7 +81,7 @@ export default function AdvancedPage() {
       .then((data) => {
         if (seq === loadSeq.current) setItems(data)
       })
-      .catch((e) => {
+      .catch((e: Error) => {
         if (seq === loadSeq.current) setError(e.message)
       })
       .finally(() => {
@@ -101,29 +90,23 @@ export default function AdvancedPage() {
   }
 
   useEffect(() => {
-    // Orgs arrive after first paint, so the initial tab has no org to target
-    // until they do; pick its default here rather than in a cascading effect.
     api
       .listOrgs()
       .then((data) => {
         setOrgs(data)
         setOrg((current) => current ?? defaultOrgFor(kind, data))
       })
-      .catch((e) => setError(e.message))
+      .catch((e: Error) => setError(e.message))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    if (kind.orgScope === 'required' && !org) return // still waiting on listOrgs
+    if (kind.orgScope === 'required' && !org) return
     // eslint-disable-next-line react-hooks/set-state-in-effect -- load on tab/org change
     loadItems()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey, org])
 
-  // Drop any open editor/selection. Both switching tab and switching org must
-  // do this: otherwise the editor keeps the previous context's item id + JSON,
-  // and a Save/Delete would then create or destroy that item in the newly
-  // selected org (a cross-tenant write). See selectKind / selectOrg.
   const resetSelection = () => {
     setSelectedId(null)
     setJsonText('')
@@ -134,22 +117,20 @@ export default function AdvancedPage() {
     setUploadFiles([])
   }
 
-  // activeKey and org move together so the load effect fires once, with a
-  // matching pair -- switching tabs must never request the previous tab's org.
-  const selectKind = (k) => {
+  const selectKind = (k: Kind) => {
     if (k.key === activeKey) return
     setActiveKey(k.key)
     setOrg(defaultOrgFor(k, orgs))
     resetSelection()
   }
 
-  const selectOrg = (value) => {
+  const selectOrg = (value: string) => {
     if (value === org) return
     setOrg(value)
     resetSelection()
   }
 
-  const select = (id) => {
+  const select = (id: string) => {
     const item = visibleItems.find((it) => itemId(kind, it) === id)
     setSelectedId(id)
     setMessage(null)
@@ -181,14 +162,14 @@ export default function AdvancedPage() {
       setJsonText(JSON.stringify(result.config, null, 2))
       if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setUploading(false)
     }
   }
 
   const save = async () => {
-    let parsed
+    let parsed: ConfigItem
     try {
       parsed = JSON.parse(jsonText)
     } catch {
@@ -201,11 +182,11 @@ export default function AdvancedPage() {
     setError(null)
     setMessage(null)
     try {
-      await api.putConfigItem(activeKey, selectedId, parsed, apiOrg)
+      await api.putConfigItem(activeKey, selectedId!, parsed, apiOrg)
       setMessage('Saved.')
       if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setSaving(false)
     }
@@ -225,7 +206,7 @@ export default function AdvancedPage() {
       setMessage('Deleted.')
       if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     } finally {
       setSaving(false)
     }
@@ -273,9 +254,9 @@ export default function AdvancedPage() {
                   <li key={id}>
                     <button className={id === selectedId ? 'active' : ''} onClick={() => select(id)}>
                       {id}
-                      {item.status && <span className="status-badge">{item.status}</span>}
+                      {(item.status as string) && <span className="status-badge">{item.status as string}</span>}
                       {activeKey === 'skills' && item.version != null && (
-                        <span className="status-badge">v{item.version}</span>
+                        <span className="status-badge">v{item.version as string | number}</span>
                       )}
                     </button>
                   </li>
@@ -300,7 +281,7 @@ export default function AdvancedPage() {
               {activeKey === 'knowledge_bases' && createMode === 'upload' ? (
                 <>
                   <input type="text" placeholder="Knowledge base name" value={newId} onChange={(e) => setNewId(e.target.value)} />
-                  <input type="file" multiple onChange={(e) => setUploadFiles(Array.from(e.target.files))} />
+                  <input type="file" multiple onChange={(e) => setUploadFiles(Array.from(e.target.files!))} />
                   <button
                     className="btn btn-secondary"
                     onClick={uploadNew}
@@ -328,7 +309,7 @@ export default function AdvancedPage() {
             <>
               <h2>{selectedId}</h2>
               <p className="advanced-readonly-text">
-                {visibleItems.find((it) => itemId(kind, it) === selectedId)?.description}
+                {visibleItems.find((it) => itemId(kind, it) === selectedId)?.description as string}
               </p>
               <p className="hint">
                 Built-in tool. Reference it by this name in an agent&apos;s or skill&apos;s <code>tools</code> list.

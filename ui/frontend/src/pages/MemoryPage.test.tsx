@@ -12,15 +12,17 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
+const mockedApi = vi.mocked(api)
+
 const USERS = [
-  { user_id: 'alice', org_id: 5, episodic: 1, semantic: 0, procedural: 0, total: 1 },
-  { user_id: 'bob', org_id: null, episodic: 1, semantic: 0, procedural: 0, total: 1 },
+  { user_id: 'alice', org_id: 5, total: 1 },
+  { user_id: 'bob', org_id: null, total: 1 },
 ]
 
 beforeEach(() => {
   vi.clearAllMocks()
-  api.memoryUsers.mockResolvedValue({ enabled: true, users: USERS })
-  api.memoryRecords.mockResolvedValue({ enabled: true, records: [] })
+  mockedApi.memoryUsers.mockResolvedValue({ enabled: true, users: USERS })
+  mockedApi.memoryRecords.mockResolvedValue({ records: [] })
 })
 
 describe('MemoryPage org scoping', () => {
@@ -30,7 +32,7 @@ describe('MemoryPage org scoping', () => {
     render(<MemoryPage />)
     fireEvent.click(await screen.findByRole('button', { name: /bob/ }))
     await waitFor(() =>
-      expect(api.memoryRecords).toHaveBeenCalledWith(
+      expect(mockedApi.memoryRecords).toHaveBeenCalledWith(
         'bob',
         expect.objectContaining({ org: 'legacy' }),
       ),
@@ -41,7 +43,7 @@ describe('MemoryPage org scoping', () => {
     render(<MemoryPage />)
     fireEvent.click(await screen.findByRole('button', { name: /alice/ }))
     await waitFor(() =>
-      expect(api.memoryRecords).toHaveBeenCalledWith('alice', expect.objectContaining({ org: 5 })),
+      expect(mockedApi.memoryRecords).toHaveBeenCalledWith('alice', expect.objectContaining({ org: 5 })),
     )
   })
 })

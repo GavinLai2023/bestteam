@@ -1,27 +1,26 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import type { MemoryRecord, MemoryUserSummary } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
 
 const TYPES = ['episodic', 'semantic', 'procedural']
 
-// Admin-only view of the per-user memory store: pick a user, browse/search
-// their remembered records, delete a bad one, or clear their whole memory.
-// Memory is opt-in (BESTTEAM_MEMORY_DB); when disabled the API reports
-// enabled:false and this page shows a clear "not enabled" notice.
+interface Identity {
+  user_id: string
+  org_id: number | null
+}
+
 export default function MemoryPage() {
   const [enabled, setEnabled] = useState(true)
-  const [users, setUsers] = useState([])
-  // A selected summary is an identity: {user_id, org_id} (org_id null = legacy).
-  // A username can appear under several orgs (a moved user), so selection and
-  // React keys must use both fields, not user_id alone.
-  const [selected, setSelected] = useState(null)
-  const [records, setRecords] = useState([])
+  const [users, setUsers] = useState<MemoryUserSummary[]>([])
+  const [selected, setSelected] = useState<Identity | null>(null)
+  const [records, setRecords] = useState<MemoryRecord[]>([])
   const [query, setQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [message, setMessage] = useState(null)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
 
   const loadUsers = () => {
     setLoading(true)
@@ -32,7 +31,7 @@ export default function MemoryPage() {
         setEnabled(data.enabled)
         setUsers(data.users)
       })
-      .catch((e) => setError(e.message))
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
   }
 
@@ -41,22 +40,20 @@ export default function MemoryPage() {
     loadUsers()
   }, [])
 
-  const loadRecords = (identity, opts = {}) => {
+  const loadRecords = (identity: Identity | null, opts: { query?: string; type?: string } = {}) => {
     if (!identity) return
     setError(null)
     api
       .memoryRecords(identity.user_id, {
         query: opts.query ?? query,
         type: opts.type ?? typeFilter,
-        // A legacy identity (org_id null) must request only NULL-org rows via the
-        // 'legacy' sentinel; omitting org would read the username across all orgs.
         org: identity.org_id == null ? 'legacy' : identity.org_id,
       })
       .then((data) => setRecords(data.records))
-      .catch((e) => setError(e.message))
+      .catch((e: Error) => setError(e.message))
   }
 
-  const selectIdentity = (identity) => {
+  const selectIdentity = (identity: Identity) => {
     setSelected(identity)
     setMessage(null)
     setError(null)
@@ -65,20 +62,21 @@ export default function MemoryPage() {
     loadRecords(identity, { query: '', type: '' })
   }
 
-  const filterByType = (type) => {
+  const filterByType = (type: string) => {
     setTypeFilter(type)
     loadRecords(selected, { type })
   }
 
-  const submitSearch = (e) => {
+  const submitSearch = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     loadRecords(selected)
   }
 
-  const sameIdentity = (a, b) => a && b && a.user_id === b.user_id && a.org_id === b.org_id
-  const scopeLabel = (orgId) => (orgId == null ? 'legacy (no org)' : `org ${orgId}`)
+  const sameIdentity = (a: Identity | null, b: Identity | null) =>
+    a !== null && b !== null && a.user_id === b.user_id && a.org_id === b.org_id
+  const scopeLabel = (orgId: number | null) => (orgId == null ? 'legacy (no org)' : `org ${orgId}`)
 
-  const deleteRecord = async (id) => {
+  const deleteRecord = async (id: string) => {
     if (!window.confirm('Delete this memory record? This cannot be undone.')) return
     setError(null)
     setMessage(null)
@@ -88,7 +86,7 @@ export default function MemoryPage() {
       setMessage('Record deleted.')
       loadUsers()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     }
   }
 
@@ -106,7 +104,7 @@ export default function MemoryPage() {
       setSelected(null)
       loadUsers()
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
     }
   }
 

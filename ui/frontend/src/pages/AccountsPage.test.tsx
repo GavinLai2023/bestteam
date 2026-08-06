@@ -16,6 +16,8 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
+const mockedApi = vi.mocked(api)
+
 const ORGS = [
   { name: 'acme', display_name: 'Acme Corp', active: true, member: 'alice' },
   { name: 'beta', display_name: '', active: false, member: null },
@@ -27,12 +29,12 @@ const USERS = [
 
 beforeEach(() => {
   vi.clearAllMocks()
-  api.adminOrgs.mockResolvedValue(ORGS)
-  api.adminUsers.mockResolvedValue(USERS)
-  api.createAdminOrg.mockResolvedValue({})
-  api.setOrgActive.mockResolvedValue({})
-  api.createAdminUser.mockResolvedValue({})
-  api.deleteAdminUser.mockResolvedValue(null)
+  mockedApi.adminOrgs.mockResolvedValue(ORGS)
+  mockedApi.adminUsers.mockResolvedValue(USERS)
+  mockedApi.createAdminOrg.mockResolvedValue(ORGS[0])
+  mockedApi.setOrgActive.mockResolvedValue(ORGS[0])
+  mockedApi.createAdminUser.mockResolvedValue(USERS[0])
+  mockedApi.deleteAdminUser.mockResolvedValue(undefined)
 })
 
 describe('AccountsPage', () => {
@@ -50,7 +52,7 @@ describe('AccountsPage', () => {
     await screen.findByText('Acme Corp')
     fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
     fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
-    await waitFor(() => expect(api.createAdminOrg).toHaveBeenCalledWith('gamma', ''))
+    await waitFor(() => expect(mockedApi.createAdminOrg).toHaveBeenCalledWith('gamma', ''))
   })
 
   it('creates a user for an org with no member', async () => {
@@ -60,7 +62,7 @@ describe('AccountsPage', () => {
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
     fireEvent.click(screen.getByRole('button', { name: /create user/i }))
-    await waitFor(() => expect(api.createAdminUser).toHaveBeenCalledWith('bob', 'beta', 'pw'))
+    await waitFor(() => expect(mockedApi.createAdminUser).toHaveBeenCalledWith('bob', 'beta', 'pw'))
   })
 
   it('does not create a user when the passwords do not match', async () => {
@@ -71,11 +73,11 @@ describe('AccountsPage', () => {
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'nope' } })
     fireEvent.click(screen.getByRole('button', { name: /create user/i }))
     expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument()
-    expect(api.createAdminUser).not.toHaveBeenCalled()
+    expect(mockedApi.createAdminUser).not.toHaveBeenCalled()
   })
 
   it('keeps the entered values when creation fails', async () => {
-    api.createAdminOrg.mockRejectedValue(new Error('boom'))
+    mockedApi.createAdminOrg.mockRejectedValue(new Error('boom'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
@@ -85,9 +87,9 @@ describe('AccountsPage', () => {
   })
 
   it('clears the form and warns (not fails) when creation succeeds but refresh fails', async () => {
-    api.createAdminOrg.mockResolvedValue({})
+    mockedApi.createAdminOrg.mockResolvedValue(ORGS[0])
     // mount reload succeeds; the post-create reload fails
-    api.adminOrgs.mockResolvedValueOnce(ORGS).mockRejectedValueOnce(new Error('net'))
+    mockedApi.adminOrgs.mockResolvedValueOnce(ORGS).mockRejectedValueOnce(new Error('net'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
@@ -102,7 +104,7 @@ describe('AccountsPage', () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.click(screen.getByRole('button', { name: /deactivate/i }))
-    await waitFor(() => expect(api.setOrgActive).toHaveBeenCalledWith('acme', false))
+    await waitFor(() => expect(mockedApi.setOrgActive).toHaveBeenCalledWith('acme', false))
   })
 
   it('deletes an org member after confirm', async () => {
@@ -110,6 +112,6 @@ describe('AccountsPage', () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
-    await waitFor(() => expect(api.deleteAdminUser).toHaveBeenCalledWith('alice'))
+    await waitFor(() => expect(mockedApi.deleteAdminUser).toHaveBeenCalledWith('alice'))
   })
 })
