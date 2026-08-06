@@ -11,6 +11,10 @@ interface UserDraft {
   confirm: string
 }
 
+// Admin-only org/user management: create orgs, deactivate/reactivate them, and
+// manage each org's single member login. Granting admin and the whole
+// platform-account lifecycle stay CLI-only, so platform accounts are shown
+// read-only. The backend enforces admin on every /api/admin call regardless.
 export default function AccountsPage() {
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -20,6 +24,7 @@ export default function AccountsPage() {
 
   const [newOrgName, setNewOrgName] = useState('')
   const [newOrgDisplay, setNewOrgDisplay] = useState('')
+  // Per-org create-user drafts, keyed by org name: { [org]: {username, password} }.
   const [drafts, setDrafts] = useState<Record<string, UserDraft>>({})
 
   const reload = () =>
@@ -34,6 +39,11 @@ export default function AccountsPage() {
       .finally(() => setLoading(false))
   }, [])
 
+  // Resolves to true iff the MUTATION succeeded (callers clear their form only
+  // then). A failed mutation keeps the entered values (review r-ext2 #5); a
+  // mutation that succeeds but whose list-refresh fails still counts as success
+  // -- clearing the form and showing a distinct refresh warning rather than a
+  // "creation failed" that invites a duplicate retry (review r-ext3).
   const run = (promise: Promise<unknown>, okMessage?: string): Promise<boolean> => {
     setError(null)
     setMessage(null)

@@ -11,9 +11,16 @@ interface Identity {
   org_id: number | null
 }
 
+// Admin-only view of the per-user memory store: pick a user, browse/search
+// their remembered records, delete a bad one, or clear their whole memory.
+// Memory is opt-in (BESTTEAM_MEMORY_DB); when disabled the API reports
+// enabled:false and this page shows a clear "not enabled" notice.
 export default function MemoryPage() {
   const [enabled, setEnabled] = useState(true)
   const [users, setUsers] = useState<MemoryUserSummary[]>([])
+  // A selected summary is an identity: {user_id, org_id} (org_id null = legacy).
+  // A username can appear under several orgs (a moved user), so selection and
+  // React keys must use both fields, not user_id alone.
   const [selected, setSelected] = useState<Identity | null>(null)
   const [records, setRecords] = useState<MemoryRecord[]>([])
   const [query, setQuery] = useState('')
@@ -47,6 +54,8 @@ export default function MemoryPage() {
       .memoryRecords(identity.user_id, {
         query: opts.query ?? query,
         type: opts.type ?? typeFilter,
+        // A legacy identity (org_id null) must request only NULL-org rows via the
+        // 'legacy' sentinel; omitting org would read the username across all orgs.
         org: identity.org_id == null ? 'legacy' : identity.org_id,
       })
       .then((data) => setRecords(data.records))

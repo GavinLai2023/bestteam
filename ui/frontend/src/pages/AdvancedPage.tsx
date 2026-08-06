@@ -4,6 +4,10 @@ import type { AdminOrg, ConfigItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
 
+// `orgScope` mirrors what the backend requires on each item route:
+//   required -- ?org= or 422 (crud.py::_resolve_org_id)
+//   optional -- omitted means the platform built-in tier (skills only)
+//   none     -- resource isn't org-scoped at all; hide the selector
 const PLATFORM_TIER = '__platform__'
 
 interface Kind {
@@ -15,6 +19,10 @@ interface Kind {
   readOnly?: boolean
 }
 
+// Ordered whole-then-parts: the deployable unit, then what it's built from,
+// then read-only reference. A workflow is what the wizard and the customer UI
+// call an "AI team"; this page is operator-only, so it uses the noun that
+// matches the JSON keys, the API path, and the YAML.
 const KINDS: Kind[] = [
   { key: 'workflows', label: 'Workflows', idField: 'name', editableField: 'config', orgScope: 'required' },
   { key: 'skills', label: 'Skills', idField: 'name', editableField: 'config', orgScope: 'optional' },
@@ -40,6 +48,9 @@ function editableJson(kind: Kind, item: ConfigItem): ConfigItem {
   return rest
 }
 
+// "Advanced" view: raw JSON CRUD over `/api/config/...`, for fine-tuning an
+// already-deployed configuration. Hidden behind its own nav entry -- the
+// wizard is the primary way to build a team.
 export default function AdvancedPage() {
   const [activeKey, setActiveKey] = useState(KINDS[0].key)
   const [items, setItems] = useState<ConfigItem[]>([])
@@ -58,10 +69,20 @@ export default function AdvancedPage() {
 
   const kind = KINDS.find((k) => k.key === activeKey)!
   const activeKeyRef = useRef(activeKey)
+  // Monotonic load token: a list response is only applied if it's the most
+  // recent request, so a slow response for a previous org/tab can't overwrite
+  // the current one (and can't leave a stale item selectable for a mutation
+  // that would then target the wrong org).
   const loadSeq = useRef(0)
 
+  // What actually goes on the wire: the platform tier is expressed by omitting
+  // `?org=` entirely, and org-less resources never send it.
   const apiOrg = kind.orgScope === 'none' || org === PLATFORM_TIER ? undefined : (org ?? undefined)
 
+  // The skills list can't ask the API for "built-ins only" -- omitting ?org=
+  // means unfiltered there, so it returns every org's skills. Narrow to the
+  // platform tier here, otherwise saving a listed org skill would silently
+  // write a built-in copy of it instead.
   const visibleItems =
     kind.orgScope === 'optional' && org === PLATFORM_TIER
       ? items.filter((it) => it.org == null)
@@ -90,6 +111,8 @@ export default function AdvancedPage() {
   }
 
   useEffect(() => {
+    // Orgs arrive after first paint, so the initial tab has no org to target
+    // until they do; pick its default here rather than in a cascading effect.
     api
       .listOrgs()
       .then((data) => {
@@ -101,12 +124,16 @@ export default function AdvancedPage() {
   }, [])
 
   useEffect(() => {
-    if (kind.orgScope === 'required' && !org) return
+    if (kind.orgScope === 'required' && !org) return // still waiting on listOrgs
     // eslint-disable-next-line react-hooks/set-state-in-effect -- load on tab/org change
     loadItems()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey, org])
 
+  // Drop any open editor/selection. Both switching tab and switching org must
+  // do this: otherwise the editor keeps the previous context's item id + JSON,
+  // and a Save/Delete would then create or destroy that item in the newly
+  // selected org (a cross-tenant write). See selectKind / selectOrg.
   const resetSelection = () => {
     setSelectedId(null)
     setJsonText('')
@@ -117,6 +144,8 @@ export default function AdvancedPage() {
     setUploadFiles([])
   }
 
+  // activeKey and org move together so the load effect fires once, with a
+  // matching pair -- switching tabs must never request the previous tab's org.
   const selectKind = (k: Kind) => {
     if (k.key === activeKey) return
     setActiveKey(k.key)
