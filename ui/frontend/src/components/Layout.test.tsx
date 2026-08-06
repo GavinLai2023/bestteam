@@ -22,7 +22,7 @@ beforeEach(() => {
 
 describe('Layout nav', () => {
   it('shows only the admin links for a platform operator', () => {
-    useMe.mockReturnValue({ me: { is_admin: true }, loading: false, isAdmin: true })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: true, username: 'x', org: null }, loading: false, isAdmin: true })
     renderLayout()
     for (const label of ADMIN_LINKS) {
       expect(screen.getByText(label)).toBeInTheDocument()
@@ -33,7 +33,7 @@ describe('Layout nav', () => {
   })
 
   it('shows only the customer links for an org member', () => {
-    useMe.mockReturnValue({ me: { is_admin: false }, loading: false, isAdmin: false })
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
     renderLayout()
     for (const label of CUSTOMER_LINKS) {
       expect(screen.getByText(label)).toBeInTheDocument()

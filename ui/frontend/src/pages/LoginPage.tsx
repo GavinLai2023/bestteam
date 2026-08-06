@@ -8,9 +8,9 @@ export default function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
-  const submit = async (e) => {
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!username.trim() || !password || submitting) return
     setSubmitting(true)
@@ -20,7 +20,7 @@ export default function LoginPage() {
       localStorage.setItem('bestteam_token', access_token)
       navigate('/')
     } catch (e) {
-      setError(e.message)
+      setError((e as Error).message)
       setSubmitting(false)
     }
   }
