@@ -3,7 +3,7 @@ const MONTHS = [
 ]
 
 // "31 JUL 2026, 2:55 PM" -- the Team Activity page's date format.
-export function formatDateTime(input) {
+export function formatDateTime(input: string | Date): string {
   const date = new Date(input)
   const day = String(date.getDate()).padStart(2, '0')
   const month = MONTHS[date.getMonth()]

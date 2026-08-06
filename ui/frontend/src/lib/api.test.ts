@@ -24,7 +24,7 @@ describe('request() error handling', () => {
   it('propagates a network failure as an error with no status', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
 
-    const err = await api.listWorkflows().catch((e) => e)
+    const err = (await api.listWorkflows().catch((e) => e)) as { status?: number; message: string }
     expect(err).toBeInstanceOf(Error)
     expect(err.status).toBeUndefined()
   })
@@ -37,12 +37,13 @@ describe('automationResultsSummary', () => {
   })
 
   it('sends the browser UTC offset so the backend can bound by the local day, not UTC (Codex review finding)', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    globalThis.fetch = fetchMock
     vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-600) // UTC+10
 
     await api.automationResultsSummary('2026-08-03')
 
-    const url = globalThis.fetch.mock.calls[0][0]
+    const url = fetchMock.mock.calls[0][0] as string
     const params = new URL(url).searchParams
     expect(params.get('date')).toBe('2026-08-03')
     expect(params.get('tz_offset_minutes')).toBe('-600')

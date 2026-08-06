@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
+import type { BuilderSession } from './types'
 
 // Loads a builder session by id and exposes a `refresh()` to re-fetch after
 // any wizard-stage mutation (requirements/specification/solution/deploy).
-export function useBuilderSession(sessionId) {
-  const [session, setSession] = useState(null)
+export function useBuilderSession(sessionId: string | undefined) {
+  const [session, setSession] = useState<BuilderSession | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback((): Promise<BuilderSession | null> => {
     if (!sessionId) {
       setLoading(false)
       return Promise.resolve(null)
@@ -21,7 +22,7 @@ export function useBuilderSession(sessionId) {
         setSession(data)
         return data
       })
-      .catch((e) => {
+      .catch((e: Error) => {
         setError(e.message)
         return null
       })

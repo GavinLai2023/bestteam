@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
+import type { ModelCatalogEntry } from './types'
 
 // Fetches `/api/model-catalog` (the non-admin read endpoint -- the wizard
 // runs as an org member). Used by wizard stages that let the customer pick
@@ -9,7 +10,7 @@ import { api } from './api'
 // catalog is genuinely empty" -- the first two must never fall through to a
 // `fake:` default in production, only the third legitimately can.
 export function useModelCatalog() {
-  const [entries, setEntries] = useState([])
+  const [entries, setEntries] = useState<ModelCatalogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
