@@ -208,7 +208,7 @@ export default function ActivityPage() {
                     className="wizard-card session-card"
                     onClick={() => setSelectedRun({ id: run.id, status: run.status, autonomous: run.autonomous })}
                   >
-                    <h2>{run.workflow}</h2>
+                    <h2>{run.team_display_name ?? run.workflow}</h2>
                     <div className="session-card-footer">
                       <span className="status-badge">{run.status}</span>
                       <span className="session-updated">

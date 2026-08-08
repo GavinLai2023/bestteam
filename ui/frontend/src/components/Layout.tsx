@@ -1,10 +1,19 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useEffect } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useMe } from '../lib/useMe'
 import './Layout.css'
 
 export default function Layout() {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const { isAdmin } = useMe()
+
+  // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
+  // scroll position the previous page was at, landing the new page mid-way
+  // down and hiding its heading/progress state.
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
 
   const logOut = () => {
     localStorage.removeItem('bestteam_token')
@@ -26,7 +35,7 @@ export default function Layout() {
               <NavLink to="/teams" className={({ isActive }) => (isActive ? 'active' : '')}>
                 My teams
               </NavLink>
-              <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
+              <NavLink to="/run" className={({ isActive }) => (isActive ? 'active' : '')}>
                 Run a team
               </NavLink>
               <NavLink to="/activity" className={({ isActive }) => (isActive ? 'active' : '')}>

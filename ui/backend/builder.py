@@ -29,7 +29,7 @@ from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
 from .db.workflows import publish_workflow_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
@@ -111,8 +111,8 @@ def _session_to_dict(
         "workflow_id": session.workflow_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
-        "created_at": session.created_at.isoformat(),
-        "updated_at": session.updated_at.isoformat(),
+        "created_at": iso_utc(session.created_at),
+        "updated_at": iso_utc(session.updated_at),
     }
 
 
@@ -320,8 +320,8 @@ def _synthetic_session_for_workflow(
             org_id,
             workflow_version_id=record.current_version_id,
         ),
-        "created_at": record.created_at.isoformat(),
-        "updated_at": record.updated_at.isoformat(),
+        "created_at": iso_utc(record.created_at),
+        "updated_at": iso_utc(record.updated_at),
     }
 
 

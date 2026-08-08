@@ -81,6 +81,7 @@ export interface TraceEvent {
 export interface RunListItem {
   id: string
   workflow: string
+  team_display_name?: string | null
   status: string
   autonomous: boolean
   started_at: string

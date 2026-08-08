@@ -55,6 +55,8 @@ from .db.models import (
     TraceEventRecord,
     User,
     WorkflowRecord,
+    WorkflowVersion,
+    iso_utc,
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
@@ -602,7 +604,7 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
                 "type": row.type,
                 "agent": row.agent,
                 "data": json.loads(row.data) if row.data is not None else None,
-                "created_at": row.created_at.isoformat(),
+                "created_at": iso_utc(row.created_at),
             }
             for row in rows
         ]
@@ -703,13 +705,33 @@ def list_runs(
         query = query.filter(Run.created_at <= until)
     total = query.count()
     rows = query.order_by(Run.created_at.desc()).offset(offset).limit(limit).all()
+
+    # The customer-facing team name (My Teams shows the same thing) -- batched
+    # rather than one lookup per row. Sourced from each run's own pinned
+    # version, not the workflow's current config, so a run's card always
+    # reflects the team as it was when that run actually happened.
+    version_ids = {row.workflow_version_id for row in rows if row.workflow_version_id is not None}
+    version_configs = (
+        {v.id: v.config for v in db.query(WorkflowVersion).filter(WorkflowVersion.id.in_(version_ids))}
+        if version_ids
+        else {}
+    )
+
+    def _team_display_name(row: Run) -> Optional[str]:
+        config = version_configs.get(row.workflow_version_id)
+        if not config:
+            return None
+        teams = config.get("teams") or []
+        return teams[0].get("display_name") if teams else None
+
     return {
         "runs": [
             {
                 "id": row.id,
                 "workflow": row.workflow,
+                "team_display_name": _team_display_name(row),
                 "status": row.status,
-                "started_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "started_at": iso_utc(row.created_at),
                 "username": row.username,
                 "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
             }
@@ -760,7 +782,7 @@ def list_automation_results_endpoint(
                 "status": row.status,
                 "needs_attention": row.needs_attention,
                 "payload": row.payload,
-                "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "created_at": iso_utc(row.created_at),
             }
             for row in rows
         ],

@@ -269,6 +269,26 @@
   text-align: center;
 }
 
+/* A sequential team's cards + "→" arrows don't fit side by side once the
+   team-block's content width drops below ~330px (two 150px-min-width cards
+   plus an arrow and gaps) -- stack them vertically instead, arrow rotated
+   to point down, rather than letting the row overflow and hide the second
+   agent (finding: overflow at 390px). */
+@media (max-width: 480px) {
+  .team-members-row.sequential {
+    flex-direction: column;
+  }
+
+  .team-members-row.sequential .sequential-arrow {
+    transform: rotate(90deg);
+  }
+
+  .employee-card {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
 .employee-avatar {
   width: 44px;
   height: 44px;

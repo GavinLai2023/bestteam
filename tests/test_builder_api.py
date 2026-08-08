@@ -207,6 +207,19 @@ def test_create_session_starts_in_intent_stage(client):
     assert body["feedback_history"] == []
 
 
+def test_session_timestamps_carry_an_explicit_utc_marker(client):
+    # A timestamp with no timezone marker (e.g. "2026-08-08T10:27:00") is
+    # parsed by JS `Date` as local time, not UTC -- on My Teams that showed
+    # the wrong wall-clock time versus Activity's (already-marked) timestamps
+    # for the very same run, a several-hour discrepancy depending on the
+    # viewer's timezone.
+    resp = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"})
+    body = resp.json()
+    for field in ("created_at", "updated_at"):
+        value = body[field]
+        assert value.endswith("Z") or "+00:00" in value, f"{field}={value!r} has no explicit UTC marker"
+
+
 def test_get_session_returns_404_for_unknown_id(client):
     resp = client.get("/api/builder/sessions/does-not-exist")
     assert resp.status_code == 404
@@ -262,11 +275,16 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
 
 
 def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
-    # A workflow deployed straight through the admin Advanced/CRUD page with
-    # no recorded creator must NOT clutter an org member's My Teams list --
-    # that list should only ever show teams the member personally built. It
-    # remains runnable from Run a Team (see /api/workflows' own creator
-    # filter, which treats an unowned workflow as an admin-shared template).
+    # A workflow with no recorded creator (a legacy pre-migration row, or one
+    # deployed to an org before it had a member) must NOT clutter an org
+    # member's My Teams list -- that list should only ever show teams the
+    # member personally built. It remains runnable from Run a Team (see
+    # /api/workflows' own creator filter, which treats an unowned workflow as
+    # an admin-shared template). A normal CRUD deploy to an org that already
+    # has its one member auto-attributes to them (see
+    # test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member
+    # below), so the no-owner state is simulated directly here rather than
+    # via that path.
     raw_workflow_config = {
         "knowledge_bases": [],
         "agents": [
@@ -287,11 +305,52 @@ def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
     )
     assert resp.status_code == 200
 
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="orphan_team").one()
+        record.created_by = None
+        db.commit()
+
     resp = client.get("/api/builder/sessions")
 
     assert resp.status_code == 200
     names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
     assert "orphan_team" not in names
+
+
+def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client):
+    # A CRUD-page deploy to an org that already has its one member (the
+    # "one member per org" invariant, ui/backend/db/CLAUDE.md) auto-stamps
+    # created_by to that member (crud.py::upsert_workflow_config) -- so it
+    # shows up on their My Teams instead of being permanently invisible
+    # there, without needing any manual attribution step.
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    resp = client.put(
+        "/api/config/workflows/auto_owned_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "auto_owned_team" in names
 
 
 def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):

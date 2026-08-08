@@ -69,6 +69,42 @@ describe('ActivityPage', () => {
     expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
   })
 
+  it('shows the team\'s customer-facing display name instead of the internal technical name', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        {
+          id: 'r1',
+          workflow: 'customer_support_team',
+          team_display_name: 'Customer Support Team',
+          status: 'completed',
+          started_at: '2026-07-31T11:00:00Z',
+          autonomous: false,
+        },
+      ],
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+
+    expect(await screen.findByRole('heading', { name: 'Customer Support Team' })).toBeInTheDocument()
+    expect(screen.queryByText('customer_support_team')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the internal technical name when no team display name is available', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [{ id: 'r1', workflow: 'wf-a', team_display_name: null, status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+
+    expect(await screen.findByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
+  })
+
   it('shows a run\'s start time as "DD MMM YYYY, h:mm AM/PM"', async () => {
     mockedApi.listRuns.mockResolvedValue({
       runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T14:05:00', autonomous: false }],

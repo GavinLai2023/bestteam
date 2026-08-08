@@ -21,6 +21,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def iso_utc(dt: datetime) -> str:
+    """Format a `created_at`/`updated_at` column for API responses.
+
+    Every such column is populated via `_utcnow()`, but SQLite round-trips it
+    tzinfo-naive -- `dt.isoformat()` alone then omits the UTC marker, and a
+    frontend `Date` parses that as local time instead (the actual value is
+    always UTC, so `.replace` is correct, not a guess)."""
+    return dt.replace(tzinfo=timezone.utc).isoformat()
+
+
 def new_security_stamp() -> str:
     """A fresh random per-account credential generation (see User.security_stamp)."""
     return secrets.token_hex(16)

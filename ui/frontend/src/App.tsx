@@ -2,6 +2,7 @@ import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import WizardLayout from './components/WizardLayout'
 import LoginPage from './pages/LoginPage'
+import LandingPage from './pages/LandingPage'
 import MonitorPage from './pages/MonitorPage'
 import ActivityPage from './pages/ActivityPage'
 import AdvancedPage from './pages/AdvancedPage'
@@ -44,7 +45,12 @@ function App() {
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
           <Route element={<RequireOrgMember />}>
-            <Route path="/" element={<MonitorPage />} />
+            {/* The landing route: sends a brand-new org (no deployed
+                workflows yet) to the wizard, and everyone else to the
+                Activity dashboard -- see LandingPage.tsx. "Run a team" is
+                a deliberate destination now (/run), not the default one. */}
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/run" element={<MonitorPage />} />
             <Route path="/teams" element={<SessionsPage />} />
             <Route path="/activity" element={<ActivityPage />} />
 
@@ -63,7 +69,8 @@ function App() {
           </Route>
 
           {/* Kept outside both guards so an unknown path routes to `/`, where
-              RequireOrgMember decides the destination (operator -> /advanced). */}
+              RequireOrgMember/LandingPage decide the destination
+              (operator -> /advanced; org member -> /wizard or /activity). */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>

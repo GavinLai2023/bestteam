@@ -54,6 +54,7 @@ from .db.models import (
     WorkflowDependency,
     WorkflowRecord,
     WorkflowVersion,
+    iso_utc,
 )
 from .db.dependencies import workflows_referencing
 from .db.skills import publish_skill_version
@@ -441,7 +442,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                     "version": version.version_number,
                     "config": version.config,
                     "created_by": version.created_by,
-                    "created_at": version.created_at.isoformat(),
+                    "created_at": iso_utc(version.created_at),
                     "current": version.id == item.current_version_id,
                 }
                 for version in versions
