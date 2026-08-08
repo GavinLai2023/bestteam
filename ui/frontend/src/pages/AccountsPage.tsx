@@ -26,6 +26,8 @@ export default function AccountsPage() {
   const [newOrgDisplay, setNewOrgDisplay] = useState('')
   // Per-org create-user drafts, keyed by org name: { [org]: {username, password} }.
   const [drafts, setDrafts] = useState<Record<string, UserDraft>>({})
+  // Which org's create-user form is expanded; only one shows at a time.
+  const [expandedOrg, setExpandedOrg] = useState<string | null>(null)
 
   const reload = () =>
     Promise.all([api.adminOrgs(), api.adminUsers()]).then(([o, u]) => {
@@ -99,7 +101,10 @@ export default function AccountsPage() {
       return
     }
     run(api.createAdminUser(username.trim(), org, password)).then((ok) => {
-      if (ok) setDrafts((d) => ({ ...d, [org]: emptyDraft }))
+      if (ok) {
+        setDrafts((d) => ({ ...d, [org]: emptyDraft }))
+        setExpandedOrg(null)
+      }
     })
   }
 
@@ -180,7 +185,7 @@ export default function AccountsPage() {
                     Delete
                   </button>
                 </>
-              ) : (
+              ) : expandedOrg === org.name ? (
                 <form onSubmit={(e) => createUser(e, org.name)} className="inline-form">
                   <input
                     aria-label={`Username for ${org.name}`}
@@ -203,9 +208,21 @@ export default function AccountsPage() {
                     placeholder="confirm password"
                   />
                   <button type="submit" className="btn btn-primary">
-                    Create user
+                    Create
+                  </button>
+                  <button type="button" className="btn" onClick={() => setExpandedOrg(null)}>
+                    Cancel
                   </button>
                 </form>
+              ) : (
+                <button
+                  type="button"
+                  className="btn"
+                  aria-label={`Create user for ${org.name}`}
+                  onClick={() => setExpandedOrg(org.name)}
+                >
+                  Create user
+                </button>
               )}
             </li>
           ))}

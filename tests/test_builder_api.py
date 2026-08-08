@@ -250,6 +250,10 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
         db.get(BuilderSession, session_id).updated_at = datetime(2020, 1, 1)
         advanced = db.query(WorkflowRecord).filter_by(name="newer_advanced_team").one()
         advanced.updated_at = datetime(2030, 1, 1)
+        # An orphan (no-session) workflow only shows on My Teams for the user
+        # who owns it -- simulate an admin deploying this one on behalf of the
+        # test client's own user, so this test can focus on ordering.
+        advanced.created_by = "test"
         db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
@@ -257,13 +261,12 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
     assert sessions[0]["specification_json"]["name"] == "newer_advanced_team"
 
 
-def test_list_sessions_includes_deployed_workflows_with_no_builder_session(client):
-    # A workflow can be deployed straight through the admin Advanced/CRUD
-    # page, bypassing the wizard entirely -- it should still show up on My
-    # Teams (as a session-shaped entry with id=None) instead of being
-    # invisible there while still being runnable from Run a Team. The CRUD
-    # path builds `Agent(**spec)` directly (ui/backend/CLAUDE.md), so its raw
-    # config has no wizard-only display_name/friendly_description fields.
+def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
+    # A workflow deployed straight through the admin Advanced/CRUD page with
+    # no recorded creator must NOT clutter an org member's My Teams list --
+    # that list should only ever show teams the member personally built. It
+    # remains runnable from Run a Team (see /api/workflows' own creator
+    # filter, which treats an unowned workflow as an admin-shared template).
     raw_workflow_config = {
         "knowledge_bases": [],
         "agents": [
@@ -287,8 +290,46 @@ def test_list_sessions_includes_deployed_workflows_with_no_builder_session(clien
     resp = client.get("/api/builder/sessions")
 
     assert resp.status_code == 200
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "orphan_team" not in names
+
+
+def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
+    # An orphan workflow (no matching BuilderSession) that DOES carry this
+    # user's own username as its creator -- e.g. its session was removed out
+    # of band -- should still show up, unlike the no-owner case above.
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    assert client.put(
+        "/api/config/workflows/owned_orphan_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    ).status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="owned_orphan_team").one()
+        record.created_by = "test"
+        db.commit()
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
     sessions = resp.json()["sessions"]
-    orphan = next(s for s in sessions if s["specification_json"]["name"] == "orphan_team")
+    orphan = next(s for s in sessions if s["specification_json"]["name"] == "owned_orphan_team")
     assert orphan["id"] is None
     assert orphan["status"] == "deployed"
     assert orphan["workflow_id"] is not None
@@ -361,6 +402,14 @@ def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
         json={"instructions": "No mail now.", "tools": []},
         headers=admin,
     ).status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="advanced_email_team").one()
+        record.created_by = "test"
+        db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
     synthetic = next(

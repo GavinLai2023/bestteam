@@ -46,16 +46,22 @@ def publish_workflow_version(
         record.name = name
         record.config = config
         record.status = "deployed"
+        if created_by is not None:
+            record.created_by = created_by
     else:
         record = (
             db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
         )
         if record is None:
-            record = WorkflowRecord(name=name, config=config, status="deployed", org_id=org_id)
+            record = WorkflowRecord(
+                name=name, config=config, status="deployed", org_id=org_id, created_by=created_by
+            )
             db.add(record)
         else:
             record.config = config
             record.status = "deployed"
+            if created_by is not None:
+                record.created_by = created_by
 
     # NB: record.config and version.config below share ONE dict object. That is
     # safe only because deploy never mutates config in place -- the next deploy

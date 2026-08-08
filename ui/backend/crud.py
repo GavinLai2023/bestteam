@@ -668,8 +668,13 @@ def upsert_workflow_config(
                 ),
             )
 
+        # Attribute an admin-side deploy to the org's own member (schema
+        # guarantees at most one) so it shows up on that member's My Teams
+        # page instead of being permanently invisible there.
+        member = db.query(User).filter_by(org_id=org_id).one_or_none()
         item, _version = publish_workflow_version(
-            db, org_id=org_id, name=item_name, config=raw
+            db, org_id=org_id, name=item_name, config=raw,
+            created_by=member.username if member else None,
         )
         db.commit()
         status = item.status

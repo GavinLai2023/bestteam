@@ -327,14 +327,19 @@ def _synthetic_session_for_workflow(
 
 @router.get("")
 def list_builder_sessions(
-    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """List the org's builder sessions (most recent first), for an "AI teams
-    I've built" list page. A session with status 'deployed' has a live
-    WorkflowRecord matching specification_json['name']. Deployed workflows
-    with no backing session at all (deployed straight through the admin
-    Advanced/CRUD page) get a synthetic entry too, so My Teams shows every
-    team the org can run, not just the wizard-built subset."""
+    """List the current user's own builder sessions (most recent first), for
+    an "AI teams I've built" list page. A session with status 'deployed' has
+    a live WorkflowRecord matching specification_json['name']. A deployed
+    workflow with no backing session at all (deployed straight through the
+    admin Advanced/CRUD page) gets a synthetic entry too -- but only when its
+    `created_by` matches this user, so My Teams shows exactly the teams this
+    person built, not every workflow anyone in the org can run (that broader
+    "org can run" list is /api/workflows, which treats an unowned workflow as
+    an admin-shared template)."""
     sessions = list_sessions(db, org_id=org.id)
     session_dicts = [_session_to_dict(s, db, org.id) for s in sessions]
 
@@ -343,6 +348,7 @@ def list_builder_sessions(
         db.query(WorkflowRecord)
         .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
         .filter(WorkflowRecord.id.notin_(session_workflow_ids))
+        .filter(WorkflowRecord.created_by == user.username)
         .all()
     )
     session_dicts.extend(

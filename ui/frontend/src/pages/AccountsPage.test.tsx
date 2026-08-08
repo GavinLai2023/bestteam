@@ -55,23 +55,49 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(mockedApi.createAdminOrg).toHaveBeenCalledWith('gamma', ''))
   })
 
+  it('hides the create-user form behind a button until clicked', async () => {
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    expect(screen.queryByLabelText('Username for beta')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    expect(screen.getByLabelText('Username for beta')).toBeInTheDocument()
+  })
+
+  it('only shows one org\'s create-user form at a time', async () => {
+    mockedApi.adminOrgs.mockResolvedValueOnce([
+      ...ORGS,
+      { name: 'gamma', display_name: '', active: true, member: null },
+    ])
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
+    expect(screen.getByLabelText('Username for beta')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /create user for gamma/i }))
+    expect(screen.queryByLabelText('Username for beta')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Username for gamma')).toBeInTheDocument()
+  })
+
   it('creates a user for an org with no member', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
     fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     await waitFor(() => expect(mockedApi.createAdminUser).toHaveBeenCalledWith('bob', 'beta', 'pw'))
+    // form collapses back to the toggle button after a successful create
+    expect(await screen.findByRole('button', { name: /create user for beta/i })).toBeInTheDocument()
   })
 
   it('does not create a user when the passwords do not match', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
     fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'nope' } })
-    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument()
     expect(mockedApi.createAdminUser).not.toHaveBeenCalled()
   })
