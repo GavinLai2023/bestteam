@@ -7,7 +7,6 @@ import { useModelCatalog } from '../../lib/useModelCatalog'
 const STAGE_LABELS: Record<string, string> = {
   creating: 'Setting things up…',
   requirements: 'Getting to know your business…',
-  specification: 'Putting your team together…',
 }
 
 const UPLOAD_LABELS: Record<string, string> = {
@@ -17,7 +16,7 @@ const UPLOAD_LABELS: Record<string, string> = {
 
 const ACCEPTED_AUDIO = '.mp3,.mp4,.m4a,.wav,.webm,.mpeg,.mpga'
 
-type Stage = null | 'creating' | 'requirements' | 'specification'
+type Stage = null | 'creating' | 'requirements'
 type UploadStage = null | 'transcribing' | 'extracting' | 'done'
 
 export default function IntentPage() {
@@ -68,18 +67,6 @@ export default function IntentPage() {
     }
   }
 
-  const buildSpecification = async (id: string) => {
-    setStage('specification')
-    try {
-      await api.submitSpecification(id, { model: pickDefaultModel(entries) })
-      navigate(`/wizard/${id}/preview`)
-    } catch (e) {
-      setError((e as Error).message)
-      setSubmitting(false)
-      setStage(null)
-    }
-  }
-
   const start = async () => {
     if (!intentText.trim() || submitting || catalogLoading || catalogUnavailable) return
     setSubmitting(true)
@@ -113,18 +100,14 @@ export default function IntentPage() {
       // ignored — non-blocking
     }
 
-    await buildSpecification(id)
+    navigate(`/wizard/${id}/documents`)
   }
 
   const retry = () => {
     if (catalogLoading || catalogUnavailable) return
     setError(null)
     setSubmitting(true)
-    if (sessionId) {
-      buildSpecification(sessionId)
-    } else {
-      start()
-    }
+    start()
   }
 
   const isUploading = uploadStage === 'transcribing' || uploadStage === 'extracting'

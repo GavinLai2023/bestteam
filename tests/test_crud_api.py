@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import crud as backend_crud
+from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, WorkflowRecord
@@ -34,6 +35,11 @@ def _active_kb_dir(uploads: Path, name: str) -> Path:
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    # `_KB_UPLOADS_DIR` is defined in knowledge_bases.py (where the actual
+    # upload/delete-on-disk logic lives) and merely re-imported into crud.py's
+    # namespace for the DELETE handler's own read -- patch both bindings so
+    # the two stay pointed at the same tmp directory during a test.
+    monkeypatch.setattr(backend_knowledge_bases, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     monkeypatch.setattr(backend_crud, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     backend_main._workflow_cache.clear()
 
@@ -403,7 +409,7 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
 
     from bestteam.exceptions import ConfigurationError
 
-    with patch.object(backend_crud, "LocalFolderKnowledgeBase", side_effect=ConfigurationError("bad upload")):
+    with patch.object(backend_knowledge_bases, "LocalFolderKnowledgeBase", side_effect=ConfigurationError("bad upload")):
         resp = client.post(
             "/api/config/knowledge_bases/kb/upload?org=default",
             files=[("files", ("doc2.txt", b"new content that fails validation", "text/plain"))],

@@ -288,6 +288,15 @@ export const api = {
       files,
     ),
 
+  // Org self-service: build your own knowledge base by uploading documents
+  // (the wizard's "Your documents" step). Org resolves server-side from the
+  // token, unlike the admin uploadKnowledgeBaseFiles above.
+  uploadOwnKnowledgeBaseFiles: (name: string, files: File[]) =>
+    uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
+      files,
+    ),
+
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),
   setOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
