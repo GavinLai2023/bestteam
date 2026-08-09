@@ -13,7 +13,7 @@ const renderLayout = () =>
     </MemoryRouter>,
   )
 
-const CUSTOMER_LINKS = ['Build a team', 'My teams', 'Run a team', 'Activity']
+const CUSTOMER_LINKS = ['Dashboard', 'Build a team', 'My teams', 'Run a team']
 const ADMIN_LINKS = ['Accounts', 'Advanced', 'Memory']
 
 beforeEach(() => {

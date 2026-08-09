@@ -29,6 +29,9 @@ export default function Layout() {
               use them, so show them only to org members. */}
           {!isAdmin && (
             <>
+              <NavLink to="/activity" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Dashboard
+              </NavLink>
               <NavLink to="/wizard" className={({ isActive }) => (isActive ? 'active' : '')}>
                 Build a team
               </NavLink>
@@ -37,9 +40,6 @@ export default function Layout() {
               </NavLink>
               <NavLink to="/run" className={({ isActive }) => (isActive ? 'active' : '')}>
                 Run a team
-              </NavLink>
-              <NavLink to="/activity" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Activity
               </NavLink>
             </>
           )}
