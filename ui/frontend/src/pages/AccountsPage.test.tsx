@@ -47,6 +47,12 @@ describe('AccountsPage', () => {
     expect(screen.getByText(/managed via the CLI/i)).toBeInTheDocument()
   })
 
+  it('hints that the organization name is a login identifier with no spaces', async () => {
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    expect(screen.getByText(/letters, digits, '\.', '_', '-'.*no spaces/i)).toBeInTheDocument()
+  })
+
   it('creates an organization', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')

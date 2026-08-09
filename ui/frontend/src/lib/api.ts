@@ -19,6 +19,35 @@ function orgQuery(org: string | null | undefined): string {
   return org ? `?${new URLSearchParams({ org })}` : ''
 }
 
+interface ValidationErrorItem {
+  loc?: unknown[]
+  msg?: unknown
+}
+
+function isValidationErrors(detail: unknown): detail is ValidationErrorItem[] {
+  return Array.isArray(detail) && detail.every((d) => d !== null && typeof d === 'object' && 'msg' in d)
+}
+
+// FastAPI/Pydantic v2 request-validation failures put a list of error objects
+// in `detail` (each with `loc`/`msg`) rather than a string -- dumping that
+// raw as JSON is unreadable. Render each as "<field>: <message>", dropping
+// the leading "body"/"query"/"path" location segment and Pydantic's "Value
+// error, " prefix on custom validator messages.
+function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (isValidationErrors(detail)) {
+    return detail
+      .map((d) => {
+        const loc = Array.isArray(d.loc) ? d.loc.filter((s) => s !== 'body' && s !== 'query' && s !== 'path') : []
+        const field = loc.join('.')
+        const msg = String(d.msg).replace(/^Value error, /, '')
+        return field ? `${field}: ${msg}` : msg
+      })
+      .join('; ')
+  }
+  return JSON.stringify(detail)
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem(TOKEN_KEY)
   const headers: Record<string, string> = {
@@ -50,7 +79,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     // reachable, e.g. a 403) apart from a network failure (fetch rejects with
     // no status). A network failure surfaces as a TypeError from fetch above
     // and never reaches this branch.
-    const error: ApiError = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    const error: ApiError = new Error(formatErrorDetail(detail))
     error.status = res.status
     throw error
   }
@@ -86,7 +115,7 @@ async function uploadSingleFile<T>(path: string, file: File, fields: Record<stri
     } catch {
       // no JSON body
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new Error(formatErrorDetail(detail))
   }
 
   return res.json()
@@ -119,7 +148,7 @@ async function uploadFiles<T>(path: string, files: File[], fields: Record<string
     } catch {
       // response had no JSON body
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new Error(formatErrorDetail(detail))
   }
 
   return res.json()

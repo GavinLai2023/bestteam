@@ -28,6 +28,30 @@ describe('request() error handling', () => {
     expect(err).toBeInstanceOf(Error)
     expect(err.status).toBeUndefined()
   })
+
+  it('formats a FastAPI validation-error array into a readable message instead of dumping raw JSON', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      statusText: 'Unprocessable Entity',
+      json: async () => ({
+        detail: [
+          {
+            type: 'value_error',
+            loc: ['body', 'name'],
+            msg: "Value error, identifier may contain only letters, digits, '.', '_' and '-'",
+            input: 'Property Management INC',
+            ctx: { error: {} },
+          },
+        ],
+      }),
+    })
+
+    await expect(api.listWorkflows()).rejects.toMatchObject({
+      status: 422,
+      message: "name: identifier may contain only letters, digits, '.', '_' and '-'",
+    })
+  })
 })
 
 describe('automationResultsSummary', () => {

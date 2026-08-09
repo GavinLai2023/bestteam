@@ -159,6 +159,10 @@ export default function AccountsPage() {
             Create organization
           </button>
         </form>
+        <p className="hint">
+          Organization name is a login identifier: letters, digits, &apos;.&apos;, &apos;_&apos;, &apos;-&apos; only
+          (no spaces). Use Display name for what customers see.
+        </p>
 
         <ul className="org-list">
           {orgs.map((org) => (
