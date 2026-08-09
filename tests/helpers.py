@@ -64,3 +64,12 @@ def get_org_id(name: str = "default") -> int:
     """Return (creating if needed) the id of the named org, for stamping rows."""
     with open_test_db() as db:
         return get_or_create_org(db, name).id
+
+
+def get_user_principal_id(username: str = "test") -> str:
+    """Return a user's immutable principal_id, for stamping WorkflowRecord.created_by
+    in tests (never the username -- see WorkflowRecord.created_by)."""
+    from ui.backend.db.models import User
+
+    with open_test_db() as db:
+        return db.query(User.principal_id).filter_by(username=username).scalar()

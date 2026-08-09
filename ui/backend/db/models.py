@@ -191,6 +191,11 @@ class WorkflowRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
+    # The creator's immutable User.principal_id (NOT username -- usernames are
+    # reusable after account deletion, and a username-keyed value here would
+    # let a newly created same-named account see/run the deleted account's
+    # personal workflows). NULL = admin-shared template, visible to every org
+    # member. See db/workflows.py::publish_workflow_version.
     created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     # draft | ready_for_testing | deployed -- mirrors the Solution/Testing/

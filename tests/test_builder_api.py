@@ -7,7 +7,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, get_user_principal_id
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
@@ -259,6 +259,7 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
         headers=_admin_headers(client),
     ).status_code == 200
 
+    principal_id = get_user_principal_id()
     with open_test_db() as db:
         db.get(BuilderSession, session_id).updated_at = datetime(2020, 1, 1)
         advanced = db.query(WorkflowRecord).filter_by(name="newer_advanced_team").one()
@@ -266,7 +267,7 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
         # An orphan (no-session) workflow only shows on My Teams for the user
         # who owns it -- simulate an admin deploying this one on behalf of the
         # test client's own user, so this test can focus on ordering.
-        advanced.created_by = "test"
+        advanced.created_by = principal_id
         db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
@@ -353,6 +354,49 @@ def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client)
     assert "auto_owned_team" in names
 
 
+def test_workflow_owned_by_a_stale_username_string_is_not_visible_to_the_current_principal(client):
+    # Regression test (Codex review finding): WorkflowRecord.created_by must
+    # bind to the immutable User.principal_id, not the reusable username --
+    # otherwise deleting an account and creating a new one with the same
+    # username would let the new account see/run the old account's personal
+    # workflows. A row whose created_by is literally the plain username
+    # string "test" (as it would be under the old, vulnerable comparison, or
+    # if left over from before this fix) must NOT match the current "test"
+    # user's own principal_id (a random, unrelated string).
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    resp = client.put(
+        "/api/config/workflows/legacy_owned_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    )
+    assert resp.status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="legacy_owned_team").one()
+        record.created_by = "test"  # a plain username string, not a principal_id
+        db.commit()
+
+    resp = client.get("/api/builder/sessions")
+
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "legacy_owned_team" not in names
+
+
 def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
     # An orphan workflow (no matching BuilderSession) that DOES carry this
     # user's own username as its creator -- e.g. its session was removed out
@@ -379,9 +423,10 @@ def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
     from helpers import open_test_db
     from ui.backend.db.models import WorkflowRecord
 
+    principal_id = get_user_principal_id()
     with open_test_db() as db:
         record = db.query(WorkflowRecord).filter_by(name="owned_orphan_team").one()
-        record.created_by = "test"
+        record.created_by = principal_id
         db.commit()
 
     resp = client.get("/api/builder/sessions")
@@ -465,9 +510,10 @@ def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
     from helpers import open_test_db
     from ui.backend.db.models import WorkflowRecord
 
+    principal_id = get_user_principal_id()
     with open_test_db() as db:
         record = db.query(WorkflowRecord).filter_by(name="advanced_email_team").one()
-        record.created_by = "test"
+        record.created_by = principal_id
         db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
@@ -893,6 +939,27 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     ).json()
     assert config["status"] == "deployed"
     assert config["config"]["name"] == "support_workflow"
+
+
+def test_deployed_config_preserves_team_display_name(client):
+    # Codex review finding: Specification.to_raw() deliberately strips
+    # TeamSpec.display_name/friendly_description (it matches the engine
+    # loader's minimal shape -- see test_to_raw_strips_friendly_fields_and_
+    # matches_loader_shape in test_specification.py). But GET /api/runs'
+    # team_display_name (main.py) reads display_name from this exact
+    # persisted config, so a wizard deploy must merge it back in for what
+    # gets persisted, without changing to_raw()'s own contract.
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/deploy")
+    assert resp.status_code == 200
+
+    config = client.get(
+        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+    ).json()["config"]
+    assert config["teams"][0]["display_name"] == "Support Team"
+    assert config["teams"][0]["friendly_description"] == "The support specialist handles every request."
 
 
 def test_deployed_workflow_can_be_run_via_get_workflow(client):

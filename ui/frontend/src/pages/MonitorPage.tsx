@@ -25,7 +25,7 @@ function MonitorPage() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [secondsSinceLastEvent, setSecondsSinceLastEvent] = useState(0)
   const [traceExpanded, setTraceExpanded] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const wsRef = useRef<WebSocket | null>(null)
   const runIdRef = useRef<string | null>(null)
   const runStartedAtRef = useRef<number | null>(null)
@@ -88,7 +88,7 @@ function MonitorPage() {
     setSecondsSinceLastEvent(0)
     setHasRunId(false)
     setTraceExpanded(false)
-    setCopied(false)
+    setCopyState('idle')
     wsRef.current?.close()
     // Clear immediately -- otherwise a Stop click in the window before the
     // new run id arrives below would silently target the previous run.
@@ -222,12 +222,20 @@ function MonitorPage() {
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => {
-                navigator.clipboard.writeText(finalEvent.data as string)
-                setCopied(true)
+              onClick={async () => {
+                if (!navigator.clipboard) {
+                  setCopyState('failed')
+                  return
+                }
+                try {
+                  await navigator.clipboard.writeText(finalEvent.data as string)
+                  setCopyState('copied')
+                } catch {
+                  setCopyState('failed')
+                }
               }}
             >
-              {copied ? 'Copied!' : 'Copy'}
+              {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? "Couldn't copy" : 'Copy'}
             </button>
             <button type="button" onClick={startRun}>
               Run again

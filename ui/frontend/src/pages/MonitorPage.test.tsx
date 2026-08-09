@@ -221,6 +221,40 @@ describe('MonitorPage run waiting UX', () => {
     fireEvent.click(await screen.findByText('Copy'))
 
     expect(writeText).toHaveBeenCalledWith('the final answer')
+    expect(await screen.findByText('Copied!')).toBeInTheDocument()
+  })
+
+  it('shows a failure state instead of "Copied!" when the clipboard write is rejected', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('permission denied'))
+    Object.assign(navigator, { clipboard: { writeText } })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Copy'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText('Copied!')).not.toBeInTheDocument()
+    expect(screen.getByText("Couldn't copy")).toBeInTheDocument()
+  })
+
+  it('shows a failure state instead of throwing when the Clipboard API is unavailable', async () => {
+    Object.assign(navigator, { clipboard: undefined })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    fireEvent.click(screen.getByText('Copy'))
+
+    expect(screen.queryByText('Copied!')).not.toBeInTheDocument()
+    expect(screen.getByText("Couldn't copy")).toBeInTheDocument()
   })
 
   it('lets you run the same team and input again from the result', async () => {

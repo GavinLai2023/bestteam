@@ -336,7 +336,8 @@ def list_builder_sessions(
     a live WorkflowRecord matching specification_json['name']. A deployed
     workflow with no backing session at all (deployed straight through the
     admin Advanced/CRUD page) gets a synthetic entry too -- but only when its
-    `created_by` matches this user, so My Teams shows exactly the teams this
+    `created_by` matches this user's immutable principal_id (never username --
+    see WorkflowRecord.created_by), so My Teams shows exactly the teams this
     person built, not every workflow anyone in the org can run (that broader
     "org can run" list is /api/workflows, which treats an unowned workflow as
     an admin-shared template)."""
@@ -348,7 +349,7 @@ def list_builder_sessions(
         db.query(WorkflowRecord)
         .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
         .filter(WorkflowRecord.id.notin_(session_workflow_ids))
-        .filter(WorkflowRecord.created_by == user.username)
+        .filter(WorkflowRecord.created_by == user.principal_id)
         .all()
     )
     session_dicts.extend(
@@ -643,6 +644,19 @@ def deploy_session(
                     + ". Pick a model from the catalog."
                 ),
             )
+        # spec.to_raw() deliberately omits display_name/friendly_description
+        # (it matches the engine loader's minimal shape, see
+        # test_to_raw_strips_friendly_fields_and_matches_loader_shape) -- but
+        # Activity's run cards read a team's customer-facing name from this
+        # exact persisted config (main.py's team_display_name), so merge it
+        # back in for what actually gets persisted, without touching
+        # to_raw()'s own contract. The loader ignores unknown keys.
+        for team_raw, team_spec in zip(raw.get("teams", []), spec.teams):
+            if team_spec.display_name:
+                team_raw["display_name"] = team_spec.display_name
+            if team_spec.friendly_description:
+                team_raw["friendly_description"] = team_spec.friendly_description
+
         record, _version = publish_workflow_version(
             db,
             org_id=org.id,
@@ -650,6 +664,7 @@ def deploy_session(
             config=raw,
             workflow_id=session.workflow_id,
             created_by=user.username,
+            owner_principal_id=user.principal_id,
         )
         session = update_session(
             db, session_id, status="deployed", workflow_id=record.id

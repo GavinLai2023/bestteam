@@ -25,6 +25,7 @@ def publish_workflow_version(
     config: dict[str, Any],
     workflow_id: Optional[int] = None,
     created_by: Optional[str] = None,
+    owner_principal_id: Optional[str] = None,
 ) -> tuple[WorkflowRecord, WorkflowVersion]:
     """Publish `config` as the next immutable version of a team head, moving its
     current-version pointer. Returns `(record, version)`; does NOT commit.
@@ -34,7 +35,16 @@ def publish_workflow_version(
     `(org_id, name)` -- so a stale session pointer (deleted team), or one that
     names another org's workflow, recreates cleanly in the caller's own org, and
     two sessions deploying the same name converge on one head. The lookup is
-    org-scoped so this primitive can never rename/redeploy another org's record."""
+    org-scoped so this primitive can never rename/redeploy another org's record.
+
+    `created_by` (a username) is purely an informational audit label on the
+    immutable `WorkflowVersion` snapshot -- same role as `SkillVersion.created_by`.
+    `owner_principal_id` is the *authorization* value written to
+    `WorkflowRecord.created_by` (My Teams / run-ownership filtering): it must be
+    the creator's immutable `User.principal_id`, never their username, since
+    usernames are reusable after account deletion and a username-keyed
+    comparison would let a newly created same-named account see/run the
+    deleted account's personal workflows."""
     record: Optional[WorkflowRecord] = None
     if workflow_id is not None:
         record = (
@@ -46,22 +56,22 @@ def publish_workflow_version(
         record.name = name
         record.config = config
         record.status = "deployed"
-        if created_by is not None:
-            record.created_by = created_by
+        if owner_principal_id is not None:
+            record.created_by = owner_principal_id
     else:
         record = (
             db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
         )
         if record is None:
             record = WorkflowRecord(
-                name=name, config=config, status="deployed", org_id=org_id, created_by=created_by
+                name=name, config=config, status="deployed", org_id=org_id, created_by=owner_principal_id
             )
             db.add(record)
         else:
             record.config = config
             record.status = "deployed"
-            if created_by is not None:
-                record.created_by = created_by
+            if owner_principal_id is not None:
+                record.created_by = owner_principal_id
 
     # NB: record.config and version.config below share ONE dict object. That is
     # safe only because deploy never mutates config in place -- the next deploy

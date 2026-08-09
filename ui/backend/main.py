@@ -343,7 +343,7 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
 
 
 def _resolve_workflow_and_version(
-    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, username: Optional[str] = None
+    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
 ) -> tuple[Workflow, Optional[int]]:
     """Load a workflow by name for one org and return it together with the
     `current_version_id` of the record it was built from (None for a YAML demo
@@ -366,9 +366,10 @@ def _resolve_workflow_and_version(
     file's mtime, so editing a workflow file on disk is picked up on the
     next request.
 
-    If `username` is provided, only workflows created by that user OR
-    admin-shared (created_by = NULL) are returned; other users' personal
-    workflows are rejected with a 404.
+    If `owner_principal_id` is provided, only workflows created by that
+    principal OR admin-shared (created_by = NULL) are returned; other users'
+    personal workflows are rejected with a 404. Must be the caller's
+    principal_id, never their username (see WorkflowRecord.created_by).
 
     `db` is the request's `get_db`-provided session, if available, so this
     sees the same data as the `/api/builder` and `/api/config` routers
@@ -381,15 +382,15 @@ def _resolve_workflow_and_version(
     generation = _workflow_cache_generation
     if db is not None:
         query = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
-        if username is not None:
-            query = query.filter(or_(WorkflowRecord.created_by == username, WorkflowRecord.created_by.is_(None)))
+        if owner_principal_id is not None:
+            query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
         record = query.one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
             query = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
-            if username is not None:
-                query = query.filter(or_(WorkflowRecord.created_by == username, WorkflowRecord.created_by.is_(None)))
+            if owner_principal_id is not None:
+                query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
             record = query.one_or_none()
             dependency_freshness = _dependency_freshness(session) if record is not None else None
 
@@ -486,12 +487,12 @@ def _resolve_workflow_and_version(
 
 
 def _get_workflow(
-    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, username: Optional[str] = None
+    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
 ) -> Workflow:
     """Back-compat wrapper: the built workflow only (see
     `_resolve_workflow_and_version` for the version-aware form used by run
     creation)."""
-    return _resolve_workflow_and_version(name, db, org_id, username)[0]
+    return _resolve_workflow_and_version(name, db, org_id, owner_principal_id)[0]
 
 
 @app.get("/api/health")
@@ -505,7 +506,8 @@ def list_workflows(
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ):
-    # The user's own deployed workflows (created_by = current user) PLUS
+    # The user's own deployed workflows (created_by = current user's
+    # principal_id, never username -- see WorkflowRecord.created_by) PLUS
     # admin-deployed shared workflows (created_by = NULL, deployed by operators).
     # This supports two models:
     # - Personal teams: user-created via builder, visible only to creator
@@ -516,7 +518,7 @@ def list_workflows(
         for row in db.query(WorkflowRecord.name).filter(
             WorkflowRecord.org_id == org.id,
             WorkflowRecord.status == "deployed",
-            or_(WorkflowRecord.created_by == user.username, WorkflowRecord.created_by.is_(None)),
+            or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
         )
     }
     yaml_names = (
@@ -532,7 +534,7 @@ def workflow_graph(
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ):
-    workflow = _get_workflow(name, db, org.id, user.username)
+    workflow = _get_workflow(name, db, org.id, user.principal_id)
     try:
         return {"mermaid": workflow.visualize()}
     except BestTeamError as exc:
@@ -548,8 +550,9 @@ async def create_run(
 ):
     # Resolve the workflow and the version it was built from together, so the
     # run is stamped with exactly the version whose config it executes.
-    # Only allow running workflows created by this user or admin-shared (created_by = NULL).
-    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.username)
+    # Only allow running workflows created by this user (by principal_id) or
+    # admin-shared (created_by = NULL).
+    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.principal_id)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(
