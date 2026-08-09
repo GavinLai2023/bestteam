@@ -522,6 +522,17 @@ def submit_solution_feedback(
             extra_skills=load_skills(db, org.id),
             pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
+        # `req.model` here is the customer's own pick from the wizard's "Which
+        # assistant should make this change?" control -- it only ran the
+        # architect above. Left alone, the architect assigns each agent a
+        # model by its own role/cost judgement, which can (and did, per
+        # customer report) end up different from what the customer just
+        # explicitly chose. Pin every agent to that choice so the picker's
+        # wording matches what actually gets deployed; this never touches
+        # `req.specification` (a customer-submitted spec already has whatever
+        # per-agent models they put in it).
+        for agent in spec.agents:
+            agent.model = req.model
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 

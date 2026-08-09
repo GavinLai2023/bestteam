@@ -1,5 +1,8 @@
 """Tests for the builder session state-machine API (Phase 2)."""
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -7,6 +10,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
+from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec
 from helpers import create_user_and_login, get_user_principal_id
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
@@ -716,6 +720,52 @@ def test_solution_feedback_appends_history_and_accepts_revised_spec(client):
     assert body["status"] == "solution"
     assert len(body["feedback_history"]) == 1
     assert body["feedback_history"][0]["note"] == "Looks good"
+
+
+def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client):
+    """Customer report: picking a model in the wizard's "Which assistant should
+    make this change?" control had no effect on the deployed agents' models --
+    the architect assigned each agent whatever it judged best for that role,
+    independent of the customer's own pick. The architect call itself may use
+    any model internally; every agent in the *resulting* spec must end up on
+    the model the customer picked."""
+    architect_drafted_spec = Specification(
+        name="support_workflow",
+        agents=[
+            AgentSpec(
+                name="support_agent",
+                role="Customer Support Specialist",
+                goal="Answer customer questions",
+                model="openai:gpt-4o-mini",
+            ),
+            AgentSpec(
+                name="drafting_agent",
+                role="Response Drafter",
+                goal="Draft replies",
+                model="openai:gpt-4o",
+            ),
+        ],
+        teams=[TeamSpec(name="support_team", agents=["support_agent", "drafting_agent"])],
+        workflow=WorkflowSpec(steps=["support_team"]),
+    )
+
+    class _FakeArchitectChatModel:
+        def with_structured_output(self, schema):
+            return SimpleNamespace(invoke=lambda messages: architect_drafted_spec)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "handle support email"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "Make replies friendlier", "model": "deepseek:friendly-assistant"},
+        )
+
+    assert resp.status_code == 200
+    agents = resp.json()["specification_json"]["agents"]
+    assert len(agents) == 2
+    assert {a["model"] for a in agents} == {"deepseek:friendly-assistant"}
 
 
 def test_test_run_requires_specification(client):
