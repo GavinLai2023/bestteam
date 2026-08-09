@@ -69,6 +69,10 @@ export default function AdvancedPage() {
 
   const kind = KINDS.find((k) => k.key === activeKey)!
   const activeKeyRef = useRef(activeKey)
+  // The last organisation the user explicitly selected (never the platform
+  // tier). Used to restore their choice when switching to an
+  // organisation-required tab from one where the platform tier was selected.
+  const lastRealOrgRef = useRef<string | null>(null)
   // Monotonic load token: a list response is only applied if it's the most
   // recent request, so a slow response for a previous org/tab can't overwrite
   // the current one (and can't leave a stale item selectable for a mutation
@@ -92,6 +96,10 @@ export default function AdvancedPage() {
   useEffect(() => {
     activeKeyRef.current = activeKey
   }, [activeKey])
+
+  useEffect(() => {
+    if (org && org !== PLATFORM_TIER) lastRealOrgRef.current = org
+  }, [org])
 
   const loadItems = () => {
     const seq = ++loadSeq.current
@@ -144,12 +152,17 @@ export default function AdvancedPage() {
     setUploadFiles([])
   }
 
-  // activeKey and org move together so the load effect fires once, with a
-  // matching pair -- switching tabs must never request the previous tab's org.
+  // Switching tabs keeps whatever organisation the user has selected -- it
+  // should never silently jump back to a default. The one exception: the
+  // platform tier (only offered on the Skills tab) isn't a valid choice on an
+  // organisation-required tab, so that case falls back to the last real
+  // organisation the user picked, or the usual default if there isn't one.
   const selectKind = (k: Kind) => {
     if (k.key === activeKey) return
     setActiveKey(k.key)
-    setOrg(defaultOrgFor(k, orgs))
+    if (k.orgScope === 'required' && (org === null || org === PLATFORM_TIER)) {
+      setOrg(lastRealOrgRef.current ?? defaultOrgFor(k, orgs))
+    }
     resetSelection()
   }
 
@@ -248,7 +261,7 @@ export default function AdvancedPage() {
         <p>Direct access to the underlying workflows, skills, knowledge bases, tools, and model catalog.</p>
         {kind.orgScope !== 'none' && (
           <label className="advanced-org">
-            Organization
+            Organisation
             <select value={org ?? ''} onChange={(e) => selectOrg(e.target.value)}>
               {kind.orgScope === 'optional' && <option value={PLATFORM_TIER}>Platform (built-ins)</option>}
               {orgs.map((o) => (
