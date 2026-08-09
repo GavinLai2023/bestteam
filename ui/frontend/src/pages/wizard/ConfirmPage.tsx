@@ -59,7 +59,9 @@ export default function ConfirmPage() {
   const history = (session.feedback_history ?? []).filter((entry) => entry.stage === 'solution')
 
   const applyFeedback = async () => {
-    if (!model || !feedback.trim() || busy) return
+    // Feedback is optional -- the customer may just be switching which
+    // assistant/model their team uses, with nothing else to describe.
+    if (!model || busy) return
     setBusy(true)
     setError(null)
     try {
@@ -137,10 +139,10 @@ export default function ConfirmPage() {
           placeholder="e.g. Have the team check our FAQ document before replying."
         />
       </div>
-      <ModelPicker value={model} onChange={setModel} label="Which assistant should make this change?" />
+      <ModelPicker value={model} onChange={setModel} label="Which assistant should your team use?" />
 
       <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={applyFeedback} disabled={!model || !feedback.trim() || busy}>
+        <button className="btn btn-secondary" onClick={applyFeedback} disabled={!model || busy}>
           {busy ? 'Updating…' : 'Apply this change'}
         </button>
       </div>

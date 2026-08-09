@@ -768,6 +768,30 @@ def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client
     assert {a["model"] for a in agents} == {"deepseek:friendly-assistant"}
 
 
+def test_solution_feedback_with_blank_feedback_skips_architect_and_repins_model(client):
+    """The wizard's feedback box is optional -- a customer switching which
+    assistant their team uses, with nothing else to describe, must not need to
+    invent filler feedback text. That case should keep the current design
+    as-is (no architect call, no drift) and just re-pin every agent's model."""
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "handle support email"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_specification") as mock_generate:
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "   ", "model": "deepseek:friendly-assistant"},
+        )
+
+    assert resp.status_code == 200
+    mock_generate.assert_not_called()
+    body = resp.json()
+    assert body["feedback_history"] == []
+    agents = body["specification_json"]["agents"]
+    assert len(agents) == len(_VALID_SPEC["agents"])
+    assert {a["model"] for a in agents} == {"deepseek:friendly-assistant"}
+
+
 def test_test_run_requires_specification(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
 

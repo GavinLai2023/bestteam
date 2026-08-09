@@ -504,39 +504,51 @@ def submit_solution_feedback(
         if session.specification_json is None:
             raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
         current = Specification.model_validate(session.specification_json)
-        requirements_text = (
-            f"{_requirements_text(session)}\n\n"
-            f"The current team design is:\n{current.model_dump_json()}\n\n"
-            f"Customer feedback on this design:\n{req.feedback}"
-        )
-        requirements_text = _with_model_catalog(db, requirements_text)
-        requirements_text = _with_skill_catalog(db, requirements_text, org.id)
-        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+        # Resolving the model spec is cheap/local (constructs a client, no API
+        # call) -- do it even on the no-feedback path below so an invalid pick
+        # still 400s clearly instead of silently landing on every agent.
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(
-            generate_specification,
-            chat_model,
-            requirements_text,
-            source=source,
-            extra_tools=_all_knowledge_base_tools(db, source, org.id),
-            extra_skills=load_skills(db, org.id),
-            pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
-        )
-        # `req.model` here is the customer's own pick from the wizard's "Which
-        # assistant should make this change?" control -- it only ran the
-        # architect above. Left alone, the architect assigns each agent a
-        # model by its own role/cost judgement, which can (and did, per
-        # customer report) end up different from what the customer just
-        # explicitly chose. Pin every agent to that choice so the picker's
-        # wording matches what actually gets deployed; this never touches
-        # `req.specification` (a customer-submitted spec already has whatever
-        # per-agent models they put in it).
+        if req.feedback.strip():
+            requirements_text = (
+                f"{_requirements_text(session)}\n\n"
+                f"The current team design is:\n{current.model_dump_json()}\n\n"
+                f"Customer feedback on this design:\n{req.feedback}"
+            )
+            requirements_text = _with_model_catalog(db, requirements_text)
+            requirements_text = _with_skill_catalog(db, requirements_text, org.id)
+            requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+            spec = _call_model(
+                generate_specification,
+                chat_model,
+                requirements_text,
+                source=source,
+                extra_tools=_all_knowledge_base_tools(db, source, org.id),
+                extra_skills=load_skills(db, org.id),
+                pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+            )
+        else:
+            # No described change -- the customer is only switching which
+            # assistant their team uses (the wizard's feedback box is
+            # optional). Keep the current design as-is rather than spending an
+            # architect call and risking unrequested drift; only the model
+            # pin below applies.
+            spec = current
+        # `req.model` here is the customer's own pick from the wizard's
+        # "Which assistant should your team use?" control -- generation above
+        # (when it ran) only used it to run the architect. Left alone, the
+        # architect assigns each agent a model by its own role/cost judgement,
+        # which can (and did, per customer report) end up different from what
+        # the customer just explicitly chose. Pin every agent to that choice
+        # so the picker's wording matches what actually gets deployed; this
+        # never touches `req.specification` (a customer-submitted spec
+        # already has whatever per-agent models they put in it).
         for agent in spec.agents:
             agent.model = req.model
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
-    append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    if req.feedback.strip():
+        append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
     _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
     return _session_to_dict(session, db, org.id)
