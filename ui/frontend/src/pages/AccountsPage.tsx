@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import type { AdminOrg, AdminUser } from '../lib/types'
 import '../components/WizardLayout.css'
@@ -21,6 +21,14 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  const bannerRef = useRef<HTMLParagraphElement>(null)
+
+  // The org list can be long -- an action taken on a row far down the page
+  // (e.g. "Create user" for an org near the bottom) sets this banner above
+  // it, off-screen, so a failure otherwise looks like nothing happened.
+  useEffect(() => {
+    if (error || message) bannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [error, message])
 
   const [newOrgName, setNewOrgName] = useState('')
   const [newOrgDisplay, setNewOrgDisplay] = useState('')
@@ -115,7 +123,7 @@ export default function AccountsPage() {
   }
 
   const moveUser = (username: string) => {
-    const to = window.prompt(`Move '${username}' to which organization?`)
+    const to = window.prompt(`Move '${username}' to which organisation?`)
     if (!to || !to.trim()) return
     run(api.moveAdminUser(username, to.trim()))
   }
@@ -132,18 +140,26 @@ export default function AccountsPage() {
   return (
     <div className="advanced">
       <header>
-        <h1>Organizations &amp; users</h1>
-        <p>Create organizations, suspend them, and manage each org&apos;s login.</p>
+        <h1>Organisations &amp; users</h1>
+        <p>Create organisations, suspend them, and manage each org&apos;s login.</p>
       </header>
 
-      {error && <p className="banner banner-error">{error}</p>}
-      {message && <p className="banner banner-success">{message}</p>}
+      {error && (
+        <p ref={bannerRef} className="banner banner-error">
+          {error}
+        </p>
+      )}
+      {message && (
+        <p ref={bannerRef} className="banner banner-success">
+          {message}
+        </p>
+      )}
 
       <section>
-        <h2>Organizations</h2>
+        <h2>Organisations</h2>
 
         <form onSubmit={createOrg} className="inline-form">
-          <label htmlFor="new-org-name">Organization name</label>
+          <label htmlFor="new-org-name">Organisation Internal Name</label>
           <input
             id="new-org-name"
             value={newOrgName}
@@ -156,12 +172,12 @@ export default function AccountsPage() {
             onChange={(e) => setNewOrgDisplay(e.target.value)}
           />
           <button type="submit" className="btn btn-primary">
-            Create organization
+            Create organisation
           </button>
         </form>
         <p className="hint">
-          Organization name is a login identifier: letters, digits, &apos;.&apos;, &apos;_&apos;, &apos;-&apos; only
-          (no spaces). Use Display name for what customers see.
+          Organisation Internal Name is a login identifier: letters, digits, &apos;.&apos;, &apos;_&apos;, &apos;-&apos;
+          only (no spaces). Use Display name for what customers see.
         </p>
 
         <ul className="org-list">

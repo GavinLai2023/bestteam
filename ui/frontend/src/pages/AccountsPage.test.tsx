@@ -47,17 +47,17 @@ describe('AccountsPage', () => {
     expect(screen.getByText(/managed via the CLI/i)).toBeInTheDocument()
   })
 
-  it('hints that the organization name is a login identifier with no spaces', async () => {
+  it('hints that the organisation internal name is a login identifier with no spaces', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     expect(screen.getByText(/letters, digits, '\.', '_', '-'.*no spaces/i)).toBeInTheDocument()
   })
 
-  it('creates an organization', async () => {
+  it('creates an organisation', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     await waitFor(() => expect(mockedApi.createAdminOrg).toHaveBeenCalledWith('gamma', ''))
   })
 
@@ -108,14 +108,31 @@ describe('AccountsPage', () => {
     expect(mockedApi.createAdminUser).not.toHaveBeenCalled()
   })
 
+  it('scrolls the error banner into view when a create-user submit fails (banner can be off-screen on a long org list)', async () => {
+    mockedApi.createAdminUser.mockRejectedValue(
+      new Error("username: identifier may contain only letters, digits, '.', '_' and '-'"),
+    )
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
+    fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'property demo' } })
+    fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
+    fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    await screen.findByText(/identifier may contain only letters/i)
+    expect(scrollIntoView).toHaveBeenCalled()
+  })
+
   it('keeps the entered values when creation fails', async () => {
     mockedApi.createAdminOrg.mockRejectedValue(new Error('boom'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     expect(await screen.findByText('boom')).toBeInTheDocument()
-    expect(screen.getByLabelText(/organization name/i)).toHaveValue('gamma')
+    expect(screen.getByLabelText(/organisation internal name/i)).toHaveValue('gamma')
   })
 
   it('clears the form and warns (not fails) when creation succeeds but refresh fails', async () => {
@@ -124,11 +141,11 @@ describe('AccountsPage', () => {
     mockedApi.adminOrgs.mockResolvedValueOnce(ORGS).mockRejectedValueOnce(new Error('net'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     expect(await screen.findByText(/could not be refreshed/i)).toBeInTheDocument()
     // form cleared despite the refresh failure, so no duplicate retry
-    expect(screen.getByLabelText(/organization name/i)).toHaveValue('')
+    expect(screen.getByLabelText(/organisation internal name/i)).toHaveValue('')
   })
 
   it('deactivates an active org after confirm', async () => {
