@@ -253,6 +253,64 @@ def test_existing_non_deployed_workflow_backfilled_to_deployed(tmp_path, monkeyp
         engine.dispose()
 
 
+# Revision just before the workflows.created_by -> principal_id backfill.
+_PRE_CREATED_BY_BACKFILL = "g4h5i6j7k8l9"
+
+
+def test_workflow_created_by_backfilled_from_username_to_principal_id(tmp_path, monkeypatch):
+    """A workflow deployed before the ownership-key switch has `created_by` set
+    to the owner's username; the backfill must re-key it to that user's
+    principal_id so My Teams / run ownership still resolves it post-upgrade."""
+    db_path = tmp_path / "created_by_backfill.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_CREATED_BY_BACKFILL)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO users (username, password_hash, is_admin, created_at, principal_id) "
+            "VALUES ('alice', 'x', 0, '2026-01-01T00:00:00+00:00', 'principal-abc')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at, created_by) "
+            "VALUES ('legacy', NULL, '{}', 'deployed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'alice')"
+        ))
+        # Admin-shared (NULL created_by) must stay NULL.
+        conn.execute(sa.text(
+            "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at, created_by) "
+            "VALUES ('shared', NULL, '{}', 'deployed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            legacy = conn.execute(sa.text(
+                "SELECT created_by FROM workflows WHERE name = 'legacy'"
+            )).scalar()
+            shared = conn.execute(sa.text(
+                "SELECT created_by FROM workflows WHERE name = 'shared'"
+            )).scalar()
+    finally:
+        engine.dispose()
+    assert legacy == "principal-abc"
+    assert shared is None
+
+    # Idempotent: re-running upgrade head leaves the already-backfilled row alone.
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            legacy = conn.execute(sa.text(
+                "SELECT created_by FROM workflows WHERE name = 'legacy'"
+            )).scalar()
+    finally:
+        engine.dispose()
+    assert legacy == "principal-abc"
+
+
 def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
     db_path = tmp_path / "status_check.db"
     cfg = _alembic_config(db_path, monkeypatch)

@@ -146,13 +146,18 @@ def upload_knowledge_base(
     chunk_size: int = 1000,
     chunk_overlap: int = 100,
     top_k: int = 5,
+    max_files: int = _MAX_FILES_PER_UPLOAD,
+    max_file_size_bytes: int = _MAX_FILE_SIZE_BYTES,
+    max_total_size_bytes: int = _MAX_TOTAL_SIZE_BYTES,
 ) -> Dict[str, Any]:
     """Validate, chunk, and index uploaded documents as a `local_folder` KB.
 
     Shared by the admin `/api/config/knowledge_bases/{name}/upload` route and
     the org self-service `/api/org/knowledge-bases/{name}/upload` route -- the
     only difference between them is how `org_id` gets resolved (an explicit
-    `?org=` for the admin surface, the bearer token's own org for self-service).
+    `?org=` for the admin surface, the bearer token's own org for self-service)
+    and, since the self-service caller is any org member rather than a trusted
+    operator, the tighter `max_*` limits `org_knowledge_bases.py` passes in.
     """
     try:
         _validate_tool_name(item_name)
@@ -162,10 +167,10 @@ def upload_knowledge_base(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    if len(files) > _MAX_FILES_PER_UPLOAD:
+    if len(files) > max_files:
         raise HTTPException(
             status_code=413,
-            detail=f"Too many files ({len(files)}); max {_MAX_FILES_PER_UPLOAD} per upload",
+            detail=f"Too many files ({len(files)}); max {max_files} per upload",
         )
 
     # Read all file contents up front to enforce size limits before writing anything to disk.
@@ -180,16 +185,16 @@ def upload_knowledge_base(
             raise HTTPException(status_code=400, detail=f"Invalid filename: '{f.filename}'")
 
         data = f.file.read()
-        if len(data) > _MAX_FILE_SIZE_BYTES:
+        if len(data) > max_file_size_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"File '{filename}' exceeds the {_MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB per-file limit",
+                detail=f"File '{filename}' exceeds the {max_file_size_bytes // (1024 * 1024)}MB per-file limit",
             )
         total_size += len(data)
-        if total_size > _MAX_TOTAL_SIZE_BYTES:
+        if total_size > max_total_size_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"Total upload size exceeds the {_MAX_TOTAL_SIZE_BYTES // (1024 * 1024)}MB limit",
+                detail=f"Total upload size exceeds the {max_total_size_bytes // (1024 * 1024)}MB limit",
             )
         contents[filename] = data
 

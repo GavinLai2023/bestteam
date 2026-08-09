@@ -148,7 +148,11 @@ async function uploadFiles<T>(path: string, files: File[], fields: Record<string
     } catch {
       // response had no JSON body
     }
-    throw new Error(formatErrorDetail(detail))
+    // Carry the HTTP status so callers can distinguish e.g. a 409 "confirm to
+    // replace" response from any other upload failure (mirrors `request()`).
+    const error: ApiError = new Error(formatErrorDetail(detail))
+    error.status = res.status
+    throw error
   }
 
   return res.json()
@@ -291,10 +295,11 @@ export const api = {
   // Org self-service: build your own knowledge base by uploading documents
   // (the wizard's "Your documents" step). Org resolves server-side from the
   // token, unlike the admin uploadKnowledgeBaseFiles above.
-  uploadOwnKnowledgeBaseFiles: (name: string, files: File[]) =>
+  uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false) =>
     uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
       files,
+      { replace },
     ),
 
   // Org self-service settings: the org's mailbox for the email tools.

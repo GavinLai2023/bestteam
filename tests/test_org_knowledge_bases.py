@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from helpers import create_user_and_login, open_test_db
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
+from ui.backend import org_knowledge_bases as backend_org_kb
 from ui.backend.builder import _all_knowledge_base_tools, _with_knowledge_base_catalog
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import KnowledgeBaseRecord
@@ -105,6 +106,50 @@ def test_uploaded_kb_is_visible_to_spec_generation(client, tmp_path):
         tools = _all_knowledge_base_tools(db, tmp_path, org_id)
         assert "policies" in tools
         assert "30 days" in tools["policies"]("refund policy")
+
+
+def test_reupload_existing_name_requires_confirmation(client):
+    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+
+    # Same name again, no confirmation -- refused, not silently replaced.
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(name="other.txt"))
+    assert resp.status_code == 409
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        tools = _all_knowledge_base_tools(db, Path("."), org_id)
+        # The original content is untouched.
+        assert "30 days" in tools["policies"]("refund policy")
+
+    # Confirmed replace succeeds.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true"},
+        files=_files(name="other.txt", content=b"Something else entirely."),
+    )
+    assert resp.status_code == 200
+
+
+def test_self_service_kb_count_capped_per_org(client, monkeypatch):
+    monkeypatch.setattr(backend_org_kb, "_MAX_SELF_SERVICE_KBS_PER_ORG", 1)
+    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+
+    resp = client.post("/api/org/knowledge-bases/other_docs/upload", files=_files())
+    assert resp.status_code == 403
+
+    # Re-uploading the already-existing name is unaffected by the cap.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true"},
+        files=_files(),
+    )
+    assert resp.status_code == 200
+
+
+def test_self_service_upload_rejects_oversized_file(client):
+    big = b"x" * (backend_org_kb._MAX_FILE_SIZE_BYTES + 1)
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(content=big))
+    assert resp.status_code == 413
 
 
 def test_cross_org_upload_isolation(client, tmp_path):

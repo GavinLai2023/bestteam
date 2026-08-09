@@ -68,10 +68,27 @@ export default function DocumentsPage() {
       try {
         await api.uploadOwnKnowledgeBaseFiles(slug, files)
       } catch (e) {
-        setError((e as Error).message)
-        setBusy(false)
-        setStage(null)
-        return
+        const err = e as Error & { status?: number }
+        if (err.status === 409) {
+          if (!window.confirm(`${err.message}\n\nReplace it with these documents?`)) {
+            setBusy(false)
+            setStage(null)
+            return
+          }
+          try {
+            await api.uploadOwnKnowledgeBaseFiles(slug, files, true)
+          } catch (e2) {
+            setError((e2 as Error).message)
+            setBusy(false)
+            setStage(null)
+            return
+          }
+        } else {
+          setError(err.message)
+          setBusy(false)
+          setStage(null)
+          return
+        }
       }
     }
 
