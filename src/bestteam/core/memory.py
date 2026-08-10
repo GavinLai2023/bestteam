@@ -1006,28 +1006,39 @@ class MemoryManager:
                 continue
             if action == "noop":
                 continue
+            replaces_id: Optional[str] = None
             if action == "update":
-                replaces_id = fact.get("replaces_id")
-                if isinstance(replaces_id, str) and replaces_id in candidate_ids:
-                    try:
-                        self.store.delete(replaces_id)
-                    except Exception as exc:  # noqa: BLE001
-                        _logger.warning(
-                            "Memory: failed to delete superseded record '%s' for '%s': %s",
-                            replaces_id,
-                            user_id,
-                            exc,
-                            exc_info=True,
-                        )
-                        ok = False
+                candidate_replaces_id = fact.get("replaces_id")
+                if isinstance(candidate_replaces_id, str) and candidate_replaces_id in candidate_ids:
+                    replaces_id = candidate_replaces_id
                 # An unrecognized/missing replaces_id downgrades to a plain add
                 # (below) -- never delete on an unverified id.
+            # Store the new fact BEFORE deleting the superseded one: if the store
+            # write fails, the old (still-valid) fact is left in place instead of
+            # being silently lost. This can't be made fully atomic against an
+            # arbitrary third-party `Memory` store (the ABC has no transaction
+            # primitive) -- if `delete()` itself then fails, both records remain,
+            # a recoverable duplicate rather than a permanent loss.
+            stored = False
             try:
                 if self._store_extracted(user_id, SEMANTIC, fact_content):
                     written.append(SEMANTIC)
+                    stored = True
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
                 ok = False
+            if replaces_id is not None and stored:
+                try:
+                    self.store.delete(replaces_id)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning(
+                        "Memory: failed to delete superseded record '%s' for '%s': %s",
+                        replaces_id,
+                        user_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    ok = False
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
             try:
