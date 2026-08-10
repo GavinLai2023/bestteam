@@ -122,7 +122,7 @@ describe('TracePage', () => {
     })
 
     expect(await screen.findByText('openai:gpt-4o-mini')).toBeInTheDocument()
-    expect(screen.getByText(/100 in \/ 20 out tokens avg/)).toBeInTheDocument()
+    expect(screen.getByText(/100 in \/ 20 out tokens avg per call/)).toBeInTheDocument()
   })
 
   it('renders token and cost totals in the summary table', async () => {

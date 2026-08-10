@@ -116,7 +116,11 @@ def list_workflow_analytics(
     """One summary row per `(org, workflow)` pair. Grouped by
     `(org_id, workflow)`, never workflow name alone -- `Run.workflow` is
     only unique per org, so two orgs' same-named workflows would otherwise
-    be silently conflated."""
+    be silently conflated.
+
+    Note: `total_cost_estimate` only sums usage rows whose model has
+    `model_catalog` pricing -- a workflow mixing priced and unpriced models
+    reports a partial total with no separate indicator that it's partial."""
     org_id = _resolve_org_filter(db, org)
     runs = _scoped_runs(db, org_id=org_id, workflow=None, since=since, until=until)
 
@@ -283,7 +287,12 @@ def list_model_analytics(
     """One row per LLM model, aggregated across every workflow in scope --
     `run_count` counts distinct runs with at least one usage row for that
     model (a run touching more than one model contributes to more than one
-    row, unlike a workflow's `total_runs`)."""
+    row, unlike a workflow's `total_runs`).
+
+    Note: `total_cost_estimate` only sums usage rows whose model has
+    `model_catalog` pricing -- a model with some catalogued and some
+    uncatalogued usage rows reports a partial total with no separate
+    indicator that it's partial."""
     org_id = _resolve_org_filter(db, org)
     runs = _scoped_runs(db, org_id=org_id, workflow=None, since=since, until=until)
     run_ids = [r.id for r in runs]

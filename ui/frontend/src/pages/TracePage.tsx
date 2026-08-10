@@ -332,6 +332,7 @@ export default function TracePage() {
                   ))}
                 </tbody>
               </table>
+              <p className="hint">Cost totals only include models with catalogue pricing.</p>
             </div>
           )}
 
@@ -375,7 +376,7 @@ export default function TracePage() {
                           <span className="status-badge">{m.model}</span>
                           {m.run_count} run(s) ·{' '}
                           {m.avg_input_tokens != null ? Math.round(m.avg_input_tokens) : '—'} in /{' '}
-                          {m.avg_output_tokens != null ? Math.round(m.avg_output_tokens) : '—'} out tokens avg
+                          {m.avg_output_tokens != null ? Math.round(m.avg_output_tokens) : '—'} out tokens avg per call
                           {m.avg_cost_estimate != null && <> · ${m.avg_cost_estimate.toFixed(4)} avg cost</>}
                         </li>
                       ))}
@@ -434,6 +435,7 @@ export default function TracePage() {
                   ))}
                 </tbody>
               </table>
+              <p className="hint">Cost totals only include models with catalogue pricing.</p>
             </div>
           )}
         </>
