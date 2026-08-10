@@ -57,6 +57,14 @@
   background: #eef2ff;
 }
 
+.trace-analytics-table-static tr {
+  cursor: default;
+}
+
+.trace-analytics-table-static tr:hover {
+  background: none;
+}
+
 .trace-agent-stats {
   list-style: none;
   margin: 0 0 16px;

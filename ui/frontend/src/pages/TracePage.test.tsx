@@ -8,6 +8,7 @@ vi.mock('../lib/api', () => ({
     listOrgs: vi.fn(),
     listRuns: vi.fn(),
     listWorkflowAnalytics: vi.fn(),
+    listModelAnalytics: vi.fn(),
     getWorkflowAnalytics: vi.fn(),
     getRunTrace: vi.fn(),
     createWsTicket: vi.fn(),
@@ -26,6 +27,7 @@ beforeEach(() => {
   mockedApi.listOrgs.mockResolvedValue(ORGS)
   mockedApi.listRuns.mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 })
   mockedApi.listWorkflowAnalytics.mockResolvedValue({ workflows: [] })
+  mockedApi.listModelAnalytics.mockResolvedValue({ models: [] })
 })
 
 describe('TracePage', () => {
@@ -162,5 +164,47 @@ describe('TracePage', () => {
 
     await screen.findByText('wf')
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+  })
+
+  it('switching to the By model tab fetches cross-org model totals by default', async () => {
+    render(<TracePage />)
+    await screen.findByDisplayValue('All organisations')
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('By model'))
+    })
+
+    expect(mockedApi.listModelAnalytics).toHaveBeenCalledWith(expect.objectContaining({ org: undefined }))
+  })
+
+  it('renders model rows with token and cost totals', async () => {
+    mockedApi.listModelAnalytics.mockResolvedValue({
+      models: [
+        { model: 'openai:gpt-4o-mini', run_count: 13, total_input_tokens: 98497, total_output_tokens: 3928, total_cost_estimate: 0.0171 },
+      ],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('By model'))
+    })
+
+    expect(await screen.findByText('openai:gpt-4o-mini')).toBeInTheDocument()
+    expect(screen.getByText('98,497')).toBeInTheDocument()
+    expect(screen.getByText('$0.0171')).toBeInTheDocument()
+  })
+
+  it('switching the org selector on the By model tab re-fetches scoped to that org', async () => {
+    render(<TracePage />)
+    await screen.findByDisplayValue('All organisations')
+    await act(async () => {
+      fireEvent.click(screen.getByText('By model'))
+    })
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Organisation'), { target: { value: 'org_a' } })
+    })
+
+    expect(mockedApi.listModelAnalytics).toHaveBeenLastCalledWith(expect.objectContaining({ org: 'org_a' }))
   })
 })

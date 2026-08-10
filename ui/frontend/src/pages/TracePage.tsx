@@ -3,7 +3,13 @@ import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
 import AdminRunDetail from '../components/AdminRunDetail'
 import RunsPager from '../components/RunsPager'
-import type { AdminOrg, RunListItem, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary } from '../lib/types'
+import type {
+  AdminOrg,
+  ModelAnalyticsSummary,
+  RunListItem,
+  WorkflowAnalyticsDetail,
+  WorkflowAnalyticsSummary,
+} from '../lib/types'
 import '../components/WizardLayout.css'
 import '../pages/ActivityPage.css' // reuses .session-list/.session-card/.run-detail-panel
 import './AdvancedPage.css' // reuses .advanced/.advanced-org
@@ -45,7 +51,7 @@ function formatCost(value: number | null): string {
 // no new capture, no redaction changes. Follows the MemoryPage/AdvancedPage
 // admin-page conventions (master layout, org selector).
 export default function TracePage() {
-  const [tab, setTab] = useState<'runs' | 'analytics'>('runs')
+  const [tab, setTab] = useState<'runs' | 'analytics' | 'models'>('runs')
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null) // null = all organisations
 
@@ -153,6 +159,35 @@ export default function TracePage() {
     }
   }, [selectedWorkflow])
 
+  // --- By model tab ---
+  const [modelSummaries, setModelSummaries] = useState<ModelAnalyticsSummary[]>([])
+  const [modelsLoading, setModelsLoading] = useState(true)
+  const [modelsError, setModelsError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (tab !== 'models') return undefined
+    let ignore = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load on tab/org change
+    setModelsLoading(true)
+    api
+      .listModelAnalytics({ org: org ?? undefined })
+      .then((d) => {
+        if (!ignore) {
+          setModelSummaries(d.models)
+          setModelsError(null)
+        }
+      })
+      .catch((e: Error) => {
+        if (!ignore) setModelsError(e.message)
+      })
+      .finally(() => {
+        if (!ignore) setModelsLoading(false)
+      })
+    return () => {
+      ignore = true
+    }
+  }, [tab, org])
+
   return (
     <div className="advanced">
       <header>
@@ -178,6 +213,9 @@ export default function TracePage() {
         </button>
         <button type="button" className={tab === 'analytics' ? 'active' : ''} onClick={() => setTab('analytics')}>
           Analytics
+        </button>
+        <button type="button" className={tab === 'models' ? 'active' : ''} onClick={() => setTab('models')}>
+          By model
         </button>
       </div>
 
@@ -360,6 +398,43 @@ export default function TracePage() {
                 </>
               )}
             </section>
+          )}
+        </>
+      )}
+
+      {tab === 'models' && (
+        <>
+          {modelsError && <p className="banner banner-error">{modelsError}</p>}
+
+          {modelsLoading ? (
+            <p className="hint">Loading…</p>
+          ) : modelSummaries.length === 0 ? (
+            <p className="hint">No usage recorded yet in this scope.</p>
+          ) : (
+            <div className="trace-analytics-table-wrap">
+              <table className="trace-analytics-table trace-analytics-table-static">
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>Runs</th>
+                    <th>Total tokens in</th>
+                    <th>Total tokens out</th>
+                    <th>Total cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modelSummaries.map((m) => (
+                    <tr key={m.model}>
+                      <td>{m.model}</td>
+                      <td>{m.run_count}</td>
+                      <td>{formatTokens(m.total_input_tokens)}</td>
+                      <td>{formatTokens(m.total_output_tokens)}</td>
+                      <td>{formatCost(m.total_cost_estimate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}

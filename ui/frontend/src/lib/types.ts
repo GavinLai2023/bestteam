@@ -147,6 +147,14 @@ export interface WorkflowAnalyticsDetail {
   common_failure_points: FailurePoint[]
 }
 
+export interface ModelAnalyticsSummary {
+  model: string
+  run_count: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cost_estimate: number | null
+}
+
 export interface AutomationResultPayload {
   priority?: string
   summary?: string

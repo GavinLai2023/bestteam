@@ -1,6 +1,6 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
-  Me, MemoryRecord, MemoryUserSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
+  Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
   Requirements, UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -261,6 +261,17 @@ export const api = {
     )
     const qs = params.toString()
     return request<{ workflows: WorkflowAnalyticsSummary[] }>(`/api/admin/analytics/workflows${qs ? `?${qs}` : ''}`)
+  },
+  listModelAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<{ models: ModelAnalyticsSummary[] }>(`/api/admin/analytics/models${qs ? `?${qs}` : ''}`)
   },
   getWorkflowAnalytics: (name: string, filters: Record<string, string | number | undefined | null> = {}) => {
     const params = new URLSearchParams(
