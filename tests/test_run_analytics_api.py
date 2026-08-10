@@ -198,6 +198,50 @@ def test_workflow_detail_per_agent_usage(rig):
     assert agent_row["avg_cost_estimate"] == pytest.approx(0.2)
 
 
+def test_workflow_detail_per_model_usage(rig):
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(
+            db, run_id="a-1", org_id=org_a, workflow="wf", status="completed",
+            agent="agent-x", input_tokens=100, output_tokens=20, cost=0.1,
+        )
+        _add_run_with_events(
+            db, run_id="a-2", org_id=org_a, workflow="wf", status="completed",
+            agent="agent-y", input_tokens=200, output_tokens=40, cost=0.3,
+        )
+        # Both runs use model="fake:x" via _add_run_with_events' default.
+
+    resp = client.get("/api/admin/analytics/workflows/wf", params={"org": "org_a"}, headers=headers["op"])
+    assert resp.status_code == 200
+    model_row = next(m for m in resp.json()["per_model"] if m["model"] == "fake:x")
+    assert model_row["run_count"] == 2
+    assert model_row["avg_input_tokens"] == 150
+    assert model_row["avg_output_tokens"] == 30
+    assert model_row["avg_cost_estimate"] == pytest.approx(0.2)
+
+
+def test_workflow_detail_per_model_buckets_null_model_as_unknown(rig):
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        db.add(Run(id="a-1", workflow="wf", input="in", status="completed", org_id=org_a, username="test"))
+        db.add(TraceEventRecord(run_id="a-1", seq=0, type="run_started", agent=None, data=None))
+        db.add(TraceEventRecord(run_id="a-1", seq=1, type="run_completed", agent=None, data=None))
+        db.add(
+            UsageRecord(
+                run_id="a-1", agent="agent-x", model=None, input_tokens=50, output_tokens=10,
+                cost_estimate=None, org_id=org_a,
+            )
+        )
+        db.commit()
+
+    resp = client.get("/api/admin/analytics/workflows/wf", params={"org": "org_a"}, headers=headers["op"])
+    model_row = next(m for m in resp.json()["per_model"] if m["model"] == "(unknown model)")
+    assert model_row["run_count"] == 1
+    assert model_row["avg_input_tokens"] == 50
+
+
 def test_workflow_detail_common_failure_points(rig):
     client, headers = rig
     org_a = get_org_id("org_a")

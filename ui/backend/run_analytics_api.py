@@ -214,6 +214,15 @@ def get_workflow_analytics(
         if u.cost_estimate is not None:
             bucket["cost"].append(u.cost_estimate)
 
+    usage_by_model: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"input": [], "output": [], "cost": [], "runs": set()})
+    for u in usage_rows:
+        bucket = usage_by_model[u.model or "(unknown model)"]
+        bucket["input"].append(u.input_tokens)
+        bucket["output"].append(u.output_tokens)
+        bucket["runs"].add(u.run_id)
+        if u.cost_estimate is not None:
+            bucket["cost"].append(u.cost_estimate)
+
     events_by_run = _events_by_run(db, run_ids)
     timing_by_agent: Dict[str, List[float]] = defaultdict(list)
     for events in events_by_run.values():
@@ -236,6 +245,17 @@ def get_workflow_analytics(
         for agent in agent_names
     ]
 
+    per_model = [
+        {
+            "model": model,
+            "run_count": len(usage_by_model[model]["runs"]),
+            "avg_input_tokens": _avg(usage_by_model[model]["input"]),
+            "avg_output_tokens": _avg(usage_by_model[model]["output"]),
+            "avg_cost_estimate": _avg(usage_by_model[model]["cost"]),
+        }
+        for model in sorted(usage_by_model)
+    ]
+
     failed_run_ids = [
         r.id
         for r in sorted((r for r in runs if r.status == "failed"), key=lambda r: r.created_at, reverse=True)[
@@ -248,5 +268,6 @@ def get_workflow_analytics(
         "org_id": org_id,
         "workflow": name,
         "per_agent": per_agent,
+        "per_model": per_model,
         "common_failure_points": common_failure_points(failed_events),
     }
