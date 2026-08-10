@@ -127,6 +127,23 @@ def list_workflow_analytics(
     for run in runs:
         groups[(run.org_id, run.workflow)].append(run)
 
+    run_by_id = {r.id: r for r in runs}
+    usage_rows = (
+        db.query(UsageRecord).filter(UsageRecord.run_id.in_(run_by_id)).all() if run_by_id else []
+    )
+    usage_by_group: Dict[tuple, Dict[str, Any]] = defaultdict(
+        lambda: {"input": 0, "output": 0, "cost": []}
+    )
+    for u in usage_rows:
+        run = run_by_id.get(u.run_id)
+        if run is None:
+            continue
+        bucket = usage_by_group[(run.org_id, run.workflow)]
+        bucket["input"] += u.input_tokens
+        bucket["output"] += u.output_tokens
+        if u.cost_estimate is not None:
+            bucket["cost"].append(u.cost_estimate)
+
     summaries = []
     for (group_org_id, workflow), group_runs in groups.items():
         statuses = Counter(r.status for r in group_runs)
@@ -136,6 +153,7 @@ def list_workflow_analytics(
             for r in group_runs
             if (d := run_duration_seconds(r.created_at, terminal_at.get(r.id))) is not None
         ]
+        usage = usage_by_group[(group_org_id, workflow)]
         summaries.append(
             {
                 "org_id": group_org_id,
@@ -148,6 +166,9 @@ def list_workflow_analytics(
                 "running": statuses.get("running", 0),
                 "success_rate": (statuses.get("completed", 0) / total) if total else None,
                 "avg_duration_seconds": (sum(durations) / len(durations)) if durations else None,
+                "total_input_tokens": usage["input"],
+                "total_output_tokens": usage["output"],
+                "total_cost_estimate": sum(usage["cost"]) if usage["cost"] else None,
             }
         )
     summaries.sort(key=lambda s: (s["org"] or "", s["workflow"]))

@@ -118,6 +118,42 @@ def test_workflows_summary_unknown_org_is_404(rig):
     assert resp.status_code == 404
 
 
+def test_workflows_summary_token_and_cost_totals(rig):
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(
+            db, run_id="a-1", org_id=org_a, workflow="wf", status="completed",
+            input_tokens=100, output_tokens=20, cost=0.1,
+        )
+        _add_run_with_events(
+            db, run_id="a-2", org_id=org_a, workflow="wf", status="completed",
+            input_tokens=200, output_tokens=40, cost=0.3,
+        )
+
+    resp = client.get("/api/admin/analytics/workflows", params={"org": "org_a"}, headers=headers["op"])
+    assert resp.status_code == 200
+    row = next(r for r in resp.json()["workflows"] if r["workflow"] == "wf")
+    assert row["total_input_tokens"] == 300
+    assert row["total_output_tokens"] == 60
+    assert row["total_cost_estimate"] == pytest.approx(0.4)
+
+
+def test_workflows_summary_null_cost_when_no_usage_has_cost(rig):
+    """A workflow whose usage rows all have cost_estimate=None (e.g. a model
+    not in model_catalog) reports total_cost_estimate=None, not 0."""
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(
+            db, run_id="a-1", org_id=org_a, workflow="wf", status="completed", cost=None,
+        )
+
+    resp = client.get("/api/admin/analytics/workflows", params={"org": "org_a"}, headers=headers["op"])
+    row = next(r for r in resp.json()["workflows"] if r["workflow"] == "wf")
+    assert row["total_cost_estimate"] is None
+
+
 def test_workflow_detail_requires_org_when_ambiguous(rig):
     client, headers = rig
     org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
