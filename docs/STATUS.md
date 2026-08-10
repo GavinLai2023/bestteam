@@ -91,6 +91,14 @@
   authoritative memory-store state, a one-time historical-legacy-provenance
   sweep. Specs: `2026-07-30-memory-principal-lifecycle-design.md`;
   `docs/MEMORY_REVIEW_TRIAGE.md`.
+- Semantic near-duplicate/update resolution (closes the M-08 gap SP-4 left
+  open, for `semantic` records): extraction is shown the user's existing
+  semantic memories as candidates and each extracted fact now carries an
+  `action` (`add`/`update`/`noop`) instead of always appending, so a
+  changed/corrected preference replaces the old record instead of
+  accumulating alongside it. `procedural` consolidation and cross-run
+  concurrency remain deferred. See `src/bestteam/core/CLAUDE.md`,
+  `docs/MEMORY_REVIEW_TRIAGE.md`.
 - Code-review triage remediation: all 17 findings (CR-001…CR-017) resolved
   across PRs #4 and #5 — KB path containment + atomic versioned uploads,
   startup secret-key guard, team-scoped aggregation, terminal-run guarantees,
@@ -854,9 +862,11 @@
 - **Vector knowledge base retrieval is single-stage** — no query
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors. See `src/bestteam/core/CLAUDE.md`.
-- **Per-user memory recall is single-stage BM25** — no rerank/expansion;
-  semantic/procedural records have no auto-dedup. Admin view/search/delete UI
-  exists (`/api/memory`), but there's no manual add/edit and no retention/quota
+- **Per-user memory recall is single-stage BM25** — no rerank/expansion.
+  Semantic records get exact-dedup on write plus LLM-mediated near-duplicate/
+  update resolution (M-08); procedural records still have no dedup/
+  consolidation. Admin view/search/delete UI exists (`/api/memory`), but
+  there's no manual add/edit and no retention/quota
   policy. `GET /api/memory/users` is unpaginated (CR-029, deferred P3): fine
   today (admin-only, opt-in, operator-provisioned accounts), but the
   shared-platform ceiling is the sum of memory-enabled users across all orgs

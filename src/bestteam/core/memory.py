@@ -692,14 +692,40 @@ class SqliteBM25Memory(Memory):
 
 # Instructs the extraction model to summarize a run into durable facts. Kept
 # terse and JSON-only so a cheap model can follow it and parsing stays simple.
+#
+# Each "facts" entry carries an action so the model can reconcile a new fact
+# against the user's existing remembered facts (shown to it as candidates in
+# the human message) instead of only ever appending -- this is what lets a
+# changed/corrected preference REPLACE the old one rather than accumulate
+# alongside it as a near-duplicate.
 _EXTRACTION_SYSTEM_PROMPT = (
     "You distill a completed AI-team interaction into durable memory about the "
     "user, for use in future sessions. Respond with ONLY a JSON object of the "
-    'form {"facts": ["..."], "procedural": "..."}. "facts" is a list of stable, '
-    "user-specific facts or preferences worth remembering (empty list if none). "
-    '"procedural" is one short note on what kind of request this was and how it '
-    "was handled well (empty string if nothing useful). No prose outside the JSON."
+    'form {"facts": [{"action": "add"|"update"|"noop", "content": "...", '
+    '"replaces_id": "<id-of-existing-fact>"|null}], "procedural": "..."}. Each '
+    'facts entry is one stable, user-specific fact or preference. You will be '
+    "shown the user's existing remembered facts with their ids -- for each new "
+    'fact, use "add" if it is genuinely new, "update" (with "replaces_id" set '
+    'to the existing fact\'s id) if it supersedes or corrects an existing one '
+    '(e.g. a changed preference), or "noop" if it only restates something '
+    'already known with nothing new to add. Use an empty "facts" list if '
+    'nothing is worth remembering. "procedural" is one short note on what kind '
+    "of request this was and how it was handled well (empty string if nothing "
+    "useful). No prose outside the JSON."
 )
+
+# Cap on how many of the user's existing semantic memories are shown to the
+# extraction model as reconciliation candidates. Fixed rather than
+# configurable -- kept minimal, matching the rest of this module's knobs.
+_DEDUP_CANDIDATE_LIMIT = 20
+
+
+def _format_candidates(candidates: Sequence["MemoryRecord"]) -> str:
+    """Render existing semantic memories as `- id=<id>: <content>` lines for the
+    extraction prompt, so the model can reference one via `replaces_id`."""
+    if not candidates:
+        return "(none)"
+    return "\n".join(f"- id={c.id}: {c.content}" for c in candidates)
 
 
 @dataclass
@@ -933,10 +959,17 @@ class MemoryManager:
         from ..adapters.langgraph_adapter import _resolve_model
 
         model = _resolve_model(self.extraction_model)
+        candidates = self._semantic_candidates(user_id, input, output)
         response = model.invoke(
             [
                 SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
-                HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
+                HumanMessage(
+                    content=(
+                        f"User request:\n{input}\n\nTeam answer:\n{output}\n\n"
+                        "Existing remembered facts about this user (id: text), to "
+                        "reconcile new facts against:\n" + _format_candidates(candidates)
+                    )
+                ),
             ]
         )
         # Capture usage IMMEDIATELY after the call: the tokens were consumed
@@ -958,14 +991,43 @@ class MemoryManager:
         # M-08: exact-duplicate suppression via an atomic, per-type insert-if-absent
         # (race-safe and complete, not a recent-window snapshot). Each write is
         # independent: a failure is logged and the rest proceed.
+        candidate_ids = {c.id for c in candidates}
         for fact in parsed.get("facts", []):
-            if isinstance(fact, str) and fact.strip():
-                try:
-                    if self._store_extracted(user_id, SEMANTIC, fact.strip()):
-                        written.append(SEMANTIC)
-                except Exception as exc:  # noqa: BLE001
-                    _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
-                    ok = False
+            if not isinstance(fact, dict):
+                continue
+            fact_content = fact.get("content")
+            if not isinstance(fact_content, str) or not fact_content.strip():
+                continue
+            fact_content = fact_content.strip()
+            action = fact.get("action")
+            if action not in ("add", "update", "noop"):
+                # Malformed/missing action: no-op rather than guess, so a parse
+                # quirk can never be misread as "update" and delete something.
+                continue
+            if action == "noop":
+                continue
+            if action == "update":
+                replaces_id = fact.get("replaces_id")
+                if isinstance(replaces_id, str) and replaces_id in candidate_ids:
+                    try:
+                        self.store.delete(replaces_id)
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.warning(
+                            "Memory: failed to delete superseded record '%s' for '%s': %s",
+                            replaces_id,
+                            user_id,
+                            exc,
+                            exc_info=True,
+                        )
+                        ok = False
+                # An unrecognized/missing replaces_id downgrades to a plain add
+                # (below) -- never delete on an unverified id.
+            try:
+                if self._store_extracted(user_id, SEMANTIC, fact_content):
+                    written.append(SEMANTIC)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
+                ok = False
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
             try:
@@ -975,6 +1037,25 @@ class MemoryManager:
                 _logger.warning("Memory: procedural write failed for '%s': %s", user_id, exc, exc_info=True)
                 ok = False
         return written, usage, ok
+
+    def _semantic_candidates(self, user_id: str, input: str, output: str) -> List[MemoryRecord]:
+        """The user's existing `semantic` memories most relevant to this run, shown
+        to the extraction model so it can reconcile (add/update/noop) against them
+        instead of only ever appending. Best-effort: a search failure degrades to
+        no candidates (every fact falls back to a plain add) rather than breaking
+        extraction."""
+        search_kwargs: Dict[str, Any] = {
+            "top_k": _DEDUP_CANDIDATE_LIMIT,
+            "types": [SEMANTIC],
+            **self._scope_kwargs(),
+        }
+        if self.recall_max_candidates is not None:
+            search_kwargs["max_candidates"] = self.recall_max_candidates
+        try:
+            return self.store.search(user_id, f"{input}\n{output}", **search_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory: candidate fetch failed for '%s': %s", user_id, exc, exc_info=True)
+            return []
 
     def _store_extracted(self, user_id: str, type: str, content: str) -> bool:
         """Write one extracted record, deduping per type. Returns True when a NEW

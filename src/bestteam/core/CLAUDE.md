@@ -219,8 +219,24 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   **per-type** `INSERT ... WHERE NOT EXISTS` keyed by `(user_id, type, content,
   org-scope)`. Per-type means a semantic and a procedural row with the same text
   don't collide; atomic under SQLite's write serialization means two concurrent
-  connections can't both insert. (Near-dup / contradiction resolution /
-  consolidation — needs embeddings/LLM — is deferred.) Recall bounds its scan to
+  connections can't both insert. **Semantic near-duplicate/update resolution**
+  is also implemented: before writing, `_extract_and_store` fetches the user's
+  existing `semantic` memories most relevant to the run (BM25, capped at 20
+  candidates, same org/principal scope) and shows them to the extraction model
+  with their ids; each extracted fact now carries an `action`
+  (`"add"`/`"update"`/`"noop"`) instead of being a bare string. `"update"`
+  deletes the referenced candidate before inserting the new fact (write-once
+  storage is otherwise unchanged — no soft-delete/history); `store.delete` is
+  only ever called for an id this call's own candidate search returned, so a
+  hallucinated `replaces_id` can never delete a real record — it falls back to
+  a plain add instead, as does a missing/unrecognized `action`. `"noop"` skips
+  the write. A candidate-fetch failure degrades to "no candidates" (plain add)
+  rather than breaking extraction. This covers **semantic only** —
+  `procedural`'s free-text shape makes near-duplicate judgment unreliable, so
+  procedural consolidation is still deferred, as is cross-run concurrency (two
+  simultaneous runs both updating the same old record) and any effectiveness
+  measurement of the reconciliation itself (M-13). See
+  `docs/MEMORY_REVIEW_TRIAGE.md`. Recall bounds its scan to
   the most-recent `recall_max_candidates` records (backend default 1000 via
   `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09; clamped to SQLite's int range so a
   fat-fingered value can't `OverflowError` the `LIMIT`). Composite `(user_id,

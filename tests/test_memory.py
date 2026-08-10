@@ -296,7 +296,11 @@ def test_record_run_noop_without_user():
 
 def test_record_run_extracts_semantic_and_procedural_with_model():
     store = _store()
-    canned = '{"facts": ["prefers bullet points", "works in finance"], "procedural": "refund questions handled by citing the 30-day policy"}'
+    canned = (
+        '{"facts": [{"action": "add", "content": "prefers bullet points"}, '
+        '{"action": "add", "content": "works in finance"}], '
+        '"procedural": "refund questions handled by citing the 30-day policy"}'
+    )
     manager = MemoryManager(store, extraction_model=f"fake:{canned}")
 
     manager.record_run("alice", "how do refunds work?", "30-day money back")
@@ -349,7 +353,7 @@ def test_record_run_captures_extraction_usage_and_types():
 
     store = _store()
     canned = AIMessage(
-        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        content='{"facts": [{"action": "add", "content": "likes bullets"}], "procedural": "answered concisely"}',
         usage_metadata={"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
     )
     mgr = MemoryManager(
@@ -377,7 +381,7 @@ def test_record_run_partial_extraction_failure_keeps_usage_and_writes():
             return super().add(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
-        content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+        content='{"facts": [{"action": "add", "content": "likes bullets"}], "procedural": "answered concisely"}',
         usage_metadata={"input_tokens": 31, "output_tokens": 9, "total_tokens": 40},
     )
     store = _FailProceduralStore(":memory:")
@@ -409,7 +413,10 @@ def test_extraction_continues_after_a_failed_write():
             return super().add(user_id, type, content, metadata, org_id=org_id)
 
     canned = AIMessage(
-        content='{"facts": ["fact one", "fact two"], "procedural": "a note"}',
+        content=(
+            '{"facts": [{"action": "add", "content": "fact one"}, '
+            '{"action": "add", "content": "fact two"}], "procedural": "a note"}'
+        ),
         usage_metadata={"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
     )
     store = _FailFirstFactStore()
@@ -496,7 +503,12 @@ def test_extraction_dedups_exact_facts_against_existing():
 
     store = _store()
     store.add("alice", SEMANTIC, "likes bullet points")  # already known
-    canned = AIMessage(content='{"facts": ["likes bullet points", "prefers short answers"], "procedural": ""}')
+    canned = AIMessage(
+        content=(
+            '{"facts": [{"action": "add", "content": "likes bullet points"}, '
+            '{"action": "add", "content": "prefers short answers"}], "procedural": ""}'
+        )
+    )
     mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
 
     outcome = mgr.record_run("alice", "q", "a")
@@ -510,12 +522,168 @@ def test_extraction_dedups_within_one_extraction():
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
 
-    canned = AIMessage(content='{"facts": ["same fact", "same fact"], "procedural": ""}')
+    canned = AIMessage(
+        content=(
+            '{"facts": [{"action": "add", "content": "same fact"}, '
+            '{"action": "add", "content": "same fact"}], "procedural": ""}'
+        )
+    )
     store = _store()
     mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
 
     mgr.record_run("alice", "q", "a")
     assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1
+
+
+# --- Semantic near-duplicate / update resolution -----------------------------
+
+
+def test_extraction_update_replaces_superseded_fact():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    old = store.add("alice", SEMANTIC, "prefers concise answers")
+    canned = AIMessage(
+        content=(
+            '{"facts": [{"action": "update", "content": "prefers detailed answers", '
+            f'"replaces_id": "{old.id}"}}], "procedural": ""}}'
+        )
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "how verbose should answers be?", "noted")
+
+    semantic = [r.content for r in store.all("alice") if r.type == SEMANTIC]
+    assert semantic == ["prefers detailed answers"]  # old row replaced, not accumulated
+    assert outcome.recorded.count(SEMANTIC) == 1
+
+
+def test_extraction_update_with_unknown_replaces_id_downgrades_to_add():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise answers")
+    canned = AIMessage(
+        content='{"facts": [{"action": "update", "content": "a genuinely new fact", '
+        '"replaces_id": "not-a-real-id"}], "procedural": ""}'
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q", "a")
+
+    semantic = sorted(r.content for r in store.all("alice") if r.type == SEMANTIC)
+    # A hallucinated/unknown id must never trigger a delete -- the old fact survives.
+    assert semantic == ["a genuinely new fact", "prefers concise answers"]
+
+
+def test_extraction_noop_action_skips_write():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise answers")
+    # Content is deliberately NOT a duplicate of anything stored, so this only
+    # passes if "noop" is actually honored -- exact-dedup can't mask a bug that
+    # writes every fact regardless of action.
+    canned = AIMessage(
+        content='{"facts": [{"action": "noop", "content": "an entirely new distinct claim"}], "procedural": ""}'
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    assert SEMANTIC not in outcome.recorded
+    assert [r.content for r in store.all("alice") if r.type == SEMANTIC] == ["prefers concise answers"]
+
+
+def test_extraction_missing_action_field_is_dropped_not_written():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    canned = AIMessage(content='{"facts": [{"content": "a fact with no action field"}], "procedural": ""}')
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q", "a")
+
+    # A malformed item (no recognized action) is dropped, not blindly written.
+    assert [r for r in store.all("alice") if r.type == SEMANTIC] == []
+
+
+def test_extraction_add_action_writes_new_and_dedups_exact():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise answers")
+    # One exact duplicate (must dedup) and one genuinely new fact (must be
+    # written) in the same call -- distinguishes a working "add" path from one
+    # that's silently broken/no-op'd (which would also leave the duplicate
+    # deduped, but would also drop the new fact).
+    canned = AIMessage(
+        content=(
+            '{"facts": ['
+            '{"action": "add", "content": "prefers concise answers"}, '
+            '{"action": "add", "content": "works in finance"}'
+            '], "procedural": ""}'
+        )
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    assert outcome.recorded.count(SEMANTIC) == 1  # only the new fact written
+    semantic = sorted(r.content for r in store.all("alice") if r.type == SEMANTIC)
+    assert semantic == ["prefers concise answers", "works in finance"]
+
+
+def test_extraction_candidates_scoped_to_user_and_semantic_type():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    alice_fact = store.add("alice", SEMANTIC, "alice likes concise answers")
+    store.add("bob", SEMANTIC, "bob likes concise answers")  # different user, must not be offered
+    store.add("alice", EPISODIC, "alice asked about refunds")  # different type, must not be offered
+
+    captured = {}
+    real_search = store.search
+
+    def spy(user_id, query, **kwargs):
+        captured["types"] = kwargs.get("types")
+        candidates = real_search(user_id, query, **kwargs)
+        captured["ids"] = {c.id for c in candidates}
+        return candidates
+
+    store.search = spy
+    canned = AIMessage(content='{"facts": [], "procedural": ""}')
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "q about concise answers", "a")
+
+    assert captured["types"] == [SEMANTIC]
+    assert captured["ids"] == {alice_fact.id}
+
+
+def test_extraction_candidate_fetch_failure_degrades_to_plain_add():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    class _FailingSearchStore(SqliteBM25Memory):
+        def search(self, *args, **kwargs):
+            raise RuntimeError("search backend down")
+
+    store = _FailingSearchStore(":memory:")
+    canned = AIMessage(content='{"facts": [{"action": "add", "content": "a new fact"}], "procedural": ""}')
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    # Candidate lookup failing must not break extraction -- it degrades to "no candidates".
+    assert SEMANTIC in outcome.recorded
+    assert [r.content for r in store.all("alice") if r.type == SEMANTIC] == ["a new fact"]
 
 
 def test_prune_user_type_keeps_most_recent(monkeypatch):
@@ -625,7 +793,8 @@ def test_dedup_is_per_type_not_cross_type():
     store = _store()
     store.add("alice", PROCEDURAL, "handle refunds carefully")
     canned = AIMessage(
-        content='{"facts": ["handle refunds carefully"], "procedural": "handle refunds carefully"}'
+        content='{"facts": [{"action": "add", "content": "handle refunds carefully"}], '
+        '"procedural": "handle refunds carefully"}'
     )
     mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
 
@@ -684,7 +853,7 @@ def test_extraction_respects_overridden_add_policy():
             return super().add(user_id, type, content, metadata, org_id=org_id)
 
     store = _AuditStore()
-    canned = AIMessage(content='{"facts": ["a fact"], "procedural": "a note"}')
+    canned = AIMessage(content='{"facts": [{"action": "add", "content": "a fact"}], "procedural": "a note"}')
     mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
 
     mgr.record_run("alice", "q", "a")
@@ -737,7 +906,10 @@ def test_add_if_absent_concurrent_threads_insert_once(tmp_path):
 
 def test_record_run_extraction_tolerates_json_with_surrounding_prose():
     store = _store()
-    canned = 'Here you go:\n```json\n{"facts": ["likes graphs"], "procedural": ""}\n```'
+    canned = (
+        'Here you go:\n```json\n{"facts": [{"action": "add", "content": "likes graphs"}], '
+        '"procedural": ""}\n```'
+    )
     manager = MemoryManager(store, extraction_model=f"fake:{canned}")
 
     manager.record_run("alice", "q", "a")

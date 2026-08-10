@@ -170,7 +170,8 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+                content='{"facts": [{"action": "add", "content": "likes bullets"}], '
+                '"procedural": "answered concisely"}',
                 usage_metadata={"input_tokens": 20, "output_tokens": 6, "total_tokens": 26},
             )
         ]
@@ -202,7 +203,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["x"], "procedural": "y"}',
+                content='{"facts": [{"action": "add", "content": "x"}], "procedural": "y"}',
                 usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
             )
         ]
@@ -242,7 +243,7 @@ def test_total_write_failure_still_meters_extraction(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["x"], "procedural": "y"}',
+                content='{"facts": [{"action": "add", "content": "x"}], "procedural": "y"}',
                 usage_metadata={"input_tokens": 17, "output_tokens": 4, "total_tokens": 21},
             )
         ]
