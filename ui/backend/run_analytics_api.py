@@ -1,9 +1,12 @@
 """Admin workflow-run analytics API (`/api/admin/analytics`).
 
 Aggregate statistics over persisted runs/trace_events/usage_records --
-success/failure rates, average duration, per-agent token/cost usage, and
-common failure points -- so a platform admin can see how a workflow behaves
-across many runs, not just drill into one. Admin-only (`get_current_admin`):
+success/failure rates, average duration, per-agent and per-model token/cost
+usage, and common failure points -- so a platform admin can see how a
+workflow behaves across many runs, not just drill into one, and which LLM
+models spend is concentrated in (`GET /workflows/{name}`'s `per_model`, and
+`GET /models` for a breakdown global across every workflow in scope).
+Admin-only (`get_current_admin`):
 this reaches every org's run history, the same trust boundary as
 `GET /api/runs`' cross-org admin mode and the existing `/api/config` and
 `/api/memory` admin surfaces.
@@ -268,3 +271,43 @@ def get_workflow_analytics(
         "per_model": per_model,
         "common_failure_points": common_failure_points(failed_events),
     }
+
+
+@router.get("/models")
+def list_model_analytics(
+    org: Optional[str] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+) -> Dict[str, List[Dict[str, Any]]]:
+    """One row per LLM model, aggregated across every workflow in scope --
+    `run_count` counts distinct runs with at least one usage row for that
+    model (a run touching more than one model contributes to more than one
+    row, unlike a workflow's `total_runs`)."""
+    org_id = _resolve_org_filter(db, org)
+    runs = _scoped_runs(db, org_id=org_id, workflow=None, since=since, until=until)
+    run_ids = [r.id for r in runs]
+    usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id.in_(run_ids)).all() if run_ids else []
+
+    usage_by_model: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"input": 0, "output": 0, "cost": [], "runs": set()})
+    for u in usage_rows:
+        bucket = usage_by_model[u.model or "(unknown model)"]
+        bucket["input"] += u.input_tokens
+        bucket["output"] += u.output_tokens
+        bucket["runs"].add(u.run_id)
+        if u.cost_estimate is not None:
+            bucket["cost"].append(u.cost_estimate)
+
+    models = [
+        {
+            "model": model,
+            "run_count": len(usage_by_model[model]["runs"]),
+            "total_input_tokens": usage_by_model[model]["input"],
+            "total_output_tokens": usage_by_model[model]["output"],
+            "total_cost_estimate": (
+                sum(usage_by_model[model]["cost"]) if usage_by_model[model]["cost"] else None
+            ),
+        }
+        for model in sorted(usage_by_model)
+    ]
+    return {"models": models}

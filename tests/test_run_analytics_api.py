@@ -254,3 +254,60 @@ def test_workflow_detail_common_failure_points(rig):
     assert points[0]["agent"] == "agent-x"
     assert points[0]["event_type"] == "tool_completed"
     assert points[0]["count"] == 2
+
+
+def test_models_summary_requires_admin(rig):
+    client, headers = rig
+    resp = client.get("/api/admin/analytics/models", headers=headers["alice"])
+    assert resp.status_code == 403
+
+
+def test_models_summary_aggregates_across_workflows_and_orgs(rig):
+    client, headers = rig
+    org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
+    with open_test_db() as db:
+        _add_run_with_events(
+            db, run_id="a-1", org_id=org_a, workflow="wf1", status="completed",
+            input_tokens=100, output_tokens=20, cost=0.1,
+        )
+        _add_run_with_events(
+            db, run_id="a-2", org_id=org_a, workflow="wf2", status="completed",
+            input_tokens=200, output_tokens=40, cost=0.3,
+        )
+        _add_run_with_events(
+            db, run_id="b-1", org_id=org_b, workflow="wf1", status="completed",
+            input_tokens=50, output_tokens=10, cost=0.05,
+        )
+        # All three use model="fake:x" via _add_run_with_events' default.
+
+    resp = client.get("/api/admin/analytics/models", headers=headers["op"])
+    assert resp.status_code == 200
+    row = next(m for m in resp.json()["models"] if m["model"] == "fake:x")
+    assert row["run_count"] == 3
+    assert row["total_input_tokens"] == 350
+    assert row["total_output_tokens"] == 70
+    assert row["total_cost_estimate"] == pytest.approx(0.45)
+
+
+def test_models_summary_org_filter_scopes_to_one_org(rig):
+    client, headers = rig
+    org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
+    with open_test_db() as db:
+        _add_run_with_events(db, run_id="a-1", org_id=org_a, workflow="wf", status="completed")
+        _add_run_with_events(db, run_id="b-1", org_id=org_b, workflow="wf", status="completed")
+
+    resp = client.get("/api/admin/analytics/models", params={"org": "org_a"}, headers=headers["op"])
+    assert resp.json()["models"][0]["run_count"] == 1
+
+
+def test_models_summary_unknown_org_is_404(rig):
+    client, headers = rig
+    resp = client.get("/api/admin/analytics/models", params={"org": "nope"}, headers=headers["op"])
+    assert resp.status_code == 404
+
+
+def test_models_summary_empty_scope_returns_empty_list(rig):
+    client, headers = rig
+    resp = client.get("/api/admin/analytics/models", headers=headers["op"])
+    assert resp.status_code == 200
+    assert resp.json() == {"models": []}
