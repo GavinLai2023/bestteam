@@ -54,15 +54,19 @@ _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 # interleave the shared CURRENT pointer + version cleanup and could leave
 # CURRENT naming a version the losing uploader then deletes (CR-008). Keyed by
 # "<org_id>/<name>"; a small guard lock protects the registry itself.
+# Reentrant (RLock): org_knowledge_bases.py's self-service route also holds
+# this same per-KB lock across its own existence/cap/replace-confirmation
+# check, then calls into upload_knowledge_base() below, which re-acquires it
+# by the same key on the same thread -- a plain Lock would deadlock there.
 _kb_upload_locks_guard = threading.Lock()
-_kb_upload_locks: Dict[str, threading.Lock] = {}
+_kb_upload_locks: Dict[str, threading.RLock] = {}
 
 
-def _kb_upload_lock(name: str) -> threading.Lock:
+def _kb_upload_lock(name: str) -> threading.RLock:
     with _kb_upload_locks_guard:
         lock = _kb_upload_locks.get(name)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _kb_upload_locks[name] = lock
         return lock
 

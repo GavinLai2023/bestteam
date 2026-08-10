@@ -15,7 +15,7 @@ from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_
 from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import Run, TraceEventRecord, WorkflowRecord, WorkflowVersion
+from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, WorkflowRecord, WorkflowVersion
 from ui.backend.db_session import get_db
 from ui.backend.runtime import registry, run_in_background
 
@@ -130,6 +130,29 @@ def test_get_run_trace_returns_persisted_events_in_seq_order(client, tmp_path):
     assert [e["seq"] for e in events] == list(range(len(events)))
     agent_completed = next(e for e in events if e["type"] == "agent_completed")
     assert agent_completed["data"] == "done"
+
+
+def test_get_run_trace_includes_per_agent_usage(client):
+    # Additive field for the admin trace view -- the existing customer
+    # RunDetail.tsx only reads `events` and ignores this.
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(
+            UsageRecord(
+                run_id="r-1", agent="agent-a", model="fake:x", input_tokens=10, output_tokens=5,
+                cost_estimate=0.01, org_id=org_id,
+            )
+        )
+        db.commit()
+
+    resp = client.get("/api/runs/r-1/trace")
+
+    assert resp.status_code == 200
+    usage = resp.json()["usage"]
+    assert usage == [
+        {"agent": "agent-a", "model": "fake:x", "input_tokens": 10, "output_tokens": 5, "cost_estimate": 0.01}
+    ]
 
 
 def test_get_run_trace_cross_org_is_404(client):

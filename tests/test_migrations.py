@@ -311,6 +311,46 @@ def test_workflow_created_by_backfilled_from_username_to_principal_id(tmp_path, 
     assert legacy == "principal-abc"
 
 
+def test_workflow_created_by_backfill_skips_workflow_older_than_username_holder(tmp_path, monkeypatch):
+    """Codex review finding: a deleted-then-recreated account can reuse a
+    username. If the workflow predates the *current* holder of that username's
+    own account, the current account can't be the one that created it -- an
+    unconditional backfill would hand it a stranger's (the deleted account's)
+    workflows. The backfill must leave such a row alone."""
+    db_path = tmp_path / "created_by_backfill_reuse.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_CREATED_BY_BACKFILL)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        # 'bob' the workflow belongs to (created_at 2026-01-01) is deleted and
+        # a new, unrelated account reuses the username 'bob' later.
+        conn.execute(sa.text(
+            "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at, created_by) "
+            "VALUES ('old-bobs-team', NULL, '{}', 'deployed', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00', 'bob')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO users (username, password_hash, is_admin, created_at, principal_id) "
+            "VALUES ('bob', 'x', 0, '2026-06-01T00:00:00+00:00', 'principal-new-bob')"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            created_by = conn.execute(sa.text(
+                "SELECT created_by FROM workflows WHERE name = 'old-bobs-team'"
+            )).scalar()
+    finally:
+        engine.dispose()
+    # Left as the stale username, NOT rewritten to the new account's
+    # principal_id -- an orphaned reference is safer than a takeover.
+    assert created_by == "bob"
+
+
 def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
     db_path = tmp_path / "status_check.db"
     cfg = _alembic_config(db_path, monkeypatch)

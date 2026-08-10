@@ -94,7 +94,20 @@ export default function DocumentsPage() {
 
     setStage('generating')
     try {
-      const updated = await api.submitSpecification(sessionId!, { model: pickDefaultModel(entries) })
+      // Tell the architect exactly which knowledge base was just uploaded --
+      // without this it only sees the org's whole KB catalog, which can
+      // leave a new upload unattached (or the wrong one picked) if the org
+      // already has other collections (Codex review finding).
+      const kbHint = useFiles
+        ? `The customer just uploaded documents to a knowledge base named "${slug}". Make sure at least one agent's tools includes it.`
+        : ''
+      // Revisiting this page after a specification already exists (the
+      // Confirm page's "add or update documents" link) must refine that
+      // design, not regenerate one from scratch -- regenerating silently
+      // discards any solution feedback already applied (Codex review finding).
+      const updated = session.specification_json
+        ? await api.submitSolution(sessionId!, { feedback: kbHint, model: pickDefaultModel(entries) })
+        : await api.submitSpecification(sessionId!, { model: pickDefaultModel(entries), feedback: kbHint || undefined })
       setSession(updated)
       navigate(`/wizard/${sessionId}/preview`)
     } catch (e) {

@@ -5,6 +5,7 @@ import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
 import RunDetail from '../components/RunDetail'
+import RunsPager from '../components/RunsPager'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -45,9 +46,18 @@ export default function ActivityPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filters, setFilters] = useState<Filters>({ workflow: '', manual: '', status: '' })
+  const [offset, setOffset] = useState(0)
+  const [page, setPage] = useState({ total: 0, limit: 50 })
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
   const hasRunningRun = runs.some((run) => run.status === 'running')
   const runDetailRef = useRef<HTMLElement>(null)
+
+  // A filter change invalidates the current page -- go back to the start
+  // rather than showing (say) page 3 of a now much shorter result set.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset pagination on filter/tab change
+    setOffset(0)
+  }, [filters, tab])
 
   // The run list can be long -- opening the detail panel below it (it's
   // rendered after the list) would otherwise leave it off-screen when the
@@ -67,10 +77,11 @@ export default function ActivityPage() {
     if (tab !== 'runs') return undefined
     let ignore = false
     api
-      .listRuns(runsQueryParams(filters))
+      .listRuns({ ...runsQueryParams(filters), offset })
       .then((d) => {
         if (ignore) return
         setRuns(d.runs)
+        setPage({ total: d.total ?? d.runs.length, limit: d.limit ?? d.runs.length })
         setError(null)
       })
       .catch((e: Error) => {
@@ -82,19 +93,22 @@ export default function ActivityPage() {
     return () => {
       ignore = true
     }
-  }, [tab, filters])
+  }, [tab, filters, offset])
 
   useEffect(() => {
     if (tab !== 'runs' || !hasRunningRun) return undefined
     let ignore = false
     const id = setInterval(() => {
       api
-        .listRuns(runsQueryParams(filters))
+        .listRuns({ ...runsQueryParams(filters), offset })
         .then((d) => {
           // A poll started under the previous filters can resolve after
           // filters changed (this effect already cleaned up) -- applying it
           // would show rows that don't match the currently selected filters.
-          if (!ignore) setRuns(d.runs)
+          if (!ignore) {
+            setRuns(d.runs)
+            setPage({ total: d.total ?? d.runs.length, limit: d.limit ?? d.runs.length })
+          }
         })
         .catch(() => {})
     }, RUN_POLL_INTERVAL_MS)
@@ -102,7 +116,7 @@ export default function ActivityPage() {
       ignore = true
       clearInterval(id)
     }
-  }, [tab, filters, hasRunningRun])
+  }, [tab, filters, offset, hasRunningRun])
 
   return (
     <div className="wizard">
@@ -220,6 +234,8 @@ export default function ActivityPage() {
               ))}
             </ul>
           )}
+
+          <RunsPager total={page.total} limit={page.limit} offset={offset} onOffsetChange={setOffset} />
 
           {selectedRun && (
             <section className="run-detail-panel" ref={runDetailRef}>

@@ -59,14 +59,14 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({})
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ offset: 0 })
 
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Team'), { target: { value: 'wf-b' } })
     })
 
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b', offset: 0 })
   })
 
   it('shows the team\'s customer-facing display name instead of the internal technical name', async () => {
@@ -221,7 +221,7 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false, offset: 0 })
   })
 
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {

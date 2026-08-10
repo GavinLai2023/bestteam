@@ -138,6 +138,14 @@ export default function ConfirmPage() {
           onChange={(e) => setFeedback(e.target.value)}
           placeholder="e.g. Have the team check our FAQ document before replying."
         />
+        <button
+          type="button"
+          className="btn-link"
+          style={{ marginTop: 4 }}
+          onClick={() => navigate(`/wizard/${sessionId}/documents`)}
+        >
+          Need to add or update a document? Upload it here
+        </button>
       </div>
       <ModelPicker value={model} onChange={setModel} label="Which assistant should your team use?" />
 

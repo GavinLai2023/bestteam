@@ -92,4 +92,12 @@ describe('ConfirmPage', () => {
       }),
     )
   })
+
+  it('navigates to the documents step to upload or update a document', async () => {
+    renderPage()
+
+    fireEvent.click(await screen.findByText('Need to add or update a document? Upload it here'))
+
+    expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents')
+  })
 })

@@ -85,6 +85,54 @@ export interface RunListItem {
   status: string
   autonomous: boolean
   started_at: string
+  // Only meaningful for a cross-org admin listing (Trace page) -- absent/null
+  // for the customer-facing Activity page, which is always one org's own runs.
+  org?: string | null
+  org_id?: number | null
+}
+
+export interface UsageRecord {
+  agent: string | null
+  model: string | null
+  input_tokens: number
+  output_tokens: number
+  cost_estimate: number | null
+}
+
+export interface WorkflowAnalyticsSummary {
+  org_id: number | null
+  org: string | null
+  workflow: string
+  total_runs: number
+  completed: number
+  failed: number
+  cancelled: number
+  running: number
+  success_rate: number | null
+  avg_duration_seconds: number | null
+}
+
+export interface AgentAnalytics {
+  agent: string
+  run_count: number
+  avg_input_tokens: number | null
+  avg_output_tokens: number | null
+  avg_cost_estimate: number | null
+  avg_duration_seconds: number | null
+}
+
+export interface FailurePoint {
+  agent: string | null
+  event_type: string
+  count: number
+  pct_of_failures: number
+}
+
+export interface WorkflowAnalyticsDetail {
+  org_id: number | null
+  workflow: string
+  per_agent: AgentAnalytics[]
+  common_failure_points: FailurePoint[]
 }
 
 export interface AutomationResultPayload {

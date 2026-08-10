@@ -54,6 +54,9 @@ export default function Layout() {
               <NavLink to="/memory" className={({ isActive }) => (isActive ? 'active' : '')}>
                 Memory
               </NavLink>
+              <NavLink to="/trace" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Trace
+              </NavLink>
             </>
           )}
           <button type="button" className="logout-button" onClick={logOut}>

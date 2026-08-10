@@ -146,6 +146,49 @@ def test_self_service_kb_count_capped_per_org(client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_concurrent_first_uploads_of_a_new_name_do_not_silently_replace(client):
+    """Two concurrent first-time uploads of a name that doesn't exist yet can
+    both observe `existing is None` before either enters the per-KB lock.
+    Without re-checking existence inside that same lock, the second would
+    silently replace the first's documents instead of getting the
+    confirmation 409 this route exists to enforce (Codex review finding)."""
+    import threading
+    import time
+
+    from ui.backend.knowledge_bases import _kb_upload_lock
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+
+    # Simulate a first upload already inside its critical section.
+    lock = _kb_upload_lock(f"{org_id}/newkb")
+    lock.acquire()
+    done = []
+
+    def _second_upload():
+        resp = client.post(
+            "/api/org/knowledge-bases/newkb/upload",
+            files=_files(name="second.txt", content=b"Second uploader's content."),
+        )
+        done.append(resp.status_code)
+
+    worker = threading.Thread(target=_second_upload)
+    worker.start()
+    try:
+        time.sleep(0.5)
+        assert done == [], "the second upload must block on the per-KB lock, not race the existence check"
+
+        # What the first uploader would have committed by now.
+        with open_test_db() as db:
+            db.add(KnowledgeBaseRecord(name="newkb", org_id=org_id, config={"type": "local_folder", "path": "x"}))
+            db.commit()
+    finally:
+        lock.release()
+
+    worker.join(timeout=5)
+    assert done == [409], "second uploader must be refused, not silently replace the first"
+
+
 def test_self_service_upload_rejects_oversized_file(client):
     big = b"x" * (backend_org_kb._MAX_FILE_SIZE_BYTES + 1)
     resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(content=big))

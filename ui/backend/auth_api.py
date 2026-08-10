@@ -11,13 +11,17 @@ other routers use to require a logged-in user (router-level on
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import dataclasses
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import AuthError, create_access_token, decode_access_token_claims
 from .db.models import Organization, User
+from .db.orgs import get_org_by_name
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
 
@@ -121,6 +125,42 @@ def get_current_org(
     # Deactivation is enforced upstream in get_current_user (this dependency
     # runs after it), so an inactive org never reaches here.
     return org
+
+
+@dataclasses.dataclass
+class OrgScope:
+    """Resolved org filter for a read endpoint reachable by both an org
+    member (always forced to their own org) and a platform admin (an
+    explicit org, or none = cross-org). `org_id=None` only ever means
+    cross-org here -- a non-admin caller always gets a concrete `org_id`
+    (get_current_org already 403s an org-less non-admin)."""
+
+    org_id: Optional[int]
+    is_admin: bool
+
+
+def get_current_org_or_admin(
+    org: Optional[str] = Query(None, description="Platform admins only: filter by org name; omit for cross-org"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> OrgScope:
+    """Like `get_current_org`, but a platform admin may also pass `?org=`
+    to target one org, or omit it to see across every org.
+
+    For a regular org member `?org=` has no effect -- they're always forced
+    to their own org via `get_current_org`, exactly as today; the query
+    param simply doesn't apply to them, never a 400/403 for supplying it.
+    """
+    is_platform_admin = user.is_admin and user.org_id is None
+    if is_platform_admin:
+        if org is None:
+            return OrgScope(org_id=None, is_admin=True)
+        org_row = get_org_by_name(db, org)
+        if org_row is None:
+            raise HTTPException(status_code=404, detail=f"Unknown organization '{org}'")
+        return OrgScope(org_id=org_row.id, is_admin=True)
+    resolved = get_current_org(user, db)
+    return OrgScope(org_id=resolved.id, is_admin=False)
 
 
 @router.get("/me")

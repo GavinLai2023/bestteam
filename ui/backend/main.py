@@ -38,7 +38,7 @@ from . import automation_results
 from . import email_trigger
 from . import interview
 from . import secret_store
-from .auth_api import get_current_org, get_current_user, router as auth_router
+from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
@@ -47,6 +47,7 @@ from .admin_api import router as admin_router
 from .memory_api import router as memory_router
 from .org_knowledge_bases import router as org_knowledge_bases_router
 from .org_settings import router as org_settings_router
+from .run_analytics_api import router as run_analytics_router
 from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
@@ -54,6 +55,7 @@ from .db.models import (
     Run,
     SkillRecord,
     TraceEventRecord,
+    UsageRecord,
     User,
     WorkflowRecord,
     WorkflowVersion,
@@ -273,6 +275,7 @@ app.include_router(admin_router)
 app.include_router(org_settings_router)
 app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
+app.include_router(run_analytics_router)
 
 logger = logging.getLogger("bestteam.api")
 
@@ -602,6 +605,7 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
         .order_by(TraceEventRecord.seq)
         .all()
     )
+    usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id == run_id).all()
     return {
         "events": [
             {
@@ -612,7 +616,19 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
                 "created_at": iso_utc(row.created_at),
             }
             for row in rows
-        ]
+        ],
+        # Per-agent token/cost usage for this run -- additive; the existing
+        # customer-facing RunDetail.tsx only reads `events` and ignores this.
+        "usage": [
+            {
+                "agent": row.agent,
+                "model": row.model,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cost_estimate": row.cost_estimate,
+            }
+            for row in usage_rows
+        ],
     }
 
 
@@ -663,11 +679,12 @@ def list_runs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    org: Organization = Depends(get_current_org),
+    scope: OrgScope = Depends(get_current_org_or_admin),
 ):
-    """Manual + automatic run history for the Activity page's Runs tab.
-    Lightweight rows only (no input/output) -- full detail is `GET
-    /api/runs/{id}` and `GET /api/runs/{id}/trace`.
+    """Manual + automatic run history for the Activity page's Runs tab (and,
+    cross-org, the admin Trace page). Lightweight rows only (no
+    input/output) -- full detail is `GET /api/runs/{id}` and
+    `GET /api/runs/{id}/trace`.
 
     Bounded (`limit`/`offset`, default 50, max 200): autonomous runs
     accumulate indefinitely, so an unbounded query would grow DB work,
@@ -678,7 +695,13 @@ def list_runs(
     which only ever sees the in-memory registry) is how the Activity page's
     Needs-attention list resolves a specific run's real, persisted status
     before opening it -- it must never assume `completed` for a run that
-    could actually be `failed` (Codex review finding)."""
+    could actually be `failed` (Codex review finding).
+
+    A platform admin may pass `?org=<name>` to scope to one org, or omit it
+    to see across every org (`scope.org_id is None`); a regular org member
+    is always forced to their own org regardless of `?org=` (see
+    `get_current_org_or_admin`)."""
+    cross_org = scope.is_admin and scope.org_id is None
     if run_id:
         # An explicit run_id lookup is a targeted probe, not a filter over
         # this org's own history -- if it belongs to another org (or doesn't
@@ -687,9 +710,11 @@ def list_runs(
         # "doesn't exist" by comparing an empty `results` against a real 404
         # elsewhere (Codex review finding).
         owner_row = db.query(Run.org_id).filter(Run.id == run_id).one_or_none()
-        if owner_row is None or owner_row[0] != org.id:
+        if owner_row is None or (not cross_org and owner_row[0] != scope.org_id):
             raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
-    query = db.query(Run).filter(Run.org_id == org.id)
+    query = db.query(Run)
+    if scope.org_id is not None:
+        query = query.filter(Run.org_id == scope.org_id)
     if run_id:
         query = query.filter(Run.id == run_id)
     if workflow:
@@ -729,6 +754,14 @@ def list_runs(
         teams = config.get("teams") or []
         return teams[0].get("display_name") if teams else None
 
+    # Only meaningful (and only ever spans more than one org) for a
+    # cross-org admin listing -- batched the same way as version_configs
+    # above to avoid one Organization lookup per row.
+    org_ids = {row.org_id for row in rows if row.org_id is not None}
+    org_names = (
+        {o.id: o.name for o in db.query(Organization).filter(Organization.id.in_(org_ids))} if org_ids else {}
+    )
+
     return {
         "runs": [
             {
@@ -739,6 +772,8 @@ def list_runs(
                 "started_at": iso_utc(row.created_at),
                 "username": row.username,
                 "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
+                "org_id": row.org_id,
+                "org": org_names.get(row.org_id),
             }
             for row in rows
         ],

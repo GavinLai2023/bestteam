@@ -750,7 +750,7 @@ def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client
     )
 
     class _FakeArchitectChatModel:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             return SimpleNamespace(invoke=lambda messages: architect_drafted_spec)
 
     session_id = client.post("/api/builder/sessions", json={"intent_text": "handle support email"}).json()["id"]

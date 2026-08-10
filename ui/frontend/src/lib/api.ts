@@ -1,7 +1,7 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   Me, MemoryRecord, MemoryUserSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
-  Requirements,
+  Requirements, UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
 export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
@@ -238,9 +238,41 @@ export const api = {
       ),
     )
     const qs = params.toString()
-    return request<{ runs: RunListItem[] }>(`/api/runs${qs ? `?${qs}` : ''}`)
+    // total/limit/offset are optional here only so pre-existing test mocks
+    // that predate pagination don't need updating -- the real backend always
+    // sends them (see GET /api/runs in main.py).
+    return request<{ runs: RunListItem[]; total?: number; limit?: number; offset?: number }>(
+      `/api/runs${qs ? `?${qs}` : ''}`,
+    )
   },
-  getRunTrace: (id: string) => request<{ events: import('./types').TraceEvent[] }>(`/api/runs/${id}/trace`),
+  getRunTrace: (id: string) =>
+    // usage is optional for the same reason -- always present in the real
+    // response, but pre-existing test mocks predate it.
+    request<{ events: import('./types').TraceEvent[]; usage?: UsageRecord[] }>(`/api/runs/${id}/trace`),
+
+  // Admin: cross-org workflow-run analytics (Trace page).
+  listWorkflowAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<{ workflows: WorkflowAnalyticsSummary[] }>(`/api/admin/analytics/workflows${qs ? `?${qs}` : ''}`)
+  },
+  getWorkflowAnalytics: (name: string, filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<WorkflowAnalyticsDetail>(`/api/admin/analytics/workflows/${encodeURIComponent(name)}${qs ? `?${qs}` : ''}`)
+  },
 
   // Property Maintenance Inbox: structured, org-scoped automation results.
   listAutomationResults: (filters: Record<string, string | number | boolean | undefined | null> = {}) => {
@@ -338,7 +370,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  submitSpecification: (id: string, payload: { model: string }) =>
+  submitSpecification: (id: string, payload: { model: string; feedback?: string }) =>
     request<BuilderSession>(`/api/builder/sessions/${id}/specification`, {
       method: 'POST',
       body: JSON.stringify(payload),

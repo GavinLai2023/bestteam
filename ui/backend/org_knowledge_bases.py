@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from .auth_api import get_current_org
 from .db.models import KnowledgeBaseRecord, Organization
 from .db_session import get_db
-from .knowledge_bases import upload_knowledge_base
+from .knowledge_bases import _kb_upload_lock, upload_knowledge_base
 
 router = APIRouter(prefix="/api/org", tags=["org-knowledge-bases"])
 
@@ -64,35 +64,45 @@ def upload_own_knowledge_base(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
-    existing = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org.id).one_or_none()
-    if existing is None:
-        count = db.query(KnowledgeBaseRecord).filter_by(org_id=org.id).count()
-        if count >= _MAX_SELF_SERVICE_KBS_PER_ORG:
-            # 403, not 409 -- this isn't resolvable by confirming a replace
-            # (the frontend's 409 handler offers exactly that), it needs an
-            # admin to free up a slot.
+    # Hold the same per-KB lock upload_knowledge_base() itself takes across
+    # this existence/cap/replace-confirmation check too, not just inside it --
+    # otherwise two concurrent first uploads of the same not-yet-existing name
+    # can both observe `existing is None` before either takes the lock, and
+    # the second then silently replaces the first's documents once it
+    # acquires the lock, without ever getting the 409 this route exists to
+    # enforce (Codex review finding). The lock is reentrant, so
+    # upload_knowledge_base's own inner acquisition of the same key below
+    # doesn't deadlock.
+    with _kb_upload_lock(f"{org.id}/{item_name}"):
+        existing = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org.id).one_or_none()
+        if existing is None:
+            count = db.query(KnowledgeBaseRecord).filter_by(org_id=org.id).count()
+            if count >= _MAX_SELF_SERVICE_KBS_PER_ORG:
+                # 403, not 409 -- this isn't resolvable by confirming a replace
+                # (the frontend's 409 handler offers exactly that), it needs an
+                # admin to free up a slot.
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Your organisation has reached the limit of "
+                        f"{_MAX_SELF_SERVICE_KBS_PER_ORG} document collections. "
+                        "Ask an administrator to remove one before adding another."
+                    ),
+                )
+        elif not replace:
             raise HTTPException(
-                status_code=403,
+                status_code=409,
                 detail=(
-                    f"Your organisation has reached the limit of "
-                    f"{_MAX_SELF_SERVICE_KBS_PER_ORG} document collections. "
-                    "Ask an administrator to remove one before adding another."
+                    f"'{item_name}' already exists and may be used by another team. "
+                    "Choose a different name, or confirm to replace its documents."
                 ),
             )
-    elif not replace:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"'{item_name}' already exists and may be used by another team. "
-                "Choose a different name, or confirm to replace its documents."
-            ),
+        return upload_knowledge_base(
+            db,
+            org.id,
+            item_name,
+            files,
+            max_files=_MAX_FILES_PER_UPLOAD,
+            max_file_size_bytes=_MAX_FILE_SIZE_BYTES,
+            max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
         )
-    return upload_knowledge_base(
-        db,
-        org.id,
-        item_name,
-        files,
-        max_files=_MAX_FILES_PER_UPLOAD,
-        max_file_size_bytes=_MAX_FILE_SIZE_BYTES,
-        max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
-    )

@@ -33,7 +33,13 @@ def upgrade() -> None:
     finding). Idempotent: a row already holding a principal_id (set by the
     new code, or a second run of this migration) matches no username and is
     left untouched. Usernames are globally unique (`users.username`), so the
-    join needs no org scoping.
+    join needs no org scoping. Guards against username reuse: only backfills
+    a row whose `created_at` is not earlier than the matching user's own
+    `created_at` -- a workflow older than its username's current account
+    holder means that account didn't create it (a prior, deleted account
+    with the same username did), so rewriting it would hand a stranger's
+    workflows to the account that reused the name (Codex review finding).
+    Such a row is left with its stale username rather than guessed at.
     """
     conn = op.get_bind()
     conn.execute(
@@ -43,7 +49,11 @@ def upgrade() -> None:
             "  SELECT users.principal_id FROM users "
             "  WHERE users.username = workflows.created_by"
             ") "
-            "WHERE created_by IN (SELECT username FROM users)"
+            "WHERE EXISTS ("
+            "  SELECT 1 FROM users "
+            "  WHERE users.username = workflows.created_by "
+            "  AND users.created_at <= workflows.created_at"
+            ")"
         )
     )
 

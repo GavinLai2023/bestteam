@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from ..exceptions import ConfigurationError
+from ._structured_output import invoke_structured
 
 # Guides the "Business Analyst" agent (see docs/team_builder_methodology.md,
 # Requirements stage) from a customer's free-text Intent/As-is description to
@@ -71,18 +72,18 @@ def generate_requirements(
     `clarifying_questions`, or a correction) and is appended to the prompt so
     the analyst can revise its summary.
     """
+    content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
+    if feedback:
+        content += f"\n\nAdditional information from the customer:\n{feedback}"
+
     try:
-        structured_model = model.with_structured_output(Requirements)
+        result, _ = invoke_structured(
+            model, Requirements, [SystemMessage(content=_ANALYST_SYSTEM_PROMPT), HumanMessage(content=content)]
+        )
     except NotImplementedError as exc:
         raise ConfigurationError(
             "The Team Builder needs a real AI model that can produce structured "
             "output; the selected model can't (for example, a demo 'fake:' model). "
             "Choose a real model to design your team."
         ) from exc
-
-    content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
-    if feedback:
-        content += f"\n\nAdditional information from the customer:\n{feedback}"
-
-    result = structured_model.invoke([SystemMessage(content=_ANALYST_SYSTEM_PROMPT), HumanMessage(content=content)])
     return result if isinstance(result, Requirements) else Requirements.model_validate(result)
