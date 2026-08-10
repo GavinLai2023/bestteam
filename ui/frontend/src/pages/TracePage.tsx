@@ -327,6 +327,23 @@ export default function TracePage() {
                     </ul>
                   )}
 
+                  <h3>Per model</h3>
+                  {detail.per_model.length === 0 ? (
+                    <p className="hint">No per-model usage recorded yet.</p>
+                  ) : (
+                    <ul className="trace-agent-stats">
+                      {detail.per_model.map((m) => (
+                        <li key={m.model}>
+                          <span className="status-badge">{m.model}</span>
+                          {m.run_count} run(s) ·{' '}
+                          {m.avg_input_tokens != null ? Math.round(m.avg_input_tokens) : '—'} in /{' '}
+                          {m.avg_output_tokens != null ? Math.round(m.avg_output_tokens) : '—'} out tokens avg
+                          {m.avg_cost_estimate != null && <> · ${m.avg_cost_estimate.toFixed(4)} avg cost</>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
                   <h3>Common failure points</h3>
                   {detail.common_failure_points.length === 0 ? (
                     <p className="hint">No failures recorded in this scope.</p>

@@ -124,6 +124,14 @@ export interface AgentAnalytics {
   avg_duration_seconds: number | null
 }
 
+export interface ModelAnalytics {
+  model: string
+  run_count: number
+  avg_input_tokens: number | null
+  avg_output_tokens: number | null
+  avg_cost_estimate: number | null
+}
+
 export interface FailurePoint {
   agent: string | null
   event_type: string
@@ -135,6 +143,7 @@ export interface WorkflowAnalyticsDetail {
   org_id: number | null
   workflow: string
   per_agent: AgentAnalytics[]
+  per_model: ModelAnalytics[]
   common_failure_points: FailurePoint[]
 }
 

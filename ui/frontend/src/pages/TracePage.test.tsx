@@ -75,6 +75,7 @@ describe('TracePage', () => {
     mockedApi.getWorkflowAnalytics.mockResolvedValue({
       org_id: 1, workflow: 'wf',
       per_agent: [{ agent: 'agent-a', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05, avg_duration_seconds: 4 }],
+      per_model: [],
       common_failure_points: [],
     })
 
@@ -90,6 +91,36 @@ describe('TracePage', () => {
 
     expect(mockedApi.getWorkflowAnalytics).toHaveBeenCalledWith('wf', { org: 'org_a' })
     expect(await screen.findByText(/3 run\(s\)/)).toBeInTheDocument()
+  })
+
+  it('renders a per-model breakdown in the workflow detail panel', async () => {
+    mockedApi.listWorkflowAnalytics.mockResolvedValue({
+      workflows: [
+        {
+          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
+          total_input_tokens: 300, total_output_tokens: 60, total_cost_estimate: 0.4,
+        },
+      ],
+    })
+    mockedApi.getWorkflowAnalytics.mockResolvedValue({
+      org_id: 1, workflow: 'wf',
+      per_agent: [],
+      per_model: [{ model: 'openai:gpt-4o-mini', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05 }],
+      common_failure_points: [],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+    const row = await screen.findByText('wf')
+    await act(async () => {
+      fireEvent.click(row)
+    })
+
+    expect(await screen.findByText('openai:gpt-4o-mini')).toBeInTheDocument()
+    expect(screen.getByText(/100 in \/ 20 out tokens avg/)).toBeInTheDocument()
   })
 
   it('renders token and cost totals in the summary table', async () => {
