@@ -1,7 +1,7 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
-  Me, MemoryRecord, MemoryUserSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
-  Requirements,
+  Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
+  Requirements, UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
 export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
@@ -17,6 +17,35 @@ interface ApiError extends Error {
 // org-less model catalog). Omitting it on an org-scoped item route is a 422.
 function orgQuery(org: string | null | undefined): string {
   return org ? `?${new URLSearchParams({ org })}` : ''
+}
+
+interface ValidationErrorItem {
+  loc?: unknown[]
+  msg?: unknown
+}
+
+function isValidationErrors(detail: unknown): detail is ValidationErrorItem[] {
+  return Array.isArray(detail) && detail.every((d) => d !== null && typeof d === 'object' && 'msg' in d)
+}
+
+// FastAPI/Pydantic v2 request-validation failures put a list of error objects
+// in `detail` (each with `loc`/`msg`) rather than a string -- dumping that
+// raw as JSON is unreadable. Render each as "<field>: <message>", dropping
+// the leading "body"/"query"/"path" location segment and Pydantic's "Value
+// error, " prefix on custom validator messages.
+function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (isValidationErrors(detail)) {
+    return detail
+      .map((d) => {
+        const loc = Array.isArray(d.loc) ? d.loc.filter((s) => s !== 'body' && s !== 'query' && s !== 'path') : []
+        const field = loc.join('.')
+        const msg = String(d.msg).replace(/^Value error, /, '')
+        return field ? `${field}: ${msg}` : msg
+      })
+      .join('; ')
+  }
+  return JSON.stringify(detail)
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -50,7 +79,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     // reachable, e.g. a 403) apart from a network failure (fetch rejects with
     // no status). A network failure surfaces as a TypeError from fetch above
     // and never reaches this branch.
-    const error: ApiError = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    const error: ApiError = new Error(formatErrorDetail(detail))
     error.status = res.status
     throw error
   }
@@ -86,7 +115,7 @@ async function uploadSingleFile<T>(path: string, file: File, fields: Record<stri
     } catch {
       // no JSON body
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new Error(formatErrorDetail(detail))
   }
 
   return res.json()
@@ -119,7 +148,11 @@ async function uploadFiles<T>(path: string, files: File[], fields: Record<string
     } catch {
       // response had no JSON body
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    // Carry the HTTP status so callers can distinguish e.g. a 409 "confirm to
+    // replace" response from any other upload failure (mirrors `request()`).
+    const error: ApiError = new Error(formatErrorDetail(detail))
+    error.status = res.status
+    throw error
   }
 
   return res.json()
@@ -205,9 +238,52 @@ export const api = {
       ),
     )
     const qs = params.toString()
-    return request<{ runs: RunListItem[] }>(`/api/runs${qs ? `?${qs}` : ''}`)
+    // total/limit/offset are optional here only so pre-existing test mocks
+    // that predate pagination don't need updating -- the real backend always
+    // sends them (see GET /api/runs in main.py).
+    return request<{ runs: RunListItem[]; total?: number; limit?: number; offset?: number }>(
+      `/api/runs${qs ? `?${qs}` : ''}`,
+    )
   },
-  getRunTrace: (id: string) => request<{ events: import('./types').TraceEvent[] }>(`/api/runs/${id}/trace`),
+  getRunTrace: (id: string) =>
+    // usage is optional for the same reason -- always present in the real
+    // response, but pre-existing test mocks predate it.
+    request<{ events: import('./types').TraceEvent[]; usage?: UsageRecord[] }>(`/api/runs/${id}/trace`),
+
+  // Admin: cross-org workflow-run analytics (Trace page).
+  listWorkflowAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<{ workflows: WorkflowAnalyticsSummary[] }>(`/api/admin/analytics/workflows${qs ? `?${qs}` : ''}`)
+  },
+  listModelAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<{ models: ModelAnalyticsSummary[] }>(`/api/admin/analytics/models${qs ? `?${qs}` : ''}`)
+  },
+  getWorkflowAnalytics: (name: string, filters: Record<string, string | number | undefined | null> = {}) => {
+    const params = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(filters)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ),
+    )
+    const qs = params.toString()
+    return request<WorkflowAnalyticsDetail>(`/api/admin/analytics/workflows/${encodeURIComponent(name)}${qs ? `?${qs}` : ''}`)
+  },
 
   // Property Maintenance Inbox: structured, org-scoped automation results.
   listAutomationResults: (filters: Record<string, string | number | boolean | undefined | null> = {}) => {
@@ -259,6 +335,16 @@ export const api = {
       files,
     ),
 
+  // Org self-service: build your own knowledge base by uploading documents
+  // (the wizard's "Your documents" step). Org resolves server-side from the
+  // token, unlike the admin uploadKnowledgeBaseFiles above.
+  uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false) =>
+    uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
+      files,
+      { replace },
+    ),
+
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),
   setOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
@@ -295,7 +381,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  submitSpecification: (id: string, payload: { model: string }) =>
+  submitSpecification: (id: string, payload: { model: string; feedback?: string }) =>
     request<BuilderSession>(`/api/builder/sessions/${id}/specification`, {
       method: 'POST',
       body: JSON.stringify(payload),

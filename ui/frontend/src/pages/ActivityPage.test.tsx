@@ -59,14 +59,50 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({})
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ offset: 0 })
 
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Team'), { target: { value: 'wf-b' } })
     })
 
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b' })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b', offset: 0 })
+  })
+
+  it('shows the team\'s customer-facing display name instead of the internal technical name', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        {
+          id: 'r1',
+          workflow: 'customer_support_team',
+          team_display_name: 'Customer Support Team',
+          status: 'completed',
+          started_at: '2026-07-31T11:00:00Z',
+          autonomous: false,
+        },
+      ],
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+
+    expect(await screen.findByRole('heading', { name: 'Customer Support Team' })).toBeInTheDocument()
+    expect(screen.queryByText('customer_support_team')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the internal technical name when no team display name is available', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [{ id: 'r1', workflow: 'wf-a', team_display_name: null, status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+
+    expect(await screen.findByRole('heading', { name: 'wf-a' })).toBeInTheDocument()
   })
 
   it('shows a run\'s start time as "DD MMM YYYY, h:mm AM/PM"', async () => {
@@ -185,7 +221,7 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false, offset: 0 })
   })
 
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {

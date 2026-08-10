@@ -51,13 +51,14 @@ export default function DeployPage() {
       <div className="wizard-card">
         <h2>Your team is live 🎉</h2>
         <p className="banner banner-success">"{spec.name}" is up and running and ready to take on real requests.</p>
+        {session.uses_email && <EmailConnect />}
         {session.uses_email && <EmailTriggerToggle workflowName={spec.name} />}
         <div className="wizard-actions">
-          <button className="btn btn-primary" onClick={() => navigate(`/?workflow=${encodeURIComponent(spec.name)}`)}>
-            Run a team
-          </button>
-          <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
+          <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
             Make more adjustments
+          </button>
+          <button className="btn btn-secondary" onClick={() => navigate(`/run?workflow=${encodeURIComponent(spec.name)}`)}>
+            Run a team
           </button>
         </div>
       </div>

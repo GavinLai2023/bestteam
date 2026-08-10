@@ -164,6 +164,40 @@ describe('SessionsPage card description', () => {
   })
 })
 
+describe('SessionsPage card title', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+  })
+
+  it("shows the team's customer-facing display_name instead of the internal technical name", async () => {
+    mockedApi.listSessions.mockResolvedValue({
+      sessions: [
+        session({
+          specification_json: {
+            name: 'customer_support_team',
+            agents: [],
+            teams: [{ name: 't1', mode: 'sequential', agents: [], display_name: 'Customer Support Team' }],
+          },
+        }),
+      ],
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Customer Support Team')).toBeInTheDocument()
+    expect(screen.queryByText('customer_support_team')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the internal technical name when no team display_name is set yet', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ specification_json: { name: 'my-team', agents: [], teams: [] } })] })
+
+    renderPage()
+
+    expect(await screen.findByText('my-team')).toBeInTheDocument()
+  })
+})
+
 describe('SessionsPage status grouping', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -367,6 +401,6 @@ describe('SessionsPage session-less deployed workflows', () => {
       fireEvent.click(card)
     })
 
-    expect(mockNavigate).toHaveBeenCalledWith('/?workflow=orphan_team')
+    expect(mockNavigate).toHaveBeenCalledWith('/run?workflow=orphan_team')
   })
 })

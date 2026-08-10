@@ -1,5 +1,8 @@
 """Tests for the builder session state-machine API (Phase 2)."""
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -7,7 +10,8 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec
+from helpers import create_user_and_login, get_user_principal_id
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
@@ -207,6 +211,19 @@ def test_create_session_starts_in_intent_stage(client):
     assert body["feedback_history"] == []
 
 
+def test_session_timestamps_carry_an_explicit_utc_marker(client):
+    # A timestamp with no timezone marker (e.g. "2026-08-08T10:27:00") is
+    # parsed by JS `Date` as local time, not UTC -- on My Teams that showed
+    # the wrong wall-clock time versus Activity's (already-marked) timestamps
+    # for the very same run, a several-hour discrepancy depending on the
+    # viewer's timezone.
+    resp = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"})
+    body = resp.json()
+    for field in ("created_at", "updated_at"):
+        value = body[field]
+        assert value.endswith("Z") or "+00:00" in value, f"{field}={value!r} has no explicit UTC marker"
+
+
 def test_get_session_returns_404_for_unknown_id(client):
     resp = client.get("/api/builder/sessions/does-not-exist")
     assert resp.status_code == 404
@@ -246,10 +263,15 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
         headers=_admin_headers(client),
     ).status_code == 200
 
+    principal_id = get_user_principal_id()
     with open_test_db() as db:
         db.get(BuilderSession, session_id).updated_at = datetime(2020, 1, 1)
         advanced = db.query(WorkflowRecord).filter_by(name="newer_advanced_team").one()
         advanced.updated_at = datetime(2030, 1, 1)
+        # An orphan (no-session) workflow only shows on My Teams for the user
+        # who owns it -- simulate an admin deploying this one on behalf of the
+        # test client's own user, so this test can focus on ordering.
+        advanced.created_by = principal_id
         db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
@@ -257,13 +279,17 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
     assert sessions[0]["specification_json"]["name"] == "newer_advanced_team"
 
 
-def test_list_sessions_includes_deployed_workflows_with_no_builder_session(client):
-    # A workflow can be deployed straight through the admin Advanced/CRUD
-    # page, bypassing the wizard entirely -- it should still show up on My
-    # Teams (as a session-shaped entry with id=None) instead of being
-    # invisible there while still being runnable from Run a Team. The CRUD
-    # path builds `Agent(**spec)` directly (ui/backend/CLAUDE.md), so its raw
-    # config has no wizard-only display_name/friendly_description fields.
+def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
+    # A workflow with no recorded creator (a legacy pre-migration row, or one
+    # deployed to an org before it had a member) must NOT clutter an org
+    # member's My Teams list -- that list should only ever show teams the
+    # member personally built. It remains runnable from Run a Team (see
+    # /api/workflows' own creator filter, which treats an unowned workflow as
+    # an admin-shared template). A normal CRUD deploy to an org that already
+    # has its one member auto-attributes to them (see
+    # test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member
+    # below), so the no-owner state is simulated directly here rather than
+    # via that path.
     raw_workflow_config = {
         "knowledge_bases": [],
         "agents": [
@@ -284,11 +310,134 @@ def test_list_sessions_includes_deployed_workflows_with_no_builder_session(clien
     )
     assert resp.status_code == 200
 
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="orphan_team").one()
+        record.created_by = None
+        db.commit()
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "orphan_team" not in names
+
+
+def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client):
+    # A CRUD-page deploy to an org that already has its one member (the
+    # "one member per org" invariant, ui/backend/db/CLAUDE.md) auto-stamps
+    # created_by to that member (crud.py::upsert_workflow_config) -- so it
+    # shows up on their My Teams instead of being permanently invisible
+    # there, without needing any manual attribution step.
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    resp = client.put(
+        "/api/config/workflows/auto_owned_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/builder/sessions")
+
+    assert resp.status_code == 200
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "auto_owned_team" in names
+
+
+def test_workflow_owned_by_a_stale_username_string_is_not_visible_to_the_current_principal(client):
+    # Regression test (Codex review finding): WorkflowRecord.created_by must
+    # bind to the immutable User.principal_id, not the reusable username --
+    # otherwise deleting an account and creating a new one with the same
+    # username would let the new account see/run the old account's personal
+    # workflows. A row whose created_by is literally the plain username
+    # string "test" (as it would be under the old, vulnerable comparison, or
+    # if left over from before this fix) must NOT match the current "test"
+    # user's own principal_id (a random, unrelated string).
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    resp = client.put(
+        "/api/config/workflows/legacy_owned_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    )
+    assert resp.status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="legacy_owned_team").one()
+        record.created_by = "test"  # a plain username string, not a principal_id
+        db.commit()
+
+    resp = client.get("/api/builder/sessions")
+
+    names = [s["specification_json"]["name"] for s in resp.json()["sessions"]]
+    assert "legacy_owned_team" not in names
+
+
+def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
+    # An orphan workflow (no matching BuilderSession) that DOES carry this
+    # user's own username as its creator -- e.g. its session was removed out
+    # of band -- should still show up, unlike the no-owner case above.
+    raw_workflow_config = {
+        "knowledge_bases": [],
+        "agents": [
+            {
+                "name": "support_agent",
+                "role": "Customer Support Specialist",
+                "goal": "Answer customer questions",
+                "model": "fake:hello",
+            }
+        ],
+        "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
+        "workflow": {"steps": ["support_team"]},
+    }
+    assert client.put(
+        "/api/config/workflows/owned_orphan_team?org=default",
+        json=raw_workflow_config,
+        headers=_admin_headers(client),
+    ).status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    principal_id = get_user_principal_id()
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="owned_orphan_team").one()
+        record.created_by = principal_id
+        db.commit()
+
     resp = client.get("/api/builder/sessions")
 
     assert resp.status_code == 200
     sessions = resp.json()["sessions"]
-    orphan = next(s for s in sessions if s["specification_json"]["name"] == "orphan_team")
+    orphan = next(s for s in sessions if s["specification_json"]["name"] == "owned_orphan_team")
     assert orphan["id"] is None
     assert orphan["status"] == "deployed"
     assert orphan["workflow_id"] is not None
@@ -361,6 +510,15 @@ def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
         json={"instructions": "No mail now.", "tools": []},
         headers=admin,
     ).status_code == 200
+
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    principal_id = get_user_principal_id()
+    with open_test_db() as db:
+        record = db.query(WorkflowRecord).filter_by(name="advanced_email_team").one()
+        record.created_by = principal_id
+        db.commit()
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
     synthetic = next(
@@ -562,6 +720,76 @@ def test_solution_feedback_appends_history_and_accepts_revised_spec(client):
     assert body["status"] == "solution"
     assert len(body["feedback_history"]) == 1
     assert body["feedback_history"][0]["note"] == "Looks good"
+
+
+def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client):
+    """Customer report: picking a model in the wizard's "Which assistant should
+    make this change?" control had no effect on the deployed agents' models --
+    the architect assigned each agent whatever it judged best for that role,
+    independent of the customer's own pick. The architect call itself may use
+    any model internally; every agent in the *resulting* spec must end up on
+    the model the customer picked."""
+    architect_drafted_spec = Specification(
+        name="support_workflow",
+        agents=[
+            AgentSpec(
+                name="support_agent",
+                role="Customer Support Specialist",
+                goal="Answer customer questions",
+                model="openai:gpt-4o-mini",
+            ),
+            AgentSpec(
+                name="drafting_agent",
+                role="Response Drafter",
+                goal="Draft replies",
+                model="openai:gpt-4o",
+            ),
+        ],
+        teams=[TeamSpec(name="support_team", agents=["support_agent", "drafting_agent"])],
+        workflow=WorkflowSpec(steps=["support_team"]),
+    )
+
+    class _FakeArchitectChatModel:
+        def with_structured_output(self, schema, **kwargs):
+            return SimpleNamespace(invoke=lambda messages: architect_drafted_spec)
+
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "handle support email"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "Make replies friendlier", "model": "deepseek:friendly-assistant"},
+        )
+
+    assert resp.status_code == 200
+    agents = resp.json()["specification_json"]["agents"]
+    assert len(agents) == 2
+    assert {a["model"] for a in agents} == {"deepseek:friendly-assistant"}
+
+
+def test_solution_feedback_with_blank_feedback_skips_architect_and_repins_model(client):
+    """The wizard's feedback box is optional -- a customer switching which
+    assistant their team uses, with nothing else to describe, must not need to
+    invent filler feedback text. That case should keep the current design
+    as-is (no architect call, no drift) and just re-pin every agent's model."""
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "handle support email"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_specification") as mock_generate:
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "   ", "model": "deepseek:friendly-assistant"},
+        )
+
+    assert resp.status_code == 200
+    mock_generate.assert_not_called()
+    body = resp.json()
+    assert body["feedback_history"] == []
+    agents = body["specification_json"]["agents"]
+    assert len(agents) == len(_VALID_SPEC["agents"])
+    assert {a["model"] for a in agents} == {"deepseek:friendly-assistant"}
 
 
 def test_test_run_requires_specification(client):
@@ -785,6 +1013,27 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     ).json()
     assert config["status"] == "deployed"
     assert config["config"]["name"] == "support_workflow"
+
+
+def test_deployed_config_preserves_team_display_name(client):
+    # Codex review finding: Specification.to_raw() deliberately strips
+    # TeamSpec.display_name/friendly_description (it matches the engine
+    # loader's minimal shape -- see test_to_raw_strips_friendly_fields_and_
+    # matches_loader_shape in test_specification.py). But GET /api/runs'
+    # team_display_name (main.py) reads display_name from this exact
+    # persisted config, so a wizard deploy must merge it back in for what
+    # gets persisted, without changing to_raw()'s own contract.
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    resp = client.post(f"/api/builder/sessions/{session_id}/deploy")
+    assert resp.status_code == 200
+
+    config = client.get(
+        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+    ).json()["config"]
+    assert config["teams"][0]["display_name"] == "Support Team"
+    assert config["teams"][0]["friendly_description"] == "The support specialist handles every request."
 
 
 def test_deployed_workflow_can_be_run_via_get_workflow(client):

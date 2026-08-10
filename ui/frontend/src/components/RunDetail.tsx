@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { WS_BASE, api } from '../lib/api'
+import { useEffect, useState } from 'react'
+import { api } from '../lib/api'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
-import type { AutomationResult, TraceEvent } from '../lib/types'
+import { useRunTrace } from '../lib/useRunTrace'
+import type { AutomationResult } from '../lib/types'
 import '../pages/MonitorPage.css' // reuses .event/.event-*/.result styling
 
 interface RunDetailProps {
@@ -13,17 +14,14 @@ interface RunDetailProps {
 
 type RetryState = 'idle' | 'retrying' | 'error'
 
-// A run's event timeline, for the Activity page's Runs tab. A `running` run
-// streams live over the same WebSocket MonitorPage uses; anything else reads
-// its persisted trace via GET /api/runs/{id}/trace -- no live/historical
-// merge, per the read endpoint's design (see docs/superpowers/specs).
+// A run's event timeline, for the Activity page's Runs tab. See
+// lib/useRunTrace.ts for the live-WS-vs-historical-fetch mechanics (shared
+// with the admin Trace page's AdminRunDetail).
 export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
-  const [events, setEvents] = useState<TraceEvent[]>([])
-  const [error, setError] = useState<string | null>(null)
+  const { events, error } = useRunTrace(runId, status)
   const [automationResults, setAutomationResults] = useState<AutomationResult[]>([])
   const [retryState, setRetryState] = useState<RetryState>('idle')
   const [retryError, setRetryError] = useState<string | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
 
   // Property Maintenance Inbox: this run's structured results, if any (most
   // runs have none -- only autonomous email-triggered runs whose output
@@ -58,47 +56,6 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
       setRetryError((e as Error).message)
     }
   }
-
-  // Callers key this component by runId (see ActivityPage) so switching to a
-  // different run remounts it -- a fresh `events`/`error` state -- rather
-  // than needing to reset them here.
-  useEffect(() => {
-    if (status === 'running') {
-      let cancelled = false
-      ;(async () => {
-        try {
-          const { ticket } = await api.createWsTicket()
-          if (cancelled) return
-          const ws = new WebSocket(`${WS_BASE}/api/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`)
-          wsRef.current = ws
-          ws.onmessage = (message: MessageEvent<string>) => {
-            const event = JSON.parse(message.data) as TraceEvent
-            setEvents((prev) => [...prev, event])
-          }
-          ws.onerror = () => setError("Couldn't stream this run.")
-        } catch (e) {
-          if (!cancelled) setError((e as Error).message)
-        }
-      })()
-      return () => {
-        cancelled = true
-        wsRef.current?.close()
-      }
-    }
-
-    let ignore = false
-    api
-      .getRunTrace(runId)
-      .then((data) => {
-        if (!ignore) setEvents(data.events)
-      })
-      .catch((e: Error) => {
-        if (!ignore) setError(e.message)
-      })
-    return () => {
-      ignore = true
-    }
-  }, [runId, status])
 
   const finalEvent = events.find((e) => e.type === finalEventType)
 

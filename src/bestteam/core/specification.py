@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from pydantic import BaseModel, Field, field_validator
 
 from ..exceptions import ConfigurationError
+from ._structured_output import invoke_structured
 from .loader import _build_workflow
 from .workflow import Workflow
 
@@ -253,23 +254,22 @@ def generate_specification(
     fails, the `ConfigurationError` is turned into feedback appended to the
     conversation and the architect tries again, up to `max_attempts` times.
     """
-    try:
-        structured_model = model.with_structured_output(Specification)
-    except NotImplementedError as exc:
-        raise ConfigurationError(
-            "The Team Builder needs a real AI model that can produce structured "
-            "output; the selected model can't (for example, a demo 'fake:' model). "
-            "Choose a real model to design your team."
-        ) from exc
-
     messages: List[BaseMessage] = [
         SystemMessage(content=_ARCHITECT_SYSTEM_PROMPT),
         HumanMessage(content=requirements),
     ]
 
     last_error: Optional[ConfigurationError] = None
+    method = "function_calling"
     for _ in range(max_attempts):
-        result = structured_model.invoke(messages)
+        try:
+            result, method = invoke_structured(model, Specification, messages, method=method)
+        except NotImplementedError as exc:
+            raise ConfigurationError(
+                "The Team Builder needs a real AI model that can produce structured "
+                "output; the selected model can't (for example, a demo 'fake:' model). "
+                "Choose a real model to design your team."
+            ) from exc
         spec = result if isinstance(result, Specification) else Specification.model_validate(result)
         try:
             if pre_validate is not None:

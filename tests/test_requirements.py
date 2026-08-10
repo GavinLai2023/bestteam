@@ -82,6 +82,41 @@ def test_generate_requirements_with_fake_model_raises_clear_error():
         generate_requirements(fake, "Help me with my email.")
 
 
+class _ThinkingModeRejectsForcedToolChoice(BaseChatModel):
+    """Simulates a reasoning/"thinking mode" model (e.g. DeepSeek's reasoning
+    models) that rejects a forced `tool_choice`, matching the real provider
+    error `generate_requirements` must fall back past
+    (see `core/_structured_output.py`)."""
+
+    response: Any = None
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise NotImplementedError
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-thinking-mode"
+
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):
+        if method == "function_calling":
+
+            def _reject(_input):
+                raise Exception("Thinking mode does not support this tool_choice")
+
+            return RunnableLambda(_reject)
+        response = self.response
+        return RunnableLambda(lambda _input: response)
+
+
+def test_generate_requirements_falls_back_to_json_mode_when_model_rejects_forced_tool_choice():
+    expected = Requirements(summary="Updated summary")
+    model = _ThinkingModeRejectsForcedToolChoice(response=expected)
+
+    result = generate_requirements(model, "Help me with my email.")
+
+    assert result == expected
+
+
 def test_requirements_to_prompt_renders_sections():
     requirements = Requirements(
         summary="Faster support.",

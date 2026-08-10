@@ -24,6 +24,8 @@ function MonitorPage() {
   const [hasRunId, setHasRunId] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [secondsSinceLastEvent, setSecondsSinceLastEvent] = useState(0)
+  const [traceExpanded, setTraceExpanded] = useState(false)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const wsRef = useRef<WebSocket | null>(null)
   const runIdRef = useRef<string | null>(null)
   const runStartedAtRef = useRef<number | null>(null)
@@ -85,6 +87,8 @@ function MonitorPage() {
     setElapsedSeconds(0)
     setSecondsSinceLastEvent(0)
     setHasRunId(false)
+    setTraceExpanded(false)
+    setCopyState('idle')
     wsRef.current?.close()
     // Clear immediately -- otherwise a Stop click in the window before the
     // new run id arrives below would silently target the previous run.
@@ -208,31 +212,63 @@ function MonitorPage() {
         </section>
       )}
 
-      <section className="trace">
-        <h2>Live trace</h2>
-        {events.length === 0 ? (
-          <p className="hint">No run yet — pick a team and hit Run.</p>
-        ) : (
-          <ul>
-            {events.map((event, i) => (
-              <li key={i} className={`event event-${event.type}`}>
-                <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
-                {event.agent && <span className="event-agent">{event.agent}</span>}
-                <p className="event-data">{renderEventData(event)}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
       {finalEvent && (
         <section className={`result result-${finalEvent.type}`}>
           <h2>{RESULT_LABELS[finalEvent.type]}</h2>
           {/* Safe: terminal-event `data` is guaranteed to be a string by the backend's
               event-emission contract, unlike PreviewPage.tsx's more defensive handling. */}
           <p>{finalEvent.data as string}</p>
+          <div className="result-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={async () => {
+                if (!navigator.clipboard) {
+                  setCopyState('failed')
+                  return
+                }
+                try {
+                  await navigator.clipboard.writeText(finalEvent.data as string)
+                  setCopyState('copied')
+                } catch {
+                  setCopyState('failed')
+                }
+              }}
+            >
+              {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? "Couldn't copy" : 'Copy'}
+            </button>
+            <button type="button" onClick={startRun}>
+              Run again
+            </button>
+          </div>
         </section>
       )}
+
+      <section className="trace">
+        <div className="trace-header">
+          <h2>Live trace</h2>
+          {finalEvent && (
+            <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
+              {traceExpanded ? 'Hide technical trace' : 'Show technical trace'}
+            </button>
+          )}
+        </div>
+        {!finalEvent || traceExpanded ? (
+          events.length === 0 ? (
+            <p className="hint">No run yet — pick a team and hit Run.</p>
+          ) : (
+            <ul>
+              {events.map((event, i) => (
+                <li key={i} className={`event event-${event.type}`}>
+                  <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
+                  {event.agent && <span className="event-agent">{event.agent}</span>}
+                  <p className="event-data">{renderEventData(event)}</p>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : null}
+      </section>
     </div>
   )
 }

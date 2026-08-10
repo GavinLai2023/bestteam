@@ -8,6 +8,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 8px;
   padding: 14px 24px;
   background: #fff;
   border-bottom: 1px solid #e5e7eb;
@@ -21,7 +23,25 @@
 
 .top-nav-links {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+/* Below this, the links (4 nav items + Log out) no longer fit on the brand's
+   row without either wrapping or overflowing -- wrap them onto their own
+   row instead of pushing the brand/Log out off-screen (finding: nav
+   overflows and clips content horizontally at 390px). */
+@media (max-width: 480px) {
+  .top-nav-links {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .top-nav-links a,
+  .logout-button {
+    padding: 6px 10px;
+    font-size: 0.85rem;
+  }
 }
 
 .top-nav-links a {

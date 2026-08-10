@@ -22,9 +22,15 @@ from bestteam.exceptions import ConfigurationError
 class _FakeArchitectChatModel(BaseChatModel):
     """Cycles through pre-scripted Specification objects via `with_structured_output`,
     independent of `bind_tools`/tool-calling -- lets tests script a Solution
-    Architect's structured outputs without a real provider."""
+    Architect's structured outputs without a real provider.
+
+    The response index lives on the instance (not a `with_structured_output`-local
+    closure) so it still advances correctly if a caller builds a fresh
+    `with_structured_output(...)` runnable on each retry, matching how a real
+    `BaseChatModel`'s stateless `with_structured_output` behaves."""
 
     responses: List[Any] = Field(default_factory=list)
+    call_index: List[int] = Field(default_factory=lambda: [0])
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise NotImplementedError
@@ -35,11 +41,11 @@ class _FakeArchitectChatModel(BaseChatModel):
 
     def with_structured_output(self, schema, **kwargs):
         responses = self.responses
-        state = {"index": 0}
+        state = self.call_index
 
         def _invoke(_input):
-            i = min(state["index"], len(responses) - 1)
-            state["index"] += 1
+            i = min(state[0], len(responses) - 1)
+            state[0] += 1
             return responses[i]
 
         return RunnableLambda(_invoke)
@@ -254,6 +260,41 @@ def test_generate_specification_with_fake_model_raises_clear_error(tmp_path):
     fake = FakeListChatModel(responses=["anything"])
     with pytest.raises(ConfigurationError, match="real AI model"):
         generate_specification(fake, "We need help answering emails.", source=tmp_path / "workflow.yaml")
+
+
+class _ThinkingModeRejectsForcedToolChoice(BaseChatModel):
+    """Simulates a reasoning/"thinking mode" model (e.g. DeepSeek's reasoning
+    models) that rejects a forced `tool_choice`, matching the real provider
+    error `generate_specification` must fall back past
+    (see `core/_structured_output.py`)."""
+
+    response: Any = None
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise NotImplementedError
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-thinking-mode"
+
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):
+        if method == "function_calling":
+
+            def _reject(_input):
+                raise Exception("Thinking mode does not support this tool_choice")
+
+            return RunnableLambda(_reject)
+        response = self.response
+        return RunnableLambda(lambda _input: response)
+
+
+def test_generate_specification_falls_back_to_json_mode_when_model_rejects_forced_tool_choice(tmp_path):
+    valid = _basic_spec()
+    model = _ThinkingModeRejectsForcedToolChoice(response=valid)
+
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+
+    assert spec == valid
 
 
 def test_generate_specification_calls_pre_validation(tmp_path):

@@ -14,9 +14,10 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db.models import Run
 from ui.backend.db_session import get_db
 
 _WORKFLOW_CONFIG = {
@@ -169,6 +170,69 @@ def test_same_named_workflow_runs_independently_per_org(rig):
     a_events = client.get(f"/api/runs/{a_run.json()['run_id']}", headers=headers["alice"])
     b_events = client.get(f"/api/runs/{b_run.json()['run_id']}", headers=headers["bob"])
     assert a_events.status_code == 200 and b_events.status_code == 200
+
+
+# --- GET /api/runs admin cross-org passthrough (get_current_org_or_admin) ---
+
+
+def test_list_runs_admin_sees_across_orgs_by_default(rig):
+    """An org member is always forced to their own org (get_current_org,
+    unchanged); a platform admin sees every org's runs when ?org= is
+    omitted, and can narrow to one with ?org=<name>."""
+    client, headers, _ = rig
+    org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
+    with open_test_db() as db:
+        db.add(Run(id="run-a", workflow="wf", input="x", status="completed", org_id=org_a, username="alice"))
+        db.add(Run(id="run-b", workflow="wf", input="x", status="completed", org_id=org_b, username="bob"))
+        db.commit()
+
+    alice_ids = {r["id"] for r in client.get("/api/runs", headers=headers["alice"]).json()["runs"]}
+    assert alice_ids == {"run-a"}
+
+    op_all = client.get("/api/runs", headers=headers["op"]).json()["runs"]
+    assert {r["id"] for r in op_all} == {"run-a", "run-b"}
+    assert {r["org"] for r in op_all} == {"org_a", "org_b"}
+
+    op_scoped = client.get("/api/runs", params={"org": "org_a"}, headers=headers["op"]).json()["runs"]
+    assert {r["id"] for r in op_scoped} == {"run-a"}
+    assert op_scoped[0]["org"] == "org_a"
+
+
+def test_list_runs_org_member_org_param_has_no_effect(rig):
+    """A regular org member can't use ?org= to peek at another org -- the
+    param is silently ignored for them (never a leak, never an error), same
+    as today's behavior with no ?org= at all."""
+    client, headers, _ = rig
+    org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
+    with open_test_db() as db:
+        db.add(Run(id="run-a", workflow="wf", input="x", status="completed", org_id=org_a, username="alice"))
+        db.add(Run(id="run-b", workflow="wf", input="x", status="completed", org_id=org_b, username="bob"))
+        db.commit()
+
+    resp = client.get("/api/runs", params={"org": "org_b"}, headers=headers["alice"])
+    assert resp.status_code == 200
+    assert {r["id"] for r in resp.json()["runs"]} == {"run-a"}
+
+
+def test_list_runs_admin_unknown_org_is_404(rig):
+    client, headers, _ = rig
+    resp = client.get("/api/runs", params={"org": "does-not-exist"}, headers=headers["op"])
+    assert resp.status_code == 404
+
+
+def test_list_runs_by_run_id_admin_cross_org_passthrough(rig):
+    """The explicit run_id probe mirrors GET /api/runs/{id}'s own admin
+    passthrough: an admin without ?org= can look up any run; scoped to a
+    different org via ?org=, it's a 404 same as an org member's."""
+    client, headers, _ = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        db.add(Run(id="run-a", workflow="wf", input="x", status="completed", org_id=org_a, username="alice"))
+        db.commit()
+
+    assert client.get("/api/runs", params={"run_id": "run-a"}, headers=headers["op"]).status_code == 200
+    resp = client.get("/api/runs", params={"run_id": "run-a", "org": "org_b"}, headers=headers["op"])
+    assert resp.status_code == 404
 
 
 def test_workflow_cannot_reference_another_orgs_knowledge_base(rig, tmp_path):

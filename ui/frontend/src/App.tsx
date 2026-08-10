@@ -2,12 +2,15 @@ import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import WizardLayout from './components/WizardLayout'
 import LoginPage from './pages/LoginPage'
+import LandingPage from './pages/LandingPage'
 import MonitorPage from './pages/MonitorPage'
 import ActivityPage from './pages/ActivityPage'
 import AdvancedPage from './pages/AdvancedPage'
 import MemoryPage from './pages/MemoryPage'
+import TracePage from './pages/TracePage'
 import AccountsPage from './pages/AccountsPage'
 import IntentPage from './pages/wizard/IntentPage'
+import DocumentsPage from './pages/wizard/DocumentsPage'
 import PreviewPage from './pages/wizard/PreviewPage'
 import ConfirmPage from './pages/wizard/ConfirmPage'
 import DeployPage from './pages/wizard/DeployPage'
@@ -44,12 +47,18 @@ function App() {
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
           <Route element={<RequireOrgMember />}>
-            <Route path="/" element={<MonitorPage />} />
+            {/* The landing route: sends a brand-new org (no deployed
+                workflows yet) to the wizard, and everyone else to the
+                Activity dashboard -- see LandingPage.tsx. "Run a team" is
+                a deliberate destination now (/run), not the default one. */}
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/run" element={<MonitorPage />} />
             <Route path="/teams" element={<SessionsPage />} />
             <Route path="/activity" element={<ActivityPage />} />
 
             <Route path="/wizard" element={<WizardLayout />}>
               <Route index element={<IntentPage />} />
+              <Route path=":sessionId/documents" element={<DocumentsPage />} />
               <Route path=":sessionId/preview" element={<PreviewPage />} />
               <Route path=":sessionId/confirm" element={<ConfirmPage />} />
               <Route path=":sessionId/deploy" element={<DeployPage />} />
@@ -60,10 +69,12 @@ function App() {
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/advanced" element={<AdvancedPage />} />
             <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/trace" element={<TracePage />} />
           </Route>
 
           {/* Kept outside both guards so an unknown path routes to `/`, where
-              RequireOrgMember decides the destination (operator -> /advanced). */}
+              RequireOrgMember/LandingPage decide the destination
+              (operator -> /advanced; org member -> /wizard or /activity). */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>

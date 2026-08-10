@@ -29,7 +29,7 @@ from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
 from .deploy_validation import validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
 from .db.workflows import publish_workflow_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
@@ -111,8 +111,8 @@ def _session_to_dict(
         "workflow_id": session.workflow_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
-        "created_at": session.created_at.isoformat(),
-        "updated_at": session.updated_at.isoformat(),
+        "created_at": iso_utc(session.created_at),
+        "updated_at": iso_utc(session.updated_at),
     }
 
 
@@ -320,21 +320,27 @@ def _synthetic_session_for_workflow(
             org_id,
             workflow_version_id=record.current_version_id,
         ),
-        "created_at": record.created_at.isoformat(),
-        "updated_at": record.updated_at.isoformat(),
+        "created_at": iso_utc(record.created_at),
+        "updated_at": iso_utc(record.updated_at),
     }
 
 
 @router.get("")
 def list_builder_sessions(
-    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """List the org's builder sessions (most recent first), for an "AI teams
-    I've built" list page. A session with status 'deployed' has a live
-    WorkflowRecord matching specification_json['name']. Deployed workflows
-    with no backing session at all (deployed straight through the admin
-    Advanced/CRUD page) get a synthetic entry too, so My Teams shows every
-    team the org can run, not just the wizard-built subset."""
+    """List the current user's own builder sessions (most recent first), for
+    an "AI teams I've built" list page. A session with status 'deployed' has
+    a live WorkflowRecord matching specification_json['name']. A deployed
+    workflow with no backing session at all (deployed straight through the
+    admin Advanced/CRUD page) gets a synthetic entry too -- but only when its
+    `created_by` matches this user's immutable principal_id (never username --
+    see WorkflowRecord.created_by), so My Teams shows exactly the teams this
+    person built, not every workflow anyone in the org can run (that broader
+    "org can run" list is /api/workflows, which treats an unowned workflow as
+    an admin-shared template)."""
     sessions = list_sessions(db, org_id=org.id)
     session_dicts = [_session_to_dict(s, db, org.id) for s in sessions]
 
@@ -343,6 +349,7 @@ def list_builder_sessions(
         db.query(WorkflowRecord)
         .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
         .filter(WorkflowRecord.id.notin_(session_workflow_ids))
+        .filter(WorkflowRecord.created_by == user.principal_id)
         .all()
     )
     session_dicts.extend(
@@ -497,28 +504,51 @@ def submit_solution_feedback(
         if session.specification_json is None:
             raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
         current = Specification.model_validate(session.specification_json)
-        requirements_text = (
-            f"{_requirements_text(session)}\n\n"
-            f"The current team design is:\n{current.model_dump_json()}\n\n"
-            f"Customer feedback on this design:\n{req.feedback}"
-        )
-        requirements_text = _with_model_catalog(db, requirements_text)
-        requirements_text = _with_skill_catalog(db, requirements_text, org.id)
-        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+        # Resolving the model spec is cheap/local (constructs a client, no API
+        # call) -- do it even on the no-feedback path below so an invalid pick
+        # still 400s clearly instead of silently landing on every agent.
         chat_model = _call_model(_resolve_model, req.model)
-        spec = _call_model(
-            generate_specification,
-            chat_model,
-            requirements_text,
-            source=source,
-            extra_tools=_all_knowledge_base_tools(db, source, org.id),
-            extra_skills=load_skills(db, org.id),
-            pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
-        )
+        if req.feedback.strip():
+            requirements_text = (
+                f"{_requirements_text(session)}\n\n"
+                f"The current team design is:\n{current.model_dump_json()}\n\n"
+                f"Customer feedback on this design:\n{req.feedback}"
+            )
+            requirements_text = _with_model_catalog(db, requirements_text)
+            requirements_text = _with_skill_catalog(db, requirements_text, org.id)
+            requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+            spec = _call_model(
+                generate_specification,
+                chat_model,
+                requirements_text,
+                source=source,
+                extra_tools=_all_knowledge_base_tools(db, source, org.id),
+                extra_skills=load_skills(db, org.id),
+                pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+            )
+        else:
+            # No described change -- the customer is only switching which
+            # assistant their team uses (the wizard's feedback box is
+            # optional). Keep the current design as-is rather than spending an
+            # architect call and risking unrequested drift; only the model
+            # pin below applies.
+            spec = current
+        # `req.model` here is the customer's own pick from the wizard's
+        # "Which assistant should your team use?" control -- generation above
+        # (when it ran) only used it to run the architect. Left alone, the
+        # architect assigns each agent a model by its own role/cost judgement,
+        # which can (and did, per customer report) end up different from what
+        # the customer just explicitly chose. Pin every agent to that choice
+        # so the picker's wording matches what actually gets deployed; this
+        # never touches `req.specification` (a customer-submitted spec
+        # already has whatever per-agent models they put in it).
+        for agent in spec.agents:
+            agent.model = req.model
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")
 
-    append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    if req.feedback.strip():
+        append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
     _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
     return _session_to_dict(session, db, org.id)
@@ -637,6 +667,19 @@ def deploy_session(
                     + ". Pick a model from the catalog."
                 ),
             )
+        # spec.to_raw() deliberately omits display_name/friendly_description
+        # (it matches the engine loader's minimal shape, see
+        # test_to_raw_strips_friendly_fields_and_matches_loader_shape) -- but
+        # Activity's run cards read a team's customer-facing name from this
+        # exact persisted config (main.py's team_display_name), so merge it
+        # back in for what actually gets persisted, without touching
+        # to_raw()'s own contract. The loader ignores unknown keys.
+        for team_raw, team_spec in zip(raw.get("teams", []), spec.teams):
+            if team_spec.display_name:
+                team_raw["display_name"] = team_spec.display_name
+            if team_spec.friendly_description:
+                team_raw["friendly_description"] = team_spec.friendly_description
+
         record, _version = publish_workflow_version(
             db,
             org_id=org.id,
@@ -644,6 +687,7 @@ def deploy_session(
             config=raw,
             workflow_id=session.workflow_id,
             created_by=user.username,
+            owner_principal_id=user.principal_id,
         )
         session = update_session(
             db, session_id, status="deployed", workflow_id=record.id

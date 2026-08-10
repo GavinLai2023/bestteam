@@ -38,14 +38,16 @@ from . import automation_results
 from . import email_trigger
 from . import interview
 from . import secret_store
-from .auth_api import get_current_org, get_current_user, router as auth_router
+from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
 from .interview import router as interview_router
 from .admin_api import router as admin_router
 from .memory_api import router as memory_router
+from .org_knowledge_bases import router as org_knowledge_bases_router
 from .org_settings import router as org_settings_router
+from .run_analytics_api import router as run_analytics_router
 from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
@@ -53,8 +55,11 @@ from .db.models import (
     Run,
     SkillRecord,
     TraceEventRecord,
+    UsageRecord,
     User,
     WorkflowRecord,
+    WorkflowVersion,
+    iso_utc,
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
@@ -268,7 +273,9 @@ app.include_router(catalog_read_router)
 app.include_router(memory_router)
 app.include_router(admin_router)
 app.include_router(org_settings_router)
+app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
+app.include_router(run_analytics_router)
 
 logger = logging.getLogger("bestteam.api")
 
@@ -341,7 +348,7 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
 
 
 def _resolve_workflow_and_version(
-    name: str, db: Optional[Session] = None, org_id: Optional[int] = None
+    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
 ) -> tuple[Workflow, Optional[int]]:
     """Load a workflow by name for one org and return it together with the
     `current_version_id` of the record it was built from (None for a YAML demo
@@ -364,6 +371,11 @@ def _resolve_workflow_and_version(
     file's mtime, so editing a workflow file on disk is picked up on the
     next request.
 
+    If `owner_principal_id` is provided, only workflows created by that
+    principal OR admin-shared (created_by = NULL) are returned; other users'
+    personal workflows are rejected with a 404. Must be the caller's
+    principal_id, never their username (see WorkflowRecord.created_by).
+
     `db` is the request's `get_db`-provided session, if available, so this
     sees the same data as the `/api/builder` and `/api/config` routers
     (including in tests, which override `get_db`); if omitted, a one-off
@@ -374,11 +386,17 @@ def _resolve_workflow_and_version(
     # result rather than repopulating the cache after the invalidation (CR-005).
     generation = _workflow_cache_generation
     if db is not None:
-        record = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed").one_or_none()
+        query = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
+        if owner_principal_id is not None:
+            query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
+        record = query.one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
-            record = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed").one_or_none()
+            query = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
+            if owner_principal_id is not None:
+                query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
+            record = query.one_or_none()
             dependency_freshness = _dependency_freshness(session) if record is not None else None
 
     if record is not None:
@@ -473,11 +491,13 @@ def _resolve_workflow_and_version(
     return workflow, None
 
 
-def _get_workflow(name: str, db: Optional[Session] = None, org_id: Optional[int] = None) -> Workflow:
+def _get_workflow(
+    name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
+) -> Workflow:
     """Back-compat wrapper: the built workflow only (see
     `_resolve_workflow_and_version` for the version-aware form used by run
     creation)."""
-    return _resolve_workflow_and_version(name, db, org_id)[0]
+    return _resolve_workflow_and_version(name, db, org_id, owner_principal_id)[0]
 
 
 @app.get("/api/health")
@@ -486,13 +506,24 @@ def health():
 
 
 @app.get("/api/workflows")
-def list_workflows(db: Session = Depends(get_db), org: Organization = Depends(get_current_org)):
-    # The org's own deployed/edited workflows, plus the global YAML demos only
-    # where they're deliberately enabled (see `demo_workflows_enabled`).
+def list_workflows(
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+):
+    # The user's own deployed workflows (created_by = current user's
+    # principal_id, never username -- see WorkflowRecord.created_by) PLUS
+    # admin-deployed shared workflows (created_by = NULL, deployed by operators).
+    # This supports two models:
+    # - Personal teams: user-created via builder, visible only to creator
+    # - Shared templates: admin-created via /api/config, visible to all org members
+    # Plus the global YAML demos only where they're deliberately enabled.
     db_names = {
         row.name
         for row in db.query(WorkflowRecord.name).filter(
-            WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed"
+            WorkflowRecord.org_id == org.id,
+            WorkflowRecord.status == "deployed",
+            or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
         )
     }
     yaml_names = (
@@ -502,8 +533,13 @@ def list_workflows(db: Session = Depends(get_db), org: Organization = Depends(ge
 
 
 @app.get("/api/workflows/{name}/graph")
-def workflow_graph(name: str, db: Session = Depends(get_db), org: Organization = Depends(get_current_org)):
-    workflow = _get_workflow(name, db, org.id)
+def workflow_graph(
+    name: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+):
+    workflow = _get_workflow(name, db, org.id, user.principal_id)
     try:
         return {"mermaid": workflow.visualize()}
     except BestTeamError as exc:
@@ -519,7 +555,9 @@ async def create_run(
 ):
     # Resolve the workflow and the version it was built from together, so the
     # run is stamped with exactly the version whose config it executes.
-    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id)
+    # Only allow running workflows created by this user (by principal_id) or
+    # admin-shared (created_by = NULL).
+    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.principal_id)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(
@@ -567,6 +605,7 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
         .order_by(TraceEventRecord.seq)
         .all()
     )
+    usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id == run_id).all()
     return {
         "events": [
             {
@@ -574,10 +613,22 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
                 "type": row.type,
                 "agent": row.agent,
                 "data": json.loads(row.data) if row.data is not None else None,
-                "created_at": row.created_at.isoformat(),
+                "created_at": iso_utc(row.created_at),
             }
             for row in rows
-        ]
+        ],
+        # Per-agent token/cost usage for this run -- additive; the existing
+        # customer-facing RunDetail.tsx only reads `events` and ignores this.
+        "usage": [
+            {
+                "agent": row.agent,
+                "model": row.model,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cost_estimate": row.cost_estimate,
+            }
+            for row in usage_rows
+        ],
     }
 
 
@@ -628,11 +679,12 @@ def list_runs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    org: Organization = Depends(get_current_org),
+    scope: OrgScope = Depends(get_current_org_or_admin),
 ):
-    """Manual + automatic run history for the Activity page's Runs tab.
-    Lightweight rows only (no input/output) -- full detail is `GET
-    /api/runs/{id}` and `GET /api/runs/{id}/trace`.
+    """Manual + automatic run history for the Activity page's Runs tab (and,
+    cross-org, the admin Trace page). Lightweight rows only (no
+    input/output) -- full detail is `GET /api/runs/{id}` and
+    `GET /api/runs/{id}/trace`.
 
     Bounded (`limit`/`offset`, default 50, max 200): autonomous runs
     accumulate indefinitely, so an unbounded query would grow DB work,
@@ -643,7 +695,13 @@ def list_runs(
     which only ever sees the in-memory registry) is how the Activity page's
     Needs-attention list resolves a specific run's real, persisted status
     before opening it -- it must never assume `completed` for a run that
-    could actually be `failed` (Codex review finding)."""
+    could actually be `failed` (Codex review finding).
+
+    A platform admin may pass `?org=<name>` to scope to one org, or omit it
+    to see across every org (`scope.org_id is None`); a regular org member
+    is always forced to their own org regardless of `?org=` (see
+    `get_current_org_or_admin`)."""
+    cross_org = scope.is_admin and scope.org_id is None
     if run_id:
         # An explicit run_id lookup is a targeted probe, not a filter over
         # this org's own history -- if it belongs to another org (or doesn't
@@ -652,9 +710,11 @@ def list_runs(
         # "doesn't exist" by comparing an empty `results` against a real 404
         # elsewhere (Codex review finding).
         owner_row = db.query(Run.org_id).filter(Run.id == run_id).one_or_none()
-        if owner_row is None or owner_row[0] != org.id:
+        if owner_row is None or (not cross_org and owner_row[0] != scope.org_id):
             raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
-    query = db.query(Run).filter(Run.org_id == org.id)
+    query = db.query(Run)
+    if scope.org_id is not None:
+        query = query.filter(Run.org_id == scope.org_id)
     if run_id:
         query = query.filter(Run.id == run_id)
     if workflow:
@@ -675,15 +735,45 @@ def list_runs(
         query = query.filter(Run.created_at <= until)
     total = query.count()
     rows = query.order_by(Run.created_at.desc()).offset(offset).limit(limit).all()
+
+    # The customer-facing team name (My Teams shows the same thing) -- batched
+    # rather than one lookup per row. Sourced from each run's own pinned
+    # version, not the workflow's current config, so a run's card always
+    # reflects the team as it was when that run actually happened.
+    version_ids = {row.workflow_version_id for row in rows if row.workflow_version_id is not None}
+    version_configs = (
+        {v.id: v.config for v in db.query(WorkflowVersion).filter(WorkflowVersion.id.in_(version_ids))}
+        if version_ids
+        else {}
+    )
+
+    def _team_display_name(row: Run) -> Optional[str]:
+        config = version_configs.get(row.workflow_version_id)
+        if not config:
+            return None
+        teams = config.get("teams") or []
+        return teams[0].get("display_name") if teams else None
+
+    # Only meaningful (and only ever spans more than one org) for a
+    # cross-org admin listing -- batched the same way as version_configs
+    # above to avoid one Organization lookup per row.
+    org_ids = {row.org_id for row in rows if row.org_id is not None}
+    org_names = (
+        {o.id: o.name for o in db.query(Organization).filter(Organization.id.in_(org_ids))} if org_ids else {}
+    )
+
     return {
         "runs": [
             {
                 "id": row.id,
                 "workflow": row.workflow,
+                "team_display_name": _team_display_name(row),
                 "status": row.status,
-                "started_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "started_at": iso_utc(row.created_at),
                 "username": row.username,
                 "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
+                "org_id": row.org_id,
+                "org": org_names.get(row.org_id),
             }
             for row in rows
         ],
@@ -732,7 +822,7 @@ def list_automation_results_endpoint(
                 "status": row.status,
                 "needs_attention": row.needs_attention,
                 "payload": row.payload,
-                "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "created_at": iso_utc(row.created_at),
             }
             for row in rows
         ],

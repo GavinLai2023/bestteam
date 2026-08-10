@@ -15,7 +15,7 @@ from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_
 from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import Run, TraceEventRecord
+from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, WorkflowRecord, WorkflowVersion
 from ui.backend.db_session import get_db
 from ui.backend.runtime import registry, run_in_background
 
@@ -132,6 +132,29 @@ def test_get_run_trace_returns_persisted_events_in_seq_order(client, tmp_path):
     assert agent_completed["data"] == "done"
 
 
+def test_get_run_trace_includes_per_agent_usage(client):
+    # Additive field for the admin trace view -- the existing customer
+    # RunDetail.tsx only reads `events` and ignores this.
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(
+            UsageRecord(
+                run_id="r-1", agent="agent-a", model="fake:x", input_tokens=10, output_tokens=5,
+                cost_estimate=0.01, org_id=org_id,
+            )
+        )
+        db.commit()
+
+    resp = client.get("/api/runs/r-1/trace")
+
+    assert resp.status_code == 200
+    usage = resp.json()["usage"]
+    assert usage == [
+        {"agent": "agent-a", "model": "fake:x", "input_tokens": 10, "output_tokens": 5, "cost_estimate": 0.01}
+    ]
+
+
 def test_get_run_trace_cross_org_is_404(client):
     with open_test_db() as db:
         db.add(Run(id="other-org-run", workflow="w", input="in", status="completed", org_id=999999))
@@ -197,6 +220,54 @@ def test_list_runs_started_at_is_utc_qualified(client):
         f"started_at {started_at!r} must carry a UTC offset, or new Date() on the "
         "frontend misreads it as browser-local time"
     )
+
+
+def test_list_runs_includes_the_team_display_name_from_the_pinned_version(client):
+    # customer_support_team is the internal technical name (used for the
+    # `workflow` filter/API identity); the Activity page's run cards should
+    # show the customer-facing team name instead, same as My Teams.
+    org_id = get_org_id()
+    with open_test_db() as db:
+        record = WorkflowRecord(name="customer_support_team", org_id=org_id, config={}, status="deployed")
+        db.add(record)
+        db.flush()
+        version = WorkflowVersion(
+            workflow_id=record.id,
+            version_number=1,
+            config={"name": "customer_support_team", "teams": [{"name": "t", "display_name": "Customer Support Team"}]},
+        )
+        db.add(version)
+        db.flush()
+        db.add(
+            Run(
+                id="r-1",
+                workflow="customer_support_team",
+                input="in",
+                status="completed",
+                org_id=org_id,
+                username="test",
+                workflow_version_id=version.id,
+            )
+        )
+        db.commit()
+
+    resp = client.get("/api/runs")
+
+    row = resp.json()["runs"][0]
+    assert row["team_display_name"] == "Customer Support Team"
+
+
+def test_list_runs_team_display_name_is_null_without_a_pinned_version(client):
+    # A sandbox test-run (or a pre-migration row) has no workflow_version_id --
+    # the frontend falls back to the raw workflow name in that case.
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.commit()
+
+    resp = client.get("/api/runs")
+
+    assert resp.json()["runs"][0]["team_display_name"] is None
 
 
 def test_list_runs_manual_filter_includes_null_username_rows(client):

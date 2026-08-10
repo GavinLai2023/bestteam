@@ -46,7 +46,7 @@ function resumePathFor(session: BuilderSession) {
   // _synthetic_session_for_workflow) has no wizard flow to resume into --
   // send it to Run a Team, pre-selected, instead.
   if (session.id == null) {
-    return `/?workflow=${encodeURIComponent(session.specification_json?.name ?? '')}`
+    return `/run?workflow=${encodeURIComponent(session.specification_json?.name ?? '')}`
   }
   return session.status === 'deployed' ? `/wizard/${session.id}/deploy` : `/wizard/${session.id}/confirm`
 }
@@ -129,11 +129,12 @@ export default function SessionsPage() {
             <ul className="session-list">
               {group.sessions.map((session) => {
                 const teamName = session.specification_json?.name
+                const displayName = session.specification_json?.teams?.[0]?.display_name || teamName
                 const isAutomated = trigger?.enabled && teamName && trigger.workflow_name === teamName
                 return (
                   <li key={session.id ?? `workflow:${teamName}`} className="session-item">
                     <button className="wizard-card session-card" onClick={() => navigate(resumePathFor(session))}>
-                      <h3>{teamName ?? session.intent_text}</h3>
+                      <h3>{displayName ?? session.intent_text}</h3>
                       <p className="subtitle">{descriptionFor(session)}</p>
                       {isAutomated && (
                         <p className="hint automation-tag">

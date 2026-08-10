@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom'
 import Layout from './Layout'
 import { useMe } from '../lib/useMe'
 
@@ -13,7 +13,7 @@ const renderLayout = () =>
     </MemoryRouter>,
   )
 
-const CUSTOMER_LINKS = ['Build a team', 'My teams', 'Run a team', 'Activity']
+const CUSTOMER_LINKS = ['Dashboard', 'Build a team', 'My teams', 'Run a team']
 const ADMIN_LINKS = ['Accounts', 'Advanced', 'Memory']
 
 beforeEach(() => {
@@ -41,5 +41,29 @@ describe('Layout nav', () => {
     for (const label of ADMIN_LINKS) {
       expect(screen.queryByText(label)).not.toBeInTheDocument()
     }
+  })
+})
+
+describe('Layout scroll restoration', () => {
+  it('scrolls to the top when navigating to a new route', async () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    const scrollToSpy = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+
+    render(
+      <MemoryRouter initialEntries={['/a']}>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/a" element={<Link to="/b">go to b</Link>} />
+            <Route path="/b" element={<div>page-b</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    scrollToSpy.mockClear()
+    fireEvent.click(screen.getByText('go to b'))
+
+    expect(await screen.findByText('page-b')).toBeInTheDocument()
+    expect(scrollToSpy).toHaveBeenCalledWith(0, 0)
   })
 })

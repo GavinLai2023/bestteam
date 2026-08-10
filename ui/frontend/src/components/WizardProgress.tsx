@@ -8,6 +8,7 @@ interface WizardProgressProps {
 
 const STEPS = [
   { stage: 'intent', label: 'Your challenge' },
+  { stage: 'documents', label: 'Your documents' },
   { stage: 'preview', label: 'Meet your team' },
   { stage: 'confirm', label: 'Confirm' },
   { stage: 'deploy', label: 'Go live' },
@@ -30,6 +31,7 @@ export default function WizardProgress({ session }: WizardProgressProps) {
 
   const unlocked: Record<string, boolean> = {
     intent: true,
+    documents: Boolean(session),
     preview: Boolean(session?.specification_json),
     confirm: Boolean(session?.specification_json),
     deploy: Boolean(session?.specification_json),

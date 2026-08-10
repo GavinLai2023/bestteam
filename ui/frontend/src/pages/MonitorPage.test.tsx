@@ -187,6 +187,90 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.getByText('Stop')).toBeInTheDocument()
   })
 
+  it('shows the result before the technical trace, collapsed by default, once the run completes', async () => {
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_completed', workflow: 'wf', agent: 'a', data: 'agent step output', usage: [] })
+    })
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    expect(await screen.findByText('the final answer')).toBeInTheDocument()
+    // Collapsed: the trace's own event list (which would otherwise duplicate
+    // the same final text a second time) isn't rendered until expanded.
+    expect(screen.queryByText('agent step output')).not.toBeInTheDocument()
+
+    const bodyText = document.body.textContent || ''
+    expect(bodyText.indexOf('Final output')).toBeLessThan(bodyText.indexOf('Live trace'))
+
+    fireEvent.click(screen.getByText('Show technical trace'))
+    expect(screen.getByText('agent step output')).toBeInTheDocument()
+  })
+
+  it('lets you copy the final result text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    fireEvent.click(await screen.findByText('Copy'))
+
+    expect(writeText).toHaveBeenCalledWith('the final answer')
+    expect(await screen.findByText('Copied!')).toBeInTheDocument()
+  })
+
+  it('shows a failure state instead of "Copied!" when the clipboard write is rejected', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('permission denied'))
+    Object.assign(navigator, { clipboard: { writeText } })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Copy'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText('Copied!')).not.toBeInTheDocument()
+    expect(screen.getByText("Couldn't copy")).toBeInTheDocument()
+  })
+
+  it('shows a failure state instead of throwing when the Clipboard API is unavailable', async () => {
+    Object.assign(navigator, { clipboard: undefined })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+
+    fireEvent.click(screen.getByText('Copy'))
+
+    expect(screen.queryByText('Copied!')).not.toBeInTheDocument()
+    expect(screen.getByText("Couldn't copy")).toBeInTheDocument()
+  })
+
+  it('lets you run the same team and input again from the result', async () => {
+    const ws = await startARun()
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+    })
+    mockedApi.createRun.mockClear()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByText('Run again'))
+    })
+
+    expect(mockedApi.createRun).toHaveBeenCalledWith('wf', 'do the thing')
+  })
+
   it('renders object-shaped tool_completed data without crashing', async () => {
     const ws = await startARun()
 

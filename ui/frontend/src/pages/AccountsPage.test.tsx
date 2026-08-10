@@ -47,43 +47,92 @@ describe('AccountsPage', () => {
     expect(screen.getByText(/managed via the CLI/i)).toBeInTheDocument()
   })
 
-  it('creates an organization', async () => {
+  it('hints that the organisation internal name is a login identifier with no spaces', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    expect(screen.getByText(/letters, digits, '\.', '_', '-'.*no spaces/i)).toBeInTheDocument()
+  })
+
+  it('creates an organisation', async () => {
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     await waitFor(() => expect(mockedApi.createAdminOrg).toHaveBeenCalledWith('gamma', ''))
+  })
+
+  it('hides the create-user form behind a button until clicked', async () => {
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    expect(screen.queryByLabelText('Username for beta')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    expect(screen.getByLabelText('Username for beta')).toBeInTheDocument()
+  })
+
+  it('only shows one org\'s create-user form at a time', async () => {
+    mockedApi.adminOrgs.mockResolvedValueOnce([
+      ...ORGS,
+      { name: 'gamma', display_name: '', active: true, member: null },
+    ])
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
+    expect(screen.getByLabelText('Username for beta')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /create user for gamma/i }))
+    expect(screen.queryByLabelText('Username for beta')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Username for gamma')).toBeInTheDocument()
   })
 
   it('creates a user for an org with no member', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
     fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     await waitFor(() => expect(mockedApi.createAdminUser).toHaveBeenCalledWith('bob', 'beta', 'pw'))
+    // form collapses back to the toggle button after a successful create
+    expect(await screen.findByRole('button', { name: /create user for beta/i })).toBeInTheDocument()
   })
 
   it('does not create a user when the passwords do not match', async () => {
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
     fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'bob' } })
     fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'nope' } })
-    fireEvent.click(screen.getByRole('button', { name: /create user/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument()
     expect(mockedApi.createAdminUser).not.toHaveBeenCalled()
+  })
+
+  it('scrolls the error banner into view when a create-user submit fails (banner can be off-screen on a long org list)', async () => {
+    mockedApi.createAdminUser.mockRejectedValue(
+      new Error("username: identifier may contain only letters, digits, '.', '_' and '-'"),
+    )
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    render(<AccountsPage />)
+    await screen.findByText('Acme Corp')
+    fireEvent.click(screen.getByRole('button', { name: /create user for beta/i }))
+    fireEvent.change(screen.getByLabelText('Username for beta'), { target: { value: 'property demo' } })
+    fireEvent.change(screen.getByLabelText('Password for beta'), { target: { value: 'pw' } })
+    fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    await screen.findByText(/identifier may contain only letters/i)
+    expect(scrollIntoView).toHaveBeenCalled()
   })
 
   it('keeps the entered values when creation fails', async () => {
     mockedApi.createAdminOrg.mockRejectedValue(new Error('boom'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     expect(await screen.findByText('boom')).toBeInTheDocument()
-    expect(screen.getByLabelText(/organization name/i)).toHaveValue('gamma')
+    expect(screen.getByLabelText(/organisation internal name/i)).toHaveValue('gamma')
   })
 
   it('clears the form and warns (not fails) when creation succeeds but refresh fails', async () => {
@@ -92,11 +141,11 @@ describe('AccountsPage', () => {
     mockedApi.adminOrgs.mockResolvedValueOnce(ORGS).mockRejectedValueOnce(new Error('net'))
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
-    fireEvent.change(screen.getByLabelText(/organization name/i), { target: { value: 'gamma' } })
-    fireEvent.click(screen.getByRole('button', { name: /create organization/i }))
+    fireEvent.change(screen.getByLabelText(/organisation internal name/i), { target: { value: 'gamma' } })
+    fireEvent.click(screen.getByRole('button', { name: /create organisation/i }))
     expect(await screen.findByText(/could not be refreshed/i)).toBeInTheDocument()
     // form cleared despite the refresh failure, so no duplicate retry
-    expect(screen.getByLabelText(/organization name/i)).toHaveValue('')
+    expect(screen.getByLabelText(/organisation internal name/i)).toHaveValue('')
   })
 
   it('deactivates an active org after confirm', async () => {
