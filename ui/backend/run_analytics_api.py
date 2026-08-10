@@ -203,25 +203,22 @@ def get_workflow_analytics(
     run_ids = [r.id for r in runs]
     usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id.in_(run_ids)).all() if run_ids else []
 
-    usage_by_agent: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"input": [], "output": [], "cost": [], "runs": set()})
-    for u in usage_rows:
-        if not u.agent:
-            continue
-        bucket = usage_by_agent[u.agent]
+    def _accumulate(bucket: Dict[str, Any], u: UsageRecord) -> None:
         bucket["input"].append(u.input_tokens)
         bucket["output"].append(u.output_tokens)
         bucket["runs"].add(u.run_id)
         if u.cost_estimate is not None:
             bucket["cost"].append(u.cost_estimate)
 
+    usage_by_agent: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"input": [], "output": [], "cost": [], "runs": set()})
+    for u in usage_rows:
+        if not u.agent:
+            continue
+        _accumulate(usage_by_agent[u.agent], u)
+
     usage_by_model: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"input": [], "output": [], "cost": [], "runs": set()})
     for u in usage_rows:
-        bucket = usage_by_model[u.model or "(unknown model)"]
-        bucket["input"].append(u.input_tokens)
-        bucket["output"].append(u.output_tokens)
-        bucket["runs"].add(u.run_id)
-        if u.cost_estimate is not None:
-            bucket["cost"].append(u.cost_estimate)
+        _accumulate(usage_by_model[u.model or "(unknown model)"], u)
 
     events_by_run = _events_by_run(db, run_ids)
     timing_by_agent: Dict[str, List[float]] = defaultdict(list)
