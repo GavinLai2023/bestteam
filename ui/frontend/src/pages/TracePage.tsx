@@ -29,6 +29,14 @@ function formatSeconds(value: number | null): string {
   return value == null ? '—' : `${value.toFixed(1)}s`
 }
 
+function formatTokens(value: number): string {
+  return value.toLocaleString()
+}
+
+function formatCost(value: number | null): string {
+  return value == null ? '—' : `$${value.toFixed(4)}`
+}
+
 // Platform-admin technical trace/analytics view: a superset of the
 // customer-facing Activity page's Runs tab (cross-org by default, full
 // event data + per-agent token/cost via AdminRunDetail) plus a
@@ -260,6 +268,9 @@ export default function TracePage() {
                     <th>Runs</th>
                     <th>Success rate</th>
                     <th>Avg duration</th>
+                    <th>Total in</th>
+                    <th>Total out</th>
+                    <th>Total cost</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -276,6 +287,9 @@ export default function TracePage() {
                       <td>{s.total_runs}</td>
                       <td>{formatPct(s.success_rate)}</td>
                       <td>{formatSeconds(s.avg_duration_seconds)}</td>
+                      <td>{formatTokens(s.total_input_tokens)}</td>
+                      <td>{formatTokens(s.total_output_tokens)}</td>
+                      <td>{formatCost(s.total_cost_estimate)}</td>
                     </tr>
                   ))}
                 </tbody>

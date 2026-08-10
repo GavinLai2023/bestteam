@@ -110,6 +110,9 @@ export interface WorkflowAnalyticsSummary {
   running: number
   success_rate: number | null
   avg_duration_seconds: number | null
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cost_estimate: number | null
 }
 
 export interface AgentAnalytics {

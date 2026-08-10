@@ -68,6 +68,7 @@ describe('TracePage', () => {
         {
           org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
         },
       ],
     })
@@ -89,5 +90,46 @@ describe('TracePage', () => {
 
     expect(mockedApi.getWorkflowAnalytics).toHaveBeenCalledWith('wf', { org: 'org_a' })
     expect(await screen.findByText(/3 run\(s\)/)).toBeInTheDocument()
+  })
+
+  it('renders token and cost totals in the summary table', async () => {
+    mockedApi.listWorkflowAnalytics.mockResolvedValue({
+      workflows: [
+        {
+          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
+          total_input_tokens: 98497, total_output_tokens: 3928, total_cost_estimate: 0.0171,
+        },
+      ],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+
+    expect(await screen.findByText('98,497')).toBeInTheDocument()
+    expect(screen.getByText('3,928')).toBeInTheDocument()
+    expect(screen.getByText('$0.0171')).toBeInTheDocument()
+  })
+
+  it('renders a dash for a workflow with no cost data', async () => {
+    mockedApi.listWorkflowAnalytics.mockResolvedValue({
+      workflows: [
+        {
+          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
+          running: 0, success_rate: 1, avg_duration_seconds: null,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+        },
+      ],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+
+    await screen.findByText('wf')
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0)
   })
 })
