@@ -177,9 +177,11 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_all = store.all
 
-    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None):
+    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None):
         captured["limit"] = limit
-        return real_all(user_id, types, limit, org_id=org_id, principal_id=principal_id)
+        return real_all(
+            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id
+        )
 
     monkeypatch.setattr(store, "all", spy_all)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
@@ -1294,4 +1296,73 @@ def test_opens_pre_org_db_and_migrates(tmp_path):
     # New org-scoped writes work and are isolated from the legacy NULL row.
     store.add("alice", EPISODIC, "new org note", org_id=5)
     assert [r.content for r in store.all("alice", org_id=5)] == ["new org note"]
+    store.close()
+
+
+# --- workflow scoping (episodic/procedural isolation, cross-workflow project) ---
+
+
+def test_add_persists_workflow_id():
+    store = _store()
+    rec = store.add("alice", EPISODIC, "content", workflow_id=1)
+    assert rec.workflow_id == 1
+    assert store.all("alice", workflow_id=1)[0].workflow_id == 1
+
+
+def test_all_scopes_by_workflow():
+    store = _store()
+    store.add("alice", EPISODIC, "workflow one note", workflow_id=1)
+    store.add("alice", EPISODIC, "workflow two note", workflow_id=2)
+
+    assert [r.content for r in store.all("alice", workflow_id=1)] == ["workflow one note"]
+    assert [r.content for r in store.all("alice", workflow_id=2)] == ["workflow two note"]
+    # workflow_id=None (admin / unfiltered) sees both.
+    assert len(store.all("alice", workflow_id=None)) == 2
+
+
+def test_search_scopes_by_workflow():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy for workflow one", workflow_id=1)
+    store.add("alice", EPISODIC, "the refund policy for workflow two", workflow_id=2)
+
+    hits1 = store.search("alice", "refund policy", workflow_id=1)
+    assert len(hits1) == 1 and hits1[0].workflow_id == 1
+    # Unfiltered search still spans every workflow.
+    assert len(store.search("alice", "refund policy", workflow_id=None)) == 2
+
+
+def test_dedup_is_per_workflow():
+    store = _store()
+    a = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=1)
+    # Same text under a DIFFERENT workflow is not a duplicate.
+    b = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=2)
+    # Same (text, workflow) IS a duplicate.
+    c = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=1)
+    assert a is not None and b is not None and c is None
+
+
+def test_opens_pre_workflow_db_and_migrates(tmp_path):
+    # A DB created before workflow scoping (no workflow_id column) must gain the
+    # column in place, keep its existing rows (workflow_id NULL), and work after.
+    import sqlite3
+
+    db_path = str(tmp_path / "pre_workflow.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, org_id INTEGER, principal_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'procedural', 'legacy note', '{}', "
+        "'2026-01-01T00:00:00+00:00', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path)
+    legacy = store.all("alice", workflow_id=None)
+    assert len(legacy) == 1 and legacy[0].workflow_id is None
+    store.add("alice", PROCEDURAL, "new workflow note", workflow_id=1)
+    assert [r.content for r in store.all("alice", workflow_id=1)] == ["new workflow note"]
     store.close()

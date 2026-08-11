@@ -109,6 +109,12 @@ class MemoryRecord:
     # same-username account can't recall the deleted account's rows. None for
     # rows written before principal stamping, or by SDK-direct callers.
     principal_id: Optional[str] = None
+    # Team/workflow this record is scoped to (`WorkflowRecord.id`, the stable
+    # head -- NOT `workflow_version_id`, which is pure per-deploy provenance and
+    # survives a redeploy differently). None for `semantic` records (deliberately
+    # org-wide, never workflow-scoped) and for rows written before this scoping
+    # dimension existed.
+    workflow_id: Optional[int] = None
 
 
 class Memory(ABC):
@@ -192,7 +198,8 @@ class SqliteBM25Memory(Memory):
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 org_id INTEGER,
-                principal_id TEXT
+                principal_id TEXT,
+                workflow_id INTEGER
             )
             """
         )
@@ -203,7 +210,11 @@ class SqliteBM25Memory(Memory):
         # won and the column now exists, which is fine -- only a different error is
         # a real failure.
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
-        for column, ddl in (("org_id", "INTEGER"), ("principal_id", "TEXT")):
+        for column, ddl in (
+            ("org_id", "INTEGER"),
+            ("principal_id", "TEXT"),
+            ("workflow_id", "INTEGER"),
+        ):
             if column not in cols:
                 try:
                     self._conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {ddl}")
@@ -234,6 +245,13 @@ class SqliteBM25Memory(Memory):
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user_created "
             "ON memories(org_id, user_id, created_at)"
         )
+        # Covers a workflow-scoped recall's filter+sort (WHERE user, workflow_id
+        # ORDER BY created_at DESC LIMIT N) the same way idx_memories_org_user_created
+        # covers the org-scoped one.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_workflow_user_created "
+            "ON memories(workflow_id, user_id, created_at)"
+        )
         # Covers `add_if_absent`'s existence check (WHERE org_id[/IS NULL] AND
         # user_id AND type AND content), so per-type dedup seeks instead of scanning
         # the user's whole (episodic-inflated) history (SP-4 review r2 #1). The
@@ -253,6 +271,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -268,6 +287,7 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         # Deletion-lifecycle fence: drop a write for a retired principal (an
         # in-flight run finishing after its account was deleted). The check is
@@ -278,8 +298,8 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -289,6 +309,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
+                record.workflow_id,
                 *retired_params,
             ),
         )
@@ -306,15 +327,20 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope,
-        principal-scope)` (SP-4 M-08 dedup + deletion-lifecycle). Returns the new
-        record, or None when an identical record already existed (or the principal is
-        retired). Dedup is **per type** (a semantic and a procedural row with the same
-        text don't collide, review r1 #4), **per principal** (the same text under a
-        recreated account is not a duplicate), and **race-safe** across connections:
-        the existence check lives inside one `INSERT ... WHERE NOT EXISTS` under
-        SQLite's write serialization, so two workers can't both insert (review r1 #2)."""
+        principal-scope, workflow-scope)` (SP-4 M-08 dedup + deletion-lifecycle +
+        cross-workflow scoping). Returns the new record, or None when an identical
+        record already existed (or the principal is retired). Dedup is **per type**
+        (a semantic and a procedural row with the same text don't collide, review r1
+        #4), **per principal** (the same text under a recreated account is not a
+        duplicate), **per workflow** (the same text under a different workflow is
+        not a duplicate -- callers never pass `workflow_id` for `semantic` writes,
+        so those always dedup at `workflow_id IS NULL`, keeping semantic facts
+        org-wide), and **race-safe** across connections: the existence check lives
+        inside one `INSERT ... WHERE NOT EXISTS` under SQLite's write serialization,
+        so two workers can't both insert (review r1 #2)."""
         if not isinstance(type, str) or not type.strip():
             raise ConfigurationError("Memory record type must be a non-empty string")
         record = MemoryRecord(
@@ -326,24 +352,28 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
         principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
+        workflow_clause = "workflow_id IS NULL" if workflow_id is None else "workflow_id = ?"
         exists_params: List[Any] = [user_id, type, content]
         if org_id is not None:
             exists_params.append(org_id)
         if principal_id is not None:
             exists_params.append(principal_id)
+        if workflow_id is not None:
+            exists_params.append(workflow_id)
         # Deletion-lifecycle fence, ANDed into the same insert as the dedup check so
         # both are atomic with the write (finding 1): a retired principal's late
         # write is dropped (reported as "nothing written", like a duplicate).
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
-            f"AND {org_clause} AND {principal_clause})" + retired_clause,
+            f"AND {org_clause} AND {principal_clause} AND {workflow_clause})" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -353,6 +383,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
+                record.workflow_id,
                 *exists_params,
                 *retired_params,
             ),
@@ -377,6 +408,7 @@ class SqliteBM25Memory(Memory):
                     created_at=row["created_at"],
                     org_id=row["org_id"],
                     principal_id=row["principal_id"],
+                    workflow_id=row["workflow_id"],
                 )
             )
         return records
@@ -389,6 +421,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
@@ -400,6 +433,12 @@ class SqliteBM25Memory(Memory):
         if principal_id is not None:
             sql += " AND principal_id = ?"
             params.append(principal_id)
+        # A concrete workflow scopes to that team's own episodic/procedural
+        # history; None is unfiltered (admin cross-workflow view, and the
+        # back-compat default for callers that never bind one).
+        if workflow_id is not None:
+            sql += " AND workflow_id = ?"
+            params.append(workflow_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -421,6 +460,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -431,7 +471,12 @@ class SqliteBM25Memory(Memory):
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
         candidates = self.all(
-            user_id, types, limit=max_candidates, org_id=org_id, principal_id=principal_id
+            user_id,
+            types,
+            limit=max_candidates,
+            org_id=org_id,
+            principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         if not candidates:
             return []
