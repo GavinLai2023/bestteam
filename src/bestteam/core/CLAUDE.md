@@ -219,8 +219,24 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   **per-type** `INSERT ... WHERE NOT EXISTS` keyed by `(user_id, type, content,
   org-scope)`. Per-type means a semantic and a procedural row with the same text
   don't collide; atomic under SQLite's write serialization means two concurrent
-  connections can't both insert. (Near-dup / contradiction resolution /
-  consolidation — needs embeddings/LLM — is deferred.) Recall bounds its scan to
+  connections can't both insert. **Semantic near-duplicate/update resolution**
+  is also implemented: before writing, `_extract_and_store` fetches the user's
+  existing `semantic` memories most relevant to the run (BM25, capped at 20
+  candidates, same org/principal scope) and shows them to the extraction model
+  with their ids; each extracted fact now carries an `action`
+  (`"add"`/`"update"`/`"noop"`) instead of being a bare string. `"update"`
+  deletes the referenced candidate before inserting the new fact (write-once
+  storage is otherwise unchanged — no soft-delete/history); `store.delete` is
+  only ever called for an id this call's own candidate search returned, so a
+  hallucinated `replaces_id` can never delete a real record — it falls back to
+  a plain add instead, as does a missing/unrecognized `action`. `"noop"` skips
+  the write. A candidate-fetch failure degrades to "no candidates" (plain add)
+  rather than breaking extraction. This covers **semantic only** —
+  `procedural`'s free-text shape makes near-duplicate judgment unreliable, so
+  procedural consolidation is still deferred, as is cross-run concurrency (two
+  simultaneous runs both updating the same old record) and any effectiveness
+  measurement of the reconciliation itself (M-13). See
+  `docs/MEMORY_REVIEW_TRIAGE.md`. Recall bounds its scan to
   the most-recent `recall_max_candidates` records (backend default 1000 via
   `BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES`, M-09; clamped to SQLite's int range so a
   fat-fingered value can't `OverflowError` the `LIMIT`). Composite `(user_id,
@@ -303,3 +319,21 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   escaping/filtering engine — a proportionate mitigation for the disabled-by-
   default, per-user model, not full hardening.
 - Procedural memory is per-user (could be promoted to global/agent-level later).
+- **Memory is workflow-scoped for episodic/procedural, org-scoped for
+  semantic** (cross-workflow memory scoping). Records also carry a
+  `workflow_id` (`WorkflowRecord.id`, the stable team head — survives a
+  redeploy, unlike `workflow_version_id`, which is pure per-deploy
+  provenance). `add`/`add_if_absent`/`search`/`all` accept it as a
+  concrete-store extension exactly like `org_id`/`principal_id` (`None` =
+  unfiltered). `MemoryManager.recall()` runs two scoped searches instead of
+  one: `semantic` never receives `workflow_id` (personal preferences stay
+  shared across an org's workflows); `episodic`/`procedural` do (one team's
+  task experience doesn't leak into an unrelated team's context) —
+  `workflow_id=None` reproduces pre-existing, workflow-agnostic behavior for
+  SDK-direct callers and YAML-only demo workflows (no `WorkflowRecord`).
+  `record_run`/`_extract_and_store` route `workflow_id` into episodic/procedural
+  writes only, never semantic. The backend binds it in
+  `main.py::create_run` → `run_in_background` → `_make_memory` — see
+  `ui/backend/CLAUDE.md`. No admin-API filter and no backfill of
+  pre-existing (workflow_id-NULL) rows; see
+  `docs/superpowers/specs/2026-08-11-cross-workflow-memory-scoping-design.md`.

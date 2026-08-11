@@ -820,6 +820,32 @@ def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
     assert captured["workflow_version_id"] == expected
 
 
+def test_create_run_stamps_the_deployed_workflow_id(client, monkeypatch):
+    """POST /api/runs dispatches run_in_background with workflow_id set to the
+    deployed workflow's stable head id (WorkflowRecord.id) -- the cross-workflow
+    memory-scoping key, distinct from workflow_version_id."""
+    import ui.backend.main as main
+    from helpers import open_test_db
+    from ui.backend.db.models import WorkflowRecord
+
+    assert client.put("/api/config/workflows/id_stamp_wf?org=default",
+                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    with open_test_db() as db:
+        expected = db.query(WorkflowRecord).filter_by(name="id_stamp_wf").one().id
+
+    captured = {}
+
+    def _fake_submit(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(main._executor, "submit", _fake_submit)
+    resp = client.post("/api/runs", json={"workflow": "id_stamp_wf", "input": "hi"},
+                       headers=_org_user_headers(client))
+    assert resp.status_code == 200
+    assert captured["workflow_id"] == expected
+
+
 def test_resolve_workflow_and_version_binds_version_to_the_built_record(client):
     """_resolve_workflow_and_version returns the current_version_id of the same
     record it built the workflow from (one read), so a run stamps the version it
@@ -831,10 +857,14 @@ def test_resolve_workflow_and_version_binds_version_to_the_built_record(client):
     assert client.put("/api/config/workflows/rv_wf?org=default",
                       json=_VALID_WORKFLOW_CONFIG).status_code == 200
     with open_test_db() as db:
-        expected = db.query(WorkflowRecord).filter_by(name="rv_wf").one().current_version_id
-        workflow, version_id = main._resolve_workflow_and_version("rv_wf", db, get_org_id("default"))
+        record = db.query(WorkflowRecord).filter_by(name="rv_wf").one()
+        expected_version, expected_workflow_id = record.current_version_id, record.id
+        workflow, version_id, workflow_id = main._resolve_workflow_and_version(
+            "rv_wf", db, get_org_id("default")
+        )
     assert workflow is not None
-    assert version_id == expected
+    assert version_id == expected_version
+    assert workflow_id == expected_workflow_id
 
 
 def test_delete_workflow_also_deletes_its_version_history(client):

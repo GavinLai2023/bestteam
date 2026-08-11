@@ -135,6 +135,27 @@ def test_run_in_background_records_with_run_principal_id(monkeypatch, tmp_path):
     store.close()
 
 
+def test_run_in_background_records_with_run_workflow_id(monkeypatch, tmp_path):
+    # The episodic record carries the run's workflow_id, and a different
+    # workflow recalls nothing of it.
+    db_path = tmp_path / "m.db"
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
+    monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
+
+    run = registry.create("wf", "hello there")
+    run_in_background(
+        run.id, _workflow(), "hello there", engine=None, user_id="alice", workflow_id=1,
+    )
+
+    store = SqliteBM25Memory(str(db_path))
+    records = store.all("alice", workflow_id=None)
+    assert len(records) == 1
+    assert records[0].workflow_id == 1
+    # Another workflow sees nothing of workflow 1's episodic memory.
+    assert store.all("alice", workflow_id=2) == []
+    store.close()
+
+
 def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
     # SP-3 M-06: the run's id + workflow_version_id are stamped into each record's
     # metadata (via the real _make_memory binding path).
@@ -170,7 +191,8 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["likes bullets"], "procedural": "answered concisely"}',
+                content='{"facts": [{"action": "add", "content": "likes bullets"}], '
+                '"procedural": "answered concisely"}',
                 usage_metadata={"input_tokens": 20, "output_tokens": 6, "total_tokens": 26},
             )
         ]
@@ -202,7 +224,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["x"], "procedural": "y"}',
+                content='{"facts": [{"action": "add", "content": "x"}], "procedural": "y"}',
                 usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
             )
         ]
@@ -242,7 +264,7 @@ def test_total_write_failure_still_meters_extraction(monkeypatch):
     extraction = FakeMessagesListChatModel(
         responses=[
             AIMessage(
-                content='{"facts": ["x"], "procedural": "y"}',
+                content='{"facts": [{"action": "add", "content": "x"}], "procedural": "y"}',
                 usage_metadata={"input_tokens": 17, "output_tokens": 4, "total_tokens": 21},
             )
         ]

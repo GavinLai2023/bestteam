@@ -80,10 +80,11 @@ implemented** — don't assume they exist:
 - **Vector knowledge base retrieval is single-stage** (no query
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors) — see `src/bestteam/core/CLAUDE.md`.
-- **Per-user memory recall is single-stage BM25** (no rerank/expansion) and
-  semantic/procedural records have no auto-dedup. Admins can view/search/delete
-  a user's memory via the admin-only Memory page (`/api/memory`); there's no
-  manual add/edit and no retention/quota policy. Disabled by default
+- **Per-user memory recall is single-stage BM25** (no rerank/expansion).
+  Semantic records get exact-dedup on write plus LLM-mediated near-duplicate/
+  update resolution; procedural records still have no dedup/consolidation.
+  Admins can view/search/delete a user's memory via the admin-only Memory page
+  (`/api/memory`); there's no manual add/edit and no retention/quota policy. Disabled by default
   (`BESTTEAM_MEMORY_DB`) — see `core/memory.py` and `src/bestteam/core/CLAUDE.md`.
 - **Live run state (`RunRegistry`) isn't rehydrated from the DB on restart**:
   a killed/restarted process still loses in-flight/live run state. History no

@@ -390,6 +390,63 @@ def test_run_recall_failure_is_distinguishable():
     assert result.recall is not None and result.recall.ok is False  # failure, not disabled
 
 
+def test_extraction_update_reconciles_across_sequential_runs():
+    # Two runs for the same user: the second run's extraction is shown the first
+    # run's stored fact as a candidate and can supersede it via "update" instead
+    # of accumulating a near-duplicate.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    from bestteam.core.memory import SEMANTIC
+
+    store = SqliteBM25Memory(":memory:")
+
+    first_agent_model = FakeMessagesListChatModel(responses=[AIMessage(content="noted, concise it is")])
+    first_agent = Agent(name="a", role="r", goal="g", model=first_agent_model)
+    first_workflow = Workflow(
+        name="wf", steps=[Team(name="t", agents=[first_agent], mode=CollaborationMode.SEQUENTIAL)]
+    )
+    first_extraction = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"facts": [{"action": "add", "content": "prefers concise answers"}], "procedural": ""}'
+            )
+        ]
+    )
+    first_workflow.run(
+        "how should answers be formatted?",
+        user_id="u",
+        memory=MemoryManager(store, extraction_model=first_extraction),
+    )
+
+    (existing,) = [r for r in store.all("u") if r.type == SEMANTIC]
+
+    second_agent_model = FakeMessagesListChatModel(responses=[AIMessage(content="noted, will be detailed")])
+    second_agent = Agent(name="a", role="r", goal="g", model=second_agent_model)
+    second_workflow = Workflow(
+        name="wf", steps=[Team(name="t", agents=[second_agent], mode=CollaborationMode.SEQUENTIAL)]
+    )
+    second_extraction = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content=(
+                    '{"facts": [{"action": "update", "content": "prefers detailed answers", '
+                    f'"replaces_id": "{existing.id}"}}], "procedural": ""}}'
+                )
+            )
+        ]
+    )
+    # Shares vocabulary with the stored fact ("concise answers") so the BM25
+    # candidate search actually surfaces it for the model to reconcile against.
+    second_workflow.run(
+        "actually I don't want concise answers anymore, give more detail",
+        user_id="u",
+        memory=MemoryManager(store, extraction_model=second_extraction),
+    )
+
+    semantic = [r.content for r in store.all("u") if r.type == SEMANTIC]
+    assert semantic == ["prefers detailed answers"]
+
+
 def test_stream_without_memory_emits_no_memory_events():
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])
     agent = Agent(name="a", role="r", goal="g", model=model)

@@ -57,7 +57,7 @@ Priority: P0 (correctness, do first) … P3 (defer / accept). Effort: XS/S/M/L.
 | **M-04** | Extraction-model spend does not enter `UsageRecord` (bypasses the adapter's usage path) | Billing correctness | **P1** | M | **SP-3 — Implemented** (metered as `agent="memory:extraction"` via `memory_recorded` event) |
 | **M-06** | No provenance: a record can't be traced to the run / workflow-version / agent that produced it (`metadata` is left empty) | Auditability | P1 | S–M | **SP-3 — Implemented** (`metadata={run_id, workflow_version_id}`; agent N/A for run-level records) |
 | **M-05** | No memory observability events: the trace never shows what was recalled, what was extracted, or whether the write succeeded | Observability | P2 | M | **SP-3 — Implemented** (`memory_recalled` / `memory_recorded` TraceEvents) |
-| **M-08** | No dedup / conflict-resolution / forgetting: semantic & procedural records accumulate near-duplicates and can contradict each other over time | Memory quality | P2 | L | **SP-4 — Implemented (exact dedup on write; near-dup/conflict/consolidation deferred)** |
+| **M-08** | No dedup / conflict-resolution / forgetting: semantic & procedural records accumulate near-duplicates and can contradict each other over time | Memory quality | P2 | L | **SP-4 — Implemented (exact dedup on write)**; **2026-08-10 — semantic near-dup/update resolution implemented** (see below); procedural consolidation still deferred |
 | **M-07** | No retention / quota / TTL: total record count grows unbounded; only manual admin cleanup exists | Lifecycle | P2 | M | **SP-4 — Implemented (opt-in episodic per-user cap; TTL/quota/sweep deferred)** |
 | **M-09** | Production recall does a full BM25 scan (no `max_candidates`); cost grows linearly with a user's record count | Performance | P2 | S | **SP-4 — Implemented (recall bounded to most-recent N, default 1000)** |
 | **M-10** | Admin API binds the concrete `SqliteBM25Memory`, not the `Memory` ABC; swapping in Redis/Postgres/mem0 would silently break the admin surface | Leaky abstraction | P3 | M | **Defer (YAGNI)** — no second backend exists yet |
@@ -145,6 +145,27 @@ Suggested order under the current "memory is opt-in, default off" posture:
 
 All four Phase-1 memory sub-projects (SP-1…SP-4) are now implemented; the
 deletion-lifecycle sub-project (below) carries the remaining cross-process items.
+
+- **2026-08-10** — Implemented: semantic near-duplicate / update resolution
+  (the M-08 gap SP-4 left open). Before writing extracted `semantic` facts,
+  `_extract_and_store` fetches the user's existing semantic memories most
+  relevant to the run (BM25, capped at 20, same org/principal scope as every
+  other read) and shows them to the extraction model with their ids. The
+  model's response now carries an `action` (`add`/`update`/`noop`) per fact
+  instead of a bare string; `"update"` deletes the referenced record before
+  inserting the new one (no soft-delete/history — write-once storage is
+  unchanged), `"noop"` skips the write entirely, and anything else (including
+  a hallucinated/unrecognized `replaces_id`, or a missing/malformed `action`)
+  falls back to a plain add — `store.delete` is only ever called for an id the
+  candidate search itself returned this call, so a hallucinated id can never
+  delete a real record. Candidate-fetch failure degrades to "no candidates"
+  (plain add for everything) rather than breaking extraction, matching the
+  rest of this module's best-effort posture. Scope: `semantic` only —
+  `procedural`'s free-text shape makes near-duplicate judgment much less
+  reliable, so consolidation there is still deferred. Also still deferred:
+  cross-run concurrency (two simultaneous runs both updating the same old
+  record) and any effectiveness measurement of whether reconciliation
+  actually improves recall quality (M-13).
 
 ## Follow-up review (2026-07-30)
 

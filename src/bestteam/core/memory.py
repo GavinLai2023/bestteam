@@ -109,6 +109,12 @@ class MemoryRecord:
     # same-username account can't recall the deleted account's rows. None for
     # rows written before principal stamping, or by SDK-direct callers.
     principal_id: Optional[str] = None
+    # Team/workflow this record is scoped to (`WorkflowRecord.id`, the stable
+    # head -- NOT `workflow_version_id`, which is pure per-deploy provenance and
+    # survives a redeploy differently). None for `semantic` records (deliberately
+    # org-wide, never workflow-scoped) and for rows written before this scoping
+    # dimension existed.
+    workflow_id: Optional[int] = None
 
 
 class Memory(ABC):
@@ -192,7 +198,8 @@ class SqliteBM25Memory(Memory):
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 org_id INTEGER,
-                principal_id TEXT
+                principal_id TEXT,
+                workflow_id INTEGER
             )
             """
         )
@@ -203,7 +210,11 @@ class SqliteBM25Memory(Memory):
         # won and the column now exists, which is fine -- only a different error is
         # a real failure.
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
-        for column, ddl in (("org_id", "INTEGER"), ("principal_id", "TEXT")):
+        for column, ddl in (
+            ("org_id", "INTEGER"),
+            ("principal_id", "TEXT"),
+            ("workflow_id", "INTEGER"),
+        ):
             if column not in cols:
                 try:
                     self._conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {ddl}")
@@ -234,6 +245,13 @@ class SqliteBM25Memory(Memory):
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user_created "
             "ON memories(org_id, user_id, created_at)"
         )
+        # Covers a workflow-scoped recall's filter+sort (WHERE user, workflow_id
+        # ORDER BY created_at DESC LIMIT N) the same way idx_memories_org_user_created
+        # covers the org-scoped one.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_workflow_user_created "
+            "ON memories(workflow_id, user_id, created_at)"
+        )
         # Covers `add_if_absent`'s existence check (WHERE org_id[/IS NULL] AND
         # user_id AND type AND content), so per-type dedup seeks instead of scanning
         # the user's whole (episodic-inflated) history (SP-4 review r2 #1). The
@@ -253,6 +271,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -268,6 +287,7 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         # Deletion-lifecycle fence: drop a write for a retired principal (an
         # in-flight run finishing after its account was deleted). The check is
@@ -278,8 +298,8 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -289,6 +309,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
+                record.workflow_id,
                 *retired_params,
             ),
         )
@@ -306,15 +327,20 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope,
-        principal-scope)` (SP-4 M-08 dedup + deletion-lifecycle). Returns the new
-        record, or None when an identical record already existed (or the principal is
-        retired). Dedup is **per type** (a semantic and a procedural row with the same
-        text don't collide, review r1 #4), **per principal** (the same text under a
-        recreated account is not a duplicate), and **race-safe** across connections:
-        the existence check lives inside one `INSERT ... WHERE NOT EXISTS` under
-        SQLite's write serialization, so two workers can't both insert (review r1 #2)."""
+        principal-scope, workflow-scope)` (SP-4 M-08 dedup + deletion-lifecycle +
+        cross-workflow scoping). Returns the new record, or None when an identical
+        record already existed (or the principal is retired). Dedup is **per type**
+        (a semantic and a procedural row with the same text don't collide, review r1
+        #4), **per principal** (the same text under a recreated account is not a
+        duplicate), **per workflow** (the same text under a different workflow is
+        not a duplicate -- callers never pass `workflow_id` for `semantic` writes,
+        so those always dedup at `workflow_id IS NULL`, keeping semantic facts
+        org-wide), and **race-safe** across connections: the existence check lives
+        inside one `INSERT ... WHERE NOT EXISTS` under SQLite's write serialization,
+        so two workers can't both insert (review r1 #2)."""
         if not isinstance(type, str) or not type.strip():
             raise ConfigurationError("Memory record type must be a non-empty string")
         record = MemoryRecord(
@@ -326,24 +352,28 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
         principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
+        workflow_clause = "workflow_id IS NULL" if workflow_id is None else "workflow_id = ?"
         exists_params: List[Any] = [user_id, type, content]
         if org_id is not None:
             exists_params.append(org_id)
         if principal_id is not None:
             exists_params.append(principal_id)
+        if workflow_id is not None:
+            exists_params.append(workflow_id)
         # Deletion-lifecycle fence, ANDed into the same insert as the dedup check so
         # both are atomic with the write (finding 1): a retired principal's late
         # write is dropped (reported as "nothing written", like a duplicate).
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
-            f"AND {org_clause} AND {principal_clause})" + retired_clause,
+            f"AND {org_clause} AND {principal_clause} AND {workflow_clause})" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -353,6 +383,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
+                record.workflow_id,
                 *exists_params,
                 *retired_params,
             ),
@@ -377,6 +408,7 @@ class SqliteBM25Memory(Memory):
                     created_at=row["created_at"],
                     org_id=row["org_id"],
                     principal_id=row["principal_id"],
+                    workflow_id=row["workflow_id"],
                 )
             )
         return records
@@ -389,6 +421,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
@@ -400,6 +433,12 @@ class SqliteBM25Memory(Memory):
         if principal_id is not None:
             sql += " AND principal_id = ?"
             params.append(principal_id)
+        # A concrete workflow scopes to that team's own episodic/procedural
+        # history; None is unfiltered (admin cross-workflow view, and the
+        # back-compat default for callers that never bind one).
+        if workflow_id is not None:
+            sql += " AND workflow_id = ?"
+            params.append(workflow_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -421,6 +460,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -431,7 +471,12 @@ class SqliteBM25Memory(Memory):
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
         candidates = self.all(
-            user_id, types, limit=max_candidates, org_id=org_id, principal_id=principal_id
+            user_id,
+            types,
+            limit=max_candidates,
+            org_id=org_id,
+            principal_id=principal_id,
+            workflow_id=workflow_id,
         )
         if not candidates:
             return []
@@ -692,14 +737,40 @@ class SqliteBM25Memory(Memory):
 
 # Instructs the extraction model to summarize a run into durable facts. Kept
 # terse and JSON-only so a cheap model can follow it and parsing stays simple.
+#
+# Each "facts" entry carries an action so the model can reconcile a new fact
+# against the user's existing remembered facts (shown to it as candidates in
+# the human message) instead of only ever appending -- this is what lets a
+# changed/corrected preference REPLACE the old one rather than accumulate
+# alongside it as a near-duplicate.
 _EXTRACTION_SYSTEM_PROMPT = (
     "You distill a completed AI-team interaction into durable memory about the "
     "user, for use in future sessions. Respond with ONLY a JSON object of the "
-    'form {"facts": ["..."], "procedural": "..."}. "facts" is a list of stable, '
-    "user-specific facts or preferences worth remembering (empty list if none). "
-    '"procedural" is one short note on what kind of request this was and how it '
-    "was handled well (empty string if nothing useful). No prose outside the JSON."
+    'form {"facts": [{"action": "add"|"update"|"noop", "content": "...", '
+    '"replaces_id": "<id-of-existing-fact>"|null}], "procedural": "..."}. Each '
+    'facts entry is one stable, user-specific fact or preference. You will be '
+    "shown the user's existing remembered facts with their ids -- for each new "
+    'fact, use "add" if it is genuinely new, "update" (with "replaces_id" set '
+    'to the existing fact\'s id) if it supersedes or corrects an existing one '
+    '(e.g. a changed preference), or "noop" if it only restates something '
+    'already known with nothing new to add. Use an empty "facts" list if '
+    'nothing is worth remembering. "procedural" is one short note on what kind '
+    "of request this was and how it was handled well (empty string if nothing "
+    "useful). No prose outside the JSON."
 )
+
+# Cap on how many of the user's existing semantic memories are shown to the
+# extraction model as reconciliation candidates. Fixed rather than
+# configurable -- kept minimal, matching the rest of this module's knobs.
+_DEDUP_CANDIDATE_LIMIT = 20
+
+
+def _format_candidates(candidates: Sequence["MemoryRecord"]) -> str:
+    """Render existing semantic memories as `- id=<id>: <content>` lines for the
+    extraction prompt, so the model can reference one via `replaces_id`."""
+    if not candidates:
+        return "(none)"
+    return "\n".join(f"- id={c.id}: {c.content}" for c in candidates)
 
 
 @dataclass
@@ -745,6 +816,7 @@ class MemoryManager:
         top_k: int = 5,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
         run_id: Optional[str] = None,
         workflow_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
@@ -761,6 +833,12 @@ class MemoryManager:
         # account's rows; bound only when a concrete principal exists (an org-less /
         # SDK-direct caller passes None, keeping the pre-SP-2 store contract).
         self.principal_id = principal_id
+        # The team/workflow this run belongs to (cross-workflow memory scoping).
+        # Applied to episodic/procedural recall+writes only -- semantic facts stay
+        # org-wide regardless of this value. None for SDK-direct callers and for a
+        # YAML-only demo workflow with no WorkflowRecord (reproduces pre-existing,
+        # workflow-agnostic behavior).
+        self.workflow_id = workflow_id
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
@@ -790,6 +868,15 @@ class MemoryManager:
         if self.principal_id is not None:
             kwargs["principal_id"] = self.principal_id
         return kwargs
+
+    def _workflow_kwargs(self) -> Dict[str, Any]:
+        """`{"workflow_id": ...}` only when a concrete workflow is bound. Mirrors
+        `_org_kwargs()`: when None (SDK-direct, or a YAML-only demo workflow with no
+        `WorkflowRecord`), the store is called with the original ABC-compatible
+        contract, so a pre-workflow-scoping custom store still works. Deliberately
+        NOT folded into `_scope_kwargs()` -- callers must opt in per write/search,
+        since `semantic` records are never workflow-scoped."""
+        return {"workflow_id": self.workflow_id} if self.workflow_id is not None else {}
 
     def _provenance(self) -> Dict[str, Any]:
         """Run-level provenance stamped into a record's metadata (M-06); omits
@@ -834,7 +921,16 @@ class MemoryManager:
         block. Returns the block plus the number of records drawn (for observability,
         M-05). ``preamble`` is ``""`` and ``count`` 0 when there's no user or nothing
         relevant, so callers can pass ``preamble`` straight through as
-        `memory_preamble` (empty = no-op)."""
+        `memory_preamble` (empty = no-op).
+
+        Issues TWO scoped searches, not one: `semantic` facts are personal
+        preferences that apply no matter which workflow is running, so that search
+        is org/principal-scoped only and NEVER receives `workflow_id` even when one
+        is bound. `episodic`/`procedural` are workflow-specific task experience, so
+        that search additionally scopes by `workflow_id` (unfiltered when None,
+        reproducing pre-existing behavior for SDK-direct callers and YAML-only demo
+        workflows). Each search is independently capped at `top_k`, so the combined
+        result can hold up to `2 * top_k` records."""
         if not user_id:
             return RecallResult(preamble="", count=0)
         # M-09: bound the scan to the most-recent N records (recency ~= relevance
@@ -842,10 +938,14 @@ class MemoryManager:
         # `max_candidates` is a concrete-store extension; only pass it when a bound
         # is configured, so an org-less SDK caller with a pre-SP-4 custom store
         # still invokes the plain ABC `search`.
-        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._scope_kwargs()}
+        base_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._scope_kwargs()}
         if self.recall_max_candidates is not None:
-            search_kwargs["max_candidates"] = self.recall_max_candidates
-        hits = self.store.search(user_id, query, **search_kwargs)
+            base_kwargs["max_candidates"] = self.recall_max_candidates
+
+        hits = self.store.search(user_id, query, types=[SEMANTIC], **base_kwargs)
+        hits += self.store.search(
+            user_id, query, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
+        )
         if not hits:
             return RecallResult(preamble="", count=0)
         # Recalled content is untrusted: an earlier tool result or model output
@@ -893,6 +993,7 @@ class MemoryManager:
                 f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
                 metadata=self._provenance(),
                 **self._scope_kwargs(),
+                **self._workflow_kwargs(),
             )
             # `add` returns None when the deletion-lifecycle fence dropped the write
             # (a retired principal); don't report a discarded write as recorded
@@ -933,10 +1034,17 @@ class MemoryManager:
         from ..adapters.langgraph_adapter import _resolve_model
 
         model = _resolve_model(self.extraction_model)
+        candidates = self._semantic_candidates(user_id, input, output)
         response = model.invoke(
             [
                 SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
-                HumanMessage(content=f"User request:\n{input}\n\nTeam answer:\n{output}"),
+                HumanMessage(
+                    content=(
+                        f"User request:\n{input}\n\nTeam answer:\n{output}\n\n"
+                        "Existing remembered facts about this user (id: text), to "
+                        "reconcile new facts against:\n" + _format_candidates(candidates)
+                    )
+                ),
             ]
         )
         # Capture usage IMMEDIATELY after the call: the tokens were consumed
@@ -958,13 +1066,65 @@ class MemoryManager:
         # M-08: exact-duplicate suppression via an atomic, per-type insert-if-absent
         # (race-safe and complete, not a recent-window snapshot). Each write is
         # independent: a failure is logged and the rest proceed.
+        candidate_ids = {c.id for c in candidates}
         for fact in parsed.get("facts", []):
-            if isinstance(fact, str) and fact.strip():
+            if not isinstance(fact, dict):
+                continue
+            fact_content = fact.get("content")
+            if not isinstance(fact_content, str) or not fact_content.strip():
+                continue
+            fact_content = fact_content.strip()
+            action = fact.get("action")
+            if action not in ("add", "update", "noop"):
+                # Malformed/missing action: no-op rather than guess, so a parse
+                # quirk can never be misread as "update" and delete something.
+                continue
+            if action == "noop":
+                continue
+            replaces_id: Optional[str] = None
+            if action == "update":
+                candidate_replaces_id = fact.get("replaces_id")
+                if isinstance(candidate_replaces_id, str) and candidate_replaces_id in candidate_ids:
+                    replaces_id = candidate_replaces_id
+                # An unrecognized/missing replaces_id downgrades to a plain add
+                # (below) -- never delete on an unverified id.
+            # Store the new fact BEFORE deleting the superseded one: if the store
+            # write fails, the old (still-valid) fact is left in place instead of
+            # being silently lost. This can't be made fully atomic against an
+            # arbitrary third-party `Memory` store (the ABC has no transaction
+            # primitive) -- if `delete()` itself then fails, both records remain,
+            # a recoverable duplicate rather than a permanent loss.
+            stored = False
+            write_failed = False
+            try:
+                if self._store_extracted(user_id, SEMANTIC, fact_content):
+                    written.append(SEMANTIC)
+                    stored = True
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
+                ok = False
+                write_failed = True
+            # `stored=False` without an exception means `add_if_absent` found the
+            # content already present -- confirmed there, not lost, so the stale
+            # record can still be superseded. The one exception is a mislabeled
+            # "update" whose new content is identical to replaces_id's own content:
+            # then the "duplicate" IS the record we're about to delete, and
+            # deleting it would remove the fact's only copy.
+            replaced = next((c for c in candidates if c.id == replaces_id), None) if replaces_id else None
+            supersede = replaces_id is not None and not write_failed
+            if supersede and not stored and replaced is not None and replaced.content == fact_content:
+                supersede = False
+            if supersede:
                 try:
-                    if self._store_extracted(user_id, SEMANTIC, fact.strip()):
-                        written.append(SEMANTIC)
+                    self.store.delete(replaces_id)
                 except Exception as exc:  # noqa: BLE001
-                    _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
+                    _logger.warning(
+                        "Memory: failed to delete superseded record '%s' for '%s': %s",
+                        replaces_id,
+                        user_id,
+                        exc,
+                        exc_info=True,
+                    )
                     ok = False
         procedural = parsed.get("procedural")
         if isinstance(procedural, str) and procedural.strip():
@@ -976,6 +1136,25 @@ class MemoryManager:
                 ok = False
         return written, usage, ok
 
+    def _semantic_candidates(self, user_id: str, input: str, output: str) -> List[MemoryRecord]:
+        """The user's existing `semantic` memories most relevant to this run, shown
+        to the extraction model so it can reconcile (add/update/noop) against them
+        instead of only ever appending. Best-effort: a search failure degrades to
+        no candidates (every fact falls back to a plain add) rather than breaking
+        extraction."""
+        search_kwargs: Dict[str, Any] = {
+            "top_k": _DEDUP_CANDIDATE_LIMIT,
+            "types": [SEMANTIC],
+            **self._scope_kwargs(),
+        }
+        if self.recall_max_candidates is not None:
+            search_kwargs["max_candidates"] = self.recall_max_candidates
+        try:
+            return self.store.search(user_id, f"{input}\n{output}", **search_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Memory: candidate fetch failed for '%s': %s", user_id, exc, exc_info=True)
+            return []
+
     def _store_extracted(self, user_id: str, type: str, content: str) -> bool:
         """Write one extracted record, deduping per type. Returns True when a NEW
         record was written (False when it was a duplicate).
@@ -985,8 +1164,15 @@ class MemoryManager:
         adopted `add_if_absent`: routing extraction writes through `add_if_absent`
         would silently bypass that policy for semantic/procedural records. In that
         case fall back to the store's `add()` (its policy applies; dedup is skipped)
-        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2)."""
+        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2).
+
+        `workflow_id` is added for every extracted type EXCEPT `SEMANTIC` --
+        personal preferences stay org-wide, task-experience notes (`PROCEDURAL`,
+        and any custom type a subclass might extract) are scoped to the current
+        workflow."""
         kwargs = {"metadata": self._provenance(), **self._scope_kwargs()}
+        if type != SEMANTIC:
+            kwargs.update(self._workflow_kwargs())
         add_if_absent = getattr(self.store, "add_if_absent", None)
         if callable(add_if_absent) and self._atomic_dedup_is_safe():
             return add_if_absent(user_id, type, content, **kwargs) is not None
