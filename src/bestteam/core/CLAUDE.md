@@ -303,3 +303,21 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   escaping/filtering engine — a proportionate mitigation for the disabled-by-
   default, per-user model, not full hardening.
 - Procedural memory is per-user (could be promoted to global/agent-level later).
+- **Memory is workflow-scoped for episodic/procedural, org-scoped for
+  semantic** (cross-workflow memory scoping). Records also carry a
+  `workflow_id` (`WorkflowRecord.id`, the stable team head — survives a
+  redeploy, unlike `workflow_version_id`, which is pure per-deploy
+  provenance). `add`/`add_if_absent`/`search`/`all` accept it as a
+  concrete-store extension exactly like `org_id`/`principal_id` (`None` =
+  unfiltered). `MemoryManager.recall()` runs two scoped searches instead of
+  one: `semantic` never receives `workflow_id` (personal preferences stay
+  shared across an org's workflows); `episodic`/`procedural` do (one team's
+  task experience doesn't leak into an unrelated team's context) —
+  `workflow_id=None` reproduces pre-existing, workflow-agnostic behavior for
+  SDK-direct callers and YAML-only demo workflows (no `WorkflowRecord`).
+  `record_run`/`_extract_and_store` route `workflow_id` into episodic/procedural
+  writes only, never semantic. The backend binds it in
+  `main.py::create_run` → `run_in_background` → `_make_memory` — see
+  `ui/backend/CLAUDE.md`. No admin-API filter and no backfill of
+  pre-existing (workflow_id-NULL) rows; see
+  `docs/superpowers/specs/2026-08-11-cross-workflow-memory-scoping-design.md`.

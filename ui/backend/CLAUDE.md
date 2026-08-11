@@ -743,6 +743,14 @@ threads the JWT `user.username` through as `user_id` (the wizard's
 `builder.py` test-runs omit it, so sandbox runs never touch memory). See
 `src/bestteam/core/CLAUDE.md` for the SDK-side design.
 
+`create_run` also resolves and passes `workflow_id` (`WorkflowRecord.id`, the
+deployed team's stable head) alongside `workflow_version_id` — see
+`_resolve_workflow_and_version`. Unlike `workflow_version_id` (pure
+provenance metadata), `workflow_id` scopes recall/writes: episodic/procedural
+memory is isolated per workflow, semantic stays org-wide. See
+`src/bestteam/core/CLAUDE.md`'s "Known limitations (per-user memory)" for the
+full design.
+
 **Admin memory management** (`ui/backend/memory_api.py`, `/api/memory`,
 `get_current_admin`-guarded): `GET /users` (users with per-type record counts),
 `GET /users/{user_id}/records?query=&type=&limit=` (browse via `all(limit=)`,
