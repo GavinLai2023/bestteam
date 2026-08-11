@@ -246,6 +246,12 @@ class SqliteBM25Memory(Memory):
         self._embeddings: Optional[Any] = None
         self._embedding_model_spec: Optional[str] = None
         self._recency_half_life_days = recency_half_life_days
+        # One-entry cache for the last embedded query: `MemoryManager.recall()`
+        # issues two scoped `search()` calls with the identical query string
+        # (semantic, then episodic/procedural), so without this a remote
+        # embedding provider gets called twice for the same text on every
+        # hybrid-enabled recall.
+        self._last_query_embedding: "Optional[tuple[str, Any]]" = None
         if embedding_model is not None:
             try:
                 import numpy  # noqa: F401
@@ -477,7 +483,8 @@ class SqliteBM25Memory(Memory):
             f"AND content = ? AND {org_clause} AND {principal_clause} AND {workflow_clause})",
             exists_params,
         ).fetchone()[0]
-        if already_exists:
+        precheck_skipped_embedding = bool(already_exists)
+        if precheck_skipped_embedding:
             embedding_json, embedding_model = None, None
         else:
             embedding_json, embedding_model = self._compute_embedding(content)
@@ -509,7 +516,23 @@ class SqliteBM25Memory(Memory):
             ),
         )
         self._conn.commit()
-        return record if cursor.rowcount else None
+        if not cursor.rowcount:
+            return None
+        if precheck_skipped_embedding and self._embeddings is not None:
+            # The precheck saw a "duplicate" but the row was inserted anyway --
+            # another connection must have deleted that row between our SELECT
+            # and the INSERT (e.g. an admin deletion), so this write raced the
+            # precheck rather than actually being a duplicate. Compute and
+            # persist the embedding now so it isn't silently missing from
+            # vector recall for the rest of this record's life.
+            embedding_json, embedding_model = self._compute_embedding(content)
+            if embedding_json is not None:
+                self._conn.execute(
+                    "UPDATE memories SET embedding_json = ?, embedding_model = ? WHERE id = ?",
+                    (embedding_json, embedding_model, record.id),
+                )
+                self._conn.commit()
+        return record
 
     def _rows_to_records(self, rows: Sequence[sqlite3.Row]) -> List[MemoryRecord]:
         records = []
@@ -542,12 +565,18 @@ class SqliteBM25Memory(Memory):
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
         workflow_id: Optional[int] = None,
+        include_embeddings: bool = True,
     ) -> "tuple[List[MemoryRecord], List[Optional[List[float]]], List[Optional[str]]]":
         """Same query as `all()`, but also returns each row's parsed embedding
         vector and the model spec it was computed under (both None when
         absent), in the same order as the records. Kept off the public
         `MemoryRecord` dataclass so a full-precision vector never rides along
-        admin API responses or `recall_preamble` text."""
+        admin API responses or `recall_preamble` text.
+
+        `include_embeddings=False` skips deserializing `embedding_json` for
+        every row -- for callers that don't need vectors at all (`all()`, or
+        `search()` when hybrid recall isn't configured), parsing a
+        potentially high-dimensional JSON array per row is pure waste."""
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
         org_sql, org_params = _org_read_clause(org_id)
@@ -576,6 +605,8 @@ class SqliteBM25Memory(Memory):
         records = self._rows_to_records(rows)
         embeddings: List[Optional[List[float]]] = []
         specs: List[Optional[str]] = []
+        if not include_embeddings:
+            return records, [None] * len(rows), [None] * len(rows)
         for row in rows:
             raw = row["embedding_json"]
             if raw is None:
@@ -605,6 +636,7 @@ class SqliteBM25Memory(Memory):
             org_id=org_id,
             principal_id=principal_id,
             workflow_id=workflow_id,
+            include_embeddings=False,
         )
         return records
 
@@ -635,15 +667,19 @@ class SqliteBM25Memory(Memory):
         ]
         if not usable:
             return []
-        try:
-            query_vec = np.array(self._embeddings.embed_query(query), dtype=np.float64)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "Memory: query embedding failed, vector leg skipped for this search: %s",
-                exc,
-                exc_info=True,
-            )
-            return []
+        if self._last_query_embedding is not None and self._last_query_embedding[0] == query:
+            query_vec = self._last_query_embedding[1]
+        else:
+            try:
+                query_vec = np.array(self._embeddings.embed_query(query), dtype=np.float64)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "Memory: query embedding failed, vector leg skipped for this search: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return []
+            self._last_query_embedding = (query, query_vec)
         dim = query_vec.shape[0]
         usable = [(record, vector) for record, vector in usable if len(vector) == dim]
         if not usable:
@@ -653,8 +689,14 @@ class SqliteBM25Memory(Memory):
         if norm > 0:
             query_vec = query_vec / norm
         scores = matrix @ query_vec
+        # Only positively-correlated candidates count as a vector "hit" --
+        # otherwise every embedded row (including an orthogonal/unrelated one)
+        # gets a nonzero RRF score just for being embedded, which can let recency
+        # decay push a fresh but irrelevant record above an older exact match.
+        # This also naturally excludes everything when the query embeds to a
+        # zero vector (all dot products are 0), with no special-case needed.
         order = np.argsort(scores)[::-1]
-        return [usable[i][0].id for i in order]
+        return [usable[i][0].id for i in order if scores[i] > 0]
 
     def search(
         self,
@@ -683,6 +725,7 @@ class SqliteBM25Memory(Memory):
             org_id=org_id,
             principal_id=principal_id,
             workflow_id=workflow_id,
+            include_embeddings=self._embeddings is not None,
         )
         if not candidates:
             return []

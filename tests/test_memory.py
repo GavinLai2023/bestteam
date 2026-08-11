@@ -188,10 +188,14 @@ def test_search_bounds_candidate_scan(monkeypatch):
     captured = {}
     real_candidates = store._candidates
 
-    def spy_candidates(user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None):
+    def spy_candidates(
+        user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None,
+        include_embeddings=True,
+    ):
         captured["limit"] = limit
         return real_candidates(
-            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id
+            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id,
+            include_embeddings=include_embeddings,
         )
 
     monkeypatch.setattr(store, "_candidates", spy_candidates)
@@ -1981,3 +1985,162 @@ def test_sqlite_bm25_no_numpy_required_without_embedding_model(monkeypatch):
 
     store = SqliteBM25Memory(":memory:")  # must not raise
     assert store.add("alice", EPISODIC, "hi") is not None
+
+
+# --- Codex review fixes: vector-leg relevance floor, dedup-precheck race,
+# --- query-embedding reuse, embedding-parse skip ---
+
+
+def test_search_hybrid_does_not_let_unrelated_vector_candidate_outrank_decayed_exact_match():
+    store = _hybrid_store(recency_half_life_days=1)
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    refund = store.add("alice", EPISODIC, "asked about a refund")
+    store._conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_time, refund.id))
+    store._conn.commit()
+    store.add("alice", EPISODIC, "left a note about their bike")  # fresh, unrelated topic
+
+    hits = store.search("alice", "refund", top_k=1)
+
+    assert hits[0].id == refund.id
+
+
+def test_vector_rank_returns_nothing_for_zero_query_vector():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    records, embeddings, specs = store._candidates("alice")
+
+    ranked = store._vector_rank("no relevant topic words here", records, embeddings, specs)
+
+    assert ranked == []
+
+
+def test_add_if_absent_self_heals_embedding_when_precheck_races_a_deletion(monkeypatch):
+    store = _hybrid_store()
+    dup = store.add("alice", SEMANTIC, "loves cycling")
+
+    embed_calls = []
+    original_embed_documents = store._embeddings.embed_documents
+
+    def spy(texts):
+        embed_calls.append(texts)
+        return original_embed_documents(texts)
+
+    monkeypatch.setattr(store._embeddings, "embed_documents", spy)
+
+    class _RacyConn:
+        """Delegates to the real connection, but simulates another connection
+        deleting the "duplicate" row right after our existence precheck runs
+        (and before our own INSERT), racing the cost-optimization precheck."""
+
+        def __init__(self, conn, dup_id):
+            self._conn = conn
+            self._dup_id = dup_id
+            self.exists_calls = 0
+
+        def execute(self, sql, params=()):
+            if sql.strip().startswith("SELECT EXISTS"):
+                self.exists_calls += 1
+                result = self._conn.execute(sql, params)
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (self._dup_id,))
+                self._conn.commit()
+                return result
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    proxy = _RacyConn(store._conn, dup.id)
+    monkeypatch.setattr(store, "_conn", proxy)
+
+    record = store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    assert record is not None  # the "duplicate" was actually gone by insert time
+    assert proxy.exists_calls == 1
+    row = proxy._conn.execute(
+        "SELECT embedding_json FROM memories WHERE id = ?", (record.id,)
+    ).fetchone()
+    assert row["embedding_json"] is not None  # self-healed, not left permanently NULL
+    assert len(embed_calls) == 1  # precheck skipped the first call; only the self-heal ran
+
+
+def test_search_reuses_query_embedding_across_repeated_calls(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", SEMANTIC, "loves cycling")
+    store.add("alice", EPISODIC, "asked about their bicycle")
+
+    embed_calls = []
+    original = store._embeddings.embed_query
+
+    def spy(text):
+        embed_calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(store._embeddings, "embed_query", spy)
+
+    store.search("alice", "cycling hobby", types=[SEMANTIC])
+    store.search("alice", "cycling hobby", types=[EPISODIC, PROCEDURAL])
+
+    assert embed_calls == ["cycling hobby"]  # second call reused the cached vector
+
+
+def test_candidates_skips_embedding_parsing_when_not_requested():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    _records, embeddings, specs = store._candidates("alice", include_embeddings=False)
+    assert embeddings == [None]
+    assert specs == [None]
+
+    _records2, embeddings2, _specs2 = store._candidates("alice", include_embeddings=True)
+    assert embeddings2 == [[1.0, 0.0]]
+
+
+def test_all_does_not_request_embeddings(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "hi")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.all("alice")
+
+    assert calls == [False]
+
+
+def test_search_without_hybrid_configured_does_not_request_embeddings(monkeypatch):
+    store = _store()
+    store.add("alice", EPISODIC, "refund note")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.search("alice", "refund")
+
+    assert calls == [False]
+
+
+def test_search_hybrid_requests_embeddings(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "refund note")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.search("alice", "refund")
+
+    assert calls == [True]
