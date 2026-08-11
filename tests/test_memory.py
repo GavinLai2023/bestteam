@@ -1366,3 +1366,57 @@ def test_opens_pre_workflow_db_and_migrates(tmp_path):
     store.add("alice", PROCEDURAL, "new workflow note", workflow_id=1)
     assert [r.content for r in store.all("alice", workflow_id=1)] == ["new workflow note"]
     store.close()
+
+
+def test_recall_semantic_shared_across_workflows():
+    # Personal preferences (semantic) apply no matter which workflow is running.
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise answers", org_id=5)
+    mgr_a = MemoryManager(store, org_id=5, workflow_id=1)
+    mgr_b = MemoryManager(store, org_id=5, workflow_id=2)
+
+    assert mgr_a.recall("alice", "concise answers").count == 1
+    assert mgr_b.recall("alice", "concise answers").count == 1
+
+
+def test_recall_procedural_isolated_per_workflow():
+    store = _store()
+    store.add("alice", PROCEDURAL, "check the order number first", org_id=5, workflow_id=1)
+    mgr_same = MemoryManager(store, org_id=5, workflow_id=1)
+    mgr_other = MemoryManager(store, org_id=5, workflow_id=2)
+
+    assert mgr_same.recall("alice", "order number").count == 1
+    assert mgr_other.recall("alice", "order number").count == 0
+
+
+def test_recall_episodic_isolated_per_workflow():
+    store = _store()
+    store.add("alice", EPISODIC, "user asked about the refund policy", org_id=5, workflow_id=1)
+    mgr_other = MemoryManager(store, org_id=5, workflow_id=2)
+
+    assert mgr_other.recall("alice", "refund policy").count == 0
+
+
+def test_recall_workflow_id_none_reproduces_prior_behavior():
+    # Back-compat: no workflow bound (SDK-direct, or a YAML-only demo workflow
+    # with no WorkflowRecord) recalls episodic/procedural across ALL workflows,
+    # exactly like before this scoping dimension existed.
+    store = _store()
+    store.add("alice", PROCEDURAL, "check the order number first", workflow_id=1)
+    store.add("alice", PROCEDURAL, "escalate angry customers", workflow_id=2)
+
+    mgr = MemoryManager(store)  # workflow_id defaults None
+    assert mgr.recall("alice", "order number").count == 1
+    assert mgr.recall("alice", "escalate angry customers").count == 1
+
+
+def test_recall_combines_semantic_and_workflow_scoped_hits():
+    store = _store()
+    store.add("alice", SEMANTIC, "prefers concise refund answers", org_id=5)
+    store.add("alice", PROCEDURAL, "refund requests: check order number first", org_id=5, workflow_id=1)
+    mgr = MemoryManager(store, org_id=5, workflow_id=1)
+
+    result = mgr.recall("alice", "refund")
+    assert result.count == 2
+    assert "prefers concise refund answers" in result.preamble
+    assert "check order number first" in result.preamble

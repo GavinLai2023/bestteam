@@ -790,6 +790,7 @@ class MemoryManager:
         top_k: int = 5,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
         run_id: Optional[str] = None,
         workflow_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
@@ -806,6 +807,12 @@ class MemoryManager:
         # account's rows; bound only when a concrete principal exists (an org-less /
         # SDK-direct caller passes None, keeping the pre-SP-2 store contract).
         self.principal_id = principal_id
+        # The team/workflow this run belongs to (cross-workflow memory scoping).
+        # Applied to episodic/procedural recall+writes only -- semantic facts stay
+        # org-wide regardless of this value. None for SDK-direct callers and for a
+        # YAML-only demo workflow with no WorkflowRecord (reproduces pre-existing,
+        # workflow-agnostic behavior).
+        self.workflow_id = workflow_id
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
         self.workflow_version_id = workflow_version_id
@@ -835,6 +842,15 @@ class MemoryManager:
         if self.principal_id is not None:
             kwargs["principal_id"] = self.principal_id
         return kwargs
+
+    def _workflow_kwargs(self) -> Dict[str, Any]:
+        """`{"workflow_id": ...}` only when a concrete workflow is bound. Mirrors
+        `_org_kwargs()`: when None (SDK-direct, or a YAML-only demo workflow with no
+        `WorkflowRecord`), the store is called with the original ABC-compatible
+        contract, so a pre-workflow-scoping custom store still works. Deliberately
+        NOT folded into `_scope_kwargs()` -- callers must opt in per write/search,
+        since `semantic` records are never workflow-scoped."""
+        return {"workflow_id": self.workflow_id} if self.workflow_id is not None else {}
 
     def _provenance(self) -> Dict[str, Any]:
         """Run-level provenance stamped into a record's metadata (M-06); omits
@@ -879,7 +895,16 @@ class MemoryManager:
         block. Returns the block plus the number of records drawn (for observability,
         M-05). ``preamble`` is ``""`` and ``count`` 0 when there's no user or nothing
         relevant, so callers can pass ``preamble`` straight through as
-        `memory_preamble` (empty = no-op)."""
+        `memory_preamble` (empty = no-op).
+
+        Issues TWO scoped searches, not one: `semantic` facts are personal
+        preferences that apply no matter which workflow is running, so that search
+        is org/principal-scoped only and NEVER receives `workflow_id` even when one
+        is bound. `episodic`/`procedural` are workflow-specific task experience, so
+        that search additionally scopes by `workflow_id` (unfiltered when None,
+        reproducing pre-existing behavior for SDK-direct callers and YAML-only demo
+        workflows). Each search is independently capped at `top_k`, so the combined
+        result can hold up to `2 * top_k` records."""
         if not user_id:
             return RecallResult(preamble="", count=0)
         # M-09: bound the scan to the most-recent N records (recency ~= relevance
@@ -887,10 +912,14 @@ class MemoryManager:
         # `max_candidates` is a concrete-store extension; only pass it when a bound
         # is configured, so an org-less SDK caller with a pre-SP-4 custom store
         # still invokes the plain ABC `search`.
-        search_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._scope_kwargs()}
+        base_kwargs: Dict[str, Any] = {"top_k": self.top_k, **self._scope_kwargs()}
         if self.recall_max_candidates is not None:
-            search_kwargs["max_candidates"] = self.recall_max_candidates
-        hits = self.store.search(user_id, query, **search_kwargs)
+            base_kwargs["max_candidates"] = self.recall_max_candidates
+
+        hits = self.store.search(user_id, query, types=[SEMANTIC], **base_kwargs)
+        hits += self.store.search(
+            user_id, query, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
+        )
         if not hits:
             return RecallResult(preamble="", count=0)
         # Recalled content is untrusted: an earlier tool result or model output
