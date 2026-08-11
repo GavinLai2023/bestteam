@@ -167,6 +167,15 @@ def _make_memory(
       exactly as before).
     - set -> a `SqliteBM25Memory` at that path; `BESTTEAM_MEMORY_MODEL`, if
       set, enables semantic/procedural extraction via one LLM call per run.
+    - `BESTTEAM_MEMORY_EMBEDDING_MODEL`, if set, enables hybrid (BM25 +
+      vector, RRF-fused) recall with type-aware recency decay -- same spec
+      convention as the vector knowledge base (`"fake:<dim>"` for $0 tests,
+      or a provider string like `"openai:text-embedding-3-small"`). Unset ->
+      pure-BM25 recall, byte-for-byte unchanged. `BESTTEAM_MEMORY_RECENCY_
+      HALF_LIFE_DAYS` tunes the decay applied to EPISODIC/PROCEDURAL hits
+      (SEMANTIC never decays); only meaningful when an embedding model is
+      also set. A misconfigured embedding spec disables memory entirely,
+      like a bad `BESTTEAM_MEMORY_DB` path (caught below).
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
     run only ever sees and writes its own org's memory. `workflow_id` (the
@@ -177,8 +186,14 @@ def _make_memory(
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
     if not db_path:
         return None
+    embedding_model = os.environ.get("BESTTEAM_MEMORY_EMBEDDING_MODEL", "").strip() or None
+    recency_half_life_days = _env_int("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", 14)
     try:
-        store = SqliteBM25Memory(db_path)
+        store = SqliteBM25Memory(
+            db_path,
+            embedding_model=embedding_model,
+            recency_half_life_days=recency_half_life_days,
+        )
     except Exception as exc:  # noqa: BLE001 — memory must never break a run
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None

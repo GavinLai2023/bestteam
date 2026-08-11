@@ -743,6 +743,15 @@ threads the JWT `user.username` through as `user_id` (the wizard's
 `builder.py` test-runs omit it, so sandbox runs never touch memory). See
 `src/bestteam/core/CLAUDE.md` for the SDK-side design.
 
+Two more optional env vars enable opt-in hybrid recall: `BESTTEAM_MEMORY_EMBEDDING_MODEL`
+(same spec convention as the vector knowledge base — unset → plain BM25
+recall, byte-for-byte unchanged) and `BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS`
+(default 14, only meaningful when an embedding model is set). Both are read
+identically by `_make_memory` and `memory_api.py::get_memory_store` (the admin
+search dependency below), so admin search reflects the same ranking behavior
+a live run gets. See `src/bestteam/core/CLAUDE.md`'s "Known limitations
+(per-user memory)" for the hybrid-recall design.
+
 `create_run` also resolves and passes `workflow_id` (`WorkflowRecord.id`, the
 deployed team's stable head) alongside `workflow_version_id` — see
 `_resolve_workflow_and_version`. Unlike `workflow_version_id` (pure

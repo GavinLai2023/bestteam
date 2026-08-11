@@ -77,6 +77,53 @@ def test_make_memory_defaults_recall_bound_and_opt_in_retention(monkeypatch, tmp
     assert mgr.max_episodic_per_user is None  # M-07: retention opt-in
 
 
+def test_make_memory_embedding_model_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", raising=False)
+
+    mgr = _make_memory()
+    assert mgr.store._embeddings is None
+
+
+def test_make_memory_wires_embedding_model_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:8")
+
+    mgr = _make_memory()
+    assert mgr.store._embeddings is not None
+
+
+def test_make_memory_wires_recency_half_life_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:8")
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "30")
+
+    mgr = _make_memory()
+    assert mgr.store._recency_half_life_days == 30
+
+
+def test_make_memory_recency_half_life_default_when_unset_or_invalid(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", raising=False)
+    assert _make_memory().store._recency_half_life_days == 14
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "not-a-number")
+    assert _make_memory().store._recency_half_life_days == 14
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "-5")
+    assert _make_memory().store._recency_half_life_days == 14
+
+
+def test_make_memory_bad_embedding_spec_disables_memory_entirely(monkeypatch, tmp_path):
+    # Documents the deliberate all-or-nothing failure mode: a misconfigured
+    # BESTTEAM_MEMORY_EMBEDDING_MODEL disables memory entirely (inherits
+    # _make_memory's existing broad except), same as a bad BESTTEAM_MEMORY_DB.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:not-an-int")
+
+    assert _make_memory() is None
+
+
 def test_run_in_background_records_episodic_memory_for_user(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))

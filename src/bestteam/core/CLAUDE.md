@@ -265,8 +265,27 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   rejects a
   non-string/empty `type`, but the type **enum stays open** — a custom store may
   still model other string types (M-11). See `docs/MEMORY_REVIEW_TRIAGE.md`.
-- Single-stage BM25 recall (no rerank/expansion) — same tradeoff as the KB;
-  the scan is now bounded to the most-recent N (SP-4/M-09, above).
+- **Recall is BM25-only by default; hybrid (BM25 + vector) recall is opt-in.**
+  Plain BM25 requires at least one shared significant term between the query
+  and a record's content — a semantically identical but lexically disjoint
+  memory returns nothing. Setting `BESTTEAM_MEMORY_EMBEDDING_MODEL` (same spec
+  convention as the vector knowledge base — `"fake:<dim>"` for $0 tests, or a
+  provider string like `"openai:text-embedding-3-small"`) enables a second,
+  overlap-free ranking leg: each write computes and persists an embedding
+  (`memories.embedding_json`/`embedding_model`, added at write time — no
+  backfill of pre-existing rows), and `search()` fuses the BM25 ranking with a
+  cosine-similarity ranking via Reciprocal Rank Fusion (`k=60`), then applies
+  type-aware recency decay (`BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS`, default
+  14 days) — SEMANTIC records never decay (a stored fact doesn't get less true
+  with age), EPISODIC/PROCEDURAL do. The embedding-resolution/cosine-math
+  primitives are shared with the vector knowledge base via `core/embeddings.py`.
+  Unset (the default) → behavior is byte-for-byte identical to plain BM25. A
+  misconfigured spec (bad string, missing `numpy`) disables memory entirely,
+  same as a bad `BESTTEAM_MEMORY_DB` path. Still no query rewriting/expansion
+  and no reranking (cross-encoder/LLM re-scoring) — same tradeoff as the vector
+  KB's own "single-stage" limitation; deferred to a future pass. A row without
+  an embedding (pre-adoption, or the embedding call failed) simply doesn't
+  participate in the vector leg and is found via BM25 only.
 - An **admin-only** Memory management page (`ui/backend/memory_api.py`,
   `/api/memory`) lets admins view/search/delete a user's records and clear a
   user's whole memory, but there's no manual add/edit. `record_run` caps each

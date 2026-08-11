@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
+from .embeddings import normalize_rows, resolve_embedding_model
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +90,54 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_RECORD_CHARS:
         return text
     return text[:_MAX_RECORD_CHARS] + " …[truncated]"
+
+
+# Default half-life (days) for the recency decay applied to EPISODIC/PROCEDURAL
+# records in hybrid search (SEMANTIC never decays -- see `_recency_weight`).
+# Only consulted when an embedding model is configured (hybrid recall).
+_DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
+
+
+def _reciprocal_rank_fusion(
+    *ranked_id_lists: Sequence[str], k: int = 60
+) -> Dict[str, float]:
+    """Merge ranked-id lists into one fused score per id: the sum, across every
+    list an id appears in, of ``1/(k+rank)`` (1-based rank). Standard
+    Reciprocal Rank Fusion -- rank-based, so it needs no score calibration
+    between BM25 and cosine similarity, which live on different scales. An id
+    present in only one list still gets a score from that list alone."""
+    scores: Dict[str, float] = {}
+    for ranked_ids in ranked_id_lists:
+        for rank, record_id in enumerate(ranked_ids, start=1):
+            scores[record_id] = scores.get(record_id, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+def _recency_weight(
+    record_type: str,
+    created_at: str,
+    *,
+    now: datetime,
+    half_life_days: Optional[float],
+) -> float:
+    """Multiplier applied to a fused hybrid-search score to fade older
+    EPISODIC/PROCEDURAL records. SEMANTIC records always weight 1.0 (never
+    decayed) -- a durable stored fact doesn't get less true with age. Also
+    1.0 when decay is disabled (`half_life_days` None/non-positive) or when
+    `created_at` can't be parsed / is in the future (clock skew) -- degrades
+    to no decay rather than guessing."""
+    if record_type == SEMANTIC or not half_life_days or half_life_days <= 0:
+        return 1.0
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return 1.0
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_days = max((now - created).total_seconds() / 86400.0, 0.0)
+    if age_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
 
 
 @dataclass
@@ -176,7 +225,13 @@ class SqliteBM25Memory(Memory):
     backend builds one per worker thread so the connection stays thread-local.
     """
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(
+        self,
+        path: str = ":memory:",
+        *,
+        embedding_model: Any = None,
+        recency_half_life_days: Optional[float] = _DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    ) -> None:
         try:
             import rank_bm25  # noqa: F401
         except ImportError as exc:
@@ -184,6 +239,25 @@ class SqliteBM25Memory(Memory):
                 "Memory requires the 'rank-bm25' package. "
                 "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
+
+        # Hybrid (BM25 + vector) recall is strictly opt-in: `embedding_model=None`
+        # (the default) leaves every new code path below a no-op, so behavior is
+        # byte-for-byte identical to pure-BM25 unless a caller configures it.
+        self._embeddings: Optional[Any] = None
+        self._embedding_model_spec: Optional[str] = None
+        self._recency_half_life_days = recency_half_life_days
+        if embedding_model is not None:
+            try:
+                import numpy  # noqa: F401
+            except ImportError as exc:
+                raise ConfigurationError(
+                    "Hybrid memory recall (embedding_model) requires the 'numpy' "
+                    "package. Install it with: pip install 'bestteam[tools-rag-vector]'"
+                ) from exc
+            self._embeddings = resolve_embedding_model(embedding_model)
+            # Only a string spec has a stable identity to tag rows/filter search
+            # with (see `_vector_rank`) -- a live Embeddings instance has none.
+            self._embedding_model_spec = embedding_model if isinstance(embedding_model, str) else None
 
         self.path = str(path)
         self._conn = sqlite3.connect(self.path)
@@ -199,7 +273,9 @@ class SqliteBM25Memory(Memory):
                 created_at TEXT NOT NULL,
                 org_id INTEGER,
                 principal_id TEXT,
-                workflow_id INTEGER
+                workflow_id INTEGER,
+                embedding_json TEXT,
+                embedding_model TEXT
             )
             """
         )
@@ -214,6 +290,8 @@ class SqliteBM25Memory(Memory):
             ("org_id", "INTEGER"),
             ("principal_id", "TEXT"),
             ("workflow_id", "INTEGER"),
+            ("embedding_json", "TEXT"),
+            ("embedding_model", "TEXT"),
         ):
             if column not in cols:
                 try:
@@ -262,6 +340,26 @@ class SqliteBM25Memory(Memory):
         )
         self._conn.commit()
 
+    def _compute_embedding(self, content: str) -> "tuple[Optional[str], Optional[str]]":
+        """`(embedding_json, embedding_model_spec)` for a new write, or
+        `(None, None)` when no embedding model is configured, or when
+        embedding this content failed. Best-effort: an embedding-provider
+        outage must never break a memory write -- the row is still stored,
+        just without a vector, and participates in search via BM25 only
+        (like a pre-hybrid-adoption row)."""
+        if self._embeddings is None:
+            return None, None
+        try:
+            vector = self._embeddings.embed_documents([content])[0]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Memory: embedding failed for a write, storing without a vector: %s",
+                exc,
+                exc_info=True,
+            )
+            return None, None
+        return json.dumps(vector), self._embedding_model_spec
+
     def add(
         self,
         user_id: str,
@@ -289,6 +387,7 @@ class SqliteBM25Memory(Memory):
             principal_id=principal_id,
             workflow_id=workflow_id,
         )
+        embedding_json, embedding_model = self._compute_embedding(content)
         # Deletion-lifecycle fence: drop a write for a retired principal (an
         # in-flight run finishing after its account was deleted). The check is
         # folded INTO the insert (`... WHERE NOT EXISTS (retired)`) so it is atomic
@@ -298,8 +397,9 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "embedding_json, embedding_model) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -310,6 +410,8 @@ class SqliteBM25Memory(Memory):
                 record.org_id,
                 record.principal_id,
                 record.workflow_id,
+                embedding_json,
+                embedding_model,
                 *retired_params,
             ),
         )
@@ -364,14 +466,30 @@ class SqliteBM25Memory(Memory):
             exists_params.append(principal_id)
         if workflow_id is not None:
             exists_params.append(workflow_id)
+        # Cost optimization, not a correctness check: skip computing an embedding
+        # when this content is very likely already present -- near-duplicate
+        # resolution routinely reconciles against existing facts, so this avoids
+        # paying for an embedding call on the common no-op/duplicate case. The
+        # atomic INSERT ... WHERE NOT EXISTS below remains the actual correctness
+        # guarantee; a lost race here just means one wasted embedding call.
+        already_exists = self._conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE user_id = ? AND type = ? "
+            f"AND content = ? AND {org_clause} AND {principal_clause} AND {workflow_clause})",
+            exists_params,
+        ).fetchone()[0]
+        if already_exists:
+            embedding_json, embedding_model = None, None
+        else:
+            embedding_json, embedding_model = self._compute_embedding(content)
         # Deletion-lifecycle fence, ANDed into the same insert as the dedup check so
         # both are atomic with the write (finding 1): a retired principal's late
         # write is dropped (reported as "nothing written", like a duplicate).
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "embedding_json, embedding_model) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
             f"AND {org_clause} AND {principal_clause} AND {workflow_clause})" + retired_clause,
             (
@@ -384,6 +502,8 @@ class SqliteBM25Memory(Memory):
                 record.org_id,
                 record.principal_id,
                 record.workflow_id,
+                embedding_json,
+                embedding_model,
                 *exists_params,
                 *retired_params,
             ),
@@ -413,7 +533,7 @@ class SqliteBM25Memory(Memory):
             )
         return records
 
-    def all(
+    def _candidates(
         self,
         user_id: str,
         types: Optional[Sequence[str]] = None,
@@ -422,7 +542,12 @@ class SqliteBM25Memory(Memory):
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
         workflow_id: Optional[int] = None,
-    ) -> List[MemoryRecord]:
+    ) -> "tuple[List[MemoryRecord], List[Optional[List[float]]], List[Optional[str]]]":
+        """Same query as `all()`, but also returns each row's parsed embedding
+        vector and the model spec it was computed under (both None when
+        absent), in the same order as the records. Kept off the public
+        `MemoryRecord` dataclass so a full-precision vector never rides along
+        admin API responses or `recall_preamble` text."""
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
         org_sql, org_params = _org_read_clause(org_id)
@@ -448,7 +573,88 @@ class SqliteBM25Memory(Memory):
             sql += " LIMIT ?"
             params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
-        return self._rows_to_records(rows)
+        records = self._rows_to_records(rows)
+        embeddings: List[Optional[List[float]]] = []
+        specs: List[Optional[str]] = []
+        for row in rows:
+            raw = row["embedding_json"]
+            if raw is None:
+                embeddings.append(None)
+            else:
+                try:
+                    embeddings.append(json.loads(raw))
+                except (ValueError, TypeError):
+                    embeddings.append(None)
+            specs.append(row["embedding_model"])
+        return records, embeddings, specs
+
+    def all(
+        self,
+        user_id: str,
+        types: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        org_id: Union[int, str, None] = None,
+        principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
+    ) -> List[MemoryRecord]:
+        records, _embeddings, _specs = self._candidates(
+            user_id,
+            types,
+            limit=limit,
+            org_id=org_id,
+            principal_id=principal_id,
+            workflow_id=workflow_id,
+        )
+        return records
+
+    def _vector_rank(
+        self,
+        query: str,
+        records: List[MemoryRecord],
+        embeddings: List[Optional[List[float]]],
+        specs: List[Optional[str]],
+    ) -> List[str]:
+        """Rank candidates by cosine similarity to `query`, with NO keyword-
+        overlap requirement -- this is what lets a semantically related but
+        lexically disjoint memory surface, which the BM25 leg alone cannot do.
+
+        Only candidates embedded under the *currently configured* model spec
+        are considered: an older row from a since-changed embedding model
+        lives in an incompatible vector space, and comparing its vector to a
+        query embedded under a different model would silently produce
+        meaningless cosine scores. A vector-length mismatch is a second,
+        always-on defense against the same problem for a live (non-string)
+        embeddings instance, which has no stable spec string to compare."""
+        import numpy as np
+
+        usable = [
+            (record, vector)
+            for record, vector, spec in zip(records, embeddings, specs)
+            if vector is not None and spec == self._embedding_model_spec
+        ]
+        if not usable:
+            return []
+        try:
+            query_vec = np.array(self._embeddings.embed_query(query), dtype=np.float64)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Memory: query embedding failed, vector leg skipped for this search: %s",
+                exc,
+                exc_info=True,
+            )
+            return []
+        dim = query_vec.shape[0]
+        usable = [(record, vector) for record, vector in usable if len(vector) == dim]
+        if not usable:
+            return []
+        matrix = normalize_rows(np.array([vector for _record, vector in usable], dtype=np.float64))
+        norm = np.linalg.norm(query_vec)
+        if norm > 0:
+            query_vec = query_vec / norm
+        scores = matrix @ query_vec
+        order = np.argsort(scores)[::-1]
+        return [usable[i][0].id for i in order]
 
     def search(
         self,
@@ -470,7 +676,7 @@ class SqliteBM25Memory(Memory):
         # scan to the most-recent N records -- a bound on the DB/CPU/memory work
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
-        candidates = self.all(
+        candidates, embeddings, specs = self._candidates(
             user_id,
             types,
             limit=max_candidates,
@@ -483,24 +689,58 @@ class SqliteBM25Memory(Memory):
 
         # Same overlap-then-score ranking as LocalFolderKnowledgeBase.query:
         # keep only records sharing at least one significant (non-stopword)
-        # term with the query, then sort by (term overlap, BM25 score).
+        # term with the query, then sort by (term overlap, BM25 score). This
+        # BM25 leg's behavior is UNCHANGED regardless of hybrid mode.
         candidate_tokens = [tokenize(r.content) for r in candidates]
         candidate_terms = [significant_terms(toks) for toks in candidate_tokens]
         query_tokens = tokenize(query)
         query_terms = significant_terms(query_tokens)
-        if not query_terms:
+
+        matches: List["tuple[int, float, MemoryRecord]"] = []
+        if query_terms:
+            bm25 = BM25Okapi(candidate_tokens)
+            scores = bm25.get_scores(query_tokens)
+            matches = [
+                (len(query_terms & terms), score, record)
+                for score, record, terms in zip(scores, candidates, candidate_terms)
+                if query_terms & terms
+            ]
+            matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        bm25_ranked_ids = [record.id for _overlap, _score, record in matches]
+
+        if self._embeddings is None:
+            # Legacy behavior, byte-for-byte unchanged: pure BM25 with the
+            # keyword-overlap gate -- a query with no significant terms (or no
+            # overlapping candidate) returns nothing.
+            if not query_terms:
+                return []
+            return [record for _overlap, _score, record in matches[:top_k]]
+
+        # Hybrid path: fuse the BM25 ranking with a vector-similarity ranking
+        # (no overlap requirement) via Reciprocal Rank Fusion, then apply
+        # type-aware recency decay before taking the top_k.
+        vector_ranked_ids = self._vector_rank(query, candidates, embeddings, specs)
+        fused = _reciprocal_rank_fusion(bm25_ranked_ids, vector_ranked_ids)
+        if not fused:
             return []
 
-        bm25 = BM25Okapi(candidate_tokens)
-        scores = bm25.get_scores(query_tokens)
-
-        matches = [
-            (len(query_terms & terms), score, record)
-            for score, record, terms in zip(scores, candidates, candidate_terms)
-            if query_terms & terms
+        by_id = {record.id: record for record in candidates}
+        now = datetime.now(timezone.utc)
+        weighted = [
+            (
+                score
+                * _recency_weight(
+                    by_id[record_id].type,
+                    by_id[record_id].created_at,
+                    now=now,
+                    half_life_days=self._recency_half_life_days,
+                ),
+                record_id,
+            )
+            for record_id, score in fused.items()
         ]
-        matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        return [record for _overlap, _score, record in matches[:top_k]]
+        weighted.sort(key=lambda pair: pair[0], reverse=True)
+        return [by_id[record_id] for _score, record_id in weighted[:top_k]]
 
     def delete(self, memory_id: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))

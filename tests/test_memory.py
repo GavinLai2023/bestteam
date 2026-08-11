@@ -1,9 +1,20 @@
 """Tests for the per-user memory store and manager (`core/memory.py`)."""
 
+import json
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from langchain_core.embeddings import Embeddings
 
 from bestteam import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
-from bestteam.core.memory import EPISODIC, LEGACY_ORG, PROCEDURAL, SEMANTIC
+from bestteam.core.memory import (
+    EPISODIC,
+    LEGACY_ORG,
+    PROCEDURAL,
+    SEMANTIC,
+    _reciprocal_rank_fusion,
+    _recency_weight,
+)
 
 
 class _LegacyStore(Memory):
@@ -175,15 +186,15 @@ def test_search_bounds_candidate_scan(monkeypatch):
         store.add("alice", EPISODIC, f"refund note {i}")
 
     captured = {}
-    real_all = store.all
+    real_candidates = store._candidates
 
-    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None):
+    def spy_candidates(user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None):
         captured["limit"] = limit
-        return real_all(
+        return real_candidates(
             user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id
         )
 
-    monkeypatch.setattr(store, "all", spy_all)
+    monkeypatch.setattr(store, "_candidates", spy_candidates)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
 
     assert captured["limit"] == 3  # loaded at most 3 rows, not all 6
@@ -1691,3 +1702,282 @@ def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
     # The procedural note is new under workflow 1 (workflow 2's note doesn't dedup it).
     assert len([r for r in store.all("alice") if r.type == PROCEDURAL]) == 2
     assert outcome.recorded.count(PROCEDURAL) == 1
+
+
+# --- Hybrid (BM25 + vector) recall: RRF fusion + type-aware recency decay ---
+
+
+class _TopicEmbedding(Embeddings):
+    """Maps text to a small topic vector via keyword buckets, deliberately
+    independent of BM25 token overlap -- lets tests prove the vector leg
+    finds a match that shares zero significant terms with the query.
+    `DeterministicFakeEmbedding`/`fake:` alone is hash-based and can't be
+    used to assert *which* content should match a given query.
+    """
+
+    _BIKE_WORDS = ("bike", "bicycle", "cycling", "pedal")
+    _FINANCE_WORDS = ("refund", "invoice", "payment", "money")
+
+    def embed_documents(self, texts):
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text):
+        lowered = text.lower()
+        bike = 1.0 if any(w in lowered for w in self._BIKE_WORDS) else 0.0
+        finance = 1.0 if any(w in lowered for w in self._FINANCE_WORDS) else 0.0
+        return [bike, finance]
+
+
+class _BrokenEmbedding(Embeddings):
+    """Raises on every call, for testing embedding-failure degradation."""
+
+    def embed_documents(self, texts):
+        raise RuntimeError("embedding provider unavailable")
+
+    def embed_query(self, text):
+        raise RuntimeError("embedding provider unavailable")
+
+
+def _hybrid_store(**kwargs):
+    return SqliteBM25Memory(":memory:", embedding_model=_TopicEmbedding(), **kwargs)
+
+
+def test_add_computes_and_persists_embedding_when_configured():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    row = store._conn.execute("SELECT embedding_json, embedding_model FROM memories").fetchone()
+    assert json.loads(row["embedding_json"]) == [1.0, 0.0]
+    # A live (non-string) Embeddings instance has no stable spec identity.
+    assert row["embedding_model"] is None
+
+
+def test_add_omits_embedding_when_unconfigured():
+    store = _store()
+    store.add("alice", EPISODIC, "hi")
+
+    row = store._conn.execute("SELECT embedding_json, embedding_model FROM memories").fetchone()
+    assert row["embedding_json"] is None
+    assert row["embedding_model"] is None
+
+
+def test_add_if_absent_persists_embedding_on_new_record():
+    store = _hybrid_store()
+    store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    row = store._conn.execute("SELECT embedding_json FROM memories").fetchone()
+    assert row["embedding_json"] is not None
+
+
+def test_add_if_absent_skips_embedding_on_duplicate(monkeypatch):
+    store = _hybrid_store()
+    store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    embed_calls = []
+    original = store._embeddings.embed_documents
+
+    def spy(texts):
+        embed_calls.append(texts)
+        return original(texts)
+
+    monkeypatch.setattr(store._embeddings, "embed_documents", spy)
+    result = store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    assert result is None  # duplicate, not written
+    assert embed_calls == []  # pre-check skipped the embedding call entirely
+
+
+def test_embedding_write_failure_degrades_to_null_vector_not_a_broken_write():
+    store = SqliteBM25Memory(":memory:", embedding_model=_BrokenEmbedding())
+
+    record = store.add("alice", EPISODIC, "hi")
+
+    assert record is not None
+    row = store._conn.execute("SELECT embedding_json FROM memories").fetchone()
+    assert row["embedding_json"] is None
+
+
+def test_search_hybrid_surfaces_zero_keyword_overlap_match():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    hits = store.search("alice", "cycling hobby")
+
+    assert [h.content for h in hits] == ["User rides their bicycle every weekend"]
+
+
+def test_search_without_embedding_model_ignores_semantic_matches():
+    store = _store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    assert store.search("alice", "cycling hobby") == []
+
+
+def test_search_hybrid_still_finds_pure_keyword_matches():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "asked about a refund for order 42")
+
+    hits = store.search("alice", "refund")
+
+    assert [h.content for h in hits] == ["asked about a refund for order 42"]
+
+
+def test_search_vector_leg_skips_records_without_embeddings():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    # Simulate a pre-hybrid-adoption row: no stored vector.
+    store._conn.execute("UPDATE memories SET embedding_json = NULL, embedding_model = NULL")
+    store._conn.commit()
+
+    assert store.search("alice", "cycling hobby") == []  # no BM25 overlap either
+    assert store.search("alice", "bicycle") != []  # still found via BM25
+
+
+def test_search_vector_leg_skips_dimension_mismatched_embeddings():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    # Simulate a changed embedding model: same (None) spec, different dimension.
+    store._conn.execute("UPDATE memories SET embedding_json = ?", (json.dumps([1.0, 0.0, 0.0]),))
+    store._conn.commit()
+
+    # No crash; the mismatched vector is excluded from the vector leg, so a
+    # zero-keyword-overlap query no longer finds it.
+    assert store.search("alice", "cycling hobby") == []
+
+
+def test_reciprocal_rank_fusion_combines_two_lists():
+    scores = _reciprocal_rank_fusion(["a", "b", "c"], ["c", "a"])
+
+    assert scores["a"] == pytest.approx(1 / 61 + 1 / 62)
+    assert scores["b"] == pytest.approx(1 / 62)
+    assert scores["c"] == pytest.approx(1 / 63 + 1 / 61)
+
+
+def test_reciprocal_rank_fusion_respects_custom_k():
+    assert _reciprocal_rank_fusion(["a"], k=1)["a"] == pytest.approx(1 / 2)
+
+
+def test_reciprocal_rank_fusion_empty_lists():
+    assert _reciprocal_rank_fusion([], []) == {}
+
+
+def test_recency_weight_semantic_never_decays():
+    now = datetime(2026, 1, 30, tzinfo=timezone.utc)
+    old = "2020-01-01T00:00:00+00:00"
+    assert _recency_weight(SEMANTIC, old, now=now, half_life_days=14) == 1.0
+
+
+def test_recency_weight_halves_at_half_life():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+
+    weight = _recency_weight(EPISODIC, created_at, now=now, half_life_days=14)
+
+    assert weight == pytest.approx(0.5)
+
+
+def test_recency_weight_disabled_when_half_life_none_or_nonpositive():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    created_at = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()
+
+    assert _recency_weight(EPISODIC, created_at, now=now, half_life_days=None) == 1.0
+    assert _recency_weight(EPISODIC, created_at, now=now, half_life_days=0) == 1.0
+
+
+def test_recency_weight_tolerates_unparseable_or_future_timestamp():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+
+    assert _recency_weight(EPISODIC, "not-a-date", now=now, half_life_days=14) == 1.0
+    future = datetime(2026, 2, 1, tzinfo=timezone.utc).isoformat()
+    assert _recency_weight(EPISODIC, future, now=now, half_life_days=14) == 1.0
+
+
+def test_search_hybrid_applies_recency_decay_to_ranking():
+    store = _hybrid_store(recency_half_life_days=1)
+    older = store.add("alice", EPISODIC, "asked about a refund")
+    newer = store.add("alice", EPISODIC, "asked about a refund")
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    store._conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_time, older.id))
+    store._conn.commit()
+
+    hits = store.search("alice", "refund", top_k=2)
+
+    assert hits[0].id == newer.id
+
+
+def test_search_hybrid_semantic_beats_stale_episodic_at_equal_fusion_score():
+    store = _hybrid_store(recency_half_life_days=1)
+    same_content = "asked about a refund"
+    semantic = store.add("alice", SEMANTIC, same_content)
+    store.add("alice", EPISODIC, same_content)
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    store._conn.execute("UPDATE memories SET created_at = ?", (old_time,))
+    store._conn.commit()
+
+    hits = store.search("alice", "refund", types=[SEMANTIC, EPISODIC], top_k=2)
+
+    assert hits[0].id == semantic.id
+
+
+def test_opens_pre_embedding_db_and_migrates(tmp_path):
+    # A DB created before hybrid recall (no embedding_json/embedding_model
+    # columns) must gain them in place, keep its existing rows (both NULL),
+    # and work after.
+    import sqlite3
+
+    db_path = str(tmp_path / "pre_embedding.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, org_id INTEGER, principal_id TEXT, workflow_id INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'semantic', 'legacy fact', '{}', "
+        "'2026-01-01T00:00:00+00:00', NULL, NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path, embedding_model=_TopicEmbedding())
+    legacy = store.all("alice")
+    assert len(legacy) == 1
+    row = store._conn.execute("SELECT embedding_json FROM memories WHERE id = 'id1'").fetchone()
+    assert row["embedding_json"] is None  # not backfilled
+    store.add("alice", SEMANTIC, "new fact about cycling")
+    assert len(store.all("alice")) == 2
+    store.close()
+
+
+def test_sqlite_bm25_requires_numpy_when_embedding_model_set(monkeypatch):
+    import builtins
+
+    from bestteam.exceptions import ConfigurationError
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "numpy":
+            raise ImportError("no numpy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ConfigurationError, match="numpy"):
+        SqliteBM25Memory(":memory:", embedding_model="fake:8")
+
+
+def test_sqlite_bm25_no_numpy_required_without_embedding_model(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "numpy":
+            raise ImportError("no numpy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    store = SqliteBM25Memory(":memory:")  # must not raise
+    assert store.add("alice", EPISODIC, "hi") is not None
