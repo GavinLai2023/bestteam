@@ -155,6 +155,7 @@ def _make_memory(
     principal_id: Optional[str] = None,
     run_id: Optional[str] = None,
     workflow_version_id: Optional[int] = None,
+    workflow_id: Optional[int] = None,
 ) -> Optional[MemoryManager]:
     """Build a per-user `MemoryManager` from env, or None when memory is disabled.
 
@@ -168,7 +169,10 @@ def _make_memory(
       set, enables semantic/procedural extraction via one LLM call per run.
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
-    run only ever sees and writes its own org's memory.
+    run only ever sees and writes its own org's memory. `workflow_id` (the
+    deployed team's stable `WorkflowRecord.id`) additionally scopes
+    episodic/procedural recall/writes to the current workflow -- semantic facts
+    stay org-wide regardless (see `core/memory.py::MemoryManager.recall`).
     """
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
     if not db_path:
@@ -184,6 +188,7 @@ def _make_memory(
         extraction_model=extraction_model,
         org_id=org_id,
         principal_id=principal_id,
+        workflow_id=workflow_id,
         run_id=run_id,
         workflow_version_id=workflow_version_id,
         # SP-4: production recall is bounded by default (M-09); episodic retention
@@ -203,6 +208,7 @@ def run_in_background(
     principal_id: Optional[str] = None,
     username: Optional[str] = None,
     workflow_version_id: Optional[int] = None,
+    workflow_id: Optional[int] = None,
 ) -> None:
     """Drain `Workflow.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
@@ -233,6 +239,7 @@ def run_in_background(
             principal_id=principal_id,
             run_id=run_id,
             workflow_version_id=workflow_version_id,
+            workflow_id=workflow_id,
         )
         if user_id
         else None

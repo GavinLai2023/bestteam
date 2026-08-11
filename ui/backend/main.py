@@ -349,10 +349,14 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
 
 def _resolve_workflow_and_version(
     name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
-) -> tuple[Workflow, Optional[int]]:
+) -> tuple[Workflow, Optional[int], Optional[int]]:
     """Load a workflow by name for one org and return it together with the
     `current_version_id` of the record it was built from (None for a YAML demo
-    or an absent record). Returning the version from the SAME record read that
+    or an absent record) AND the record's own stable `workflow_id`
+    (`WorkflowRecord.id`, None in the same two cases) -- the cross-workflow
+    memory-scoping key, distinct from `current_version_id` (a redeploy changes
+    the version but keeps the same `workflow_id`, so accumulated task memory
+    survives a redeploy). Returning both from the SAME record read that
     produces the config makes a run's stamped version match the config it
     executed even if a redeploy commits concurrently -- a separate
     `current_version_id` re-query could observe a newer version than the one
@@ -403,7 +407,7 @@ def _resolve_workflow_and_version(
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
         cached = _workflow_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
-            return cached[0], record.current_version_id
+            return cached[0], record.current_version_id, record.id
         # Only load skills and build standalone KB tools (which may re-chunk
         # files and, for type: vector, call a paid embedding model) on a cache
         # miss -- not on every request. Dependencies resolve within the
@@ -445,7 +449,7 @@ def _resolve_workflow_and_version(
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-        return workflow, record.current_version_id
+        return workflow, record.current_version_id, record.id
 
     # Same 404 whether the demos are disabled or the file is absent -- hiding
     # them from the list alone would still leave them runnable by name via
@@ -474,7 +478,7 @@ def _resolve_workflow_and_version(
             email_tools = {}
         cached = _workflow_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
-            return cached[0], None
+            return cached[0], None, None
         builtin_skills = load_skills(session, None)
         try:
             workflow = load_workflow(
@@ -488,7 +492,7 @@ def _resolve_workflow_and_version(
         if own_session:
             session.close()
     _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-    return workflow, None
+    return workflow, None, None
 
 
 def _get_workflow(
@@ -557,7 +561,7 @@ async def create_run(
     # run is stamped with exactly the version whose config it executes.
     # Only allow running workflows created by this user (by principal_id) or
     # admin-shared (created_by = NULL).
-    workflow, version_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.principal_id)
+    workflow, version_id, workflow_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.principal_id)
     run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(
@@ -571,6 +575,7 @@ async def create_run(
         principal_id=user.principal_id,
         username=user.username,
         workflow_version_id=version_id,
+        workflow_id=workflow_id,
     )
 
     return {"run_id": run.id}
