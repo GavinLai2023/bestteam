@@ -136,8 +136,13 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             pass
 
 
-def _env_int(name: str, default: Optional[int]) -> Optional[int]:
-    """Positive-int env config, or `default` when unset/blank/invalid/non-positive."""
+def _env_int(name: str, default: Optional[int], *, min_value: Optional[int] = 1) -> Optional[int]:
+    """Int env config, or `default` when unset/blank/invalid. `min_value` (1 by
+    default, matching every other caller's "positive-int" knobs) also falls
+    back to `default` when the parsed value is below it. Pass `min_value=None`
+    for a knob whose own consumer treats a non-positive value as meaningful
+    (e.g. `query_expansion_count`'s documented `<=0` = disabled contract) --
+    without this, `0`/negative silently couldn't reach that consumer at all."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -146,7 +151,9 @@ def _env_int(name: str, default: Optional[int]) -> Optional[int]:
     except ValueError:
         _logger.warning("Ignoring non-integer %s=%r; using %r", name, raw, default)
         return default
-    return value if value > 0 else default
+    if min_value is not None and value < min_value:
+        return default
+    return value
 
 
 def _make_memory(
@@ -222,7 +229,10 @@ def _make_memory(
         recall_max_candidates=_env_int("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", 1000),
         max_episodic_per_user=_env_int("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", None),
         query_expansion_model=query_expansion_model,
-        query_expansion_count=_env_int("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", 3),
+        # min_value=None: 0/negative must reach MemoryManager, which treats
+        # <=0 as "expansion disabled" -- the default min_value=1 would instead
+        # silently substitute the default count, defeating that setting.
+        query_expansion_count=_env_int("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", 3, min_value=None),
     )
 
 
@@ -500,9 +510,21 @@ def run_in_background(
                 # during compile/memory-recall, before run_started was even
                 # yielded) goes unhonored for a whole avoidable extra paid
                 # agent turn (round-2 review P1).
+                #
+                # Exception: when memory is active, `run_started` is ALSO
+                # skipped -- it's immediately followed by exactly one
+                # `memory_recalled`/`memory_failed` event, which is the sole
+                # carrier of the (already-paid-for) query-expansion usage. A
+                # cancellation discovered right after `run_started` would call
+                # `stream_iter.close()` before that event is ever pulled from
+                # the generator, silently dropping billable usage. Deferring
+                # the check by that one event still stops before any agent
+                # runs (memory_recalled/failed always precedes agent_started),
+                # so the "avoidable paid agent turn" guarantee above is intact.
                 if (
                     not terminal_seen
                     and event.type not in _BUFFERED_NODE_EVENT_TYPES
+                    and not (event.type == "run_started" and memory is not None)
                     and registry.cancel_requested(run_id)
                 ):
                     stream_iter.close()

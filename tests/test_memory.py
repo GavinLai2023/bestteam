@@ -621,6 +621,26 @@ def test_recall_expansion_unparseable_response_degrades_gracefully():
     assert result.expansion_usage is None
 
 
+def test_recall_expansion_preserves_usage_when_response_parsing_raises():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    # Simulates a provider returning structured content blocks (a list) instead
+    # of a plain string: content.strip() inside _parse_extraction then raises
+    # AttributeError -- a failure mode distinct from "successfully parsed but
+    # not valid JSON", and one that happens AFTER usage was already captured.
+    canned = AIMessage(
+        content=[{"type": "text", "text": "not a string"}],
+        usage_metadata={"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+    )
+    store = _store()
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    expansions, usage = mgr._expand_query("refund")
+    assert expansions == []
+    assert usage == {"model": None, "input_tokens": 4, "output_tokens": 1}
+
+
 def test_recall_expansion_dedupes_against_original_and_itself_and_caps_count():
     canned = (
         '{"queries": ["Refund", "refund ", "alt one", "alt one", "alt two", "alt three"]}'
@@ -1948,8 +1968,29 @@ def test_add_computes_and_persists_embedding_when_configured():
 
     row = store._conn.execute("SELECT embedding_json, embedding_model FROM memories").fetchone()
     assert json.loads(row["embedding_json"]) == [1.0, 0.0]
-    # A live (non-string) Embeddings instance has no stable spec identity.
-    assert row["embedding_model"] is None
+    # A live (non-string) Embeddings instance has no spec string of its own,
+    # so it's tagged with a fresh per-instance identity instead of a bare
+    # None (a None==None match would let a DIFFERENT, incompatible live
+    # instance's vectors get reused -- see test_vector_rank_rejects_vectors_
+    # from_a_different_anonymous_embedding_instance below).
+    assert row["embedding_model"] == store._embedding_model_spec
+    assert row["embedding_model"].startswith("anon:")
+
+
+def test_vector_rank_rejects_vectors_from_a_different_anonymous_embedding_instance(tmp_path):
+    path = str(tmp_path / "m.db")
+    store1 = SqliteBM25Memory(path, embedding_model=_TopicEmbedding())
+    store1.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    store1.close()
+
+    # A second store instance -- even backed by an equivalent live embedding
+    # model -- gets its OWN anonymous identity; it must not silently reuse a
+    # different instance's persisted vector.
+    store2 = SqliteBM25Memory(path, embedding_model=_TopicEmbedding())
+    records, embeddings, specs = store2._candidates("alice")
+    ranked = store2._vector_rank("cycling", records, embeddings, specs)
+
+    assert ranked == []
 
 
 def test_add_omits_embedding_when_unconfigured():
@@ -2208,6 +2249,30 @@ def test_vector_rank_returns_nothing_for_zero_query_vector():
     ranked = store._vector_rank("no relevant topic words here", records, embeddings, specs)
 
     assert ranked == []
+
+
+def test_add_skips_embedding_for_a_retired_principal(monkeypatch):
+    store = _hybrid_store()
+    store.retire_principal("p1")
+    embed_calls = []
+    monkeypatch.setattr(store._embeddings, "embed_documents", lambda texts: embed_calls.append(texts) or [])
+
+    result = store.add("alice", EPISODIC, "bicycle notes", principal_id="p1")
+
+    assert result is None  # dropped by the deletion-lifecycle fence
+    assert embed_calls == []  # never paid an external embedding call for it
+
+
+def test_add_if_absent_skips_embedding_for_a_retired_principal(monkeypatch):
+    store = _hybrid_store()
+    store.retire_principal("p1")
+    embed_calls = []
+    monkeypatch.setattr(store._embeddings, "embed_documents", lambda texts: embed_calls.append(texts) or [])
+
+    result = store.add_if_absent("alice", SEMANTIC, "bicycle notes", principal_id="p1")
+
+    assert result is None
+    assert embed_calls == []
 
 
 def test_add_if_absent_self_heals_embedding_when_precheck_races_a_deletion(monkeypatch):

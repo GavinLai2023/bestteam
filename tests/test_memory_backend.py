@@ -155,6 +155,23 @@ def test_make_memory_query_expansion_count_defaults_to_three(monkeypatch, tmp_pa
     assert _make_memory().query_expansion_count == 3
 
 
+def test_make_memory_query_expansion_count_zero_reaches_manager_as_disabled(monkeypatch, tmp_path):
+    # 0 must reach MemoryManager as-is (its own <=0 disable contract), not
+    # silently fall back to the default 3 -- _env_int's normal "non-positive ->
+    # default" clamp is deliberately bypassed for this specific knob.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", "0")
+
+    assert _make_memory().query_expansion_count == 0
+
+
+def test_make_memory_query_expansion_count_negative_reaches_manager_as_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", "-1")
+
+    assert _make_memory().query_expansion_count == -1
+
+
 def test_make_memory_bad_query_expansion_spec_does_not_disable_memory(monkeypatch, tmp_path):
     # Contrast with test_make_memory_bad_embedding_spec_disables_memory_entirely:
     # query_expansion_model is resolved lazily per-call (like extraction_model),

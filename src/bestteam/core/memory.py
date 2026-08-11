@@ -261,9 +261,23 @@ class SqliteBM25Memory(Memory):
                     "package. Install it with: pip install 'bestteam[tools-rag-vector]'"
                 ) from exc
             self._embeddings = resolve_embedding_model(embedding_model)
-            # Only a string spec has a stable identity to tag rows/filter search
-            # with (see `_vector_rank`) -- a live Embeddings instance has none.
-            self._embedding_model_spec = embedding_model if isinstance(embedding_model, str) else None
+            if isinstance(embedding_model, str):
+                self._embedding_model_spec = embedding_model
+            else:
+                # A live (non-string) Embeddings instance has no stable spec
+                # string of its own, so tag it with a fresh per-instance
+                # identity rather than a bare `None`: two different live
+                # instances (e.g. across a process restart against the same
+                # persistent DB) would otherwise both compare `None ==
+                # self._embedding_model_spec` as a match in `_vector_rank`,
+                # silently reusing another (possibly semantically
+                # incompatible) instance's persisted vectors merely because
+                # neither has an identity. This means an anonymous instance's
+                # persisted vectors are never reused past its own lifetime
+                # (a new instance -> a new identity, so its own past writes
+                # stop matching too, same as a changed string spec) -- the
+                # safe default when compatibility can't be verified.
+                self._embedding_model_spec = f"anon:{uuid.uuid4()}"
 
         self.path = str(path)
         self._conn = sqlite3.connect(self.path)
@@ -393,7 +407,18 @@ class SqliteBM25Memory(Memory):
             principal_id=principal_id,
             workflow_id=workflow_id,
         )
-        embedding_json, embedding_model = self._compute_embedding(content)
+        # Skip the embedding call outright for an already-retired principal: a
+        # remote embedding provider call is real external processing/cost, and
+        # the atomic fence below will drop this write anyway. A precheck can
+        # only be a FALSE NEGATIVE here (retirement happens after this check but
+        # before the insert -- the fence still catches that write, just doesn't
+        # save its embedding cost), never a false positive, since retirement is
+        # one-way (no un-retire operation exists) -- so this is a pure cost
+        # optimization, not a correctness gap, unlike the dedup precheck below.
+        if self._is_retired(principal_id):
+            embedding_json, embedding_model = None, None
+        else:
+            embedding_json, embedding_model = self._compute_embedding(content)
         # Deletion-lifecycle fence: drop a write for a retired principal (an
         # in-flight run finishing after its account was deleted). The check is
         # folded INTO the insert (`... WHERE NOT EXISTS (retired)`) so it is atomic
@@ -483,7 +508,12 @@ class SqliteBM25Memory(Memory):
             f"AND content = ? AND {org_clause} AND {principal_clause} AND {workflow_clause})",
             exists_params,
         ).fetchone()[0]
-        precheck_skipped_embedding = bool(already_exists)
+        # Same cost optimization as `add()`: an already-retired principal's
+        # write will be dropped by the fence below regardless, so skip paying
+        # for the embedding call. One-way retirement means this precheck can
+        # only under-save (retire lands between here and the insert), never
+        # wrongly skip a write that would actually succeed.
+        precheck_skipped_embedding = bool(already_exists) or self._is_retired(principal_id)
         if precheck_skipped_embedding:
             embedding_json, embedding_model = None, None
         else:
@@ -1259,16 +1289,30 @@ class MemoryManager:
                     HumanMessage(content=f"Query: {query}"),
                 ]
             )
-            usage = self._usage_entry(response, self.query_expansion_model)
-            content = response.content if hasattr(response, "content") else str(response)
-            parsed = _parse_extraction(content)
-        except Exception as exc:  # noqa: BLE001 -- expansion is best-effort
+        except Exception as exc:  # noqa: BLE001 -- no call succeeded, nothing billable
             _logger.warning(
                 "Memory: query expansion failed, recalling with the original query only: %s",
                 exc,
                 exc_info=True,
             )
             return [], None
+
+        # Capture usage IMMEDIATELY after the call succeeds: the tokens were
+        # consumed regardless of whether parsing the response later fails
+        # (mirrors `_extract_and_store`'s usage-capture ordering).
+        usage = self._usage_entry(response, self.query_expansion_model)
+
+        try:
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = _parse_extraction(content)
+        except Exception as exc:  # noqa: BLE001 -- parse failure, usage still billable
+            _logger.warning(
+                "Memory: query expansion response parse failed, recalling with the "
+                "original query only: %s",
+                exc,
+                exc_info=True,
+            )
+            return [], usage
         if not parsed or not isinstance(parsed.get("queries"), list):
             return [], usage
 
