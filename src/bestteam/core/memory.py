@@ -967,6 +967,7 @@ class MemoryManager:
                 f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
                 metadata=self._provenance(),
                 **self._scope_kwargs(),
+                **self._workflow_kwargs(),
             )
             # `add` returns None when the deletion-lifecycle fence dropped the write
             # (a retired principal); don't report a discarded write as recorded
@@ -1059,8 +1060,15 @@ class MemoryManager:
         adopted `add_if_absent`: routing extraction writes through `add_if_absent`
         would silently bypass that policy for semantic/procedural records. In that
         case fall back to the store's `add()` (its policy applies; dedup is skipped)
-        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2)."""
+        so a pre-SP-4 subclass keeps intercepting every write (review r2 #2).
+
+        `workflow_id` is added for every extracted type EXCEPT `SEMANTIC` --
+        personal preferences stay org-wide, task-experience notes (`PROCEDURAL`,
+        and any custom type a subclass might extract) are scoped to the current
+        workflow."""
         kwargs = {"metadata": self._provenance(), **self._scope_kwargs()}
+        if type != SEMANTIC:
+            kwargs.update(self._workflow_kwargs())
         add_if_absent = getattr(self.store, "add_if_absent", None)
         if callable(add_if_absent) and self._atomic_dedup_is_safe():
             return add_if_absent(user_id, type, content, **kwargs) is not None

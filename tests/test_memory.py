@@ -1420,3 +1420,51 @@ def test_recall_combines_semantic_and_workflow_scoped_hits():
     assert result.count == 2
     assert "prefers concise refund answers" in result.preamble
     assert "check order number first" in result.preamble
+
+
+# --- workflow scoping on writes: episodic/procedural only, never semantic ---
+
+
+def test_record_run_stamps_workflow_id_on_episodic():
+    store = _store()
+    MemoryManager(store, workflow_id=1).record_run("alice", "q", "a")
+
+    (record,) = store.all("alice", workflow_id=1)
+    assert record.type == EPISODIC
+
+
+def test_record_run_stamps_workflow_id_on_extracted_procedural_not_semantic():
+    canned = '{"facts": ["prefers bullet points"], "procedural": "check order number first"}'
+    store = _store()
+    MemoryManager(store, workflow_id=1, extraction_model=f"fake:{canned}").record_run(
+        "alice", "how do refunds work?", "30-day money back"
+    )
+
+    semantic = [r for r in store.all("alice") if r.type == SEMANTIC][0]
+    procedural = [r for r in store.all("alice") if r.type == PROCEDURAL][0]
+    assert semantic.workflow_id is None  # org-wide, not tied to any one workflow
+    assert procedural.workflow_id == 1
+
+
+def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    store.add("alice", SEMANTIC, "likes bullet points")  # no workflow_id -> org-wide
+    store.add("alice", PROCEDURAL, "check order number first", workflow_id=2)  # a DIFFERENT workflow
+    canned = AIMessage(
+        content='{"facts": ["likes bullet points"], "procedural": "check order number first"}'
+    )
+    mgr = MemoryManager(
+        store, workflow_id=1, extraction_model=FakeMessagesListChatModel(responses=[canned])
+    )
+
+    outcome = mgr.record_run("alice", "q", "a")
+
+    # The semantic fact already exists org-wide -> deduped, not rewritten.
+    assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1
+    assert outcome.recorded.count(SEMANTIC) == 0
+    # The procedural note is new under workflow 1 (workflow 2's note doesn't dedup it).
+    assert len([r for r in store.all("alice") if r.type == PROCEDURAL]) == 2
+    assert outcome.recorded.count(PROCEDURAL) == 1
