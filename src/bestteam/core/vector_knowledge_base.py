@@ -7,72 +7,9 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
-
 from ..exceptions import ConfigurationError
+from .embeddings import normalize_rows, resolve_embedding_model
 from .knowledge_base import KnowledgeBase, _load_document_chunks, _validate_chunk_params
-
-_DEFAULT_FAKE_EMBEDDING_DIM = 32
-
-
-def _resolve_embedding_model(model: Any) -> Embeddings:
-    """Accept either a ready-made embeddings model or a provider model spec string.
-
-    Mirrors `_resolve_model()` in the LangGraph adapter: customers with a
-    `langchain_core.embeddings.Embeddings` instance (real, fake, or a custom
-    test double) can pass it directly. String specs are resolved lazily.
-    """
-    if isinstance(model, Embeddings):
-        return model
-    if isinstance(model, str):
-        # "fake:<dim>" (dim optional) lets customers dry-run a vector KB from
-        # plain YAML — no provider package or API key required, $0 cost.
-        if model.startswith("fake:"):
-            dim_str = model[len("fake:") :]
-            if dim_str:
-                try:
-                    dim = int(dim_str)
-                except ValueError as exc:
-                    raise ConfigurationError(
-                        f"Invalid 'fake:' embedding spec {model!r}: dimension "
-                        "must be an integer, e.g. 'fake:32'."
-                    ) from exc
-                if dim <= 0:
-                    raise ConfigurationError(
-                        f"Invalid 'fake:' embedding spec {model!r}: dimension "
-                        "must be positive."
-                    )
-            else:
-                dim = _DEFAULT_FAKE_EMBEDDING_DIM
-            return DeterministicFakeEmbedding(size=dim)
-        try:
-            from langchain.embeddings import init_embeddings
-        except ImportError as exc:
-            raise ConfigurationError(
-                "Resolving an embedding model from a string name requires the "
-                "optional 'langchain' package (pip install langchain). "
-                "Alternatively, pass an Embeddings instance directly as "
-                "VectorKnowledgeBase(embedding_model=...)."
-            ) from exc
-        return init_embeddings(model)
-    raise ConfigurationError(
-        f"Unsupported embedding model spec {model!r} on knowledge base: pass a "
-        "provider embedding model name (str) or a langchain Embeddings instance."
-    )
-
-
-def _normalize_rows(matrix: Any) -> Any:
-    """L2-normalize each row; rows with zero norm are left as all-zeros.
-
-    A zero vector naturally yields a cosine similarity of 0 against any
-    query, which is the desired "no signal" behavior rather than a
-    division-by-zero NaN.
-    """
-    import numpy as np
-
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    safe_norms = np.where(norms == 0, 1.0, norms)
-    return matrix / safe_norms
 
 
 def _chunk_cache_key(model_spec: str, text: str) -> str:
@@ -139,7 +76,7 @@ class VectorKnowledgeBase(KnowledgeBase):
                 f"Knowledge base '{name}' has no readable documents in {self.path}"
             )
 
-        self._embeddings = _resolve_embedding_model(embedding_model)
+        self._embeddings = resolve_embedding_model(embedding_model)
 
         vectors = self._embed_chunks(embedding_model, cache_path)
         if not vectors or len(vectors) != len(self._chunks):
@@ -149,7 +86,7 @@ class VectorKnowledgeBase(KnowledgeBase):
             )
 
         matrix = np.array(vectors, dtype=np.float64)
-        self._matrix = _normalize_rows(matrix)
+        self._matrix = normalize_rows(matrix)
 
     def _embed_chunks(self, embedding_model: Any, cache_path: Optional[str | Path]) -> List[List[float]]:
         texts = [c.text for c in self._chunks]

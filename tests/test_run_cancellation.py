@@ -169,6 +169,68 @@ def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(d
     assert usage_records[0].output_tokens == 5
 
 
+class _CancelBetweenRunStartedAndMemoryRecalled:
+    """Reproduces the memory_recalled usage-loss bug: cancellation is
+    discovered right after run_started, before the memory_recalled event --
+    the sole carrier of query-expansion usage -- is ever pulled from the
+    generator. Usage must survive: the paid expansion call already happened
+    before run_started was even yielded."""
+
+    name = "wf"
+
+    def __init__(self, run_id, events):
+        self._run_id = run_id
+        self._events = events
+
+    def stream(self, *args, **kwargs):
+        yield self._events[0]  # run_started
+        registry.request_cancel(self._run_id)
+        yield self._events[1]  # memory_recalled, carries expansion usage
+        yield self._events[2]  # next event -- must never be delivered
+
+
+def test_cancel_right_after_run_started_preserves_memory_recalled_usage(monkeypatch, tmp_path):
+    from ui.backend.db.usage import list_usage_for_run
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    engine = _engine()
+    Session = session_factory(engine)
+    run = registry.create("wf", "in")
+    events = [
+        TraceEvent(type="run_started", workflow="wf", data="in"),
+        TraceEvent(
+            type="memory_recalled",
+            workflow="wf",
+            data=0,
+            usage=[{"model": None, "input_tokens": 9, "output_tokens": 3}],
+        ),
+        TraceEvent(type="agent_started", workflow="wf", agent="a", data="should-not-be-delivered"),
+    ]
+
+    run_in_background(
+        run.id,
+        _CancelBetweenRunStartedAndMemoryRecalled(run.id, events),
+        "in",
+        engine=engine,
+        user_id="alice",
+    )
+
+    with Session() as s:
+        row = s.get(Run, run.id)
+        assert row.status == "cancelled"
+        rows = s.query(TraceEventRecord).filter_by(run_id=run.id).order_by(TraceEventRecord.seq).all()
+        usage_records = list_usage_for_run(s, run.id)
+
+    types = [r.type for r in rows]
+    assert types == ["run_queued", "run_started", "memory_recalled", "run_cancelled"]
+    assert (
+        len(usage_records) == 1
+    ), "query-expansion usage must not be dropped by cancellation racing run_started"
+    assert usage_records[0].agent == "memory:query_expansion"
+    assert usage_records[0].input_tokens == 9
+    assert usage_records[0].output_tokens == 3
+
+
 class _CancelDuringPreStreamSetup:
     """Cancellation lands during workflow setup (compile/memory-recall) --
     before the generator ever yields its first event. Must be honored right

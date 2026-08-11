@@ -5,13 +5,14 @@ Asserts that a recalled memory reaches an agent's SystemMessage (the
 all three collaboration modes.
 """
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
 )
 from langchain_core.messages import AIMessage, SystemMessage
 
 from bestteam import Agent, CollaborationMode, MemoryManager, SqliteBM25Memory, Team, Workflow
-from bestteam.core.memory import EPISODIC
+from bestteam.core.memory import EPISODIC, SEMANTIC
 
 
 class _RecordingChatModel(FakeMessagesListChatModel):
@@ -470,3 +471,140 @@ def test_no_memory_writes_nothing_and_no_preamble():
     assert store.all("u") == []
     # No memory preamble was appended, so the system prompt is the agent's own.
     assert "previous sessions" not in (model.captured_system or "")
+
+
+# --- Hybrid (BM25 + vector) recall, end-to-end through Workflow.stream ------
+
+
+class _TopicEmbedding(Embeddings):
+    """Keyword-bucket embedding, deliberately independent of BM25 token
+    overlap -- lets a zero-keyword-overlap query still recall a topically
+    related memory. Mirrors test_memory.py's double (duplicated locally;
+    this suite has no shared test-helper module)."""
+
+    _BIKE_WORDS = ("bike", "bicycle", "cycling", "pedal")
+
+    def embed_documents(self, texts):
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text):
+        lowered = text.lower()
+        return [1.0 if any(w in lowered for w in self._BIKE_WORDS) else 0.0]
+
+
+def test_recall_uses_hybrid_when_embedding_model_configured():
+    store = SqliteBM25Memory(":memory:", embedding_model=_TopicEmbedding())
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    # Zero keyword overlap between "cycling hobby" and "bicycle every weekend"
+    # -- only findable via the vector leg.
+    assert "bicycle" in (model.captured_system or "")
+
+
+def test_recall_unaffected_when_embedding_model_unset():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    assert "bicycle" not in (model.captured_system or "")
+
+
+def test_extraction_near_dup_candidates_benefit_from_hybrid_automatically():
+    # `_extract_and_store`'s near-dup candidate search (`_semantic_candidates`)
+    # is just `store.search(...)` -- once hybrid search lands in the store, it
+    # can surface a paraphrased existing fact with zero code change here.
+    store = SqliteBM25Memory(":memory:", embedding_model=_TopicEmbedding())
+    existing = store.add("u", SEMANTIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store, extraction_model="fake:ignored")
+
+    candidates = manager._semantic_candidates("u", "cycling hobby", "")
+
+    assert [c.id for c in candidates] == [existing.id]
+
+
+def test_extraction_near_dup_candidates_unaffected_without_hybrid():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", SEMANTIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store, extraction_model="fake:ignored")
+
+    candidates = manager._semantic_candidates("u", "cycling hobby", "")
+
+    assert candidates == []
+
+
+def test_recall_uses_query_expansion_when_configured():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(
+        store, query_expansion_model='fake:{"queries": ["bicycle weekend hobby"]}'
+    )
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    # Zero keyword overlap between "cycling hobby" and "bicycle every weekend"
+    # -- only findable once the query is expanded into a phrasing that shares
+    # BM25 terms with the stored record.
+    assert "bicycle" in (model.captured_system or "")
+
+
+def test_recall_unaffected_when_query_expansion_unset():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    assert "bicycle" not in (model.captured_system or "")
+
+
+def test_extraction_near_dup_candidates_unaffected_by_query_expansion():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", SEMANTIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(
+        store,
+        extraction_model="fake:ignored",
+        query_expansion_model='fake:{"queries": ["bicycle weekend hobby"]}',
+    )
+
+    candidates = manager._semantic_candidates("u", "cycling hobby", "")
+
+    assert candidates == []
+
+
+def test_memory_recalled_trace_event_carries_expansion_usage():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    expansion = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"queries": ["bicycle weekend hobby"]}',
+                usage_metadata={"input_tokens": 6, "output_tokens": 2, "total_tokens": 8},
+            )
+        ]
+    )
+    manager = MemoryManager(store, query_expansion_model=expansion)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    recalled = next(e for e in events if e.type == "memory_recalled")
+    assert recalled.usage == [{"model": None, "input_tokens": 6, "output_tokens": 2}]

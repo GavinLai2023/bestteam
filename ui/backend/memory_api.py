@@ -26,6 +26,7 @@ from bestteam.core.memory import LEGACY_ORG
 from .auth_api import get_current_admin
 from .db.models import User
 from .db_session import get_db
+from .runtime import _env_int
 
 router = APIRouter(
     prefix="/api/memory",
@@ -37,15 +38,24 @@ router = APIRouter(
 def get_memory_store() -> Iterator[Optional[SqliteBM25Memory]]:
     """Yield a per-request memory store, or None when memory is disabled.
 
-    Mirrors `runtime._make_memory`'s env handling but returns the raw store.
-    Opened on the request's threadpool thread (so the SQLite connection stays
-    thread-local) and closed afterward to avoid leaking connections.
+    Mirrors `runtime._make_memory`'s env handling (including
+    `BESTTEAM_MEMORY_EMBEDDING_MODEL`/`BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS`,
+    so admin search reflects the same hybrid-recall behavior a live run gets)
+    but returns the raw store. Opened on the request's threadpool thread (so
+    the SQLite connection stays thread-local) and closed afterward to avoid
+    leaking connections.
     """
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
     if not db_path:
         yield None
         return
-    store = SqliteBM25Memory(db_path)
+    embedding_model = os.environ.get("BESTTEAM_MEMORY_EMBEDDING_MODEL", "").strip() or None
+    recency_half_life_days = _env_int("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", 14)
+    store = SqliteBM25Memory(
+        db_path,
+        embedding_model=embedding_model,
+        recency_half_life_days=recency_half_life_days,
+    )
     try:
         yield store
     finally:

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
+from .embeddings import normalize_rows, resolve_embedding_model
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +90,54 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_RECORD_CHARS:
         return text
     return text[:_MAX_RECORD_CHARS] + " …[truncated]"
+
+
+# Default half-life (days) for the recency decay applied to EPISODIC/PROCEDURAL
+# records in hybrid search (SEMANTIC never decays -- see `_recency_weight`).
+# Only consulted when an embedding model is configured (hybrid recall).
+_DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
+
+
+def _reciprocal_rank_fusion(
+    *ranked_id_lists: Sequence[str], k: int = 60
+) -> Dict[str, float]:
+    """Merge ranked-id lists into one fused score per id: the sum, across every
+    list an id appears in, of ``1/(k+rank)`` (1-based rank). Standard
+    Reciprocal Rank Fusion -- rank-based, so it needs no score calibration
+    between BM25 and cosine similarity, which live on different scales. An id
+    present in only one list still gets a score from that list alone."""
+    scores: Dict[str, float] = {}
+    for ranked_ids in ranked_id_lists:
+        for rank, record_id in enumerate(ranked_ids, start=1):
+            scores[record_id] = scores.get(record_id, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+def _recency_weight(
+    record_type: str,
+    created_at: str,
+    *,
+    now: datetime,
+    half_life_days: Optional[float],
+) -> float:
+    """Multiplier applied to a fused hybrid-search score to fade older
+    EPISODIC/PROCEDURAL records. SEMANTIC records always weight 1.0 (never
+    decayed) -- a durable stored fact doesn't get less true with age. Also
+    1.0 when decay is disabled (`half_life_days` None/non-positive) or when
+    `created_at` can't be parsed / is in the future (clock skew) -- degrades
+    to no decay rather than guessing."""
+    if record_type == SEMANTIC or not half_life_days or half_life_days <= 0:
+        return 1.0
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return 1.0
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_days = max((now - created).total_seconds() / 86400.0, 0.0)
+    if age_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
 
 
 @dataclass
@@ -176,7 +225,13 @@ class SqliteBM25Memory(Memory):
     backend builds one per worker thread so the connection stays thread-local.
     """
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(
+        self,
+        path: str = ":memory:",
+        *,
+        embedding_model: Any = None,
+        recency_half_life_days: Optional[float] = _DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    ) -> None:
         try:
             import rank_bm25  # noqa: F401
         except ImportError as exc:
@@ -184,6 +239,45 @@ class SqliteBM25Memory(Memory):
                 "Memory requires the 'rank-bm25' package. "
                 "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
+
+        # Hybrid (BM25 + vector) recall is strictly opt-in: `embedding_model=None`
+        # (the default) leaves every new code path below a no-op, so behavior is
+        # byte-for-byte identical to pure-BM25 unless a caller configures it.
+        self._embeddings: Optional[Any] = None
+        self._embedding_model_spec: Optional[str] = None
+        self._recency_half_life_days = recency_half_life_days
+        # One-entry cache for the last embedded query: `MemoryManager.recall()`
+        # issues two scoped `search()` calls with the identical query string
+        # (semantic, then episodic/procedural), so without this a remote
+        # embedding provider gets called twice for the same text on every
+        # hybrid-enabled recall.
+        self._last_query_embedding: "Optional[tuple[str, Any]]" = None
+        if embedding_model is not None:
+            try:
+                import numpy  # noqa: F401
+            except ImportError as exc:
+                raise ConfigurationError(
+                    "Hybrid memory recall (embedding_model) requires the 'numpy' "
+                    "package. Install it with: pip install 'bestteam[tools-rag-vector]'"
+                ) from exc
+            self._embeddings = resolve_embedding_model(embedding_model)
+            if isinstance(embedding_model, str):
+                self._embedding_model_spec = embedding_model
+            else:
+                # A live (non-string) Embeddings instance has no stable spec
+                # string of its own, so tag it with a fresh per-instance
+                # identity rather than a bare `None`: two different live
+                # instances (e.g. across a process restart against the same
+                # persistent DB) would otherwise both compare `None ==
+                # self._embedding_model_spec` as a match in `_vector_rank`,
+                # silently reusing another (possibly semantically
+                # incompatible) instance's persisted vectors merely because
+                # neither has an identity. This means an anonymous instance's
+                # persisted vectors are never reused past its own lifetime
+                # (a new instance -> a new identity, so its own past writes
+                # stop matching too, same as a changed string spec) -- the
+                # safe default when compatibility can't be verified.
+                self._embedding_model_spec = f"anon:{uuid.uuid4()}"
 
         self.path = str(path)
         self._conn = sqlite3.connect(self.path)
@@ -199,7 +293,9 @@ class SqliteBM25Memory(Memory):
                 created_at TEXT NOT NULL,
                 org_id INTEGER,
                 principal_id TEXT,
-                workflow_id INTEGER
+                workflow_id INTEGER,
+                embedding_json TEXT,
+                embedding_model TEXT
             )
             """
         )
@@ -214,6 +310,8 @@ class SqliteBM25Memory(Memory):
             ("org_id", "INTEGER"),
             ("principal_id", "TEXT"),
             ("workflow_id", "INTEGER"),
+            ("embedding_json", "TEXT"),
+            ("embedding_model", "TEXT"),
         ):
             if column not in cols:
                 try:
@@ -262,6 +360,26 @@ class SqliteBM25Memory(Memory):
         )
         self._conn.commit()
 
+    def _compute_embedding(self, content: str) -> "tuple[Optional[str], Optional[str]]":
+        """`(embedding_json, embedding_model_spec)` for a new write, or
+        `(None, None)` when no embedding model is configured, or when
+        embedding this content failed. Best-effort: an embedding-provider
+        outage must never break a memory write -- the row is still stored,
+        just without a vector, and participates in search via BM25 only
+        (like a pre-hybrid-adoption row)."""
+        if self._embeddings is None:
+            return None, None
+        try:
+            vector = self._embeddings.embed_documents([content])[0]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Memory: embedding failed for a write, storing without a vector: %s",
+                exc,
+                exc_info=True,
+            )
+            return None, None
+        return json.dumps(vector), self._embedding_model_spec
+
     def add(
         self,
         user_id: str,
@@ -289,6 +407,18 @@ class SqliteBM25Memory(Memory):
             principal_id=principal_id,
             workflow_id=workflow_id,
         )
+        # Skip the embedding call outright for an already-retired principal: a
+        # remote embedding provider call is real external processing/cost, and
+        # the atomic fence below will drop this write anyway. A precheck can
+        # only be a FALSE NEGATIVE here (retirement happens after this check but
+        # before the insert -- the fence still catches that write, just doesn't
+        # save its embedding cost), never a false positive, since retirement is
+        # one-way (no un-retire operation exists) -- so this is a pure cost
+        # optimization, not a correctness gap, unlike the dedup precheck below.
+        if self._is_retired(principal_id):
+            embedding_json, embedding_model = None, None
+        else:
+            embedding_json, embedding_model = self._compute_embedding(content)
         # Deletion-lifecycle fence: drop a write for a retired principal (an
         # in-flight run finishing after its account was deleted). The check is
         # folded INTO the insert (`... WHERE NOT EXISTS (retired)`) so it is atomic
@@ -298,8 +428,9 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "embedding_json, embedding_model) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -310,6 +441,8 @@ class SqliteBM25Memory(Memory):
                 record.org_id,
                 record.principal_id,
                 record.workflow_id,
+                embedding_json,
+                embedding_model,
                 *retired_params,
             ),
         )
@@ -364,14 +497,36 @@ class SqliteBM25Memory(Memory):
             exists_params.append(principal_id)
         if workflow_id is not None:
             exists_params.append(workflow_id)
+        # Cost optimization, not a correctness check: skip computing an embedding
+        # when this content is very likely already present -- near-duplicate
+        # resolution routinely reconciles against existing facts, so this avoids
+        # paying for an embedding call on the common no-op/duplicate case. The
+        # atomic INSERT ... WHERE NOT EXISTS below remains the actual correctness
+        # guarantee; a lost race here just means one wasted embedding call.
+        already_exists = self._conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE user_id = ? AND type = ? "
+            f"AND content = ? AND {org_clause} AND {principal_clause} AND {workflow_clause})",
+            exists_params,
+        ).fetchone()[0]
+        # Same cost optimization as `add()`: an already-retired principal's
+        # write will be dropped by the fence below regardless, so skip paying
+        # for the embedding call. One-way retirement means this precheck can
+        # only under-save (retire lands between here and the insert), never
+        # wrongly skip a write that would actually succeed.
+        precheck_skipped_embedding = bool(already_exists) or self._is_retired(principal_id)
+        if precheck_skipped_embedding:
+            embedding_json, embedding_model = None, None
+        else:
+            embedding_json, embedding_model = self._compute_embedding(content)
         # Deletion-lifecycle fence, ANDed into the same insert as the dedup check so
         # both are atomic with the write (finding 1): a retired principal's late
         # write is dropped (reported as "nothing written", like a duplicate).
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "embedding_json, embedding_model) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
             f"AND {org_clause} AND {principal_clause} AND {workflow_clause})" + retired_clause,
             (
@@ -384,12 +539,30 @@ class SqliteBM25Memory(Memory):
                 record.org_id,
                 record.principal_id,
                 record.workflow_id,
+                embedding_json,
+                embedding_model,
                 *exists_params,
                 *retired_params,
             ),
         )
         self._conn.commit()
-        return record if cursor.rowcount else None
+        if not cursor.rowcount:
+            return None
+        if precheck_skipped_embedding and self._embeddings is not None:
+            # The precheck saw a "duplicate" but the row was inserted anyway --
+            # another connection must have deleted that row between our SELECT
+            # and the INSERT (e.g. an admin deletion), so this write raced the
+            # precheck rather than actually being a duplicate. Compute and
+            # persist the embedding now so it isn't silently missing from
+            # vector recall for the rest of this record's life.
+            embedding_json, embedding_model = self._compute_embedding(content)
+            if embedding_json is not None:
+                self._conn.execute(
+                    "UPDATE memories SET embedding_json = ?, embedding_model = ? WHERE id = ?",
+                    (embedding_json, embedding_model, record.id),
+                )
+                self._conn.commit()
+        return record
 
     def _rows_to_records(self, rows: Sequence[sqlite3.Row]) -> List[MemoryRecord]:
         records = []
@@ -413,7 +586,7 @@ class SqliteBM25Memory(Memory):
             )
         return records
 
-    def all(
+    def _candidates(
         self,
         user_id: str,
         types: Optional[Sequence[str]] = None,
@@ -422,7 +595,18 @@ class SqliteBM25Memory(Memory):
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
         workflow_id: Optional[int] = None,
-    ) -> List[MemoryRecord]:
+        include_embeddings: bool = True,
+    ) -> "tuple[List[MemoryRecord], List[Optional[List[float]]], List[Optional[str]]]":
+        """Same query as `all()`, but also returns each row's parsed embedding
+        vector and the model spec it was computed under (both None when
+        absent), in the same order as the records. Kept off the public
+        `MemoryRecord` dataclass so a full-precision vector never rides along
+        admin API responses or `recall_preamble` text.
+
+        `include_embeddings=False` skips deserializing `embedding_json` for
+        every row -- for callers that don't need vectors at all (`all()`, or
+        `search()` when hybrid recall isn't configured), parsing a
+        potentially high-dimensional JSON array per row is pure waste."""
         sql = "SELECT * FROM memories WHERE user_id = ?"
         params: List[Any] = [user_id]
         org_sql, org_params = _org_read_clause(org_id)
@@ -448,7 +632,101 @@ class SqliteBM25Memory(Memory):
             sql += " LIMIT ?"
             params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
-        return self._rows_to_records(rows)
+        records = self._rows_to_records(rows)
+        embeddings: List[Optional[List[float]]] = []
+        specs: List[Optional[str]] = []
+        if not include_embeddings:
+            return records, [None] * len(rows), [None] * len(rows)
+        for row in rows:
+            raw = row["embedding_json"]
+            if raw is None:
+                embeddings.append(None)
+            else:
+                try:
+                    embeddings.append(json.loads(raw))
+                except (ValueError, TypeError):
+                    embeddings.append(None)
+            specs.append(row["embedding_model"])
+        return records, embeddings, specs
+
+    def all(
+        self,
+        user_id: str,
+        types: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        org_id: Union[int, str, None] = None,
+        principal_id: Optional[str] = None,
+        workflow_id: Optional[int] = None,
+    ) -> List[MemoryRecord]:
+        records, _embeddings, _specs = self._candidates(
+            user_id,
+            types,
+            limit=limit,
+            org_id=org_id,
+            principal_id=principal_id,
+            workflow_id=workflow_id,
+            include_embeddings=False,
+        )
+        return records
+
+    def _vector_rank(
+        self,
+        query: str,
+        records: List[MemoryRecord],
+        embeddings: List[Optional[List[float]]],
+        specs: List[Optional[str]],
+    ) -> List[str]:
+        """Rank candidates by cosine similarity to `query`, with NO keyword-
+        overlap requirement -- this is what lets a semantically related but
+        lexically disjoint memory surface, which the BM25 leg alone cannot do.
+
+        Only candidates embedded under the *currently configured* model spec
+        are considered: an older row from a since-changed embedding model
+        lives in an incompatible vector space, and comparing its vector to a
+        query embedded under a different model would silently produce
+        meaningless cosine scores. A vector-length mismatch is a second,
+        always-on defense against the same problem for a live (non-string)
+        embeddings instance, which has no stable spec string to compare."""
+        import numpy as np
+
+        usable = [
+            (record, vector)
+            for record, vector, spec in zip(records, embeddings, specs)
+            if vector is not None and spec == self._embedding_model_spec
+        ]
+        if not usable:
+            return []
+        if self._last_query_embedding is not None and self._last_query_embedding[0] == query:
+            query_vec = self._last_query_embedding[1]
+        else:
+            try:
+                query_vec = np.array(self._embeddings.embed_query(query), dtype=np.float64)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "Memory: query embedding failed, vector leg skipped for this search: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return []
+            self._last_query_embedding = (query, query_vec)
+        dim = query_vec.shape[0]
+        usable = [(record, vector) for record, vector in usable if len(vector) == dim]
+        if not usable:
+            return []
+        matrix = normalize_rows(np.array([vector for _record, vector in usable], dtype=np.float64))
+        norm = np.linalg.norm(query_vec)
+        if norm > 0:
+            query_vec = query_vec / norm
+        scores = matrix @ query_vec
+        # Only positively-correlated candidates count as a vector "hit" --
+        # otherwise every embedded row (including an orthogonal/unrelated one)
+        # gets a nonzero RRF score just for being embedded, which can let recency
+        # decay push a fresh but irrelevant record above an older exact match.
+        # This also naturally excludes everything when the query embeds to a
+        # zero vector (all dot products are 0), with no special-case needed.
+        order = np.argsort(scores)[::-1]
+        return [usable[i][0].id for i in order if scores[i] > 0]
 
     def search(
         self,
@@ -470,37 +748,72 @@ class SqliteBM25Memory(Memory):
         # scan to the most-recent N records -- a bound on the DB/CPU/memory work
         # for callers over a possibly-large store (the admin API sets it). None
         # keeps the full-store scan used by per-run recall.
-        candidates = self.all(
+        candidates, embeddings, specs = self._candidates(
             user_id,
             types,
             limit=max_candidates,
             org_id=org_id,
             principal_id=principal_id,
             workflow_id=workflow_id,
+            include_embeddings=self._embeddings is not None,
         )
         if not candidates:
             return []
 
         # Same overlap-then-score ranking as LocalFolderKnowledgeBase.query:
         # keep only records sharing at least one significant (non-stopword)
-        # term with the query, then sort by (term overlap, BM25 score).
+        # term with the query, then sort by (term overlap, BM25 score). This
+        # BM25 leg's behavior is UNCHANGED regardless of hybrid mode.
         candidate_tokens = [tokenize(r.content) for r in candidates]
         candidate_terms = [significant_terms(toks) for toks in candidate_tokens]
         query_tokens = tokenize(query)
         query_terms = significant_terms(query_tokens)
-        if not query_terms:
+
+        matches: List["tuple[int, float, MemoryRecord]"] = []
+        if query_terms:
+            bm25 = BM25Okapi(candidate_tokens)
+            scores = bm25.get_scores(query_tokens)
+            matches = [
+                (len(query_terms & terms), score, record)
+                for score, record, terms in zip(scores, candidates, candidate_terms)
+                if query_terms & terms
+            ]
+            matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        bm25_ranked_ids = [record.id for _overlap, _score, record in matches]
+
+        if self._embeddings is None:
+            # Legacy behavior, byte-for-byte unchanged: pure BM25 with the
+            # keyword-overlap gate -- a query with no significant terms (or no
+            # overlapping candidate) returns nothing.
+            if not query_terms:
+                return []
+            return [record for _overlap, _score, record in matches[:top_k]]
+
+        # Hybrid path: fuse the BM25 ranking with a vector-similarity ranking
+        # (no overlap requirement) via Reciprocal Rank Fusion, then apply
+        # type-aware recency decay before taking the top_k.
+        vector_ranked_ids = self._vector_rank(query, candidates, embeddings, specs)
+        fused = _reciprocal_rank_fusion(bm25_ranked_ids, vector_ranked_ids)
+        if not fused:
             return []
 
-        bm25 = BM25Okapi(candidate_tokens)
-        scores = bm25.get_scores(query_tokens)
-
-        matches = [
-            (len(query_terms & terms), score, record)
-            for score, record, terms in zip(scores, candidates, candidate_terms)
-            if query_terms & terms
+        by_id = {record.id: record for record in candidates}
+        now = datetime.now(timezone.utc)
+        weighted = [
+            (
+                score
+                * _recency_weight(
+                    by_id[record_id].type,
+                    by_id[record_id].created_at,
+                    now=now,
+                    half_life_days=self._recency_half_life_days,
+                ),
+                record_id,
+            )
+            for record_id, score in fused.items()
         ]
-        matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        return [record for _overlap, _score, record in matches[:top_k]]
+        weighted.sort(key=lambda pair: pair[0], reverse=True)
+        return [by_id[record_id] for _score, record_id in weighted[:top_k]]
 
     def delete(self, memory_id: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
@@ -764,6 +1077,21 @@ _EXTRACTION_SYSTEM_PROMPT = (
 # configurable -- kept minimal, matching the rest of this module's knobs.
 _DEDUP_CANDIDATE_LIMIT = 20
 
+# Instructs the query-expansion model to rewrite a recall query into
+# alternative phrasings -- the MultiQueryRetriever pattern, applied to
+# per-user memory recall so a query worded differently from how a fact was
+# stored can still match it. Same JSON-only, cheap-model-friendly shape as
+# `_EXTRACTION_SYSTEM_PROMPT`.
+_QUERY_EXPANSION_SYSTEM_PROMPT = (
+    "You rewrite a memory-recall query into alternative phrasings that might "
+    "match a differently-worded stored note with the same meaning (synonyms, "
+    "rephrasing, a more/less formal register). Respond with ONLY a JSON object "
+    'of the form {{"queries": ["...", "..."]}} containing up to {n} alternative '
+    "phrasings of the given query -- NOT the original query itself, NOT an "
+    "answer to it, NOT a follow-up question. Use an empty list if no useful "
+    "alternative phrasing exists. No prose outside the JSON."
+)
+
 
 def _format_candidates(candidates: Sequence["MemoryRecord"]) -> str:
     """Render existing semantic memories as `- id=<id>: <content>` lines for the
@@ -781,6 +1109,12 @@ class RecallResult:
     preamble: str
     count: int
     ok: bool = True
+    # The query-expansion call's token usage (SP-3-style metering), when query
+    # expansion is configured and reported usage. None when expansion is
+    # unset/disabled, failed, or used a model that doesn't report tokens
+    # (e.g. `fake:`). Set even when `ok` is False (the search that follows a
+    # successful expansion can still fail; the paid call already happened).
+    expansion_usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -821,10 +1155,21 @@ class MemoryManager:
         workflow_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
         max_episodic_per_user: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
         self.top_k = top_k
+        # Query expansion (opt-in, MultiQueryRetriever-style): when set, `recall`
+        # makes one extra LLM call per recall to rewrite the query into up to
+        # `query_expansion_count` alternative phrasings, searches with each, and
+        # fuses the results via `_reciprocal_rank_fusion` -- same opt-in/fail-soft
+        # shape as `extraction_model` (a bad spec never disables memory, it just
+        # makes that call's expansion silently no-op). `query_expansion_count<=0`
+        # disables expansion even with a model configured.
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
@@ -888,16 +1233,19 @@ class MemoryManager:
             meta["workflow_version_id"] = self.workflow_version_id
         return meta
 
-    def _usage_entry(self, response: Any) -> Optional[Dict[str, Any]]:
-        """The extraction call's token usage as a `{model, input_tokens,
-        output_tokens}` entry (mirrors the adapter's `_record_usage`), or None
-        when the model didn't report `usage_metadata` (e.g. `fake:` models)."""
+    def _usage_entry(self, response: Any, model_spec: Any) -> Optional[Dict[str, Any]]:
+        """A model call's token usage as a `{model, input_tokens, output_tokens}`
+        entry (mirrors the adapter's `_record_usage`), or None when the model
+        didn't report `usage_metadata` (e.g. `fake:` models). `model_spec` is
+        whichever configured spec made this call (`extraction_model` or
+        `query_expansion_model`) -- shared across both callers since the shape
+        is identical."""
         usage = getattr(response, "usage_metadata", None)
         if not usage:
             return None
         # Only a string spec can resolve to a catalog price; a BaseChatModel
         # instance records tokens with model=None (cost stays null).
-        model_spec = self.extraction_model if isinstance(self.extraction_model, str) else None
+        model_spec = model_spec if isinstance(model_spec, str) else None
         return {
             "model": model_spec,
             "input_tokens": usage.get("input_tokens", 0),
@@ -916,6 +1264,94 @@ class MemoryManager:
         if callable(close):
             close()
 
+    def _expand_query(self, query: str) -> "tuple[List[str], Optional[Dict[str, Any]]]":
+        """Best-effort: up to `query_expansion_count` alternative phrasings of
+        `query` from `query_expansion_model`, for MultiQueryRetriever-style
+        fused recall, plus that call's token-usage entry (None if unreported,
+        e.g. a `fake:` model). NEVER raises -- any failure (no model
+        configured, count<=0, invoke error, unparseable response) returns
+        ``([], None)``, so `recall()` always has a safe fallback to the
+        literal query alone and never bills for a call that didn't happen."""
+        if self.query_expansion_model is None or self.query_expansion_count <= 0:
+            return [], None
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Same resolver as extraction, so "fake:" specs stay $0 in tests.
+        from ..adapters.langgraph_adapter import _resolve_model
+
+        try:
+            model = _resolve_model(self.query_expansion_model)
+            response = model.invoke(
+                [
+                    SystemMessage(
+                        content=_QUERY_EXPANSION_SYSTEM_PROMPT.format(n=self.query_expansion_count)
+                    ),
+                    HumanMessage(content=f"Query: {query}"),
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 -- no call succeeded, nothing billable
+            _logger.warning(
+                "Memory: query expansion failed, recalling with the original query only: %s",
+                exc,
+                exc_info=True,
+            )
+            return [], None
+
+        # Capture usage IMMEDIATELY after the call succeeds: the tokens were
+        # consumed regardless of whether parsing the response later fails
+        # (mirrors `_extract_and_store`'s usage-capture ordering).
+        usage = self._usage_entry(response, self.query_expansion_model)
+
+        try:
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = _parse_extraction(content)
+        except Exception as exc:  # noqa: BLE001 -- parse failure, usage still billable
+            _logger.warning(
+                "Memory: query expansion response parse failed, recalling with the "
+                "original query only: %s",
+                exc,
+                exc_info=True,
+            )
+            return [], usage
+        if not parsed or not isinstance(parsed.get("queries"), list):
+            return [], usage
+
+        seen = {query.strip().lower()}
+        expansions: List[str] = []
+        for item in parsed["queries"]:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text or text.lower() in seen:
+                continue
+            seen.add(text.lower())
+            expansions.append(text)
+            if len(expansions) >= self.query_expansion_count:
+                break
+        return expansions, usage
+
+    def _fused_search(
+        self, user_id: str, queries: List[str], types: Sequence[str], **kwargs: Any
+    ) -> List["MemoryRecord"]:
+        """`store.search()` over one query when `queries` has a single entry --
+        byte-for-byte the pre-expansion call, same signature. Otherwise search
+        once per query and fuse the ranked id lists with `_reciprocal_rank_fusion`
+        (rank-based, so it composes cleanly on top of each per-query search's own
+        BM25/vector/recency-decay ranking), returning the fused top `top_k`."""
+        if len(queries) == 1:
+            return self.store.search(user_id, queries[0], types=types, **kwargs)
+        ranked_lists: List[List[str]] = []
+        by_id: Dict[str, "MemoryRecord"] = {}
+        for q in queries:
+            results = self.store.search(user_id, q, types=types, **kwargs)
+            ranked_lists.append([r.id for r in results])
+            for r in results:
+                by_id.setdefault(r.id, r)
+        fused = _reciprocal_rank_fusion(*ranked_lists)
+        top_k = kwargs.get("top_k", self.top_k)
+        ranked = sorted(fused.items(), key=lambda pair: pair[1], reverse=True)
+        return [by_id[record_id] for record_id, _score in ranked[:top_k]]
+
     def recall(self, user_id: Optional[str], query: str) -> RecallResult:
         """Recall the top records for `user_id` and format them into a system-prompt
         block. Returns the block plus the number of records drawn (for observability,
@@ -930,7 +1366,13 @@ class MemoryManager:
         that search additionally scopes by `workflow_id` (unfiltered when None,
         reproducing pre-existing behavior for SDK-direct callers and YAML-only demo
         workflows). Each search is independently capped at `top_k`, so the combined
-        result can hold up to `2 * top_k` records."""
+        result can hold up to `2 * top_k` records.
+
+        When `query_expansion_model` is configured, the query is expanded ONCE
+        (not once per scope) into up to `query_expansion_count` alternative
+        phrasings and each scoped search fans out across all of them, fused via
+        `_reciprocal_rank_fusion` -- unset/disabled/failed expansion falls back
+        to exactly today's single-query behavior."""
         if not user_id:
             return RecallResult(preamble="", count=0)
         # M-09: bound the scan to the most-recent N records (recency ~= relevance
@@ -942,12 +1384,25 @@ class MemoryManager:
         if self.recall_max_candidates is not None:
             base_kwargs["max_candidates"] = self.recall_max_candidates
 
-        hits = self.store.search(user_id, query, types=[SEMANTIC], **base_kwargs)
-        hits += self.store.search(
-            user_id, query, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
-        )
+        expansions, expansion_usage = self._expand_query(query)  # never raises
+        queries = [query] + expansions
+
+        try:
+            hits = self._fused_search(user_id, queries, types=[SEMANTIC], **base_kwargs)
+            hits += self._fused_search(
+                user_id, queries, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
+            )
+        except Exception:  # noqa: BLE001 -- see below
+            # The expansion LLM call already happened and is billable even if
+            # the store search that follows it fails -- mirrors M-04's "usage
+            # must be metered even if every write failed" (record_run), applied
+            # to the read side. Caught here (not left to `_safe_recall`'s outer
+            # except) specifically so `expansion_usage` survives the failure.
+            _logger.exception("Memory recall's store search failed; returning no recall")
+            return RecallResult(preamble="", count=0, ok=False, expansion_usage=expansion_usage)
+
         if not hits:
-            return RecallResult(preamble="", count=0)
+            return RecallResult(preamble="", count=0, expansion_usage=expansion_usage)
         # Recalled content is untrusted: an earlier tool result or model output
         # may have been stored and could contain injected instructions. Delimit
         # it and frame it as reference-only data so it can't act as commands in
@@ -966,7 +1421,7 @@ class MemoryManager:
             "Use them to personalize your response where relevant; do not mention "
             "these notes explicitly."
         )
-        return RecallResult(preamble="\n".join(lines), count=len(hits))
+        return RecallResult(preamble="\n".join(lines), count=len(hits), expansion_usage=expansion_usage)
 
     def recall_preamble(self, user_id: Optional[str], query: str) -> str:
         """Backward-compatible wrapper over `recall` returning only the preamble."""
@@ -1049,7 +1504,7 @@ class MemoryManager:
         )
         # Capture usage IMMEDIATELY after the call: the tokens were consumed
         # regardless of whether parsing/storage later fails (review r4 #1).
-        usage = self._usage_entry(response)
+        usage = self._usage_entry(response, self.extraction_model)
         written: List[str] = []
         ok = True
 

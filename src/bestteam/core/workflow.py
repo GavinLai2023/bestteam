@@ -152,10 +152,22 @@ class Workflow:
         # attempt — a count (0 when nothing matched, distinguishing it from memory
         # being disabled) or a sanitized failure marker.
         if memory:
+            # The query-expansion call's usage (SP-3-style metering) is billable
+            # even when the recall that follows it fails, so it rides whichever
+            # of these two events is emitted -- mirrors how `memory_recorded`/
+            # `memory_failed` carry the extraction call's usage below.
+            expansion_usage = [recall_result.expansion_usage] if recall_result.expansion_usage else []
             if recall_result.ok:
-                yield TraceEvent(type="memory_recalled", workflow=self.name, data=recall_result.count)
+                yield TraceEvent(
+                    type="memory_recalled",
+                    workflow=self.name,
+                    data=recall_result.count,
+                    usage=expansion_usage,
+                )
             else:
-                yield TraceEvent(type="memory_failed", workflow=self.name, data="recall")
+                yield TraceEvent(
+                    type="memory_failed", workflow=self.name, data="recall", usage=expansion_usage
+                )
 
         last_output = ""
         try:

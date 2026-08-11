@@ -719,17 +719,28 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   entry on every `agent_completed` event, computing `cost_estimate` from
   `model_catalog` when the model spec matches a catalog entry (`None` otherwise).
   It also meters the per-user memory extraction call: a `memory_recorded` (or,
-  when every write failed, `memory_failed`) event (SP-3) carries the extraction
-  LLM's `usage`, recorded as a `usage_records` row with `agent="memory:extraction"`
-  (that call bypasses the adapter's usage path, so it arrives on the memory event
-  instead). The SDK attaches the usage to exactly one event, so it's billed once
-  even on total write failure. These memory events arrive AFTER `run_completed`
-  (recording runs post-terminal so a hung extraction can't wedge the run), but
-  `run_in_background` drains the whole event stream so they're still metered/
-  recorded; `registry.publish` tolerates a run evicted in that window. All usage
-  persistence goes through `_safe_record_usage`, which isolates a `usage_records`
-  write failure (logs + rolls back) so metering can never flip a successful run
-  to `run_failed`.
+  when every write failed, `memory_failed` with `data="record"`) event (SP-3)
+  carries the extraction LLM's `usage`, recorded as a `usage_records` row with
+  `agent="memory:extraction"` (that call bypasses the adapter's usage path, so
+  it arrives on the memory event instead). The SDK attaches the usage to
+  exactly one event, so it's billed once even on total write failure. These
+  memory events arrive AFTER `run_completed` (recording runs post-terminal so
+  a hung extraction can't wedge the run), but `run_in_background` drains the
+  whole event stream so they're still metered/recorded; `registry.publish`
+  tolerates a run evicted in that window. Symmetrically, the per-user memory
+  **query-expansion** call is metered the same way on the recall side: a
+  `memory_recalled` (or, when the search that followed a successful expansion
+  failed, `memory_failed` with `data="recall"`) event carries the expansion
+  LLM's `usage`, recorded as a `usage_records` row tagged
+  `agent="memory:query_expansion"` — `run_in_background`'s usage block picks
+  the agent label per-event (`event.type == "memory_recalled"`, or
+  `memory_failed` with `event.data == "recall"`) so a recall-side call is
+  never mis-attributed as extraction, and vice versa. These events arrive
+  BEFORE `run_started` (recall happens before the agents), so unlike the
+  extraction/record events they're metered promptly, not post-terminal. All
+  usage persistence goes through `_safe_record_usage`, which isolates a
+  `usage_records` write failure (logs + rolls back) so metering can never
+  flip a successful run to `run_failed`.
 
 ## Per-user memory
 
@@ -742,6 +753,29 @@ passes it plus `user_id` into `workflow.stream(...)`; `main.py::create_run`
 threads the JWT `user.username` through as `user_id` (the wizard's
 `builder.py` test-runs omit it, so sandbox runs never touch memory). See
 `src/bestteam/core/CLAUDE.md` for the SDK-side design.
+
+Two more optional env vars enable opt-in hybrid recall: `BESTTEAM_MEMORY_EMBEDDING_MODEL`
+(same spec convention as the vector knowledge base — unset → plain BM25
+recall, byte-for-byte unchanged) and `BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS`
+(default 14, only meaningful when an embedding model is set). Both are read
+identically by `_make_memory` and `memory_api.py::get_memory_store` (the admin
+search dependency below), so admin search reflects the same ranking behavior
+a live run gets. See `src/bestteam/core/CLAUDE.md`'s "Known limitations
+(per-user memory)" for the hybrid-recall design.
+
+Two further optional env vars enable opt-in query expansion:
+`BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` (same `_resolve_model` spec
+convention as `BESTTEAM_MEMORY_MODEL`/extraction — unset → recall is
+byte-for-byte unchanged) and `BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT` (default
+3, how many alternative phrasings to request). **Unlike the two hybrid-recall
+vars above, these are NOT read by `memory_api.py::get_memory_store`** — admin
+search stays literal-only by design (see `src/bestteam/core/CLAUDE.md`).
+Also unlike `BESTTEAM_MEMORY_EMBEDDING_MODEL` (eagerly resolved at store
+construction, so a bad spec disables memory entirely), a bad
+`BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` never disables memory — it's resolved
+lazily per-call and degrades to searching the literal query alone, same
+failure shape as a bad `BESTTEAM_MEMORY_MODEL`. See `src/bestteam/core/CLAUDE.md`'s
+"Known limitations (per-user memory)" for the full query-expansion design.
 
 `create_run` also resolves and passes `workflow_id` (`WorkflowRecord.id`, the
 deployed team's stable head) alongside `workflow_version_id` — see

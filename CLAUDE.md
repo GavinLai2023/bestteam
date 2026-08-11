@@ -80,9 +80,12 @@ implemented** — don't assume they exist:
 - **Vector knowledge base retrieval is single-stage** (no query
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors) — see `src/bestteam/core/CLAUDE.md`.
-- **Per-user memory recall is single-stage BM25** (no rerank/expansion).
-  Semantic records get exact-dedup on write plus LLM-mediated near-duplicate/
-  update resolution; procedural records still have no dedup/consolidation.
+- **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
+  vector, RRF-fused, with type-aware recency decay) is available via
+  `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or
+  reranking either way. Semantic records get exact-dedup on write plus
+  LLM-mediated near-duplicate/update resolution; procedural records still
+  have no dedup/consolidation.
   Admins can view/search/delete a user's memory via the admin-only Memory page
   (`/api/memory`); there's no manual add/edit and no retention/quota policy. Disabled by default
   (`BESTTEAM_MEMORY_DB`) — see `core/memory.py` and `src/bestteam/core/CLAUDE.md`.

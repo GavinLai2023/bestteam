@@ -1,9 +1,20 @@
 """Tests for the per-user memory store and manager (`core/memory.py`)."""
 
+import json
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from langchain_core.embeddings import Embeddings
 
 from bestteam import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
-from bestteam.core.memory import EPISODIC, LEGACY_ORG, PROCEDURAL, SEMANTIC
+from bestteam.core.memory import (
+    EPISODIC,
+    LEGACY_ORG,
+    PROCEDURAL,
+    SEMANTIC,
+    _reciprocal_rank_fusion,
+    _recency_weight,
+)
 
 
 class _LegacyStore(Memory):
@@ -175,15 +186,19 @@ def test_search_bounds_candidate_scan(monkeypatch):
         store.add("alice", EPISODIC, f"refund note {i}")
 
     captured = {}
-    real_all = store.all
+    real_candidates = store._candidates
 
-    def spy_all(user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None):
+    def spy_candidates(
+        user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None,
+        include_embeddings=True,
+    ):
         captured["limit"] = limit
-        return real_all(
-            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id
+        return real_candidates(
+            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id,
+            include_embeddings=include_embeddings,
         )
 
-    monkeypatch.setattr(store, "all", spy_all)
+    monkeypatch.setattr(store, "_candidates", spy_candidates)
     hits = store.search("alice", "refund", top_k=2, max_candidates=3)
 
     assert captured["limit"] == 3  # loaded at most 3 rows, not all 6
@@ -497,6 +512,222 @@ def test_recall_unbounded_omits_the_bound():
     store.search = spy
     MemoryManager(store).recall("u", "refund")  # recall_max_candidates defaults None
     assert "max_candidates" not in captured["kwargs"]
+
+
+# --- Query expansion: MultiQueryRetriever-style fused recall ----------------
+
+
+def test_recall_without_query_expansion_model_unchanged():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    calls = []
+    real = store.search
+
+    def spy(user_id, query, **kwargs):
+        calls.append((user_id, query, kwargs))
+        return real(user_id, query, **kwargs)
+
+    store.search = spy
+    result = MemoryManager(store).recall("alice", "refund")
+
+    assert len(calls) == 2
+    assert calls[0][1] == "refund"
+    assert calls[1][1] == "refund"
+    assert result.expansion_usage is None
+
+
+def test_recall_expands_query_and_surfaces_lexically_disjoint_match():
+    store = _store()
+    store.add("alice", SEMANTIC, "the company offers a money back guarantee")
+    # No shared significant term with "refund" -- plain BM25 would miss this.
+    mgr = MemoryManager(
+        store, query_expansion_model='fake:{"queries": ["money back guarantee"]}'
+    )
+
+    result = mgr.recall("alice", "refund")
+    assert result.count == 1
+    assert "money back guarantee" in result.preamble
+
+
+def test_recall_expansion_calls_llm_exactly_once_per_recall(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(content='{"queries": ["alt phrasing"]}')
+    model = FakeMessagesListChatModel(responses=[canned, canned, canned])
+    calls = []
+    original_invoke = type(model).invoke
+
+    def spy(self, *args, **kwargs):
+        calls.append(1)
+        return original_invoke(self, *args, **kwargs)
+
+    # `FakeMessagesListChatModel` is a pydantic model -- only class-level
+    # patching is allowed, not setting an instance attribute for a method.
+    monkeypatch.setattr(type(model), "invoke", spy)
+
+    store = _store()
+    store.add("alice", EPISODIC, "note about refunds")
+    MemoryManager(store, query_expansion_model=model).recall("alice", "refund")
+
+    # Two scoped searches (semantic, episodic/procedural) share ONE expansion call.
+    assert len(calls) == 1
+
+
+def test_recall_captures_expansion_usage_on_success():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(
+        content='{"queries": ["money back guarantee"]}',
+        usage_metadata={"input_tokens": 15, "output_tokens": 5, "total_tokens": 20},
+    )
+    store = _store()
+    store.add("alice", SEMANTIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    result = mgr.recall("alice", "refund")
+    assert result.expansion_usage == {"model": None, "input_tokens": 15, "output_tokens": 5}
+
+
+def test_recall_expansion_llm_failure_degrades_to_original_query_only():
+    from langchain_core.language_models.chat_models import BaseChatModel
+
+    class _RaisingChatModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "raising-fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise RuntimeError("model provider unavailable")
+
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model=_RaisingChatModel())
+
+    result = mgr.recall("alice", "refund")
+    assert result.ok is True
+    assert result.count == 1
+    assert result.expansion_usage is None
+
+
+def test_recall_expansion_unparseable_response_degrades_gracefully():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model="fake:sorry, not JSON")
+
+    result = mgr.recall("alice", "refund")
+    assert result.count == 1
+    assert result.expansion_usage is None
+
+
+def test_recall_expansion_preserves_usage_when_response_parsing_raises():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    # Simulates a provider returning structured content blocks (a list) instead
+    # of a plain string: content.strip() inside _parse_extraction then raises
+    # AttributeError -- a failure mode distinct from "successfully parsed but
+    # not valid JSON", and one that happens AFTER usage was already captured.
+    canned = AIMessage(
+        content=[{"type": "text", "text": "not a string"}],
+        usage_metadata={"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+    )
+    store = _store()
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    expansions, usage = mgr._expand_query("refund")
+    assert expansions == []
+    assert usage == {"model": None, "input_tokens": 4, "output_tokens": 1}
+
+
+def test_recall_expansion_dedupes_against_original_and_itself_and_caps_count():
+    canned = (
+        '{"queries": ["Refund", "refund ", "alt one", "alt one", "alt two", "alt three"]}'
+    )
+    store = _store()
+    mgr = MemoryManager(store, query_expansion_model=f"fake:{canned}", query_expansion_count=2)
+
+    expansions, usage = mgr._expand_query("refund")
+    # "Refund"/"refund " dedupe against the original query (case/whitespace
+    # insensitive); "alt one" dedupes against itself; capped at count=2 before
+    # ever considering "alt three".
+    assert expansions == ["alt one", "alt two"]
+
+
+def test_recall_expansion_count_zero_or_negative_disables_expansion():
+    store = _store()
+    mgr = MemoryManager(
+        store,
+        query_expansion_model='fake:{"queries": ["alt"]}',
+        query_expansion_count=0,
+    )
+    expansions, usage = mgr._expand_query("refund")
+    assert expansions == []
+    assert usage is None
+
+
+def test_recall_top_k_applied_after_fusion_across_expanded_queries():
+    store = _store()
+    store.add("alice", EPISODIC, "alpha widget notes")
+    store.add("alice", EPISODIC, "beta widget notes")
+    store.add("alice", EPISODIC, "gamma gadget notes")
+    mgr = MemoryManager(store, top_k=2)
+
+    # Two query variants together could surface 3 distinct records (2 "widget"
+    # hits + 1 "gadget" hit); the post-fusion result must still respect top_k.
+    results = mgr._fused_search("alice", ["widget", "gadget"], types=[EPISODIC], top_k=2)
+    assert len(results) == 2
+
+
+def test_semantic_candidate_search_unaffected_by_query_expansion_model(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(content='{"queries": ["alt phrasing"]}')
+    expansion_model = FakeMessagesListChatModel(responses=[canned] * 5)
+    calls = []
+    # `FakeMessagesListChatModel` is a pydantic model -- only class-level
+    # patching is allowed, not setting an instance attribute for a method.
+    monkeypatch.setattr(type(expansion_model), "invoke", lambda self, *a, **k: calls.append(1))
+
+    store = _store()
+    store.add("alice", SEMANTIC, "likes bullet points")
+    extraction_canned = '{"facts": [{"action": "add", "content": "works in finance"}], "procedural": ""}'
+    mgr = MemoryManager(
+        store,
+        extraction_model=f"fake:{extraction_canned}",
+        query_expansion_model=expansion_model,
+    )
+    mgr.record_run("alice", "q", "a")
+
+    # `_extract_and_store`'s near-dup candidate search never routes through
+    # query expansion -- fuzzy-expanded candidates risk false dup/update merges.
+    assert calls == []
+
+
+def test_recall_preserves_expansion_usage_when_store_search_fails_after_expansion():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(
+        content='{"queries": ["alt phrasing"]}',
+        usage_metadata={"input_tokens": 7, "output_tokens": 2, "total_tokens": 9},
+    )
+
+    class _FailingSearchStore(SqliteBM25Memory):
+        def search(self, *args, **kwargs):
+            raise RuntimeError("search backend unavailable")
+
+    store = _FailingSearchStore(":memory:")
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    result = mgr.recall("alice", "refund")
+    # The expansion call already happened (and is billable) even though the
+    # store search that follows it blew up -- mirrors M-04 for record_run.
+    assert result.ok is False
+    assert result.count == 0
+    assert result.expansion_usage == {"model": None, "input_tokens": 7, "output_tokens": 2}
 
 
 def test_extraction_dedups_exact_facts_against_existing():
@@ -1691,3 +1922,486 @@ def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
     # The procedural note is new under workflow 1 (workflow 2's note doesn't dedup it).
     assert len([r for r in store.all("alice") if r.type == PROCEDURAL]) == 2
     assert outcome.recorded.count(PROCEDURAL) == 1
+
+
+# --- Hybrid (BM25 + vector) recall: RRF fusion + type-aware recency decay ---
+
+
+class _TopicEmbedding(Embeddings):
+    """Maps text to a small topic vector via keyword buckets, deliberately
+    independent of BM25 token overlap -- lets tests prove the vector leg
+    finds a match that shares zero significant terms with the query.
+    `DeterministicFakeEmbedding`/`fake:` alone is hash-based and can't be
+    used to assert *which* content should match a given query.
+    """
+
+    _BIKE_WORDS = ("bike", "bicycle", "cycling", "pedal")
+    _FINANCE_WORDS = ("refund", "invoice", "payment", "money")
+
+    def embed_documents(self, texts):
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text):
+        lowered = text.lower()
+        bike = 1.0 if any(w in lowered for w in self._BIKE_WORDS) else 0.0
+        finance = 1.0 if any(w in lowered for w in self._FINANCE_WORDS) else 0.0
+        return [bike, finance]
+
+
+class _BrokenEmbedding(Embeddings):
+    """Raises on every call, for testing embedding-failure degradation."""
+
+    def embed_documents(self, texts):
+        raise RuntimeError("embedding provider unavailable")
+
+    def embed_query(self, text):
+        raise RuntimeError("embedding provider unavailable")
+
+
+def _hybrid_store(**kwargs):
+    return SqliteBM25Memory(":memory:", embedding_model=_TopicEmbedding(), **kwargs)
+
+
+def test_add_computes_and_persists_embedding_when_configured():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    row = store._conn.execute("SELECT embedding_json, embedding_model FROM memories").fetchone()
+    assert json.loads(row["embedding_json"]) == [1.0, 0.0]
+    # A live (non-string) Embeddings instance has no spec string of its own,
+    # so it's tagged with a fresh per-instance identity instead of a bare
+    # None (a None==None match would let a DIFFERENT, incompatible live
+    # instance's vectors get reused -- see test_vector_rank_rejects_vectors_
+    # from_a_different_anonymous_embedding_instance below).
+    assert row["embedding_model"] == store._embedding_model_spec
+    assert row["embedding_model"].startswith("anon:")
+
+
+def test_vector_rank_rejects_vectors_from_a_different_anonymous_embedding_instance(tmp_path):
+    path = str(tmp_path / "m.db")
+    store1 = SqliteBM25Memory(path, embedding_model=_TopicEmbedding())
+    store1.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    store1.close()
+
+    # A second store instance -- even backed by an equivalent live embedding
+    # model -- gets its OWN anonymous identity; it must not silently reuse a
+    # different instance's persisted vector.
+    store2 = SqliteBM25Memory(path, embedding_model=_TopicEmbedding())
+    records, embeddings, specs = store2._candidates("alice")
+    ranked = store2._vector_rank("cycling", records, embeddings, specs)
+
+    assert ranked == []
+
+
+def test_add_omits_embedding_when_unconfigured():
+    store = _store()
+    store.add("alice", EPISODIC, "hi")
+
+    row = store._conn.execute("SELECT embedding_json, embedding_model FROM memories").fetchone()
+    assert row["embedding_json"] is None
+    assert row["embedding_model"] is None
+
+
+def test_add_if_absent_persists_embedding_on_new_record():
+    store = _hybrid_store()
+    store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    row = store._conn.execute("SELECT embedding_json FROM memories").fetchone()
+    assert row["embedding_json"] is not None
+
+
+def test_add_if_absent_skips_embedding_on_duplicate(monkeypatch):
+    store = _hybrid_store()
+    store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    embed_calls = []
+    original = store._embeddings.embed_documents
+
+    def spy(texts):
+        embed_calls.append(texts)
+        return original(texts)
+
+    monkeypatch.setattr(store._embeddings, "embed_documents", spy)
+    result = store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    assert result is None  # duplicate, not written
+    assert embed_calls == []  # pre-check skipped the embedding call entirely
+
+
+def test_embedding_write_failure_degrades_to_null_vector_not_a_broken_write():
+    store = SqliteBM25Memory(":memory:", embedding_model=_BrokenEmbedding())
+
+    record = store.add("alice", EPISODIC, "hi")
+
+    assert record is not None
+    row = store._conn.execute("SELECT embedding_json FROM memories").fetchone()
+    assert row["embedding_json"] is None
+
+
+def test_search_hybrid_surfaces_zero_keyword_overlap_match():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    hits = store.search("alice", "cycling hobby")
+
+    assert [h.content for h in hits] == ["User rides their bicycle every weekend"]
+
+
+def test_search_without_embedding_model_ignores_semantic_matches():
+    store = _store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    assert store.search("alice", "cycling hobby") == []
+
+
+def test_search_hybrid_still_finds_pure_keyword_matches():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "asked about a refund for order 42")
+
+    hits = store.search("alice", "refund")
+
+    assert [h.content for h in hits] == ["asked about a refund for order 42"]
+
+
+def test_search_vector_leg_skips_records_without_embeddings():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    # Simulate a pre-hybrid-adoption row: no stored vector.
+    store._conn.execute("UPDATE memories SET embedding_json = NULL, embedding_model = NULL")
+    store._conn.commit()
+
+    assert store.search("alice", "cycling hobby") == []  # no BM25 overlap either
+    assert store.search("alice", "bicycle") != []  # still found via BM25
+
+
+def test_search_vector_leg_skips_dimension_mismatched_embeddings():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    # Simulate a changed embedding model: same (None) spec, different dimension.
+    store._conn.execute("UPDATE memories SET embedding_json = ?", (json.dumps([1.0, 0.0, 0.0]),))
+    store._conn.commit()
+
+    # No crash; the mismatched vector is excluded from the vector leg, so a
+    # zero-keyword-overlap query no longer finds it.
+    assert store.search("alice", "cycling hobby") == []
+
+
+def test_reciprocal_rank_fusion_combines_two_lists():
+    scores = _reciprocal_rank_fusion(["a", "b", "c"], ["c", "a"])
+
+    assert scores["a"] == pytest.approx(1 / 61 + 1 / 62)
+    assert scores["b"] == pytest.approx(1 / 62)
+    assert scores["c"] == pytest.approx(1 / 63 + 1 / 61)
+
+
+def test_reciprocal_rank_fusion_respects_custom_k():
+    assert _reciprocal_rank_fusion(["a"], k=1)["a"] == pytest.approx(1 / 2)
+
+
+def test_reciprocal_rank_fusion_empty_lists():
+    assert _reciprocal_rank_fusion([], []) == {}
+
+
+def test_recency_weight_semantic_never_decays():
+    now = datetime(2026, 1, 30, tzinfo=timezone.utc)
+    old = "2020-01-01T00:00:00+00:00"
+    assert _recency_weight(SEMANTIC, old, now=now, half_life_days=14) == 1.0
+
+
+def test_recency_weight_halves_at_half_life():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+
+    weight = _recency_weight(EPISODIC, created_at, now=now, half_life_days=14)
+
+    assert weight == pytest.approx(0.5)
+
+
+def test_recency_weight_disabled_when_half_life_none_or_nonpositive():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    created_at = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()
+
+    assert _recency_weight(EPISODIC, created_at, now=now, half_life_days=None) == 1.0
+    assert _recency_weight(EPISODIC, created_at, now=now, half_life_days=0) == 1.0
+
+
+def test_recency_weight_tolerates_unparseable_or_future_timestamp():
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+
+    assert _recency_weight(EPISODIC, "not-a-date", now=now, half_life_days=14) == 1.0
+    future = datetime(2026, 2, 1, tzinfo=timezone.utc).isoformat()
+    assert _recency_weight(EPISODIC, future, now=now, half_life_days=14) == 1.0
+
+
+def test_search_hybrid_applies_recency_decay_to_ranking():
+    store = _hybrid_store(recency_half_life_days=1)
+    older = store.add("alice", EPISODIC, "asked about a refund")
+    newer = store.add("alice", EPISODIC, "asked about a refund")
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    store._conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_time, older.id))
+    store._conn.commit()
+
+    hits = store.search("alice", "refund", top_k=2)
+
+    assert hits[0].id == newer.id
+
+
+def test_search_hybrid_semantic_beats_stale_episodic_at_equal_fusion_score():
+    store = _hybrid_store(recency_half_life_days=1)
+    same_content = "asked about a refund"
+    semantic = store.add("alice", SEMANTIC, same_content)
+    store.add("alice", EPISODIC, same_content)
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    store._conn.execute("UPDATE memories SET created_at = ?", (old_time,))
+    store._conn.commit()
+
+    hits = store.search("alice", "refund", types=[SEMANTIC, EPISODIC], top_k=2)
+
+    assert hits[0].id == semantic.id
+
+
+def test_opens_pre_embedding_db_and_migrates(tmp_path):
+    # A DB created before hybrid recall (no embedding_json/embedding_model
+    # columns) must gain them in place, keep its existing rows (both NULL),
+    # and work after.
+    import sqlite3
+
+    db_path = str(tmp_path / "pre_embedding.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+        "type TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, org_id INTEGER, principal_id TEXT, workflow_id INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES ('id1', 'alice', 'semantic', 'legacy fact', '{}', "
+        "'2026-01-01T00:00:00+00:00', NULL, NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteBM25Memory(db_path, embedding_model=_TopicEmbedding())
+    legacy = store.all("alice")
+    assert len(legacy) == 1
+    row = store._conn.execute("SELECT embedding_json FROM memories WHERE id = 'id1'").fetchone()
+    assert row["embedding_json"] is None  # not backfilled
+    store.add("alice", SEMANTIC, "new fact about cycling")
+    assert len(store.all("alice")) == 2
+    store.close()
+
+
+def test_sqlite_bm25_requires_numpy_when_embedding_model_set(monkeypatch):
+    import builtins
+
+    from bestteam.exceptions import ConfigurationError
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "numpy":
+            raise ImportError("no numpy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ConfigurationError, match="numpy"):
+        SqliteBM25Memory(":memory:", embedding_model="fake:8")
+
+
+def test_sqlite_bm25_no_numpy_required_without_embedding_model(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "numpy":
+            raise ImportError("no numpy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    store = SqliteBM25Memory(":memory:")  # must not raise
+    assert store.add("alice", EPISODIC, "hi") is not None
+
+
+# --- Codex review fixes: vector-leg relevance floor, dedup-precheck race,
+# --- query-embedding reuse, embedding-parse skip ---
+
+
+def test_search_hybrid_does_not_let_unrelated_vector_candidate_outrank_decayed_exact_match():
+    store = _hybrid_store(recency_half_life_days=1)
+    old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    refund = store.add("alice", EPISODIC, "asked about a refund")
+    store._conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_time, refund.id))
+    store._conn.commit()
+    store.add("alice", EPISODIC, "left a note about their bike")  # fresh, unrelated topic
+
+    hits = store.search("alice", "refund", top_k=1)
+
+    assert hits[0].id == refund.id
+
+
+def test_vector_rank_returns_nothing_for_zero_query_vector():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+    records, embeddings, specs = store._candidates("alice")
+
+    ranked = store._vector_rank("no relevant topic words here", records, embeddings, specs)
+
+    assert ranked == []
+
+
+def test_add_skips_embedding_for_a_retired_principal(monkeypatch):
+    store = _hybrid_store()
+    store.retire_principal("p1")
+    embed_calls = []
+    monkeypatch.setattr(store._embeddings, "embed_documents", lambda texts: embed_calls.append(texts) or [])
+
+    result = store.add("alice", EPISODIC, "bicycle notes", principal_id="p1")
+
+    assert result is None  # dropped by the deletion-lifecycle fence
+    assert embed_calls == []  # never paid an external embedding call for it
+
+
+def test_add_if_absent_skips_embedding_for_a_retired_principal(monkeypatch):
+    store = _hybrid_store()
+    store.retire_principal("p1")
+    embed_calls = []
+    monkeypatch.setattr(store._embeddings, "embed_documents", lambda texts: embed_calls.append(texts) or [])
+
+    result = store.add_if_absent("alice", SEMANTIC, "bicycle notes", principal_id="p1")
+
+    assert result is None
+    assert embed_calls == []
+
+
+def test_add_if_absent_self_heals_embedding_when_precheck_races_a_deletion(monkeypatch):
+    store = _hybrid_store()
+    dup = store.add("alice", SEMANTIC, "loves cycling")
+
+    embed_calls = []
+    original_embed_documents = store._embeddings.embed_documents
+
+    def spy(texts):
+        embed_calls.append(texts)
+        return original_embed_documents(texts)
+
+    monkeypatch.setattr(store._embeddings, "embed_documents", spy)
+
+    class _RacyConn:
+        """Delegates to the real connection, but simulates another connection
+        deleting the "duplicate" row right after our existence precheck runs
+        (and before our own INSERT), racing the cost-optimization precheck."""
+
+        def __init__(self, conn, dup_id):
+            self._conn = conn
+            self._dup_id = dup_id
+            self.exists_calls = 0
+
+        def execute(self, sql, params=()):
+            if sql.strip().startswith("SELECT EXISTS"):
+                self.exists_calls += 1
+                result = self._conn.execute(sql, params)
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (self._dup_id,))
+                self._conn.commit()
+                return result
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    proxy = _RacyConn(store._conn, dup.id)
+    monkeypatch.setattr(store, "_conn", proxy)
+
+    record = store.add_if_absent("alice", SEMANTIC, "loves cycling")
+
+    assert record is not None  # the "duplicate" was actually gone by insert time
+    assert proxy.exists_calls == 1
+    row = proxy._conn.execute(
+        "SELECT embedding_json FROM memories WHERE id = ?", (record.id,)
+    ).fetchone()
+    assert row["embedding_json"] is not None  # self-healed, not left permanently NULL
+    assert len(embed_calls) == 1  # precheck skipped the first call; only the self-heal ran
+
+
+def test_search_reuses_query_embedding_across_repeated_calls(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", SEMANTIC, "loves cycling")
+    store.add("alice", EPISODIC, "asked about their bicycle")
+
+    embed_calls = []
+    original = store._embeddings.embed_query
+
+    def spy(text):
+        embed_calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(store._embeddings, "embed_query", spy)
+
+    store.search("alice", "cycling hobby", types=[SEMANTIC])
+    store.search("alice", "cycling hobby", types=[EPISODIC, PROCEDURAL])
+
+    assert embed_calls == ["cycling hobby"]  # second call reused the cached vector
+
+
+def test_candidates_skips_embedding_parsing_when_not_requested():
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "User rides their bicycle every weekend")
+
+    _records, embeddings, specs = store._candidates("alice", include_embeddings=False)
+    assert embeddings == [None]
+    assert specs == [None]
+
+    _records2, embeddings2, _specs2 = store._candidates("alice", include_embeddings=True)
+    assert embeddings2 == [[1.0, 0.0]]
+
+
+def test_all_does_not_request_embeddings(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "hi")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.all("alice")
+
+    assert calls == [False]
+
+
+def test_search_without_hybrid_configured_does_not_request_embeddings(monkeypatch):
+    store = _store()
+    store.add("alice", EPISODIC, "refund note")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.search("alice", "refund")
+
+    assert calls == [False]
+
+
+def test_search_hybrid_requests_embeddings(monkeypatch):
+    store = _hybrid_store()
+    store.add("alice", EPISODIC, "refund note")
+
+    calls = []
+    real = store._candidates
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("include_embeddings"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_candidates", spy)
+    store.search("alice", "refund")
+
+    assert calls == [True]

@@ -136,8 +136,13 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             pass
 
 
-def _env_int(name: str, default: Optional[int]) -> Optional[int]:
-    """Positive-int env config, or `default` when unset/blank/invalid/non-positive."""
+def _env_int(name: str, default: Optional[int], *, min_value: Optional[int] = 1) -> Optional[int]:
+    """Int env config, or `default` when unset/blank/invalid. `min_value` (1 by
+    default, matching every other caller's "positive-int" knobs) also falls
+    back to `default` when the parsed value is below it. Pass `min_value=None`
+    for a knob whose own consumer treats a non-positive value as meaningful
+    (e.g. `query_expansion_count`'s documented `<=0` = disabled contract) --
+    without this, `0`/negative silently couldn't reach that consumer at all."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -146,7 +151,9 @@ def _env_int(name: str, default: Optional[int]) -> Optional[int]:
     except ValueError:
         _logger.warning("Ignoring non-integer %s=%r; using %r", name, raw, default)
         return default
-    return value if value > 0 else default
+    if min_value is not None and value < min_value:
+        return default
+    return value
 
 
 def _make_memory(
@@ -167,6 +174,25 @@ def _make_memory(
       exactly as before).
     - set -> a `SqliteBM25Memory` at that path; `BESTTEAM_MEMORY_MODEL`, if
       set, enables semantic/procedural extraction via one LLM call per run.
+    - `BESTTEAM_MEMORY_EMBEDDING_MODEL`, if set, enables hybrid (BM25 +
+      vector, RRF-fused) recall with type-aware recency decay -- same spec
+      convention as the vector knowledge base (`"fake:<dim>"` for $0 tests,
+      or a provider string like `"openai:text-embedding-3-small"`). Unset ->
+      pure-BM25 recall, byte-for-byte unchanged. `BESTTEAM_MEMORY_RECENCY_
+      HALF_LIFE_DAYS` tunes the decay applied to EPISODIC/PROCEDURAL hits
+      (SEMANTIC never decays); only meaningful when an embedding model is
+      also set. A misconfigured embedding spec disables memory entirely,
+      like a bad `BESTTEAM_MEMORY_DB` path (caught below).
+    - `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`, if set, enables query expansion:
+      one extra LLM call per recall rewrites the query into up to
+      `BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT` (default 3) alternative
+      phrasings, each searched and fused via RRF alongside the literal query.
+      Unlike `BESTTEAM_MEMORY_EMBEDDING_MODEL` (eagerly resolved at store
+      construction, so a bad spec disables memory entirely), this is resolved
+      lazily per-call inside its own try/except -- a bad spec never disables
+      memory, it just makes that call's expansion silently no-op (same
+      failure shape as `BESTTEAM_MEMORY_MODEL`/extraction). Unset -> recall is
+      byte-for-byte unchanged.
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
     run only ever sees and writes its own org's memory. `workflow_id` (the
@@ -177,12 +203,19 @@ def _make_memory(
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
     if not db_path:
         return None
+    embedding_model = os.environ.get("BESTTEAM_MEMORY_EMBEDDING_MODEL", "").strip() or None
+    recency_half_life_days = _env_int("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", 14)
     try:
-        store = SqliteBM25Memory(db_path)
+        store = SqliteBM25Memory(
+            db_path,
+            embedding_model=embedding_model,
+            recency_half_life_days=recency_half_life_days,
+        )
     except Exception as exc:  # noqa: BLE001 — memory must never break a run
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
+    query_expansion_model = os.environ.get("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", "").strip() or None
     return MemoryManager(
         store,
         extraction_model=extraction_model,
@@ -195,6 +228,11 @@ def _make_memory(
         # is opt-in (M-07, destructive so default unbounded).
         recall_max_candidates=_env_int("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", 1000),
         max_episodic_per_user=_env_int("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", None),
+        query_expansion_model=query_expansion_model,
+        # min_value=None: 0/negative must reach MemoryManager, which treats
+        # <=0 as "expansion disabled" -- the default min_value=1 would instead
+        # silently substitute the default count, defeating that setting.
+        query_expansion_count=_env_int("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", 3, min_value=None),
     )
 
 
@@ -433,16 +471,27 @@ def run_in_background(
                             output_tokens=entry.get("output_tokens", 0),
                             org_id=org_id,
                         )
-                if db is not None and event.type in ("memory_recorded", "memory_failed"):
-                    # Meter the memory extraction LLM call (M-04); it bypasses the
-                    # adapter's usage path, so it arrives on the memory event. The SDK
-                    # attaches the usage to exactly one event (recorded, or failed when
-                    # every write failed), so this never double-counts (review r6 #1).
+                if db is not None and event.type in ("memory_recorded", "memory_recalled", "memory_failed"):
+                    # Meter the memory extraction/query-expansion LLM calls; both
+                    # bypass the adapter's usage path, so each arrives on its own
+                    # memory event (M-04). `memory_failed` is shared between a
+                    # record failure (data="record") and a recall failure
+                    # (data="recall") that may still carry billable expansion
+                    # usage, so the agent label is picked per-event rather than
+                    # hardcoded -- a recall-side call must never be mis-attributed
+                    # as extraction. Each side attaches usage to exactly one event
+                    # of its own (recorded/recalled, or failed when that side's
+                    # only write/search failed), so this never double-counts
+                    # (review r6 #1, extended to the recall side).
+                    is_recall_side = event.type == "memory_recalled" or (
+                        event.type == "memory_failed" and event.data == "recall"
+                    )
+                    agent = "memory:query_expansion" if is_recall_side else "memory:extraction"
                     for entry in event.usage:
                         _safe_record_usage(
                             db,
                             run_id=run_id,
-                            agent="memory:extraction",
+                            agent=agent,
                             model=entry.get("model"),
                             input_tokens=entry.get("input_tokens", 0),
                             output_tokens=entry.get("output_tokens", 0),
@@ -461,9 +510,21 @@ def run_in_background(
                 # during compile/memory-recall, before run_started was even
                 # yielded) goes unhonored for a whole avoidable extra paid
                 # agent turn (round-2 review P1).
+                #
+                # Exception: when memory is active, `run_started` is ALSO
+                # skipped -- it's immediately followed by exactly one
+                # `memory_recalled`/`memory_failed` event, which is the sole
+                # carrier of the (already-paid-for) query-expansion usage. A
+                # cancellation discovered right after `run_started` would call
+                # `stream_iter.close()` before that event is ever pulled from
+                # the generator, silently dropping billable usage. Deferring
+                # the check by that one event still stops before any agent
+                # runs (memory_recalled/failed always precedes agent_started),
+                # so the "avoidable paid agent turn" guarantee above is intact.
                 if (
                     not terminal_seen
                     and event.type not in _BUFFERED_NODE_EVENT_TYPES
+                    and not (event.type == "run_started" and memory is not None)
                     and registry.cancel_requested(run_id)
                 ):
                     stream_iter.close()

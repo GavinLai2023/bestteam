@@ -6,10 +6,8 @@ from unittest.mock import patch
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 
-from bestteam.core.vector_knowledge_base import (
-    VectorKnowledgeBase,
-    _resolve_embedding_model,
-)
+from bestteam.core.embeddings import resolve_embedding_model as _resolve_embedding_model
+from bestteam.core.vector_knowledge_base import VectorKnowledgeBase
 from bestteam.exceptions import ConfigurationError
 
 

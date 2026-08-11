@@ -77,6 +77,113 @@ def test_make_memory_defaults_recall_bound_and_opt_in_retention(monkeypatch, tmp
     assert mgr.max_episodic_per_user is None  # M-07: retention opt-in
 
 
+def test_make_memory_embedding_model_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", raising=False)
+
+    mgr = _make_memory()
+    assert mgr.store._embeddings is None
+
+
+def test_make_memory_wires_embedding_model_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:8")
+
+    mgr = _make_memory()
+    assert mgr.store._embeddings is not None
+
+
+def test_make_memory_wires_recency_half_life_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:8")
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "30")
+
+    mgr = _make_memory()
+    assert mgr.store._recency_half_life_days == 30
+
+
+def test_make_memory_recency_half_life_default_when_unset_or_invalid(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", raising=False)
+    assert _make_memory().store._recency_half_life_days == 14
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "not-a-number")
+    assert _make_memory().store._recency_half_life_days == 14
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "-5")
+    assert _make_memory().store._recency_half_life_days == 14
+
+
+def test_make_memory_bad_embedding_spec_disables_memory_entirely(monkeypatch, tmp_path):
+    # Documents the deliberate all-or-nothing failure mode: a misconfigured
+    # BESTTEAM_MEMORY_EMBEDDING_MODEL disables memory entirely (inherits
+    # _make_memory's existing broad except), same as a bad BESTTEAM_MEMORY_DB.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:not-an-int")
+
+    assert _make_memory() is None
+
+
+def test_make_memory_query_expansion_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", raising=False)
+
+    mgr = _make_memory()
+    assert mgr.query_expansion_model is None
+
+
+def test_make_memory_wires_query_expansion_model_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", "fake:{}")
+
+    mgr = _make_memory()
+    assert mgr.query_expansion_model == "fake:{}"
+
+
+def test_make_memory_wires_query_expansion_count_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", "5")
+
+    mgr = _make_memory()
+    assert mgr.query_expansion_count == 5
+
+
+def test_make_memory_query_expansion_count_defaults_to_three(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", raising=False)
+
+    assert _make_memory().query_expansion_count == 3
+
+
+def test_make_memory_query_expansion_count_zero_reaches_manager_as_disabled(monkeypatch, tmp_path):
+    # 0 must reach MemoryManager as-is (its own <=0 disable contract), not
+    # silently fall back to the default 3 -- _env_int's normal "non-positive ->
+    # default" clamp is deliberately bypassed for this specific knob.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", "0")
+
+    assert _make_memory().query_expansion_count == 0
+
+
+def test_make_memory_query_expansion_count_negative_reaches_manager_as_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", "-1")
+
+    assert _make_memory().query_expansion_count == -1
+
+
+def test_make_memory_bad_query_expansion_spec_does_not_disable_memory(monkeypatch, tmp_path):
+    # Contrast with test_make_memory_bad_embedding_spec_disables_memory_entirely:
+    # query_expansion_model is resolved lazily per-call (like extraction_model),
+    # not eagerly at store construction, so a bad spec never disables memory.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", "not-a-real-provider:whatever")
+
+    mgr = _make_memory()
+    assert mgr is not None
+    assert mgr.query_expansion_model == "not-a-real-provider:whatever"
+
+
 def test_run_in_background_records_episodic_memory_for_user(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
@@ -208,6 +315,78 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
     assert len(mem_rows) == 1
     assert mem_rows[0].input_tokens == 20 and mem_rows[0].output_tokens == 6
     assert mem_rows[0].org_id == 5
+
+
+def test_run_in_background_meters_memory_query_expansion(monkeypatch):
+    # The query-expansion LLM call's usage lands in usage_records tagged
+    # agent="memory:query_expansion", mirroring the extraction-side test above.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from bestteam import MemoryManager
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    expansion = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"queries": ["alt phrasing"]}',
+                usage_metadata={"input_tokens": 9, "output_tokens": 3, "total_tokens": 12},
+            )
+        ]
+    )
+    mgr = MemoryManager(SqliteBM25Memory(":memory:"), query_expansion_model=expansion, org_id=5)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
+
+    run = registry.create("wf", "hello")
+    run_in_background(run.id, _workflow(), "hello", engine=engine, user_id="alice", org_id=5)
+
+    with Session() as db:
+        mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:query_expansion"]
+    assert len(mem_rows) == 1
+    assert mem_rows[0].input_tokens == 9 and mem_rows[0].output_tokens == 3
+    assert mem_rows[0].org_id == 5
+
+
+def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_fails(monkeypatch):
+    # Mirrors test_total_write_failure_still_meters_extraction, applied to the
+    # recall side: the expansion call already happened and is billable even
+    # though the store search that follows it fails.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from bestteam import MemoryManager
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    class _FailSearchStore(SqliteBM25Memory):
+        def search(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    expansion = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"queries": ["alt phrasing"]}',
+                usage_metadata={"input_tokens": 11, "output_tokens": 4, "total_tokens": 15},
+            )
+        ]
+    )
+    mgr = MemoryManager(_FailSearchStore(":memory:"), query_expansion_model=expansion, org_id=5)
+    monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
+
+    run = registry.create("wf", "hi")
+    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+
+    with Session() as db:
+        mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:query_expansion"]
+    assert len(mem_rows) == 1  # billed despite the recall search failing
+    assert mem_rows[0].input_tokens == 11 and mem_rows[0].output_tokens == 4
+    events = registry.get(run.id).events
+    assert any(e["type"] == "run_completed" for e in events)
 
 
 def test_usage_persistence_failure_does_not_fail_run(monkeypatch):

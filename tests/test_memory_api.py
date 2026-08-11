@@ -50,6 +50,50 @@ def admin_client(monkeypatch):
         backend_main.app.dependency_overrides.pop(get_db, None)
 
 
+def test_get_memory_store_wires_embedding_model_from_env(tmp_path, monkeypatch):
+    # The admin dependency must pick up the same hybrid-recall env vars as
+    # runtime._make_memory, so admin search reflects the same ranking
+    # behavior a live run gets (they're two independent construction sites).
+    from ui.backend.memory_api import get_memory_store
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", "fake:8")
+    monkeypatch.setenv("BESTTEAM_MEMORY_RECENCY_HALF_LIFE_DAYS", "30")
+
+    gen = get_memory_store()
+    store = next(gen)
+    try:
+        assert store._embeddings is not None
+        assert store._recency_half_life_days == 30
+    finally:
+        gen.close()
+
+
+def test_get_memory_store_embedding_model_disabled_by_default(tmp_path, monkeypatch):
+    from ui.backend.memory_api import get_memory_store
+
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_EMBEDDING_MODEL", raising=False)
+
+    gen = get_memory_store()
+    store = next(gen)
+    try:
+        assert store._embeddings is None
+    finally:
+        gen.close()
+
+
+def test_admin_search_ignores_query_expansion_env(admin_client, memory_db, monkeypatch):
+    # Admin search wants precise literal lookup; get_memory_store builds a
+    # SqliteBM25Memory directly (never a MemoryManager), so query expansion
+    # structurally can't apply here regardless of this env var being set.
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", 'fake:{"queries": ["shipping"]}')
+
+    hits = admin_client.get("/api/memory/users/alice/records", params={"query": "refunds"}).json()
+    assert len(hits["records"]) == 1
+    assert "refunds" in hits["records"][0]["content"]
+
+
 def test_list_users_returns_counts(admin_client, memory_db):
     resp = admin_client.get("/api/memory/users")
     assert resp.status_code == 200
