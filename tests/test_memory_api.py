@@ -83,6 +83,17 @@ def test_get_memory_store_embedding_model_disabled_by_default(tmp_path, monkeypa
         gen.close()
 
 
+def test_admin_search_ignores_query_expansion_env(admin_client, memory_db, monkeypatch):
+    # Admin search wants precise literal lookup; get_memory_store builds a
+    # SqliteBM25Memory directly (never a MemoryManager), so query expansion
+    # structurally can't apply here regardless of this env var being set.
+    monkeypatch.setenv("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", 'fake:{"queries": ["shipping"]}')
+
+    hits = admin_client.get("/api/memory/users/alice/records", params={"query": "refunds"}).json()
+    assert len(hits["records"]) == 1
+    assert "refunds" in hits["records"][0]["content"]
+
+
 def test_list_users_returns_counts(admin_client, memory_db):
     resp = admin_client.get("/api/memory/users")
     assert resp.status_code == 200

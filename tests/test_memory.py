@@ -514,6 +514,202 @@ def test_recall_unbounded_omits_the_bound():
     assert "max_candidates" not in captured["kwargs"]
 
 
+# --- Query expansion: MultiQueryRetriever-style fused recall ----------------
+
+
+def test_recall_without_query_expansion_model_unchanged():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    calls = []
+    real = store.search
+
+    def spy(user_id, query, **kwargs):
+        calls.append((user_id, query, kwargs))
+        return real(user_id, query, **kwargs)
+
+    store.search = spy
+    result = MemoryManager(store).recall("alice", "refund")
+
+    assert len(calls) == 2
+    assert calls[0][1] == "refund"
+    assert calls[1][1] == "refund"
+    assert result.expansion_usage is None
+
+
+def test_recall_expands_query_and_surfaces_lexically_disjoint_match():
+    store = _store()
+    store.add("alice", SEMANTIC, "the company offers a money back guarantee")
+    # No shared significant term with "refund" -- plain BM25 would miss this.
+    mgr = MemoryManager(
+        store, query_expansion_model='fake:{"queries": ["money back guarantee"]}'
+    )
+
+    result = mgr.recall("alice", "refund")
+    assert result.count == 1
+    assert "money back guarantee" in result.preamble
+
+
+def test_recall_expansion_calls_llm_exactly_once_per_recall(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(content='{"queries": ["alt phrasing"]}')
+    model = FakeMessagesListChatModel(responses=[canned, canned, canned])
+    calls = []
+    original_invoke = type(model).invoke
+
+    def spy(self, *args, **kwargs):
+        calls.append(1)
+        return original_invoke(self, *args, **kwargs)
+
+    # `FakeMessagesListChatModel` is a pydantic model -- only class-level
+    # patching is allowed, not setting an instance attribute for a method.
+    monkeypatch.setattr(type(model), "invoke", spy)
+
+    store = _store()
+    store.add("alice", EPISODIC, "note about refunds")
+    MemoryManager(store, query_expansion_model=model).recall("alice", "refund")
+
+    # Two scoped searches (semantic, episodic/procedural) share ONE expansion call.
+    assert len(calls) == 1
+
+
+def test_recall_captures_expansion_usage_on_success():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(
+        content='{"queries": ["money back guarantee"]}',
+        usage_metadata={"input_tokens": 15, "output_tokens": 5, "total_tokens": 20},
+    )
+    store = _store()
+    store.add("alice", SEMANTIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    result = mgr.recall("alice", "refund")
+    assert result.expansion_usage == {"model": None, "input_tokens": 15, "output_tokens": 5}
+
+
+def test_recall_expansion_llm_failure_degrades_to_original_query_only():
+    from langchain_core.language_models.chat_models import BaseChatModel
+
+    class _RaisingChatModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "raising-fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise RuntimeError("model provider unavailable")
+
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model=_RaisingChatModel())
+
+    result = mgr.recall("alice", "refund")
+    assert result.ok is True
+    assert result.count == 1
+    assert result.expansion_usage is None
+
+
+def test_recall_expansion_unparseable_response_degrades_gracefully():
+    store = _store()
+    store.add("alice", EPISODIC, "the refund policy is 30 days")
+    mgr = MemoryManager(store, query_expansion_model="fake:sorry, not JSON")
+
+    result = mgr.recall("alice", "refund")
+    assert result.count == 1
+    assert result.expansion_usage is None
+
+
+def test_recall_expansion_dedupes_against_original_and_itself_and_caps_count():
+    canned = (
+        '{"queries": ["Refund", "refund ", "alt one", "alt one", "alt two", "alt three"]}'
+    )
+    store = _store()
+    mgr = MemoryManager(store, query_expansion_model=f"fake:{canned}", query_expansion_count=2)
+
+    expansions, usage = mgr._expand_query("refund")
+    # "Refund"/"refund " dedupe against the original query (case/whitespace
+    # insensitive); "alt one" dedupes against itself; capped at count=2 before
+    # ever considering "alt three".
+    assert expansions == ["alt one", "alt two"]
+
+
+def test_recall_expansion_count_zero_or_negative_disables_expansion():
+    store = _store()
+    mgr = MemoryManager(
+        store,
+        query_expansion_model='fake:{"queries": ["alt"]}',
+        query_expansion_count=0,
+    )
+    expansions, usage = mgr._expand_query("refund")
+    assert expansions == []
+    assert usage is None
+
+
+def test_recall_top_k_applied_after_fusion_across_expanded_queries():
+    store = _store()
+    store.add("alice", EPISODIC, "alpha widget notes")
+    store.add("alice", EPISODIC, "beta widget notes")
+    store.add("alice", EPISODIC, "gamma gadget notes")
+    mgr = MemoryManager(store, top_k=2)
+
+    # Two query variants together could surface 3 distinct records (2 "widget"
+    # hits + 1 "gadget" hit); the post-fusion result must still respect top_k.
+    results = mgr._fused_search("alice", ["widget", "gadget"], types=[EPISODIC], top_k=2)
+    assert len(results) == 2
+
+
+def test_semantic_candidate_search_unaffected_by_query_expansion_model(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(content='{"queries": ["alt phrasing"]}')
+    expansion_model = FakeMessagesListChatModel(responses=[canned] * 5)
+    calls = []
+    # `FakeMessagesListChatModel` is a pydantic model -- only class-level
+    # patching is allowed, not setting an instance attribute for a method.
+    monkeypatch.setattr(type(expansion_model), "invoke", lambda self, *a, **k: calls.append(1))
+
+    store = _store()
+    store.add("alice", SEMANTIC, "likes bullet points")
+    extraction_canned = '{"facts": [{"action": "add", "content": "works in finance"}], "procedural": ""}'
+    mgr = MemoryManager(
+        store,
+        extraction_model=f"fake:{extraction_canned}",
+        query_expansion_model=expansion_model,
+    )
+    mgr.record_run("alice", "q", "a")
+
+    # `_extract_and_store`'s near-dup candidate search never routes through
+    # query expansion -- fuzzy-expanded candidates risk false dup/update merges.
+    assert calls == []
+
+
+def test_recall_preserves_expansion_usage_when_store_search_fails_after_expansion():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    canned = AIMessage(
+        content='{"queries": ["alt phrasing"]}',
+        usage_metadata={"input_tokens": 7, "output_tokens": 2, "total_tokens": 9},
+    )
+
+    class _FailingSearchStore(SqliteBM25Memory):
+        def search(self, *args, **kwargs):
+            raise RuntimeError("search backend unavailable")
+
+    store = _FailingSearchStore(":memory:")
+    mgr = MemoryManager(store, query_expansion_model=FakeMessagesListChatModel(responses=[canned]))
+
+    result = mgr.recall("alice", "refund")
+    # The expansion call already happened (and is billable) even though the
+    # store search that follows it blew up -- mirrors M-04 for record_run.
+    assert result.ok is False
+    assert result.count == 0
+    assert result.expansion_usage == {"model": None, "input_tokens": 7, "output_tokens": 2}
+
+
 def test_extraction_dedups_exact_facts_against_existing():
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage

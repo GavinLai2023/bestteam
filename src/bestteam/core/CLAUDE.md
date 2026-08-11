@@ -281,11 +281,49 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   primitives are shared with the vector knowledge base via `core/embeddings.py`.
   Unset (the default) → behavior is byte-for-byte identical to plain BM25. A
   misconfigured spec (bad string, missing `numpy`) disables memory entirely,
-  same as a bad `BESTTEAM_MEMORY_DB` path. Still no query rewriting/expansion
-  and no reranking (cross-encoder/LLM re-scoring) — same tradeoff as the vector
-  KB's own "single-stage" limitation; deferred to a future pass. A row without
-  an embedding (pre-adoption, or the embedding call failed) simply doesn't
-  participate in the vector leg and is found via BM25 only.
+  same as a bad `BESTTEAM_MEMORY_DB` path. A row without an embedding
+  (pre-adoption, or the embedding call failed) simply doesn't participate in
+  the vector leg and is found via BM25 only. Still no reranking (cross-encoder/
+  LLM re-scoring of an over-fetched candidate set) — deferred to a future pass.
+- **Query expansion (opt-in, MultiQueryRetriever-style)** is layered on top of
+  recall, in `MemoryManager` (not the store — it's the one other place this
+  subsystem makes an LLM call, alongside extraction). Setting
+  `query_expansion_model`/`BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` (same
+  `_resolve_model` spec convention as `extraction_model`) rewrites the recall
+  query into up to `query_expansion_count`/`BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT`
+  (default 3) alternative phrasings via one LLM call — computed ONCE per
+  `recall()`, not once per scope — and each scoped search (`semantic`;
+  `episodic`/`procedural`) fans out across the literal query plus every
+  expansion, fusing the per-query ranked results with `_reciprocal_rank_fusion`
+  before taking the scope's `top_k`. Unlike `embedding_model` (eagerly
+  resolved at store construction, so a bad spec disables memory entirely),
+  this follows the `extraction_model` failure shape: resolved lazily inside
+  `_expand_query`'s own try/except, so a bad spec/unparseable response/model
+  error never disables memory — it just falls back to searching the literal
+  query alone. `query_expansion_count<=0` disables expansion even with a
+  model configured. Unset (the default) → `recall()` is byte-for-byte
+  unchanged (`_fused_search`'s single-query branch calls `store.search()`
+  with identical arguments to pre-expansion behavior).
+  **Cost tradeoff**: with `query_expansion_count=E`, exactly 1 expansion LLM
+  call per `recall()`, but up to `2 × (1+E)` `store.search()` calls (vs. 2
+  today) and, when hybrid vector recall is *also* configured, up to
+  `2 × (1+E)` embedding-provider calls too — `SqliteBM25Memory`'s one-entry
+  query-embedding cache only helps when both scoped searches share the exact
+  same query text, which no longer holds once there's more than one query
+  variant. Deliberately **not** wired into two other `store.search()` call
+  sites: the admin browsing/search API (`memory_api.py::get_memory_store`
+  builds a `SqliteBM25Memory` directly, never a `MemoryManager` — admin search
+  wants precise literal lookup) and `_extract_and_store`'s near-duplicate
+  candidate search (`_semantic_candidates` — a fuzzy-expanded candidate search
+  risks a false "duplicate"/"update" merge deleting a real fact). The
+  expansion call's usage is metered like extraction's: it rides
+  `RecallResult.expansion_usage` → the `memory_recalled`/`memory_failed`
+  `TraceEvent.usage`, recorded by the backend as a `usage_records` row tagged
+  `agent="memory:query_expansion"` — see `ui/backend/CLAUDE.md`. Preserved
+  even when the store search that follows a successful expansion fails (the
+  paid call already happened): `recall()` catches that failure internally
+  (not left to `Workflow._safe_recall`'s outer catch) specifically so
+  `expansion_usage` survives on the resulting `ok=False` result.
 - An **admin-only** Memory management page (`ui/backend/memory_api.py`,
   `/api/memory`) lets admins view/search/delete a user's records and clear a
   user's whole memory, but there's no manual add/edit. `record_run` caps each

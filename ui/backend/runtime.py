@@ -176,6 +176,16 @@ def _make_memory(
       (SEMANTIC never decays); only meaningful when an embedding model is
       also set. A misconfigured embedding spec disables memory entirely,
       like a bad `BESTTEAM_MEMORY_DB` path (caught below).
+    - `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`, if set, enables query expansion:
+      one extra LLM call per recall rewrites the query into up to
+      `BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT` (default 3) alternative
+      phrasings, each searched and fused via RRF alongside the literal query.
+      Unlike `BESTTEAM_MEMORY_EMBEDDING_MODEL` (eagerly resolved at store
+      construction, so a bad spec disables memory entirely), this is resolved
+      lazily per-call inside its own try/except -- a bad spec never disables
+      memory, it just makes that call's expansion silently no-op (same
+      failure shape as `BESTTEAM_MEMORY_MODEL`/extraction). Unset -> recall is
+      byte-for-byte unchanged.
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
     run only ever sees and writes its own org's memory. `workflow_id` (the
@@ -198,6 +208,7 @@ def _make_memory(
         _logger.warning("Memory disabled: could not open store at %r: %s", db_path, exc)
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
+    query_expansion_model = os.environ.get("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", "").strip() or None
     return MemoryManager(
         store,
         extraction_model=extraction_model,
@@ -210,6 +221,8 @@ def _make_memory(
         # is opt-in (M-07, destructive so default unbounded).
         recall_max_candidates=_env_int("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", 1000),
         max_episodic_per_user=_env_int("BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER", None),
+        query_expansion_model=query_expansion_model,
+        query_expansion_count=_env_int("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", 3),
     )
 
 
@@ -448,16 +461,27 @@ def run_in_background(
                             output_tokens=entry.get("output_tokens", 0),
                             org_id=org_id,
                         )
-                if db is not None and event.type in ("memory_recorded", "memory_failed"):
-                    # Meter the memory extraction LLM call (M-04); it bypasses the
-                    # adapter's usage path, so it arrives on the memory event. The SDK
-                    # attaches the usage to exactly one event (recorded, or failed when
-                    # every write failed), so this never double-counts (review r6 #1).
+                if db is not None and event.type in ("memory_recorded", "memory_recalled", "memory_failed"):
+                    # Meter the memory extraction/query-expansion LLM calls; both
+                    # bypass the adapter's usage path, so each arrives on its own
+                    # memory event (M-04). `memory_failed` is shared between a
+                    # record failure (data="record") and a recall failure
+                    # (data="recall") that may still carry billable expansion
+                    # usage, so the agent label is picked per-event rather than
+                    # hardcoded -- a recall-side call must never be mis-attributed
+                    # as extraction. Each side attaches usage to exactly one event
+                    # of its own (recorded/recalled, or failed when that side's
+                    # only write/search failed), so this never double-counts
+                    # (review r6 #1, extended to the recall side).
+                    is_recall_side = event.type == "memory_recalled" or (
+                        event.type == "memory_failed" and event.data == "recall"
+                    )
+                    agent = "memory:query_expansion" if is_recall_side else "memory:extraction"
                     for entry in event.usage:
                         _safe_record_usage(
                             db,
                             run_id=run_id,
-                            agent="memory:extraction",
+                            agent=agent,
                             model=entry.get("model"),
                             input_tokens=entry.get("input_tokens", 0),
                             output_tokens=entry.get("output_tokens", 0),

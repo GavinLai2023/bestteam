@@ -1047,6 +1047,21 @@ _EXTRACTION_SYSTEM_PROMPT = (
 # configurable -- kept minimal, matching the rest of this module's knobs.
 _DEDUP_CANDIDATE_LIMIT = 20
 
+# Instructs the query-expansion model to rewrite a recall query into
+# alternative phrasings -- the MultiQueryRetriever pattern, applied to
+# per-user memory recall so a query worded differently from how a fact was
+# stored can still match it. Same JSON-only, cheap-model-friendly shape as
+# `_EXTRACTION_SYSTEM_PROMPT`.
+_QUERY_EXPANSION_SYSTEM_PROMPT = (
+    "You rewrite a memory-recall query into alternative phrasings that might "
+    "match a differently-worded stored note with the same meaning (synonyms, "
+    "rephrasing, a more/less formal register). Respond with ONLY a JSON object "
+    'of the form {{"queries": ["...", "..."]}} containing up to {n} alternative '
+    "phrasings of the given query -- NOT the original query itself, NOT an "
+    "answer to it, NOT a follow-up question. Use an empty list if no useful "
+    "alternative phrasing exists. No prose outside the JSON."
+)
+
 
 def _format_candidates(candidates: Sequence["MemoryRecord"]) -> str:
     """Render existing semantic memories as `- id=<id>: <content>` lines for the
@@ -1064,6 +1079,12 @@ class RecallResult:
     preamble: str
     count: int
     ok: bool = True
+    # The query-expansion call's token usage (SP-3-style metering), when query
+    # expansion is configured and reported usage. None when expansion is
+    # unset/disabled, failed, or used a model that doesn't report tokens
+    # (e.g. `fake:`). Set even when `ok` is False (the search that follows a
+    # successful expansion can still fail; the paid call already happened).
+    expansion_usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1104,10 +1125,21 @@ class MemoryManager:
         workflow_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
         max_episodic_per_user: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
         self.top_k = top_k
+        # Query expansion (opt-in, MultiQueryRetriever-style): when set, `recall`
+        # makes one extra LLM call per recall to rewrite the query into up to
+        # `query_expansion_count` alternative phrasings, searches with each, and
+        # fuses the results via `_reciprocal_rank_fusion` -- same opt-in/fail-soft
+        # shape as `extraction_model` (a bad spec never disables memory, it just
+        # makes that call's expansion silently no-op). `query_expansion_count<=0`
+        # disables expansion even with a model configured.
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
@@ -1171,16 +1203,19 @@ class MemoryManager:
             meta["workflow_version_id"] = self.workflow_version_id
         return meta
 
-    def _usage_entry(self, response: Any) -> Optional[Dict[str, Any]]:
-        """The extraction call's token usage as a `{model, input_tokens,
-        output_tokens}` entry (mirrors the adapter's `_record_usage`), or None
-        when the model didn't report `usage_metadata` (e.g. `fake:` models)."""
+    def _usage_entry(self, response: Any, model_spec: Any) -> Optional[Dict[str, Any]]:
+        """A model call's token usage as a `{model, input_tokens, output_tokens}`
+        entry (mirrors the adapter's `_record_usage`), or None when the model
+        didn't report `usage_metadata` (e.g. `fake:` models). `model_spec` is
+        whichever configured spec made this call (`extraction_model` or
+        `query_expansion_model`) -- shared across both callers since the shape
+        is identical."""
         usage = getattr(response, "usage_metadata", None)
         if not usage:
             return None
         # Only a string spec can resolve to a catalog price; a BaseChatModel
         # instance records tokens with model=None (cost stays null).
-        model_spec = self.extraction_model if isinstance(self.extraction_model, str) else None
+        model_spec = model_spec if isinstance(model_spec, str) else None
         return {
             "model": model_spec,
             "input_tokens": usage.get("input_tokens", 0),
@@ -1199,6 +1234,80 @@ class MemoryManager:
         if callable(close):
             close()
 
+    def _expand_query(self, query: str) -> "tuple[List[str], Optional[Dict[str, Any]]]":
+        """Best-effort: up to `query_expansion_count` alternative phrasings of
+        `query` from `query_expansion_model`, for MultiQueryRetriever-style
+        fused recall, plus that call's token-usage entry (None if unreported,
+        e.g. a `fake:` model). NEVER raises -- any failure (no model
+        configured, count<=0, invoke error, unparseable response) returns
+        ``([], None)``, so `recall()` always has a safe fallback to the
+        literal query alone and never bills for a call that didn't happen."""
+        if self.query_expansion_model is None or self.query_expansion_count <= 0:
+            return [], None
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Same resolver as extraction, so "fake:" specs stay $0 in tests.
+        from ..adapters.langgraph_adapter import _resolve_model
+
+        try:
+            model = _resolve_model(self.query_expansion_model)
+            response = model.invoke(
+                [
+                    SystemMessage(
+                        content=_QUERY_EXPANSION_SYSTEM_PROMPT.format(n=self.query_expansion_count)
+                    ),
+                    HumanMessage(content=f"Query: {query}"),
+                ]
+            )
+            usage = self._usage_entry(response, self.query_expansion_model)
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = _parse_extraction(content)
+        except Exception as exc:  # noqa: BLE001 -- expansion is best-effort
+            _logger.warning(
+                "Memory: query expansion failed, recalling with the original query only: %s",
+                exc,
+                exc_info=True,
+            )
+            return [], None
+        if not parsed or not isinstance(parsed.get("queries"), list):
+            return [], usage
+
+        seen = {query.strip().lower()}
+        expansions: List[str] = []
+        for item in parsed["queries"]:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text or text.lower() in seen:
+                continue
+            seen.add(text.lower())
+            expansions.append(text)
+            if len(expansions) >= self.query_expansion_count:
+                break
+        return expansions, usage
+
+    def _fused_search(
+        self, user_id: str, queries: List[str], types: Sequence[str], **kwargs: Any
+    ) -> List["MemoryRecord"]:
+        """`store.search()` over one query when `queries` has a single entry --
+        byte-for-byte the pre-expansion call, same signature. Otherwise search
+        once per query and fuse the ranked id lists with `_reciprocal_rank_fusion`
+        (rank-based, so it composes cleanly on top of each per-query search's own
+        BM25/vector/recency-decay ranking), returning the fused top `top_k`."""
+        if len(queries) == 1:
+            return self.store.search(user_id, queries[0], types=types, **kwargs)
+        ranked_lists: List[List[str]] = []
+        by_id: Dict[str, "MemoryRecord"] = {}
+        for q in queries:
+            results = self.store.search(user_id, q, types=types, **kwargs)
+            ranked_lists.append([r.id for r in results])
+            for r in results:
+                by_id.setdefault(r.id, r)
+        fused = _reciprocal_rank_fusion(*ranked_lists)
+        top_k = kwargs.get("top_k", self.top_k)
+        ranked = sorted(fused.items(), key=lambda pair: pair[1], reverse=True)
+        return [by_id[record_id] for record_id, _score in ranked[:top_k]]
+
     def recall(self, user_id: Optional[str], query: str) -> RecallResult:
         """Recall the top records for `user_id` and format them into a system-prompt
         block. Returns the block plus the number of records drawn (for observability,
@@ -1213,7 +1322,13 @@ class MemoryManager:
         that search additionally scopes by `workflow_id` (unfiltered when None,
         reproducing pre-existing behavior for SDK-direct callers and YAML-only demo
         workflows). Each search is independently capped at `top_k`, so the combined
-        result can hold up to `2 * top_k` records."""
+        result can hold up to `2 * top_k` records.
+
+        When `query_expansion_model` is configured, the query is expanded ONCE
+        (not once per scope) into up to `query_expansion_count` alternative
+        phrasings and each scoped search fans out across all of them, fused via
+        `_reciprocal_rank_fusion` -- unset/disabled/failed expansion falls back
+        to exactly today's single-query behavior."""
         if not user_id:
             return RecallResult(preamble="", count=0)
         # M-09: bound the scan to the most-recent N records (recency ~= relevance
@@ -1225,12 +1340,25 @@ class MemoryManager:
         if self.recall_max_candidates is not None:
             base_kwargs["max_candidates"] = self.recall_max_candidates
 
-        hits = self.store.search(user_id, query, types=[SEMANTIC], **base_kwargs)
-        hits += self.store.search(
-            user_id, query, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
-        )
+        expansions, expansion_usage = self._expand_query(query)  # never raises
+        queries = [query] + expansions
+
+        try:
+            hits = self._fused_search(user_id, queries, types=[SEMANTIC], **base_kwargs)
+            hits += self._fused_search(
+                user_id, queries, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
+            )
+        except Exception:  # noqa: BLE001 -- see below
+            # The expansion LLM call already happened and is billable even if
+            # the store search that follows it fails -- mirrors M-04's "usage
+            # must be metered even if every write failed" (record_run), applied
+            # to the read side. Caught here (not left to `_safe_recall`'s outer
+            # except) specifically so `expansion_usage` survives the failure.
+            _logger.exception("Memory recall's store search failed; returning no recall")
+            return RecallResult(preamble="", count=0, ok=False, expansion_usage=expansion_usage)
+
         if not hits:
-            return RecallResult(preamble="", count=0)
+            return RecallResult(preamble="", count=0, expansion_usage=expansion_usage)
         # Recalled content is untrusted: an earlier tool result or model output
         # may have been stored and could contain injected instructions. Delimit
         # it and frame it as reference-only data so it can't act as commands in
@@ -1249,7 +1377,7 @@ class MemoryManager:
             "Use them to personalize your response where relevant; do not mention "
             "these notes explicitly."
         )
-        return RecallResult(preamble="\n".join(lines), count=len(hits))
+        return RecallResult(preamble="\n".join(lines), count=len(hits), expansion_usage=expansion_usage)
 
     def recall_preamble(self, user_id: Optional[str], query: str) -> str:
         """Backward-compatible wrapper over `recall` returning only the preamble."""
@@ -1332,7 +1460,7 @@ class MemoryManager:
         )
         # Capture usage IMMEDIATELY after the call: the tokens were consumed
         # regardless of whether parsing/storage later fails (review r4 #1).
-        usage = self._usage_entry(response)
+        usage = self._usage_entry(response, self.extraction_model)
         written: List[str] = []
         ok = True
 

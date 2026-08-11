@@ -541,3 +541,70 @@ def test_extraction_near_dup_candidates_unaffected_without_hybrid():
     candidates = manager._semantic_candidates("u", "cycling hobby", "")
 
     assert candidates == []
+
+
+def test_recall_uses_query_expansion_when_configured():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(
+        store, query_expansion_model='fake:{"queries": ["bicycle weekend hobby"]}'
+    )
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    # Zero keyword overlap between "cycling hobby" and "bicycle every weekend"
+    # -- only findable once the query is expanded into a phrasing that shares
+    # BM25 terms with the stored record.
+    assert "bicycle" in (model.captured_system or "")
+
+
+def test_recall_unaffected_when_query_expansion_unset():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(store)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    assert "bicycle" not in (model.captured_system or "")
+
+
+def test_extraction_near_dup_candidates_unaffected_by_query_expansion():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", SEMANTIC, "User rides their bicycle every weekend")
+    manager = MemoryManager(
+        store,
+        extraction_model="fake:ignored",
+        query_expansion_model='fake:{"queries": ["bicycle weekend hobby"]}',
+    )
+
+    candidates = manager._semantic_candidates("u", "cycling hobby", "")
+
+    assert candidates == []
+
+
+def test_memory_recalled_trace_event_carries_expansion_usage():
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", EPISODIC, "User rides their bicycle every weekend")
+    expansion = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"queries": ["bicycle weekend hobby"]}',
+                usage_metadata={"input_tokens": 6, "output_tokens": 2, "total_tokens": 8},
+            )
+        ]
+    )
+    manager = MemoryManager(store, query_expansion_model=expansion)
+    model = _RecordingChatModel(responses=[AIMessage(content="ok")])
+    agent = Agent(name="a", role="Support", goal="help", model=model)
+    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    events = list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+
+    recalled = next(e for e in events if e.type == "memory_recalled")
+    assert recalled.usage == [{"model": None, "input_tokens": 6, "output_tokens": 2}]
