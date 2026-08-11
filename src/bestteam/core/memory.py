@@ -1095,6 +1095,7 @@ class MemoryManager:
             # primitive) -- if `delete()` itself then fails, both records remain,
             # a recoverable duplicate rather than a permanent loss.
             stored = False
+            write_failed = False
             try:
                 if self._store_extracted(user_id, SEMANTIC, fact_content):
                     written.append(SEMANTIC)
@@ -1102,7 +1103,18 @@ class MemoryManager:
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("Memory: semantic write failed for '%s': %s", user_id, exc, exc_info=True)
                 ok = False
-            if replaces_id is not None and stored:
+                write_failed = True
+            # `stored=False` without an exception means `add_if_absent` found the
+            # content already present -- confirmed there, not lost, so the stale
+            # record can still be superseded. The one exception is a mislabeled
+            # "update" whose new content is identical to replaces_id's own content:
+            # then the "duplicate" IS the record we're about to delete, and
+            # deleting it would remove the fact's only copy.
+            replaced = next((c for c in candidates if c.id == replaces_id), None) if replaces_id else None
+            supersede = replaces_id is not None and not write_failed
+            if supersede and not stored and replaced is not None and replaced.content == fact_content:
+                supersede = False
+            if supersede:
                 try:
                     self.store.delete(replaces_id)
                 except Exception as exc:  # noqa: BLE001

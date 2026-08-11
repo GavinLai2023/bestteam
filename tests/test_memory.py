@@ -561,6 +561,53 @@ def test_extraction_update_replaces_superseded_fact():
     assert outcome.recorded.count(SEMANTIC) == 1
 
 
+def test_extraction_update_deletes_stale_fact_even_when_replacement_already_exists():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    old = store.add("alice", SEMANTIC, "prefers concise answers")
+    store.add("alice", SEMANTIC, "prefers detailed answers")  # the "replacement" already stored
+    canned = AIMessage(
+        content=(
+            '{"facts": [{"action": "update", "content": "prefers detailed answers", '
+            f'"replaces_id": "{old.id}"}}], "procedural": ""}}'
+        )
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "how verbose should answers be?", "noted")
+
+    # The already-duplicate write reports False (nothing NEW stored), but the
+    # stale fact must still be superseded -- not left contradicting the
+    # already-current one.
+    semantic = [r.content for r in store.all("alice") if r.type == SEMANTIC]
+    assert semantic == ["prefers detailed answers"]
+
+
+def test_extraction_update_to_same_content_as_stale_fact_does_not_delete_only_copy():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    store = _store()
+    old = store.add("alice", SEMANTIC, "prefers concise answers")
+    # Mislabeled "update" whose new content is identical to the stale record's
+    # own content -- the "duplicate" IS replaces_id, so deleting it would wipe
+    # out the fact's only copy.
+    canned = AIMessage(
+        content=(
+            '{"facts": [{"action": "update", "content": "prefers concise answers", '
+            f'"replaces_id": "{old.id}"}}], "procedural": ""}}'
+        )
+    )
+    mgr = MemoryManager(store, extraction_model=FakeMessagesListChatModel(responses=[canned]))
+
+    mgr.record_run("alice", "how verbose should answers be?", "noted")
+
+    semantic = [r.content for r in store.all("alice") if r.type == SEMANTIC]
+    assert semantic == ["prefers concise answers"]
+
+
 def test_extraction_update_with_unknown_replaces_id_downgrades_to_add():
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
