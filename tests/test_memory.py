@@ -1606,7 +1606,10 @@ def test_record_run_stamps_workflow_id_on_episodic():
 
 
 def test_record_run_stamps_workflow_id_on_extracted_procedural_not_semantic():
-    canned = '{"facts": ["prefers bullet points"], "procedural": "check order number first"}'
+    canned = (
+        '{"facts": [{"action": "add", "content": "prefers bullet points"}], '
+        '"procedural": "check order number first"}'
+    )
     store = _store()
     MemoryManager(store, workflow_id=1, extraction_model=f"fake:{canned}").record_run(
         "alice", "how do refunds work?", "30-day money back"
@@ -1626,7 +1629,8 @@ def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
     store.add("alice", SEMANTIC, "likes bullet points")  # no workflow_id -> org-wide
     store.add("alice", PROCEDURAL, "check order number first", workflow_id=2)  # a DIFFERENT workflow
     canned = AIMessage(
-        content='{"facts": ["likes bullet points"], "procedural": "check order number first"}'
+        content='{"facts": [{"action": "add", "content": "likes bullet points"}], '
+        '"procedural": "check order number first"}'
     )
     mgr = MemoryManager(
         store, workflow_id=1, extraction_model=FakeMessagesListChatModel(responses=[canned])
