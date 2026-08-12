@@ -57,3 +57,27 @@ def test_fake_reranker_scores_by_length_distance():
 
 def test_fake_reranker_does_not_call_model_for_empty_input():
     assert _FakeReranker().score("q", []) == []
+
+
+from bestteam.core.reranking import resolve_reranker
+from bestteam.exceptions import ConfigurationError
+
+
+def test_resolve_reranker_passthrough_instance():
+    reranker = _FakeReranker()
+    assert resolve_reranker(reranker) is reranker
+
+
+def test_resolve_reranker_fake_spec():
+    reranker = resolve_reranker("fake:")
+    assert isinstance(reranker, _FakeReranker)
+
+
+def test_resolve_reranker_unrecognized_string_spec():
+    with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
+        resolve_reranker("openai:gpt-4o-mini")
+
+
+def test_resolve_reranker_invalid_type():
+    with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
+        resolve_reranker(123)

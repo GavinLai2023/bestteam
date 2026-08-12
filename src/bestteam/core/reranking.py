@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import List, Sequence
+from typing import Any, List, Sequence
+
+from ..exceptions import ConfigurationError
 
 
 class _RerankScoringError(RuntimeError):
@@ -58,3 +60,23 @@ class _FakeReranker(Reranker):
 
     def _score(self, query: str, texts: List[str]) -> Sequence[float]:
         return [-abs(len(text) - len(query)) for text in texts]
+
+
+def resolve_reranker(spec: Any) -> Reranker:
+    """Accept a live `Reranker`, `"fake:"` (deterministic, $0), or
+    `"cross-encoder:<model-name>"` (added in the next task). Raises
+    `ConfigurationError` uniformly on a bad spec -- this function does not
+    decide what a caller does with that failure."""
+    if isinstance(spec, Reranker):
+        return spec
+    if isinstance(spec, str):
+        if spec.startswith("fake:"):
+            return _FakeReranker()
+        raise ConfigurationError(
+            f"Unsupported reranker spec {spec!r}: use 'fake:' or "
+            "'cross-encoder:<model-name>'."
+        )
+    raise ConfigurationError(
+        f"Unsupported reranker spec {spec!r}: pass a reranker model spec "
+        "(str) or a Reranker instance."
+    )
