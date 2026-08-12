@@ -2430,3 +2430,47 @@ def test_search_hybrid_requests_embeddings(monkeypatch):
     store.search("alice", "refund")
 
     assert calls == [True]
+
+
+def test_memory_manager_rerank_disabled_by_default():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store)
+    assert mgr._get_reranker() is None
+
+
+def test_memory_manager_fake_rerank_resolves():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="fake:")
+    reranker = mgr._get_reranker()
+    assert reranker is not None
+    assert reranker.score("q", ["a", "bb"]) == [0.0, -1.0]
+
+
+def test_memory_manager_bad_rerank_spec_disables_rerank_not_construction():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="not-a-real-spec")  # must not raise
+    assert mgr._get_reranker() is None  # degrades silently
+
+
+def test_memory_manager_reranker_resolved_once(monkeypatch):
+    calls = []
+    import bestteam.core.memory as memory_module
+
+    real_resolve = memory_module.resolve_reranker
+
+    def spy_resolve(spec):
+        calls.append(spec)
+        return real_resolve(spec)
+
+    monkeypatch.setattr(memory_module, "resolve_reranker", spy_resolve)
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="fake:")
+    mgr._get_reranker()
+    mgr._get_reranker()
+    assert len(calls) == 1  # resolved once per MemoryManager, not per call
+
+
+def test_memory_manager_rerank_candidate_k_defaults_from_top_k():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, top_k=5)
+    assert mgr.rerank_candidate_k == 20

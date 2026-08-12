@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
+from .reranking import Reranker, _resolve_candidate_k, resolve_reranker
 
 _logger = logging.getLogger(__name__)
 
@@ -1161,6 +1162,8 @@ class MemoryManager:
         max_episodic_per_user: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        rerank_model: Any = None,
+        rerank_candidate_k: Optional[int] = None,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
@@ -1174,6 +1177,17 @@ class MemoryManager:
         # disables expansion even with a model configured.
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
+        # Rerank (opt-in): resolved LAZILY on first use (`_get_reranker`),
+        # never at construction -- unlike the store's `embedding_model`
+        # (eager, fail-hard), every other MemoryManager-level model knob
+        # (extraction_model, query_expansion_model) is lazy + fail-soft, and
+        # rerank follows that same convention since it lives at this layer
+        # too. `rerank_candidate_k` is resolved eagerly here (pure
+        # arithmetic, no model call) via the same helper the KB side uses.
+        self.rerank_model = rerank_model
+        self.rerank_candidate_k = _resolve_candidate_k(rerank_candidate_k, top_k)
+        self._reranker: Optional[Reranker] = None
+        self._reranker_resolve_attempted = False
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
@@ -1333,6 +1347,27 @@ class MemoryManager:
             if len(expansions) >= self.query_expansion_count:
                 break
         return expansions, usage
+
+    def _get_reranker(self) -> Optional[Reranker]:
+        """Lazily resolve `rerank_model` on first use, cached on `self` for
+        this manager's lifetime (one resolution attempt per run, since a new
+        `MemoryManager` is built per run -- see `ui/backend/runtime.py::
+        _make_memory`). NEVER raises: a bad spec/missing dependency degrades
+        to "rerank disabled for this run", exactly like `_expand_query`'s
+        `query_expansion_model` handling, not the store's eager
+        `embedding_model` handling."""
+        if not self._reranker_resolve_attempted:
+            self._reranker_resolve_attempted = True
+            if self.rerank_model is not None:
+                try:
+                    self._reranker = resolve_reranker(self.rerank_model)
+                except Exception:
+                    _logger.warning(
+                        "Memory rerank disabled: could not resolve reranker %r",
+                        self.rerank_model,
+                        exc_info=True,
+                    )
+        return self._reranker
 
     def _fused_search(
         self, user_id: str, queries: List[str], types: Sequence[str], **kwargs: Any
