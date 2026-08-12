@@ -64,7 +64,7 @@ backed by a folder of documents (`tools.parse_file` + chunking):
 - `vector` (`core/vector_knowledge_base.py`): embeds each chunk and ranks by
   **cosine similarity** for semantic search (e.g. a query about "refunds"
   matches a chunk that says "money back" with no shared keywords). Retrieval
-  is single-stage — no query rewriting/expansion and no reranking (see
+  has no query rewriting/expansion; reranking is available, opt-in (see
   "Known limitation: vector knowledge base retrieval is single-stage"
   below).
 
@@ -127,14 +127,36 @@ no shared keywords). The live variant requires `OPENAI_API_KEY`.
 ## Known limitation: vector knowledge base retrieval is single-stage
 
 `VectorKnowledgeBase` does cosine-similarity search only — no query
-rewriting/expansion (e.g. LLM-based rewrite or HyDE) and no reranking
-(cross-encoder or LLM-based re-scoring of an over-fetched candidate set).
+rewriting/expansion for KB (see Memory's `query_expansion_model`, below, for
+a possible pattern to mirror); reranking is available, opt-in (see below).
 It's also in-memory plus an optional JSON embedding cache (`cache_path`) — no
 external vector store (Chroma/FAISS/Pinecone) and no hierarchical/
 "small-to-big" indexing. Without `cache_path`, every workflow load re-embeds
 all chunks (real embedding APIs incur cost/latency on each run). There's no
 DMS connector (SharePoint/Confluence/Google Drive) for either knowledge base
 type.
+
+**Reranking (opt-in, both KB types, `core/reranking.py`).**
+`LocalFolderKnowledgeBase` and `VectorKnowledgeBase` both accept
+`rerank_model` (a spec string or a live `Reranker` instance) and
+`candidate_k`. When `rerank_model` is set, `query()` over-fetches
+`candidate_k` results from the existing BM25/cosine ranking (default
+`top_k * 4`, clamped to `[top_k, 100]`) instead of just `top_k`, scores each
+candidate against the query with the reranker, and returns the top `top_k`
+by rerank score (`_rerank_candidates()`, a shared helper in
+`knowledge_base.py` that `vector_knowledge_base.py` reuses). `rerank_model`
+follows the same spec-string convention as `embedding_model`: `"fake:"`
+(deterministic, $0, scores by negative length-distance to the query — for
+tests/dry runs) or `"cross-encoder:<model-name>"` (a real local
+`sentence_transformers.CrossEncoder`, cached at process scope by model
+name); requires `pip install 'bestteam[tools-rerank]'`. Unset (the default,
+both types) → `query()` is byte-for-byte unchanged (no over-fetch, no rerank
+call). A bad reranker spec or an out-of-`[top_k, 100]` `candidate_k` raises
+`ConfigurationError` at construction (fail-hard, like a bad `chunk_size`); a
+rerank-time failure (a cross-encoder inference error) logs a warning and
+falls back to the pre-rerank `candidate_k`-ordered slice — rerank is a
+quality layer, never a reason a query itself fails. See
+`docs/superpowers/specs/2026-08-12-pluggable-rerank-design.md`.
 
 ## Per-user memory (`core/memory.py`, `core/text_tokenize.py`)
 
@@ -283,8 +305,8 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   misconfigured spec (bad string, missing `numpy`) disables memory entirely,
   same as a bad `BESTTEAM_MEMORY_DB` path. A row without an embedding
   (pre-adoption, or the embedding call failed) simply doesn't participate in
-  the vector leg and is found via BM25 only. Still no reranking (cross-encoder/
-  LLM re-scoring of an over-fetched candidate set) — deferred to a future pass.
+  the vector leg and is found via BM25 only. Reranking (cross-encoder
+  re-scoring of the fused candidate set) is available, opt-in — see below.
 - **Query expansion (opt-in, MultiQueryRetriever-style)** is layered on top of
   recall, in `MemoryManager` (not the store — it's the one other place this
   subsystem makes an LLM call, alongside extraction). Setting
@@ -324,6 +346,48 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   paid call already happened): `recall()` catches that failure internally
   (not left to `Workflow._safe_recall`'s outer catch) specifically so
   `expansion_usage` survives on the resulting `ok=False` result.
+- **Reranking (opt-in)** is layered on top of the fused BM25/hybrid recall,
+  in `MemoryManager._fused_search` (`core/reranking.py`). Setting
+  `rerank_model`/`BESTTEAM_MEMORY_RERANK_MODEL` (same spec-string convention
+  as the KB's `rerank_model` — `"fake:"` for $0 tests,
+  `"cross-encoder:<model-name>"` for a real local
+  `sentence_transformers.CrossEncoder`) makes each scoped search fetch
+  `rerank_candidate_k`/`BESTTEAM_MEMORY_RERANK_CANDIDATE_K` (default
+  `top_k * 4`, clamped like the KB's `candidate_k`) fused candidates instead
+  of `top_k`, scores the capped pool against the LITERAL query only
+  (`queries[0]` — never an expansion variant, even when query expansion is
+  also configured) with the reranker, then re-fuses the pre-rerank
+  (BM25/hybrid/recency-decayed) ranking with the rerank ranking via a
+  **weighted** Reciprocal Rank Fusion
+  (`_reciprocal_rank_fusion(..., weights=(1.0, _RERANK_RRF_WEIGHT))`,
+  `_RERANK_RRF_WEIGHT = 8.0`) rather than just taking the reranker's order
+  outright — hand-derived (see the constant's comment in `core/memory.py`)
+  so the cross-encoder's signal isn't diluted by equal-weight RRF, while
+  still letting a very consistent pre-rerank candidate win over the
+  reranker's pick on a wide signal disagreement. Resolution mirrors
+  `query_expansion_model`'s lazy/fail-soft shape, not `embedding_model`'s
+  eager/fail-hard one: `_get_reranker()` resolves `rerank_model` lazily on
+  first use, once per `MemoryManager` (i.e. once per run — cached on
+  `self._reranker`/`self._reranker_resolve_attempted`), and a bad
+  spec/missing dependency logs a warning and disables rerank for that run's
+  lifetime rather than disabling memory; a rerank-time failure (a
+  cross-encoder inference error) logs a warning and falls back to the
+  pre-rerank `candidates[:top_k]` order — recall must never fail because of
+  rerank. Unset (the default) → `recall()` is byte-for-byte unchanged. Two
+  items are deliberately deferred from the v1 design (see
+  `docs/superpowers/specs/2026-08-12-pluggable-rerank-design.md`,
+  "Deferred"): **no differentiated failure caching** — every call for a
+  still-unresolved spec retries `resolve_reranker()` from scratch (bounded to
+  one retry per run, since `_reranker_resolve_attempted` prevents a second
+  one within the same `MemoryManager`), rather than permanently caching a
+  deterministic `ConfigurationError` separately from a possibly-transient
+  failure (e.g. a model download error); and **no inference-time lock**
+  across concurrent cross-encoder calls — the backend's worker pool can run
+  several reranker inferences in parallel, which is safe under PyTorch's own
+  internal threading on CPU but could contend for GPU memory under a GPU
+  deployment (a future hardening item, not a v1 blocker, since a
+  contention-driven failure just degrades to pre-rerank order like any other
+  rerank error).
 - An **admin-only** Memory management page (`ui/backend/memory_api.py`,
   `/api/memory`) lets admins view/search/delete a user's records and clear a
   user's whole memory, but there's no manual add/edit. `record_run` caps each
