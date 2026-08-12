@@ -2594,3 +2594,15 @@ def test_fused_search_rerank_unset_byte_identical_to_no_rerank():
         plain._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
         == with_none._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
     )
+
+
+def test_recall_two_scopes_each_independently_respect_top_k_with_rerank():
+    store = SqliteBM25Memory(":memory:")
+    for i in range(5):
+        store.add("u", SEMANTIC, f"semantic fact about apples {i}")
+    for i in range(5):
+        store.add("u", EPISODIC, f"episodic note about apples {i}")
+    mgr = MemoryManager(store, top_k=2, rerank_model="fake:")
+
+    result = mgr.recall("u", "apples")
+    assert result.count <= 4  # 2 semantic + 2 episodic/procedural, never more
