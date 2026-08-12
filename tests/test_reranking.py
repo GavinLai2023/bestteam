@@ -1,4 +1,7 @@
 """Tests for pluggable rerank (core/reranking.py)."""
+import sys
+import types
+
 import pytest
 
 from bestteam.core.reranking import Reranker, _FakeReranker, _RerankScoringError
@@ -93,9 +96,10 @@ def test_resolve_reranker_missing_sentence_transformers():
 
 
 def test_resolve_reranker_cross_encoder_caches_across_calls():
-    pytest.importorskip("sentence_transformers")
-    with patch("sentence_transformers.CrossEncoder") as mock_cls:
-        mock_cls.return_value = MagicMock()
+    mock_cls = MagicMock()
+    mock_cls.return_value = MagicMock()
+    stub_module = types.SimpleNamespace(CrossEncoder=mock_cls)
+    with patch.dict(sys.modules, {"sentence_transformers": stub_module}):
         first = resolve_reranker("cross-encoder:test-model")
         second = resolve_reranker("cross-encoder:test-model")
     assert first is second
@@ -103,9 +107,10 @@ def test_resolve_reranker_cross_encoder_caches_across_calls():
 
 
 def test_resolve_reranker_cross_encoder_different_specs_not_shared():
-    pytest.importorskip("sentence_transformers")
-    with patch("sentence_transformers.CrossEncoder") as mock_cls:
-        mock_cls.side_effect = lambda name: MagicMock(name=name)
+    mock_cls = MagicMock()
+    mock_cls.side_effect = lambda name: MagicMock(name=name)
+    stub_module = types.SimpleNamespace(CrossEncoder=mock_cls)
+    with patch.dict(sys.modules, {"sentence_transformers": stub_module}):
         first = resolve_reranker("cross-encoder:model-a")
         second = resolve_reranker("cross-encoder:model-b")
     assert first is not second
@@ -113,11 +118,11 @@ def test_resolve_reranker_cross_encoder_different_specs_not_shared():
 
 
 def test_cross_encoder_reranker_scores_via_predict():
-    pytest.importorskip("sentence_transformers")
-    with patch("sentence_transformers.CrossEncoder") as mock_cls:
-        mock_instance = MagicMock()
-        mock_instance.predict.return_value = [0.9, 0.1]
-        mock_cls.return_value = mock_instance
+    mock_instance = MagicMock()
+    mock_instance.predict.return_value = [0.9, 0.1]
+    mock_cls = MagicMock(return_value=mock_instance)
+    stub_module = types.SimpleNamespace(CrossEncoder=mock_cls)
+    with patch.dict(sys.modules, {"sentence_transformers": stub_module}):
         reranker = resolve_reranker("cross-encoder:unique-model-for-this-test")
         scores = reranker.score("q", ["a", "b"])
     assert scores == [0.9, 0.1]

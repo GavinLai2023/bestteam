@@ -77,9 +77,10 @@ relevant file below the first time it reads a file in that directory:
 These are intentionally abstracted behind interfaces but **not yet
 implemented** — don't assume they exist:
 
-- **Vector knowledge base retrieval is single-stage** (no query
-  rewriting/expansion or reranking, no external vector store, no DMS
-  connectors) — see `src/bestteam/core/CLAUDE.md`.
+- **Vector knowledge base retrieval has no query rewriting/expansion, no
+  external vector store, no DMS connectors** (reranking is available,
+  opt-in, for both knowledge base types via `rerank_model`/`candidate_k` —
+  `core/reranking.py`) — see `src/bestteam/core/CLAUDE.md`.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or

@@ -321,19 +321,35 @@ def test_local_folder_kb_rerank_unset_is_byte_identical(tmp_path):
 
 
 def test_local_folder_kb_rerank_changes_result_order(tmp_path):
-    # Both docs share the term "fruit" so BM25 keeps both; fake reranker
-    # (scores by length-distance to the query) prefers whichever is closer
-    # in length to the query text.
-    kb = _kb_with_docs(
-        tmp_path,
-        "fruit " * 1,       # short
-        "fruit " * 20,      # long
+    # Three docs: doc0/doc1 share the term "fruit" (BM25 candidates), doc2 is
+    # an unrelated filler doc that gives "fruit" a non-degenerate IDF, which
+    # makes plain BM25 favor doc1 (more occurrences) over doc0. The fake
+    # reranker (scores by length-distance to the query) instead prefers doc0,
+    # the doc closest in length to the query text -- flipping the top result.
+    docs = ("fruit " * 1, "fruit " * 20, "banana orange grape melon")
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _kb_with_docs(
+        plain_dir,
+        *docs,
+        top_k=1,
+        candidate_k=2,
+    )
+    reranked_dir = tmp_path / "reranked"
+    reranked_dir.mkdir()
+    reranked = _kb_with_docs(
+        reranked_dir,
+        *docs,
         top_k=1,
         candidate_k=2,
         rerank_model="fake:",
     )
-    result = kb.query("fruit")
-    assert "doc0.txt" in result  # the short doc, closest in length to "fruit"
+    plain_result = plain.query("fruit")
+    reranked_result = reranked.query("fruit")
+    # Control comparison: plain BM25 (no reranker) vs. the same docs reranked
+    # must differ, proving the reranker actually changed the order.
+    assert plain_result != reranked_result
+    assert "doc0.txt" in reranked_result  # the short doc, closest in length to "fruit"
 
 
 def test_local_folder_kb_candidate_k_rejects_below_top_k(tmp_path):
