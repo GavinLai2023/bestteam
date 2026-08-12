@@ -4,11 +4,16 @@ import logging
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, List, NamedTuple, Optional
+from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
-from .reranking import Reranker
+from .reranking import (
+    _MAX_RERANK_CANDIDATE_K,
+    _resolve_candidate_k,
+    Reranker,
+    resolve_reranker,
+)
 from .text_tokenize import significant_terms, tokenize
 
 _logger = logging.getLogger(__name__)
@@ -55,6 +60,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
         top_k: int = 5,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
     ) -> None:
         try:
             from rank_bm25 import BM25Okapi
@@ -69,6 +76,13 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self.name = name
         self.path = Path(path)
         self.default_top_k = top_k
+        self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
+        if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
+            raise ConfigurationError(
+                f"Knowledge base '{name}': candidate_k ({candidate_k}) must be "
+                f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
+            )
+        self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -92,7 +106,9 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        results = [(score, chunk) for _overlap, score, chunk in matches[:top_k]]
+        fetch_k = self._candidate_k if self._reranker is not None else top_k
+        results = [(score, chunk) for _overlap, score, chunk in matches[:fetch_k]]
+        results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:
             return f"No results found in knowledge base '{self.name}' for: {query}"

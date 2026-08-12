@@ -301,3 +301,65 @@ def test_rerank_candidates_does_not_mutate_input():
     original = list(candidates)
     _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
     assert candidates == original
+
+
+# ---------------------------------------------------------------------------
+# LocalFolderKnowledgeBase rerank wiring
+# ---------------------------------------------------------------------------
+
+def _kb_with_docs(tmp_path, *texts, **kwargs):
+    for i, text in enumerate(texts):
+        (tmp_path / f"doc{i}.txt").write_text(text, encoding="utf-8")
+    return LocalFolderKnowledgeBase("kb", tmp_path, **kwargs)
+
+
+def test_local_folder_kb_rerank_unset_is_byte_identical(tmp_path):
+    plain = _kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", top_k=2)
+    result_a = plain.query("apples")
+    result_b = plain.query("apples")
+    assert result_a == result_b  # deterministic, unaffected by the new code path
+
+
+def test_local_folder_kb_rerank_changes_result_order(tmp_path):
+    # Both docs share the term "fruit" so BM25 keeps both; fake reranker
+    # (scores by length-distance to the query) prefers whichever is closer
+    # in length to the query text.
+    kb = _kb_with_docs(
+        tmp_path,
+        "fruit " * 1,       # short
+        "fruit " * 20,      # long
+        top_k=1,
+        candidate_k=2,
+        rerank_model="fake:",
+    )
+    result = kb.query("fruit")
+    assert "doc0.txt" in result  # the short doc, closest in length to "fruit"
+
+
+def test_local_folder_kb_candidate_k_rejects_below_top_k(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="candidate_k"):
+        LocalFolderKnowledgeBase("kb", tmp_path, top_k=5, candidate_k=2, rerank_model="fake:")
+
+
+def test_local_folder_kb_candidate_k_rejects_above_max(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="candidate_k"):
+        LocalFolderKnowledgeBase("kb", tmp_path, top_k=5, candidate_k=500, rerank_model="fake:")
+
+
+def test_local_folder_kb_bad_rerank_spec_raises_at_construction(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
+        LocalFolderKnowledgeBase("kb", tmp_path, rerank_model="not-a-real-spec")
+
+
+def test_local_folder_kb_rerank_inference_failure_falls_back(tmp_path, monkeypatch):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", top_k=1, rerank_model="fake:")
+
+    def boom(self, query, texts):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(kb._reranker.__class__, "_score", boom)
+    result = kb.query("apples")
+    assert "doc0.txt" in result  # still returns the retrieval-order result
