@@ -161,6 +161,54 @@ def test_response_skill_grants_only_draft_tool_never_read_tools(db_session):
     assert response.tools == ["email_draft_reply"]
 
 
+# --- Contractor Sourcing (local business search) ---------------------------
+
+
+def test_seed_creates_contractor_sourcing_skill(db_session):
+    seed_default_skills(db_session)
+    record = db_session.query(SkillRecord).filter_by(name="contractor_sourcing_v1").one()
+    assert record.config["tools"] == ["local_business_search"]
+    assert record.config["instructions"]
+
+
+def test_contractor_sourcing_skill_never_books_or_contacts(db_session):
+    # This skill only produces a comparison list for a human to choose from --
+    # it must never contact, book, or commit to a specific contractor, and
+    # must never fabricate licensing/insurance status the tool doesn't return.
+    seed_default_skills(db_session)
+    instructions = (
+        db_session.query(SkillRecord).filter_by(name="contractor_sourcing_v1").one().config["instructions"]
+    ).lower()
+    assert "never" in instructions
+    assert "book" in instructions or "contact" in instructions
+    assert "licens" in instructions or "insur" in instructions
+
+
+def test_contractor_sourcing_skill_builds_into_workflow(db_session, tmp_path):
+    seed_default_skills(db_session)
+    skills = load_skills(db_session)
+    assert "contractor_sourcing_v1" in skills
+
+    spec = Specification(
+        name="sourcing_workflow",
+        agents=[
+            AgentSpec(
+                name="sourcing_agent",
+                role="Contractor Sourcing Assistant",
+                goal="Find and compare local tradespeople for a maintenance job",
+                model="fake:done",
+                skills=["contractor_sourcing_v1"],
+            )
+        ],
+        teams=[TeamSpec(name="sourcing_team", agents=["sourcing_agent"], mode="sequential")],
+        workflow=WorkflowSpec(steps=["sourcing_team"]),
+    )
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=skills)
+    agent = workflow.steps[0].agents[0]
+    tool_names = {t.__name__ for t in agent.tools}
+    assert "local_business_search" in tool_names
+
+
 def test_property_maintenance_inbox_demo_workflow_enforces_tool_boundary(db_session, tmp_path, monkeypatch):
     """End-to-end version of the two tests above: build the actual shipped
     template and check each agent's resolved tool set."""
