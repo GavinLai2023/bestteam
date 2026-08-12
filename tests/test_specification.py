@@ -238,6 +238,32 @@ def test_knowledge_base_spec_omits_vector_only_fields_for_local_folder():
     assert "score_threshold" not in raw
 
 
+def test_knowledge_base_spec_rerank_fields_emitted_for_local_folder():
+    spec = KnowledgeBaseSpec(
+        name="kb", path="./docs", rerank_model="fake:", candidate_k=20
+    )
+    raw = spec.to_raw()
+    assert raw["rerank_model"] == "fake:"
+    assert raw["candidate_k"] == 20
+
+
+def test_knowledge_base_spec_rerank_fields_emitted_for_vector():
+    spec = KnowledgeBaseSpec(
+        name="kb", path="./docs", type="vector", embedding_model="fake:8",
+        rerank_model="fake:", candidate_k=20,
+    )
+    raw = spec.to_raw()
+    assert raw["rerank_model"] == "fake:"
+    assert raw["candidate_k"] == 20
+
+
+def test_knowledge_base_spec_rerank_fields_omitted_when_unset():
+    spec = KnowledgeBaseSpec(name="kb", path="./docs")
+    raw = spec.to_raw()
+    assert "rerank_model" not in raw
+    assert "candidate_k" not in raw
+
+
 def test_knowledge_base_spec_rejects_name_with_spaces():
     with pytest.raises(ValueError, match="not a valid knowledge base name"):
         KnowledgeBaseSpec(name="bad name", path="./docs")
