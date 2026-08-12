@@ -143,3 +143,13 @@ through this project's normal brainstorm → spec → plan cycle as its own
 sub-project before any code is written, the same pattern used for "Org
 multi-tenancy — sub-project 1" earlier in this project, rather than being
 absorbed wholesale into one pass.
+
+**P2-12 re-reviewed (2026-08-12):** re-confirmed accurate — still only
+`KnowledgeBaseRecord` persisted, no `KnowledgeDocument`/`KnowledgeChunk`/
+`IngestionJob`/`KnowledgeIndex` entities, no document ACL/retention status,
+no per-org storage quota (only a self-service KB **count** cap). Still
+deferred: the project is at MVP/pre-release stage with no real multi-org
+customers uploading documents at volume, so there is no active
+correctness/security/cost incident forcing this now. Revisit as its own
+brainstorm → spec → plan sub-project once real multi-org document-upload
+volume or a compliance/retention requirement makes it concrete.
