@@ -5,17 +5,30 @@ See the root `CLAUDE.md` for project overview, architecture, and commands.
 
 ## Built-in tools
 
-Seven ready-made tools clients can attach directly to any Agent:
+Eight ready-made tools clients can attach directly to any Agent:
 
 | Tool | Import | Env var required | Extra dep |
 |---|---|---|---|
 | `web_search(query, max_results=5)` | `from bestteam import web_search` | `TAVILY_API_KEY` | `pip install 'bestteam[tools-search]'` |
+| `local_business_search(query, max_results=5)` | `from bestteam import local_business_search` | `GOOGLE_MAPS_API_KEY` | `pip install 'bestteam[tools-places]'` (httpx) |
 | `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word) |
 | `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `pip install 'bestteam[tools-http]'` (httpx) |
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
 | `email_find(query="")` | `from bestteam import email_find` | `BESTTEAM_EMAIL_BACKEND` + backend creds | `graph`: `pip install 'bestteam[tools-email]'` (httpx); `imap`: none |
 | `email_read(message_id)` | `from bestteam import email_read` | (same) | (same) |
 | `email_draft_reply(message_id, body)` | `from bestteam import email_draft_reply` | (same) | (same) |
+
+### Local business search (`google_places.py`)
+
+Wraps the Google Places API (New) Text Search endpoint
+(`places:searchText`). The query is a single free-text string that should
+include both the business type and an area (e.g. `"electrician in
+Parramatta NSW"`) — there's no separate lat/lng/radius parameter, matching
+`web_search`'s single-query-string shape. Returns name, address, Google
+rating, review count, and price level (`$`–`$$$$`) per result, formatted as
+plain text for the model to compare. Requires `GOOGLE_MAPS_API_KEY` with the
+Places API (New) enabled on the project; billed per Google's Places API
+pricing. Only server errors (5xx) are retried, matching `http_get`.
 
 ### Email tools (`email_client.py`) — draft-only by design
 

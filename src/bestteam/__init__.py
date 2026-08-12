@@ -25,6 +25,7 @@ from .tools import (
     email_find,
     email_read,
     http_get,
+    local_business_search,
     parse_file,
     web_search,
 )
@@ -67,4 +68,5 @@ __all__ = [
     "email_find",
     "email_read",
     "email_draft_reply",
+    "local_business_search",
 ]

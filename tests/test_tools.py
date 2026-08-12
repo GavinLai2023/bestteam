@@ -6,7 +6,14 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from bestteam.exceptions import ConfigurationError
-from bestteam.tools import REGISTRY, calculator, http_get, parse_file, web_search
+from bestteam.tools import (
+    REGISTRY,
+    calculator,
+    http_get,
+    local_business_search,
+    parse_file,
+    web_search,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -17,6 +24,7 @@ def test_registry_contains_all_tools():
     assert set(REGISTRY) == {
         "web_search", "parse_file", "http_get", "calculator",
         "email_find", "email_read", "email_draft_reply",
+        "local_business_search",
     }
 
 
@@ -125,6 +133,110 @@ def test_web_search_returns_formatted_string(monkeypatch):
     assert "AI News" in result
     assert "https://example.com" in result
     assert "Big breakthrough." in result
+
+
+# ---------------------------------------------------------------------------
+# local_business_search
+# ---------------------------------------------------------------------------
+
+def _make_mock_httpx_post(side_effects):
+    """Build a fake httpx module whose Client.post raises/returns side_effects."""
+    import httpx as _real_httpx
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
+    mock_client_instance.__exit__ = MagicMock(return_value=False)
+    mock_client_instance.post.side_effect = side_effects
+
+    mock_httpx = MagicMock()
+    mock_httpx.Client.return_value = mock_client_instance
+    mock_httpx.RequestError = _real_httpx.RequestError
+    return mock_httpx, mock_client_instance
+
+
+def test_local_business_search_raises_without_package():
+    with patch.dict("sys.modules", {"httpx": None}):
+        with pytest.raises(ConfigurationError, match="httpx"):
+            local_business_search("plumber in Bondi NSW")
+
+
+def test_local_business_search_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+    fake_httpx = MagicMock()
+    with patch.dict("sys.modules", {"httpx": fake_httpx}):
+        with pytest.raises(ConfigurationError, match="GOOGLE_MAPS_API_KEY"):
+            local_business_search("plumber in Bondi NSW")
+
+
+def test_local_business_search_returns_formatted_string(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "places": [
+            {
+                "displayName": {"text": "Bondi Plumbing Co"},
+                "formattedAddress": "1 Beach Rd, Bondi NSW",
+                "rating": 4.7,
+                "userRatingCount": 128,
+                "priceLevel": "PRICE_LEVEL_MODERATE",
+                "googleMapsUri": "https://maps.google.com/?cid=123",
+            }
+        ]
+    }
+    mock_httpx, mock_client_instance = _make_mock_httpx_post([response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        result = local_business_search("plumber in Bondi NSW", max_results=1)
+    assert "Bondi Plumbing Co" in result
+    assert "1 Beach Rd, Bondi NSW" in result
+    assert "4.7" in result
+    assert "128" in result
+    assert "$$" in result
+    assert "https://maps.google.com/?cid=123" in result
+
+
+def test_local_business_search_no_results(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"places": []}
+    mock_httpx, mock_client_instance = _make_mock_httpx_post([response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        result = local_business_search("nonexistent trade in nowhere")
+    assert "No results found" in result
+
+
+def test_local_business_search_does_not_retry_on_4xx(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    response = MagicMock()
+    response.status_code = 400
+    response.text = "Invalid request"
+    mock_httpx, mock_client_instance = _make_mock_httpx_post([response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            with pytest.raises(ConfigurationError, match="400"):
+                local_business_search("plumber in Bondi NSW")
+    assert mock_client_instance.post.call_count == 1
+    assert mock_sleep.call_count == 0
+
+
+def test_local_business_search_retries_on_5xx(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    server_error = MagicMock()
+    server_error.status_code = 503
+    server_error.text = "Service Unavailable"
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.json.return_value = {"places": []}
+
+    mock_httpx, mock_client_instance = _make_mock_httpx_post([server_error, ok_response])
+    with patch.dict("sys.modules", {"httpx": mock_httpx}):
+        with patch("bestteam.tools._retry.time.sleep") as mock_sleep:
+            result = local_business_search("plumber in Bondi NSW")
+    assert mock_client_instance.post.call_count == 2
+    assert mock_sleep.call_count == 1
+    assert "No results found" in result
 
 
 # ---------------------------------------------------------------------------
