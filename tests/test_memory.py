@@ -12,6 +12,7 @@ from bestteam.core.memory import (
     LEGACY_ORG,
     PROCEDURAL,
     SEMANTIC,
+    Reranker,
     _reciprocal_rank_fusion,
     _recency_weight,
 )
@@ -2474,3 +2475,122 @@ def test_memory_manager_rerank_candidate_k_defaults_from_top_k():
     store = SqliteBM25Memory(":memory:")
     mgr = MemoryManager(store, top_k=5)
     assert mgr.rerank_candidate_k == 20
+
+
+def _manager_with_records(records, **manager_kwargs):
+    """records: list of (type, content) tuples, all for user 'u'."""
+    store = SqliteBM25Memory(":memory:")
+    for type_, content in records:
+        store.add("u", type_, content)
+    return MemoryManager(store, **manager_kwargs)
+
+
+def test_fused_search_single_query_matches_pre_change_behavior():
+    # No query expansion, no rerank: _fused_search's single-query path must
+    # still return the plain BM25 order (this is the len(queries)==1
+    # special case being removed -- must remain equivalent via RRF-of-one).
+    mgr = _manager_with_records([
+        (SEMANTIC, "likes apples"),
+        (SEMANTIC, "likes oranges and apples too"),
+    ])
+    results = mgr._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+    assert len(results) == 2  # both share "apples"; order matches BM25-only ranking
+
+
+def test_fused_search_rerank_scores_literal_query_only(monkeypatch):
+    # `_fused_search` receives `queries` already assembled (by `recall()`,
+    # via `_expand_query` -- untouched by this task) as
+    # [literal_query, *expansions]. This test calls `_fused_search` directly
+    # with a literal + a fake "expansion" already in the list, the same
+    # shape `recall()` would pass, to isolate: does rerank scoring ever see
+    # anything but `queries[0]`?
+    seen_queries = []
+
+    class _SpyReranker(Reranker):
+        def _score(self, query, texts):
+            seen_queries.append(query)
+            return [0.0] * len(texts)
+
+    mgr = _manager_with_records(
+        [(SEMANTIC, "prefers bullet points"), (SEMANTIC, "likes concise answers")],
+        rerank_model="fake:",
+    )
+    monkeypatch.setattr(mgr, "_get_reranker", lambda: _SpyReranker())
+
+    # queries[0] ("original query") shares no BM25 term with either record --
+    # only queries[1] (the "expansion") retrieves a candidate ("concise
+    # answers"), so the candidate pool is populated purely via the expansion
+    # variant. This proves scoring still uses queries[0] even when it wasn't
+    # the variant that found the candidate.
+    mgr._fused_search(
+        "u", ["original query", "totally different concise answers phrasing"], types=[SEMANTIC], top_k=5
+    )
+    assert seen_queries == ["original query"]  # never the expansion variant
+
+
+def test_fused_search_candidate_pool_capped_at_rerank_candidate_k():
+    scored_batches = []
+
+    class _SpyReranker(Reranker):
+        def _score(self, query, texts):
+            scored_batches.append(len(texts))
+            return [0.0] * len(texts)
+
+    mgr = _manager_with_records(
+        [(SEMANTIC, f"fact number {i}") for i in range(30)],
+        rerank_model="fake:",
+        rerank_candidate_k=10,
+    )
+    mgr._reranker = _SpyReranker()
+    mgr._reranker_resolve_attempted = True
+
+    # 4 query variants, each capable of returning up to rerank_candidate_k=10
+    # results -- the reranker must still only ever see <= 10 candidates.
+    mgr._fused_search(
+        "u",
+        ["fact", "number", "fact number", "figures"],
+        types=[SEMANTIC],
+        top_k=5,
+    )
+    assert scored_batches and max(scored_batches) <= 10
+
+
+def test_fused_search_rerank_changes_final_order():
+    mgr = _manager_with_records(
+        [(SEMANTIC, "x"), (SEMANTIC, "matching query text exactly")],
+        rerank_model="fake:",  # scores by length-distance to the query
+        rerank_candidate_k=10,
+    )
+    results = mgr._fused_search("u", ["matching query text exactly"], types=[SEMANTIC], top_k=1)
+    assert results[0].content == "matching query text exactly"
+
+
+def test_fused_search_rerank_failure_falls_back(monkeypatch):
+    class _BoomReranker(Reranker):
+        def _score(self, query, texts):
+            raise RuntimeError("boom")
+
+    # Single-character content/query ("a"/"b") gets filtered out entirely by
+    # `significant_terms` (no significant terms -> BM25 returns nothing
+    # regardless of rerank), so use real words that actually produce a match.
+    mgr = _manager_with_records([(SEMANTIC, "apple"), (SEMANTIC, "banana")], rerank_model="fake:")
+    monkeypatch.setattr(mgr, "_get_reranker", lambda: _BoomReranker())
+
+    results = mgr._fused_search("u", ["apple"], types=[SEMANTIC], top_k=5)
+    assert len(results) >= 1  # recall still works, just without rerank benefit
+
+
+def test_fused_search_rerank_unset_byte_identical_to_no_rerank():
+    # Share ONE store between both managers -- `_manager_with_records` builds
+    # a fresh store per call, which would give each record a different
+    # auto-generated id/timestamp and make dataclass equality impossible
+    # regardless of `_fused_search`'s behavior.
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", SEMANTIC, "likes apples")
+    store.add("u", SEMANTIC, "likes oranges and apples too")
+    plain = MemoryManager(store)
+    with_none = MemoryManager(store, rerank_model=None)
+    assert (
+        plain._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+        == with_none._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+    )
