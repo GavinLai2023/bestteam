@@ -363,6 +363,76 @@ workflow:
         load_workflow(str(p))
 
 
+def _vector_kb_with_docs(tmp_path, *texts, **kwargs):
+    for i, text in enumerate(texts):
+        (tmp_path / f"doc{i}.txt").write_text(text, encoding="utf-8")
+    kwargs.setdefault("embedding_model", "fake:8")
+    return VectorKnowledgeBase("kb", tmp_path, **kwargs)
+
+
+def test_vector_kb_rerank_unset_is_byte_identical(tmp_path):
+    kb = _vector_kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", top_k=2)
+    assert kb.query("apples") == kb.query("apples")
+
+
+def test_vector_kb_rerank_changes_result_order(tmp_path):
+    kb = _vector_kb_with_docs(
+        tmp_path,
+        "fruit " * 1,
+        "fruit " * 20,
+        top_k=1,
+        candidate_k=2,
+        rerank_model="fake:",
+        embedding_model=_KeywordEmbedding(),  # both docs equally "relevant" by cosine
+    )
+    result = kb.query("fruit")
+    assert "doc0.txt" in result  # closest in length to the query
+
+
+def test_vector_kb_score_threshold_applies_before_rerank(tmp_path):
+    # score_threshold filters on the ORIGINAL cosine score, before rerank
+    # ever sees the candidate pool.
+    kb = _vector_kb_with_docs(
+        tmp_path,
+        "car engine",
+        "irrelevant text about nothing shared",
+        top_k=2,
+        candidate_k=2,
+        rerank_model="fake:",
+        embedding_model=_KeywordEmbedding(),
+        score_threshold=0.5,
+    )
+    result = kb.query("car engine")
+    assert "doc0.txt" in result
+    assert "doc1.txt" not in result  # excluded by score_threshold, never reaches rerank
+
+
+def test_vector_kb_rerank_honors_per_call_top_k_above_default(tmp_path):
+    # Constructor top_k=1 -> default candidate_k = 4. A per-call top_k=10
+    # must still be able to return up to 10 results, not be capped at 4
+    # by the construction-time candidate pool size.
+    docs = ["fruit"] * 10
+    kb = _vector_kb_with_docs(
+        tmp_path,
+        *docs,
+        top_k=1,
+        rerank_model="fake:",
+        embedding_model=_KeywordEmbedding(),  # all docs tie on cosine score
+    )
+    result = kb.query("fruit", top_k=10)
+    assert sum(f"doc{i}.txt" in result for i in range(10)) == 10
+
+
+def test_vector_kb_candidate_k_rejects_below_top_k(tmp_path):
+    with pytest.raises(ConfigurationError, match="candidate_k"):
+        _vector_kb_with_docs(tmp_path, "hello world", top_k=5, candidate_k=2, rerank_model="fake:")
+
+
+def test_vector_kb_bad_rerank_spec_raises_at_construction(tmp_path):
+    with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
+        _vector_kb_with_docs(tmp_path, "hello world", rerank_model="not-a-real-spec")
+
+
 def test_loader_resolves_vector_kb_cache_path_relative_to_workflow(tmp_path):
     from bestteam import load_workflow
 

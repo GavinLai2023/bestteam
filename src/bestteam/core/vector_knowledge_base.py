@@ -9,7 +9,14 @@ from typing import Any, Dict, List, Optional
 
 from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
-from .knowledge_base import KnowledgeBase, _load_document_chunks, _validate_chunk_params
+from .knowledge_base import (
+    KnowledgeBase,
+    _load_document_chunks,
+    _rerank_candidates,
+    _rerank_fetch_k,
+    _validate_chunk_params,
+)
+from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
 
 
 def _chunk_cache_key(model_spec: str, text: str) -> str:
@@ -54,6 +61,8 @@ class VectorKnowledgeBase(KnowledgeBase):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         cache_path: Optional[str | Path] = None,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
     ) -> None:
         try:
             import numpy as np
@@ -69,6 +78,13 @@ class VectorKnowledgeBase(KnowledgeBase):
         self.path = Path(path)
         self.default_top_k = top_k
         self.score_threshold = score_threshold
+        self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
+        if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
+            raise ConfigurationError(
+                f"Knowledge base '{name}': candidate_k ({candidate_k}) must be "
+                f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
+            )
+        self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -134,13 +150,16 @@ class VectorKnowledgeBase(KnowledgeBase):
 
         scores = self._matrix @ query_vec
 
-        k = min(top_k, len(scores))
+        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
+        k = min(fetch_k, len(scores))
         top_indices = np.argsort(scores)[::-1][:k]
 
         results = [(scores[i], self._chunks[i]) for i in top_indices]
 
         if self.score_threshold is not None:
             results = [(s, c) for s, c in results if s >= self.score_threshold]
+
+        results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:
             return f"No results found in knowledge base '{self.name}' for: {query}"

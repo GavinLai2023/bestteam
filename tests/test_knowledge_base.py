@@ -233,3 +233,159 @@ workflow:
 
     with pytest.raises(ConfigurationError, match="does not exist or is not a directory"):
         load_workflow(str(p))
+
+
+# ---------------------------------------------------------------------------
+# _rerank_candidates
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import _Chunk, _rerank_candidates
+from bestteam.core.reranking import Reranker
+
+
+class _ReverseLengthReranker(Reranker):
+    """Scores by text length -- longer text wins. Distinct from any
+    retrieval score, so tests can tell rerank changed the order."""
+
+    def _score(self, query, texts):
+        return [float(len(t)) for t in texts]
+
+
+class _BoomReranker(Reranker):
+    def _score(self, query, texts):
+        raise RuntimeError("inference boom")
+
+
+def _candidates(*texts):
+    return [(1.0, _Chunk(source="s", text=t)) for t in texts]
+
+
+def test_rerank_candidates_no_reranker_slices_to_top_k():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, None, top_k=2)
+    assert result == candidates[:2]
+
+
+def test_rerank_candidates_empty_list_no_reranker_call():
+    calls = []
+
+    class _Spy(Reranker):
+        def _score(self, query, texts):
+            calls.append(texts)
+            return []
+
+    assert _rerank_candidates("q", [], _Spy(), top_k=5) == []
+    assert calls == []
+
+
+def test_rerank_candidates_reorders_by_score():
+    candidates = _candidates("a", "bb", "ccc")  # retrieval order: a, bb, ccc
+    result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
+    assert [c.text for _s, c in result] == ["ccc", "bb", "a"]  # longest first
+
+
+def test_rerank_candidates_truncates_to_top_k_after_reranking():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=1)
+    assert [c.text for _s, c in result] == ["ccc"]
+
+
+def test_rerank_candidates_falls_back_on_scoring_failure():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, _BoomReranker(), top_k=2)
+    assert result == candidates[:2]  # pre-rerank order preserved
+
+
+def test_rerank_candidates_does_not_mutate_input():
+    candidates = _candidates("a", "bb", "ccc")
+    original = list(candidates)
+    _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
+    assert candidates == original
+
+
+# ---------------------------------------------------------------------------
+# LocalFolderKnowledgeBase rerank wiring
+# ---------------------------------------------------------------------------
+
+def _kb_with_docs(tmp_path, *texts, **kwargs):
+    for i, text in enumerate(texts):
+        (tmp_path / f"doc{i}.txt").write_text(text, encoding="utf-8")
+    return LocalFolderKnowledgeBase("kb", tmp_path, **kwargs)
+
+
+def test_local_folder_kb_rerank_unset_is_byte_identical(tmp_path):
+    plain = _kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", top_k=2)
+    result_a = plain.query("apples")
+    result_b = plain.query("apples")
+    assert result_a == result_b  # deterministic, unaffected by the new code path
+
+
+def test_local_folder_kb_rerank_changes_result_order(tmp_path):
+    # Three docs: doc0/doc1 share the term "fruit" (BM25 candidates), doc2 is
+    # an unrelated filler doc that gives "fruit" a non-degenerate IDF, which
+    # makes plain BM25 favor doc1 (more occurrences) over doc0. The fake
+    # reranker (scores by length-distance to the query) instead prefers doc0,
+    # the doc closest in length to the query text -- flipping the top result.
+    docs = ("fruit " * 1, "fruit " * 20, "banana orange grape melon")
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _kb_with_docs(
+        plain_dir,
+        *docs,
+        top_k=1,
+        candidate_k=2,
+    )
+    reranked_dir = tmp_path / "reranked"
+    reranked_dir.mkdir()
+    reranked = _kb_with_docs(
+        reranked_dir,
+        *docs,
+        top_k=1,
+        candidate_k=2,
+        rerank_model="fake:",
+    )
+    plain_result = plain.query("fruit")
+    reranked_result = reranked.query("fruit")
+    # Control comparison: plain BM25 (no reranker) vs. the same docs reranked
+    # must differ, proving the reranker actually changed the order.
+    assert plain_result != reranked_result
+    assert "doc0.txt" in reranked_result  # the short doc, closest in length to "fruit"
+
+
+def test_local_folder_kb_candidate_k_rejects_below_top_k(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="candidate_k"):
+        LocalFolderKnowledgeBase("kb", tmp_path, top_k=5, candidate_k=2, rerank_model="fake:")
+
+
+def test_local_folder_kb_candidate_k_rejects_above_max(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="candidate_k"):
+        LocalFolderKnowledgeBase("kb", tmp_path, top_k=5, candidate_k=500, rerank_model="fake:")
+
+
+def test_local_folder_kb_bad_rerank_spec_raises_at_construction(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
+        LocalFolderKnowledgeBase("kb", tmp_path, rerank_model="not-a-real-spec")
+
+
+def test_local_folder_kb_rerank_honors_per_call_top_k_above_default(tmp_path):
+    # Constructor top_k=1 -> default candidate_k = 4. A per-call top_k=10
+    # must still be able to return up to 10 results, not be capped at 4
+    # by the construction-time candidate pool size.
+    docs = [f"fruit item number {i}" for i in range(10)]
+    kb = _kb_with_docs(tmp_path, *docs, top_k=1, rerank_model="fake:")
+    result = kb.query("fruit", top_k=10)
+    assert sum(f"doc{i}.txt" in result for i in range(10)) == 10
+
+
+def test_local_folder_kb_rerank_inference_failure_falls_back(tmp_path, monkeypatch):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", top_k=1, rerank_model="fake:")
+
+    def boom(self, query, texts):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(kb._reranker.__class__, "_score", boom)
+    result = kb.query("apples")
+    assert "doc0.txt" in result  # still returns the retrieval-order result

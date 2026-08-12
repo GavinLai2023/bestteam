@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, List, NamedTuple, Optional
+from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
+from .reranking import (
+    _MAX_RERANK_CANDIDATE_K,
+    _resolve_candidate_k,
+    Reranker,
+    resolve_reranker,
+)
 from .text_tokenize import significant_terms, tokenize
+
+_logger = logging.getLogger(__name__)
 
 _SUPPORTED_SUFFIXES = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
@@ -51,6 +60,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
         top_k: int = 5,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
     ) -> None:
         try:
             from rank_bm25 import BM25Okapi
@@ -65,6 +76,13 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self.name = name
         self.path = Path(path)
         self.default_top_k = top_k
+        self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
+        if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
+            raise ConfigurationError(
+                f"Knowledge base '{name}': candidate_k ({candidate_k}) must be "
+                f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
+            )
+        self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -88,7 +106,9 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        results = [(score, chunk) for _overlap, score, chunk in matches[:top_k]]
+        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
+        results = [(score, chunk) for _overlap, score, chunk in matches[:fetch_k]]
+        results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:
             return f"No results found in knowledge base '{self.name}' for: {query}"
@@ -147,6 +167,44 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
         for piece in _chunk_text(text, chunk_size, chunk_overlap):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
+
+
+def _rerank_fetch_k(top_k: int, candidate_k: int, reranker: Optional[Reranker]) -> int:
+    """How many pre-rerank candidates to fetch for this call. `candidate_k`
+    is fixed at construction time from the constructor's default `top_k`, but
+    a per-call `query(..., top_k=N)` can ask for more results than that --
+    never fetch fewer than the effective `top_k`, or reranking would silently
+    truncate below what was requested. Still bounded by
+    `_MAX_RERANK_CANDIDATE_K`, so a very large per-call `top_k` cannot blow
+    up the reranker batch size; in that case fewer than `top_k` results may
+    come back, same as any other cost-bounded truncation."""
+    if reranker is None:
+        return top_k
+    return min(max(top_k, candidate_k), _MAX_RERANK_CANDIDATE_K)
+
+
+def _rerank_candidates(
+    query: str,
+    candidates: List["tuple[float, _Chunk]"],
+    reranker: Optional[Reranker],
+    top_k: int,
+) -> List["tuple[float, _Chunk]"]:
+    """Never mutates `candidates`. `candidates` is already sorted by
+    retrieval score and sliced to `candidate_k` by the caller. Empty input
+    or no reranker configured is a pure slice -- no model call, no logging.
+    Any exception during scoring (including a `_RerankScoringError` contract
+    violation) falls back to the pre-rerank `candidates[:top_k]` slice,
+    logged as a warning: rerank is a quality layer, never a reason the
+    knowledge base query itself fails."""
+    if reranker is None or not candidates:
+        return candidates[:top_k]
+    try:
+        rerank_scores = reranker.score(query, [chunk.text for _score, chunk in candidates])
+    except Exception:
+        _logger.warning("Rerank failed; falling back to retrieval order", exc_info=True)
+        return candidates[:top_k]
+    order = sorted(range(len(candidates)), key=lambda i: (-rerank_scores[i], i))
+    return [candidates[i] for i in order[:top_k]]
 
 
 def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:

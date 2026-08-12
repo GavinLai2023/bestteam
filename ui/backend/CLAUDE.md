@@ -777,6 +777,19 @@ lazily per-call and degrades to searching the literal query alone, same
 failure shape as a bad `BESTTEAM_MEMORY_MODEL`. See `src/bestteam/core/CLAUDE.md`'s
 "Known limitations (per-user memory)" for the full query-expansion design.
 
+Two more optional env vars enable opt-in reranking of the fused recall
+candidates: `BESTTEAM_MEMORY_RERANK_MODEL` (same spec-string convention as
+the knowledge bases' `rerank_model` — `"fake:"` for $0 tests,
+`"cross-encoder:<model-name>"` for a real local
+`sentence_transformers.CrossEncoder`; unset → `recall()` is byte-for-byte
+unchanged) and `BESTTEAM_MEMORY_RERANK_CANDIDATE_K` (default `top_k * 4`,
+clamped — how many fused candidates reach the reranker). Like
+`BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`, `BESTTEAM_MEMORY_RERANK_MODEL` is
+resolved lazily per-run and a bad spec never disables memory — it just
+disables rerank for that run. See `src/bestteam/core/CLAUDE.md`'s "Known
+limitations (per-user memory)" for the full reranking design (weighted RRF
+re-fusion, literal-query-only scoring, deferred v1 items).
+
 `create_run` also resolves and passes `workflow_id` (`WorkflowRecord.id`, the
 deployed team's stable head) alongside `workflow_version_id` — see
 `_resolve_workflow_and_version`. Unlike `workflow_version_id` (pure

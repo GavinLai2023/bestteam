@@ -12,6 +12,7 @@ from bestteam.core.memory import (
     LEGACY_ORG,
     PROCEDURAL,
     SEMANTIC,
+    Reranker,
     _reciprocal_rank_fusion,
     _recency_weight,
 )
@@ -2102,6 +2103,31 @@ def test_reciprocal_rank_fusion_empty_lists():
     assert _reciprocal_rank_fusion([], []) == {}
 
 
+def test_reciprocal_rank_fusion_weights_default_matches_unweighted():
+    unweighted = _reciprocal_rank_fusion(["a", "b"], ["b", "a"])
+    explicit = _reciprocal_rank_fusion(["a", "b"], ["b", "a"], weights=[1.0, 1.0])
+    assert unweighted == explicit
+
+
+def test_reciprocal_rank_fusion_weighted_favors_higher_weight_list():
+    # List A ranks "steady" #1; list B ranks "winner" #1 and "steady" #5 (so
+    # "steady" is present -- weaker -- in BOTH lists while "winner" is only
+    # in one). Unweighted, "steady" can outscore "winner" (verified in the
+    # design spec's math -- see docs/superpowers/specs/2026-08-12-pluggable-
+    # rerank-design.md's own dilution example): being present-but-mediocre
+    # everywhere beats being #1 in a single list. Weighting list-2 (the
+    # "winner" signal) heavily enough should let it win instead -- here 30x,
+    # well past the ~16.25x break-even for this list shape.
+    list_a = ["steady", "x2", "x3", "x4", "x5"]  # steady at rank 1 here too
+    list_b = ["winner", "x2", "x3", "x4", "steady"]  # winner at rank 1, steady at rank 5
+
+    unweighted = _reciprocal_rank_fusion(list_a, list_b)
+    assert unweighted["steady"] > unweighted["winner"]  # confirms the dilution problem
+
+    weighted = _reciprocal_rank_fusion(list_a, list_b, weights=(1.0, 30.0))
+    assert weighted["winner"] > weighted["steady"]  # weighting fixes it
+
+
 def test_recency_weight_semantic_never_decays():
     now = datetime(2026, 1, 30, tzinfo=timezone.utc)
     old = "2020-01-01T00:00:00+00:00"
@@ -2405,3 +2431,178 @@ def test_search_hybrid_requests_embeddings(monkeypatch):
     store.search("alice", "refund")
 
     assert calls == [True]
+
+
+def test_memory_manager_rerank_disabled_by_default():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store)
+    assert mgr._get_reranker() is None
+
+
+def test_memory_manager_fake_rerank_resolves():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="fake:")
+    reranker = mgr._get_reranker()
+    assert reranker is not None
+    assert reranker.score("q", ["a", "bb"]) == [0.0, -1.0]
+
+
+def test_memory_manager_bad_rerank_spec_disables_rerank_not_construction():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="not-a-real-spec")  # must not raise
+    assert mgr._get_reranker() is None  # degrades silently
+
+
+def test_memory_manager_reranker_resolved_once(monkeypatch):
+    calls = []
+    import bestteam.core.memory as memory_module
+
+    real_resolve = memory_module.resolve_reranker
+
+    def spy_resolve(spec):
+        calls.append(spec)
+        return real_resolve(spec)
+
+    monkeypatch.setattr(memory_module, "resolve_reranker", spy_resolve)
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, rerank_model="fake:")
+    mgr._get_reranker()
+    mgr._get_reranker()
+    assert len(calls) == 1  # resolved once per MemoryManager, not per call
+
+
+def test_memory_manager_rerank_candidate_k_defaults_from_top_k():
+    store = SqliteBM25Memory(":memory:")
+    mgr = MemoryManager(store, top_k=5)
+    assert mgr.rerank_candidate_k == 20
+
+
+def _manager_with_records(records, **manager_kwargs):
+    """records: list of (type, content) tuples, all for user 'u'."""
+    store = SqliteBM25Memory(":memory:")
+    for type_, content in records:
+        store.add("u", type_, content)
+    return MemoryManager(store, **manager_kwargs)
+
+
+def test_fused_search_single_query_matches_pre_change_behavior():
+    # No query expansion, no rerank: _fused_search's single-query path must
+    # still return the plain BM25 order (this is the len(queries)==1
+    # special case being removed -- must remain equivalent via RRF-of-one).
+    mgr = _manager_with_records([
+        (SEMANTIC, "likes apples"),
+        (SEMANTIC, "likes oranges and apples too"),
+    ])
+    results = mgr._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+    assert len(results) == 2  # both share "apples"; order matches BM25-only ranking
+
+
+def test_fused_search_rerank_scores_literal_query_only(monkeypatch):
+    # `_fused_search` receives `queries` already assembled (by `recall()`,
+    # via `_expand_query` -- untouched by this task) as
+    # [literal_query, *expansions]. This test calls `_fused_search` directly
+    # with a literal + a fake "expansion" already in the list, the same
+    # shape `recall()` would pass, to isolate: does rerank scoring ever see
+    # anything but `queries[0]`?
+    seen_queries = []
+
+    class _SpyReranker(Reranker):
+        def _score(self, query, texts):
+            seen_queries.append(query)
+            return [0.0] * len(texts)
+
+    mgr = _manager_with_records(
+        [(SEMANTIC, "prefers bullet points"), (SEMANTIC, "likes concise answers")],
+        rerank_model="fake:",
+    )
+    monkeypatch.setattr(mgr, "_get_reranker", lambda: _SpyReranker())
+
+    # queries[0] ("original query") shares no BM25 term with either record --
+    # only queries[1] (the "expansion") retrieves a candidate ("concise
+    # answers"), so the candidate pool is populated purely via the expansion
+    # variant. This proves scoring still uses queries[0] even when it wasn't
+    # the variant that found the candidate.
+    mgr._fused_search(
+        "u", ["original query", "totally different concise answers phrasing"], types=[SEMANTIC], top_k=5
+    )
+    assert seen_queries == ["original query"]  # never the expansion variant
+
+
+def test_fused_search_candidate_pool_capped_at_rerank_candidate_k():
+    scored_batches = []
+
+    class _SpyReranker(Reranker):
+        def _score(self, query, texts):
+            scored_batches.append(len(texts))
+            return [0.0] * len(texts)
+
+    mgr = _manager_with_records(
+        [(SEMANTIC, f"fact number {i}") for i in range(30)],
+        rerank_model="fake:",
+        rerank_candidate_k=10,
+    )
+    mgr._reranker = _SpyReranker()
+    mgr._reranker_resolve_attempted = True
+
+    # 4 query variants, each capable of returning up to rerank_candidate_k=10
+    # results -- the reranker must still only ever see <= 10 candidates.
+    mgr._fused_search(
+        "u",
+        ["fact", "number", "fact number", "figures"],
+        types=[SEMANTIC],
+        top_k=5,
+    )
+    assert scored_batches and max(scored_batches) <= 10
+
+
+def test_fused_search_rerank_changes_final_order():
+    mgr = _manager_with_records(
+        [(SEMANTIC, "x"), (SEMANTIC, "matching query text exactly")],
+        rerank_model="fake:",  # scores by length-distance to the query
+        rerank_candidate_k=10,
+    )
+    results = mgr._fused_search("u", ["matching query text exactly"], types=[SEMANTIC], top_k=1)
+    assert results[0].content == "matching query text exactly"
+
+
+def test_fused_search_rerank_failure_falls_back(monkeypatch):
+    class _BoomReranker(Reranker):
+        def _score(self, query, texts):
+            raise RuntimeError("boom")
+
+    # Single-character content/query ("a"/"b") gets filtered out entirely by
+    # `significant_terms` (no significant terms -> BM25 returns nothing
+    # regardless of rerank), so use real words that actually produce a match.
+    mgr = _manager_with_records([(SEMANTIC, "apple"), (SEMANTIC, "banana")], rerank_model="fake:")
+    monkeypatch.setattr(mgr, "_get_reranker", lambda: _BoomReranker())
+
+    results = mgr._fused_search("u", ["apple"], types=[SEMANTIC], top_k=5)
+    assert len(results) >= 1  # recall still works, just without rerank benefit
+
+
+def test_fused_search_rerank_unset_byte_identical_to_no_rerank():
+    # Share ONE store between both managers -- `_manager_with_records` builds
+    # a fresh store per call, which would give each record a different
+    # auto-generated id/timestamp and make dataclass equality impossible
+    # regardless of `_fused_search`'s behavior.
+    store = SqliteBM25Memory(":memory:")
+    store.add("u", SEMANTIC, "likes apples")
+    store.add("u", SEMANTIC, "likes oranges and apples too")
+    plain = MemoryManager(store)
+    with_none = MemoryManager(store, rerank_model=None)
+    assert (
+        plain._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+        == with_none._fused_search("u", ["apples"], types=[SEMANTIC], top_k=5)
+    )
+
+
+def test_recall_two_scopes_each_independently_respect_top_k_with_rerank():
+    store = SqliteBM25Memory(":memory:")
+    for i in range(5):
+        store.add("u", SEMANTIC, f"semantic fact about apples {i}")
+    for i in range(5):
+        store.add("u", EPISODIC, f"episodic note about apples {i}")
+    mgr = MemoryManager(store, top_k=2, rerank_model="fake:")
+
+    result = mgr.recall("u", "apples")
+    assert result.count <= 4  # 2 semantic + 2 episodic/procedural, never more

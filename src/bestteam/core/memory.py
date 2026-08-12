@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
+from .reranking import Reranker, _resolve_candidate_k, resolve_reranker
 
 _logger = logging.getLogger(__name__)
 
@@ -98,18 +99,46 @@ def _truncate(text: str) -> str:
 _DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
 
 
+# Weight given to the reranker's own ranking when re-fusing it with the
+# pre-rerank (hybrid/recency-aware) ranking in `_fused_search`. >1 so the
+# cross-encoder's signal isn't diluted by equal-weight RRF -- verified
+# numerically (see the design spec) that unweighted RRF can let a
+# mid-ranked-on-both-signals candidate beat the reranker's clear #1 pick.
+#
+# 8.0, not 2.0: hand-derived break-even math (k=60, RRF's rank-based
+# 1/(k+rank) formula) shows weight=2.0 still loses to a
+# consistent-on-both-signals candidate across most of the realistic
+# pre-rerank-rank-gap range -- it barely nudges the fused order. Pushing the
+# weight past ~15-40 (depending on candidate_k) instead makes the reranker's
+# order win almost unconditionally, which quietly defeats the point of
+# re-fusing with the pre-rerank order at all (a continuous cross-encoder
+# score essentially never ties, so the pre-rerank signal would then only
+# ever break a tie that doesn't happen). 8.0 is a deliberate middle point:
+# it meaningfully corrects the fused order when the two signals roughly
+# agree or diverge modestly, but still lets a very consistent pre-rerank
+# candidate win over the reranker's pick on a WIDE disagreement (e.g.
+# pre-rerank rank ~20+ vs rank ~1) -- treated as a legitimate hedge on
+# strong signal conflict, not a bug. Internal constant for v1; revisit once
+# there's eval data to tune against.
+_RERANK_RRF_WEIGHT = 8.0
+
+
 def _reciprocal_rank_fusion(
-    *ranked_id_lists: Sequence[str], k: int = 60
+    *ranked_id_lists: Sequence[str], k: int = 60, weights: Optional[Sequence[float]] = None
 ) -> Dict[str, float]:
-    """Merge ranked-id lists into one fused score per id: the sum, across every
-    list an id appears in, of ``1/(k+rank)`` (1-based rank). Standard
-    Reciprocal Rank Fusion -- rank-based, so it needs no score calibration
-    between BM25 and cosine similarity, which live on different scales. An id
-    present in only one list still gets a score from that list alone."""
+    """Merge ranked-id lists into one fused score per id: the sum, across
+    every list an id appears in, of ``weight / (k + rank)`` (1-based rank).
+    Standard Reciprocal Rank Fusion -- rank-based, so it needs no score
+    calibration between signals on different scales (BM25 vs. cosine vs. a
+    cross-encoder's raw logits). `weights` defaults to `1.0` per list
+    (today's behavior, unchanged); the rerank combination step (see
+    `_fused_search`) passes an explicit weight to keep the reranker's signal
+    from being diluted by the pre-rerank ordering."""
+    resolved_weights = weights if weights is not None else [1.0] * len(ranked_id_lists)
     scores: Dict[str, float] = {}
-    for ranked_ids in ranked_id_lists:
+    for weight, ranked_ids in zip(resolved_weights, ranked_id_lists):
         for rank, record_id in enumerate(ranked_ids, start=1):
-            scores[record_id] = scores.get(record_id, 0.0) + 1.0 / (k + rank)
+            scores[record_id] = scores.get(record_id, 0.0) + weight / (k + rank)
     return scores
 
 
@@ -1157,6 +1186,8 @@ class MemoryManager:
         max_episodic_per_user: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        rerank_model: Any = None,
+        rerank_candidate_k: Optional[int] = None,
     ) -> None:
         self.store = store
         self.extraction_model = extraction_model
@@ -1170,6 +1201,17 @@ class MemoryManager:
         # disables expansion even with a model configured.
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
+        # Rerank (opt-in): resolved LAZILY on first use (`_get_reranker`),
+        # never at construction -- unlike the store's `embedding_model`
+        # (eager, fail-hard), every other MemoryManager-level model knob
+        # (extraction_model, query_expansion_model) is lazy + fail-soft, and
+        # rerank follows that same convention since it lives at this layer
+        # too. `rerank_candidate_k` is resolved eagerly here (pure
+        # arithmetic, no model call) via the same helper the KB side uses.
+        self.rerank_model = rerank_model
+        self.rerank_candidate_k = _resolve_candidate_k(rerank_candidate_k, top_k)
+        self._reranker: Optional[Reranker] = None
+        self._reranker_resolve_attempted = False
         # The organization this run belongs to (SP-2). Every recall/record is
         # scoped to it, so a run only ever sees and writes its own org's memory.
         self.org_id = org_id
@@ -1330,27 +1372,86 @@ class MemoryManager:
                 break
         return expansions, usage
 
+    def _get_reranker(self) -> Optional[Reranker]:
+        """Lazily resolve `rerank_model` on first use, cached on `self` for
+        this manager's lifetime (one resolution attempt per run, since a new
+        `MemoryManager` is built per run -- see `ui/backend/runtime.py::
+        _make_memory`). NEVER raises: a bad spec/missing dependency degrades
+        to "rerank disabled for this run", exactly like `_expand_query`'s
+        `query_expansion_model` handling, not the store's eager
+        `embedding_model` handling."""
+        if not self._reranker_resolve_attempted:
+            self._reranker_resolve_attempted = True
+            if self.rerank_model is not None:
+                try:
+                    self._reranker = resolve_reranker(self.rerank_model)
+                except Exception:
+                    _logger.warning(
+                        "Memory rerank disabled: could not resolve reranker %r",
+                        self.rerank_model,
+                        exc_info=True,
+                    )
+        return self._reranker
+
     def _fused_search(
         self, user_id: str, queries: List[str], types: Sequence[str], **kwargs: Any
     ) -> List["MemoryRecord"]:
-        """`store.search()` over one query when `queries` has a single entry --
-        byte-for-byte the pre-expansion call, same signature. Otherwise search
-        once per query and fuse the ranked id lists with `_reciprocal_rank_fusion`
-        (rank-based, so it composes cleanly on top of each per-query search's own
-        BM25/vector/recency-decay ranking), returning the fused top `top_k`."""
-        if len(queries) == 1:
-            return self.store.search(user_id, queries[0], types=types, **kwargs)
+        """Search once per query in `queries` and fuse the ranked id lists
+        with `_reciprocal_rank_fusion` (rank-based, so it composes cleanly on
+        top of each per-query search's own BM25/vector/recency-decay
+        ranking). With a single query this reproduces the pre-rerank ranking
+        exactly (RRF over one list preserves relative order). When rerank is
+        configured (`_get_reranker()` returns non-None): each query variant
+        fetches `rerank_candidate_k` results instead of `top_k` (so a deep
+        enough pool survives fusion), the fused pool is capped to
+        `rerank_candidate_k` BEFORE scoring (bounding the cross-encoder call
+        regardless of how many query variants query expansion produced), the
+        capped pool is scored against `queries[0]` ONLY (the literal
+        original query -- an expansion variant is never used for scoring,
+        only for widening recall), and the pre-rerank and rerank orderings
+        are re-fused via a weighted RRF (`_RERANK_RRF_WEIGHT`) so the
+        reranker's signal isn't diluted by the existing recency/hybrid
+        ordering. A rerank-time failure (bad `score()` contract, model
+        inference error) logs a warning and falls back to the pre-rerank
+        `candidates[:top_k]` -- recall must never fail because of rerank."""
+        top_k = kwargs.get("top_k", self.top_k)
+        reranker = self._get_reranker()
+        fetch_k = self.rerank_candidate_k if reranker is not None else top_k
+
         ranked_lists: List[List[str]] = []
         by_id: Dict[str, "MemoryRecord"] = {}
         for q in queries:
-            results = self.store.search(user_id, q, types=types, **kwargs)
+            results = self.store.search(user_id, q, types=types, **{**kwargs, "top_k": fetch_k})
             ranked_lists.append([r.id for r in results])
             for r in results:
                 by_id.setdefault(r.id, r)
+
         fused = _reciprocal_rank_fusion(*ranked_lists)
-        top_k = kwargs.get("top_k", self.top_k)
-        ranked = sorted(fused.items(), key=lambda pair: pair[1], reverse=True)
-        return [by_id[record_id] for record_id, _score in ranked[:top_k]]
+        pre_rerank_ranked_ids = [
+            record_id
+            for record_id, _score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)
+        ]
+
+        if reranker is None:
+            return [by_id[record_id] for record_id in pre_rerank_ranked_ids[:top_k]]
+
+        candidate_ids = pre_rerank_ranked_ids[: self.rerank_candidate_k]
+        candidates = [by_id[record_id] for record_id in candidate_ids]
+        try:
+            scores = reranker.score(queries[0], [c.content for c in candidates])
+            rerank_ranked_ids = [
+                candidate_ids[i]
+                for i, _score in sorted(enumerate(scores), key=lambda pair: (-pair[1], pair[0]))
+            ]
+        except Exception:
+            _logger.warning("Memory rerank failed; using pre-rerank order", exc_info=True)
+            return candidates[:top_k]
+
+        final = _reciprocal_rank_fusion(
+            candidate_ids, rerank_ranked_ids, weights=(1.0, _RERANK_RRF_WEIGHT)
+        )
+        final_ranked = sorted(final.items(), key=lambda pair: pair[1], reverse=True)
+        return [by_id[record_id] for record_id, _score in final_ranked[:top_k]]
 
     def recall(self, user_id: Optional[str], query: str) -> RecallResult:
         """Recall the top records for `user_id` and format them into a system-prompt

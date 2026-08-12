@@ -148,7 +148,9 @@ class KnowledgeBaseSpec(BaseModel):
     `embedding_model`/`score_threshold`/`cache_path` only apply to
     `type: vector` -- `to_raw()` omits them for `local_folder` so an
     architect that sets them on the wrong type doesn't trigger an unexpected
-    `TypeError` from the knowledge base constructor.
+    `TypeError` from the knowledge base constructor. `rerank_model`/
+    `candidate_k` apply to BOTH types (rerank is retrieval-method-agnostic)
+    and are always emitted when set.
     """
 
     name: str
@@ -160,6 +162,8 @@ class KnowledgeBaseSpec(BaseModel):
     embedding_model: Optional[str] = None
     score_threshold: Optional[float] = None
     cache_path: Optional[str] = None
+    rerank_model: Optional[str] = None
+    candidate_k: Optional[int] = None
 
     @field_validator("name")
     @classmethod
@@ -176,6 +180,10 @@ class KnowledgeBaseSpec(BaseModel):
             "chunk_overlap": self.chunk_overlap,
             "top_k": self.top_k,
         }
+        if self.rerank_model is not None:
+            raw["rerank_model"] = self.rerank_model
+        if self.candidate_k is not None:
+            raw["candidate_k"] = self.candidate_k
         if self.type == "vector":
             if self.embedding_model is not None:
                 raw["embedding_model"] = self.embedding_model
