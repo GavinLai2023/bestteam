@@ -540,3 +540,39 @@ def test_run_in_background_no_memory_when_env_unset(monkeypatch):
 
     events = registry.get(run.id).events
     assert any(e["type"] == "run_completed" for e in events)
+
+
+def test_make_memory_rerank_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.delenv("BESTTEAM_MEMORY_RERANK_MODEL", raising=False)
+
+    mgr = _make_memory()
+    assert mgr.rerank_model is None
+
+
+def test_make_memory_wires_rerank_model_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_RERANK_MODEL", "fake:")
+
+    mgr = _make_memory()
+    assert mgr.rerank_model == "fake:"
+
+
+def test_make_memory_wires_rerank_candidate_k_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_RERANK_CANDIDATE_K", "30")
+
+    mgr = _make_memory()
+    assert mgr.rerank_candidate_k == 30
+
+
+def test_make_memory_bad_rerank_spec_does_not_disable_memory(monkeypatch, tmp_path):
+    # Contrast with test_make_memory_bad_embedding_spec_disables_memory_entirely:
+    # rerank_model is resolved lazily (like query_expansion_model), not
+    # eagerly at store construction, so a bad spec never disables memory.
+    monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("BESTTEAM_MEMORY_RERANK_MODEL", "not-a-real-provider:whatever")
+
+    mgr = _make_memory()
+    assert mgr is not None
+    assert mgr._get_reranker() is None

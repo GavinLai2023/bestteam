@@ -193,6 +193,16 @@ def _make_memory(
       memory, it just makes that call's expansion silently no-op (same
       failure shape as `BESTTEAM_MEMORY_MODEL`/extraction). Unset -> recall is
       byte-for-byte unchanged.
+    - `BESTTEAM_MEMORY_RERANK_MODEL`, if set, enables a cross-encoder rerank
+      pass over the fused recall candidates for both scopes (same spec
+      convention -- `"fake:"` for $0 tests, `"cross-encoder:<model-name>"`
+      for a real local model via `sentence-transformers`).
+      `BESTTEAM_MEMORY_RERANK_CANDIDATE_K` (default `top_k * 4`, clamped)
+      tunes how many fused candidates reach the reranker. Like
+      `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`, this is resolved lazily and a
+      bad spec never disables memory -- it just disables rerank for that
+      run. See `core/memory.py`'s `_fused_search` and
+      `docs/superpowers/specs/2026-08-12-pluggable-rerank-design.md`.
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
     run only ever sees and writes its own org's memory. `workflow_id` (the
@@ -216,6 +226,8 @@ def _make_memory(
         return None
     extraction_model = os.environ.get("BESTTEAM_MEMORY_MODEL", "").strip() or None
     query_expansion_model = os.environ.get("BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL", "").strip() or None
+    rerank_model = os.environ.get("BESTTEAM_MEMORY_RERANK_MODEL", "").strip() or None
+    rerank_candidate_k = _env_int("BESTTEAM_MEMORY_RERANK_CANDIDATE_K", None)
     return MemoryManager(
         store,
         extraction_model=extraction_model,
@@ -233,6 +245,8 @@ def _make_memory(
         # <=0 as "expansion disabled" -- the default min_value=1 would instead
         # silently substitute the default count, defeating that setting.
         query_expansion_count=_env_int("BESTTEAM_MEMORY_QUERY_EXPANSION_COUNT", 3, min_value=None),
+        rerank_model=rerank_model,
+        rerank_candidate_k=rerank_candidate_k,
     )
 
 
