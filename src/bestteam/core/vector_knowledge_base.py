@@ -13,6 +13,7 @@ from .knowledge_base import (
     KnowledgeBase,
     _load_document_chunks,
     _rerank_candidates,
+    _rerank_fetch_k,
     _validate_chunk_params,
 )
 from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
@@ -149,7 +150,7 @@ class VectorKnowledgeBase(KnowledgeBase):
 
         scores = self._matrix @ query_vec
 
-        fetch_k = self._candidate_k if self._reranker is not None else top_k
+        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
         k = min(fetch_k, len(scores))
         top_indices = np.argsort(scores)[::-1][:k]
 

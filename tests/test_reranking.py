@@ -151,3 +151,10 @@ def test_resolve_candidate_k_passthrough_within_bounds():
 def test_resolve_candidate_k_default_also_clamped_to_max():
     # top_k=30 -> default would be 120, clamped to 100
     assert _resolve_candidate_k(None, top_k=30) == _MAX_RERANK_CANDIDATE_K
+
+
+def test_resolve_candidate_k_top_k_above_max_still_capped():
+    # top_k itself (200) exceeds the cap -- the cap must win, not top_k,
+    # even though the result then falls below top_k.
+    assert _resolve_candidate_k(None, top_k=200) == _MAX_RERANK_CANDIDATE_K
+    assert _resolve_candidate_k(500, top_k=200) == _MAX_RERANK_CANDIDATE_K

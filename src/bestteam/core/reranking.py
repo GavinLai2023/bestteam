@@ -94,15 +94,19 @@ class _CrossEncoderReranker(Reranker):
 
 def _resolve_candidate_k(candidate_k: Optional[int], top_k: int) -> int:
     """`None` defaults to `top_k * 4`; the result is always clamped into
-    `[top_k, _MAX_RERANK_CANDIDATE_K]`. Pure clamp, never raises: a caller
-    that wants "reject bad config" (knowledge bases, YAML-authored) checks
-    the caller-supplied value against these same bounds itself and raises
-    before calling this; a caller that wants "clamp silently"
-    (`MemoryManager`, env-authored) just uses this function's return value
-    directly."""
+    `[top_k, _MAX_RERANK_CANDIDATE_K]` when `top_k` itself fits that range.
+    `_MAX_RERANK_CANDIDATE_K` is the outer, non-negotiable bound (it caps how
+    many texts ever reach the reranker), so it is applied last -- if `top_k`
+    alone exceeds it, the result is the cap, not `top_k` (the pool can end up
+    smaller than `top_k`, same as any other cost-bounded truncation). Pure
+    clamp, never raises: a caller that wants "reject bad config" (knowledge
+    bases, YAML-authored) checks the caller-supplied value against these same
+    bounds itself and raises before calling this; a caller that wants "clamp
+    silently" (`MemoryManager`, env-authored) just uses this function's
+    return value directly."""
     if candidate_k is None:
         candidate_k = top_k * 4
-    return max(top_k, min(candidate_k, _MAX_RERANK_CANDIDATE_K))
+    return min(max(top_k, candidate_k), _MAX_RERANK_CANDIDATE_K)
 
 
 def resolve_reranker(spec: Any) -> Reranker:

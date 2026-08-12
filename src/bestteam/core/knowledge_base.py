@@ -106,7 +106,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        fetch_k = self._candidate_k if self._reranker is not None else top_k
+        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
         results = [(score, chunk) for _overlap, score, chunk in matches[:fetch_k]]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 
@@ -167,6 +167,20 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
         for piece in _chunk_text(text, chunk_size, chunk_overlap):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
+
+
+def _rerank_fetch_k(top_k: int, candidate_k: int, reranker: Optional[Reranker]) -> int:
+    """How many pre-rerank candidates to fetch for this call. `candidate_k`
+    is fixed at construction time from the constructor's default `top_k`, but
+    a per-call `query(..., top_k=N)` can ask for more results than that --
+    never fetch fewer than the effective `top_k`, or reranking would silently
+    truncate below what was requested. Still bounded by
+    `_MAX_RERANK_CANDIDATE_K`, so a very large per-call `top_k` cannot blow
+    up the reranker batch size; in that case fewer than `top_k` results may
+    come back, same as any other cost-bounded truncation."""
+    if reranker is None:
+        return top_k
+    return min(max(top_k, candidate_k), _MAX_RERANK_CANDIDATE_K)
 
 
 def _rerank_candidates(

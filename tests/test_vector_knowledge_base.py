@@ -407,6 +407,22 @@ def test_vector_kb_score_threshold_applies_before_rerank(tmp_path):
     assert "doc1.txt" not in result  # excluded by score_threshold, never reaches rerank
 
 
+def test_vector_kb_rerank_honors_per_call_top_k_above_default(tmp_path):
+    # Constructor top_k=1 -> default candidate_k = 4. A per-call top_k=10
+    # must still be able to return up to 10 results, not be capped at 4
+    # by the construction-time candidate pool size.
+    docs = ["fruit"] * 10
+    kb = _vector_kb_with_docs(
+        tmp_path,
+        *docs,
+        top_k=1,
+        rerank_model="fake:",
+        embedding_model=_KeywordEmbedding(),  # all docs tie on cosine score
+    )
+    result = kb.query("fruit", top_k=10)
+    assert sum(f"doc{i}.txt" in result for i in range(10)) == 10
+
+
 def test_vector_kb_candidate_k_rejects_below_top_k(tmp_path):
     with pytest.raises(ConfigurationError, match="candidate_k"):
         _vector_kb_with_docs(tmp_path, "hello world", top_k=5, candidate_k=2, rerank_model="fake:")

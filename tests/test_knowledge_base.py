@@ -370,6 +370,16 @@ def test_local_folder_kb_bad_rerank_spec_raises_at_construction(tmp_path):
         LocalFolderKnowledgeBase("kb", tmp_path, rerank_model="not-a-real-spec")
 
 
+def test_local_folder_kb_rerank_honors_per_call_top_k_above_default(tmp_path):
+    # Constructor top_k=1 -> default candidate_k = 4. A per-call top_k=10
+    # must still be able to return up to 10 results, not be capped at 4
+    # by the construction-time candidate pool size.
+    docs = [f"fruit item number {i}" for i in range(10)]
+    kb = _kb_with_docs(tmp_path, *docs, top_k=1, rerank_model="fake:")
+    result = kb.query("fruit", top_k=10)
+    assert sum(f"doc{i}.txt" in result for i in range(10)) == 10
+
+
 def test_local_folder_kb_rerank_inference_failure_falls_back(tmp_path, monkeypatch):
     kb = _kb_with_docs(tmp_path, "apples and oranges", top_k=1, rerank_model="fake:")
 
