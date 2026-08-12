@@ -99,17 +99,21 @@ _DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
 
 
 def _reciprocal_rank_fusion(
-    *ranked_id_lists: Sequence[str], k: int = 60
+    *ranked_id_lists: Sequence[str], k: int = 60, weights: Optional[Sequence[float]] = None
 ) -> Dict[str, float]:
-    """Merge ranked-id lists into one fused score per id: the sum, across every
-    list an id appears in, of ``1/(k+rank)`` (1-based rank). Standard
-    Reciprocal Rank Fusion -- rank-based, so it needs no score calibration
-    between BM25 and cosine similarity, which live on different scales. An id
-    present in only one list still gets a score from that list alone."""
+    """Merge ranked-id lists into one fused score per id: the sum, across
+    every list an id appears in, of ``weight / (k + rank)`` (1-based rank).
+    Standard Reciprocal Rank Fusion -- rank-based, so it needs no score
+    calibration between signals on different scales (BM25 vs. cosine vs. a
+    cross-encoder's raw logits). `weights` defaults to `1.0` per list
+    (today's behavior, unchanged); the rerank combination step (see
+    `_fused_search`) passes an explicit weight to keep the reranker's signal
+    from being diluted by the pre-rerank ordering."""
+    resolved_weights = weights if weights is not None else [1.0] * len(ranked_id_lists)
     scores: Dict[str, float] = {}
-    for ranked_ids in ranked_id_lists:
+    for weight, ranked_ids in zip(resolved_weights, ranked_id_lists):
         for rank, record_id in enumerate(ranked_ids, start=1):
-            scores[record_id] = scores.get(record_id, 0.0) + 1.0 / (k + rank)
+            scores[record_id] = scores.get(record_id, 0.0) + weight / (k + rank)
     return scores
 
 

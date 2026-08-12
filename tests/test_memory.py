@@ -2102,6 +2102,31 @@ def test_reciprocal_rank_fusion_empty_lists():
     assert _reciprocal_rank_fusion([], []) == {}
 
 
+def test_reciprocal_rank_fusion_weights_default_matches_unweighted():
+    unweighted = _reciprocal_rank_fusion(["a", "b"], ["b", "a"])
+    explicit = _reciprocal_rank_fusion(["a", "b"], ["b", "a"], weights=[1.0, 1.0])
+    assert unweighted == explicit
+
+
+def test_reciprocal_rank_fusion_weighted_favors_higher_weight_list():
+    # List A ranks "steady" #1; list B ranks "winner" #1 and "steady" #5 (so
+    # "steady" is present -- weaker -- in BOTH lists while "winner" is only
+    # in one). Unweighted, "steady" can outscore "winner" (verified in the
+    # design spec's math -- see docs/superpowers/specs/2026-08-12-pluggable-
+    # rerank-design.md's own dilution example): being present-but-mediocre
+    # everywhere beats being #1 in a single list. Weighting list-2 (the
+    # "winner" signal) heavily enough should let it win instead -- here 30x,
+    # well past the ~16.25x break-even for this list shape.
+    list_a = ["steady", "x2", "x3", "x4", "x5"]  # steady at rank 1 here too
+    list_b = ["winner", "x2", "x3", "x4", "steady"]  # winner at rank 1, steady at rank 5
+
+    unweighted = _reciprocal_rank_fusion(list_a, list_b)
+    assert unweighted["steady"] > unweighted["winner"]  # confirms the dilution problem
+
+    weighted = _reciprocal_rank_fusion(list_a, list_b, weights=(1.0, 30.0))
+    assert weighted["winner"] > weighted["steady"]  # weighting fixes it
+
+
 def test_recency_weight_semantic_never_decays():
     now = datetime(2026, 1, 30, tzinfo=timezone.utc)
     old = "2020-01-01T00:00:00+00:00"
