@@ -77,7 +77,21 @@ lazily, `fake:` for $0 tests" convention already established by
   0.0289 combined, vs. retrieval-rank-5 + rerank-rank-5 scores 0.0308 — the
   mediocre-but-consistent candidate wins) — reusing it unweighted for the
   rerank-vs-pre-rerank combination would materially dilute what rerank is
-  for.
+  for. A first pass at fixing this with `weights=(1.0, 2.0)` (implemented
+  during Task 9 of the plan) turned out to be far too weak: the same
+  retrieval-rank-20-vs-5 scenario at weight 2.0 still has the mediocre-but-
+  consistent candidate winning (0.0462 vs. 0.0453); the break-even weight for
+  even a small 5-candidate example worked out to 16.25 by hand. Pushing the
+  weight past roughly 15-40 (depending on `candidate_k`) instead makes the
+  reranker's order win almost unconditionally, since RRF is rank-based (not
+  magnitude-based) and a continuous cross-encoder score essentially never
+  ties — at that point the pre-rerank/recency signal this whole re-fusion
+  step exists to preserve stops mattering in practice. `_RERANK_RRF_WEIGHT =
+  8.0` (revised from the plan's original `2.0`) is a deliberate middle point:
+  it meaningfully corrects the fused order on a modest signal disagreement,
+  while still letting a very consistent pre-rerank candidate win over the
+  reranker's pick on a wide disagreement — treated as a legitimate hedge on
+  strong signal conflict, not a bug.
 - `_executor = ThreadPoolExecutor(max_workers=4, ...)` (`ui/backend/
   runtime.py:31`) — up to 4 runs execute concurrently, each capable of
   triggering a memory recall. A cross-encoder is a local model with real
@@ -294,7 +308,7 @@ def _reciprocal_rank_fusion(*ranked_id_lists, k=60, weights=None):
             scores[record_id] = scores.get(record_id, 0.0) + weight / (k + rank)
     return scores
 
-_RERANK_RRF_WEIGHT = 2.0  # internal constant; revisit once a Ragas-style eval baseline exists
+_RERANK_RRF_WEIGHT = 8.0  # internal constant; revisit once a Ragas-style eval baseline exists
 
 def _fused_search(self, user_id, queries, types, **kwargs):
     top_k = kwargs.get("top_k", self.top_k)

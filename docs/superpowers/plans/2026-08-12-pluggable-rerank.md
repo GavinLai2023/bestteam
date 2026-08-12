@@ -15,7 +15,7 @@ fetch `candidate_k` candidates instead of `top_k`, rerank, then truncate.
 `MemoryManager._fused_search` fetches `candidate_k` per query variant, fuses
 via the existing RRF, caps to `candidate_k`, reranks against the literal
 query only, then re-fuses the pre-rerank and rerank orderings via a
-*weighted* RRF (`weights=(1.0, 2.0)`) so the reranker's signal isn't diluted
+*weighted* RRF (`weights=(1.0, 8.0)`) so the reranker's signal isn't diluted
 by the existing recency/hybrid signal. KB fails hard at construction
 (`ConfigurationError`, matches `embedding_model`); Memory fails soft, lazily,
 per `MemoryManager` instance (matches `query_expansion_model`). Both fall
@@ -36,8 +36,13 @@ in play. No new backend/DB/API dependency.
 - `resolve_reranker()` never decides fail-hard vs. fail-soft — it always
   raises `ConfigurationError` uniformly on a bad spec/missing dependency.
   Callers (KB constructors vs. `MemoryManager._get_reranker`) decide.
-- `_MAX_RERANK_CANDIDATE_K = 100`; `_RERANK_RRF_WEIGHT = 2.0` — both are
-  internal constants in this pass, not customer-facing config.
+- `_MAX_RERANK_CANDIDATE_K = 100`; `_RERANK_RRF_WEIGHT = 8.0` — both are
+  internal constants in this pass, not customer-facing config. `8.0` (not the
+  originally-planned `2.0`) is deliberate: see Task 11's implementation for
+  the break-even math showing `2.0` barely nudges the fused order, while a
+  much larger weight (~15-40+) would make rerank order win almost
+  unconditionally and quietly defeat the point of re-fusing with the
+  pre-rerank order at all.
 - Rerank is always scored against the **literal, unexpanded** query — never
   a query-expansion variant.
 - New dependency: `sentence-transformers>=2.2` behind `bestteam[tools-rerank]`
@@ -1380,7 +1385,7 @@ git commit -m "feat(memory): add MemoryManager.rerank_model with lazy fail-soft 
 - Consumes: `_reciprocal_rank_fusion(weights=)` (Task 9), `_get_reranker()`
   (Task 10).
 - Produces: `_fused_search()` unchanged signature, new internal behavior;
-  `_RERANK_RRF_WEIGHT = 2.0` module constant.
+  `_RERANK_RRF_WEIGHT = 8.0` module constant.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1508,8 +1513,23 @@ In `src/bestteam/core/memory.py`, add the module constant near
 # cross-encoder's signal isn't diluted by equal-weight RRF -- verified
 # numerically (see the design spec) that unweighted RRF can let a
 # mid-ranked-on-both-signals candidate beat the reranker's clear #1 pick.
-# Internal constant for v1; revisit once there's eval data to tune against.
-_RERANK_RRF_WEIGHT = 2.0
+#
+# 8.0, not 2.0: hand-derived break-even math (k=60, RRF's rank-based
+# 1/(k+rank) formula) shows weight=2.0 still loses to a
+# consistent-on-both-signals candidate across most of the realistic
+# pre-rerank-rank-gap range -- it barely nudges the fused order. Pushing the
+# weight past ~15-40 (depending on candidate_k) instead makes the reranker's
+# order win almost unconditionally, which quietly defeats the point of
+# re-fusing with the pre-rerank order at all (a continuous cross-encoder
+# score essentially never ties, so the pre-rerank signal would then only
+# ever break a tie that doesn't happen). 8.0 is a deliberate middle point:
+# it meaningfully corrects the fused order when the two signals roughly
+# agree or diverge modestly, but still lets a very consistent pre-rerank
+# candidate win over the reranker's pick on a WIDE disagreement (e.g.
+# pre-rerank rank ~20+ vs rank ~1) -- treated as a legitimate hedge on
+# strong signal conflict, not a bug. Internal constant for v1; revisit once
+# there's eval data to tune against.
+_RERANK_RRF_WEIGHT = 8.0
 ```
 
 Replace `_fused_search` entirely:
