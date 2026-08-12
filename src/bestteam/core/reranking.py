@@ -11,8 +11,9 @@ construction; `MemoryManager` catches and disables rerank for that run). See
 from __future__ import annotations
 
 import math
+import threading
 from abc import ABC, abstractmethod
-from typing import Any, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from ..exceptions import ConfigurationError
 
@@ -62,6 +63,32 @@ class _FakeReranker(Reranker):
         return [-abs(len(text) - len(query)) for text in texts]
 
 
+_cache_lock = threading.Lock()
+_reranker_cache: Dict[str, Reranker] = {}  # successful resolutions only
+
+
+class _CrossEncoderReranker(Reranker):
+    """Wraps `sentence_transformers.CrossEncoder`. Constructed once per
+    unique model spec and cached at process (module) scope by
+    `resolve_reranker` -- a cross-encoder is a real local model with load
+    cost, and `MemoryManager` is rebuilt fresh every run (see the design
+    spec's "Key facts"), so per-instance caching alone wouldn't survive
+    across runs."""
+
+    def __init__(self, model_name: str) -> None:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:
+            raise ConfigurationError(
+                "Cross-encoder reranking requires the 'sentence-transformers' "
+                "package. Install it with: pip install 'bestteam[tools-rerank]'"
+            ) from exc
+        self._model = CrossEncoder(model_name)
+
+    def _score(self, query: str, texts: List[str]) -> Sequence[float]:
+        return self._model.predict([(query, text) for text in texts])
+
+
 def resolve_reranker(spec: Any) -> Reranker:
     """Accept a live `Reranker`, `"fake:"` (deterministic, $0), or
     `"cross-encoder:<model-name>"` (added in the next task). Raises
@@ -72,6 +99,11 @@ def resolve_reranker(spec: Any) -> Reranker:
     if isinstance(spec, str):
         if spec.startswith("fake:"):
             return _FakeReranker()
+        if spec.startswith("cross-encoder:"):
+            with _cache_lock:
+                if spec not in _reranker_cache:
+                    _reranker_cache[spec] = _CrossEncoderReranker(spec[len("cross-encoder:") :])
+                return _reranker_cache[spec]
         raise ConfigurationError(
             f"Unsupported reranker spec {spec!r}: use 'fake:' or "
             "'cross-encoder:<model-name>'."

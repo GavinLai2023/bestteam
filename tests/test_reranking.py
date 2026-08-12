@@ -81,3 +81,44 @@ def test_resolve_reranker_unrecognized_string_spec():
 def test_resolve_reranker_invalid_type():
     with pytest.raises(ConfigurationError, match="Unsupported reranker spec"):
         resolve_reranker(123)
+
+
+from unittest.mock import MagicMock, patch
+
+
+def test_resolve_reranker_missing_sentence_transformers():
+    with patch.dict("sys.modules", {"sentence_transformers": None}):
+        with pytest.raises(ConfigurationError, match="sentence-transformers"):
+            resolve_reranker("cross-encoder:some-model")
+
+
+def test_resolve_reranker_cross_encoder_caches_across_calls():
+    pytest.importorskip("sentence_transformers")
+    with patch("sentence_transformers.CrossEncoder") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        first = resolve_reranker("cross-encoder:test-model")
+        second = resolve_reranker("cross-encoder:test-model")
+    assert first is second
+    mock_cls.assert_called_once_with("test-model")
+
+
+def test_resolve_reranker_cross_encoder_different_specs_not_shared():
+    pytest.importorskip("sentence_transformers")
+    with patch("sentence_transformers.CrossEncoder") as mock_cls:
+        mock_cls.side_effect = lambda name: MagicMock(name=name)
+        first = resolve_reranker("cross-encoder:model-a")
+        second = resolve_reranker("cross-encoder:model-b")
+    assert first is not second
+    assert mock_cls.call_count == 2
+
+
+def test_cross_encoder_reranker_scores_via_predict():
+    pytest.importorskip("sentence_transformers")
+    with patch("sentence_transformers.CrossEncoder") as mock_cls:
+        mock_instance = MagicMock()
+        mock_instance.predict.return_value = [0.9, 0.1]
+        mock_cls.return_value = mock_instance
+        reranker = resolve_reranker("cross-encoder:unique-model-for-this-test")
+        scores = reranker.score("q", ["a", "b"])
+    assert scores == [0.9, 0.1]
+    mock_instance.predict.assert_called_once_with([("q", "a"), ("q", "b")])
