@@ -233,3 +233,71 @@ workflow:
 
     with pytest.raises(ConfigurationError, match="does not exist or is not a directory"):
         load_workflow(str(p))
+
+
+# ---------------------------------------------------------------------------
+# _rerank_candidates
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import _Chunk, _rerank_candidates
+from bestteam.core.reranking import Reranker
+
+
+class _ReverseLengthReranker(Reranker):
+    """Scores by text length -- longer text wins. Distinct from any
+    retrieval score, so tests can tell rerank changed the order."""
+
+    def _score(self, query, texts):
+        return [float(len(t)) for t in texts]
+
+
+class _BoomReranker(Reranker):
+    def _score(self, query, texts):
+        raise RuntimeError("inference boom")
+
+
+def _candidates(*texts):
+    return [(1.0, _Chunk(source="s", text=t)) for t in texts]
+
+
+def test_rerank_candidates_no_reranker_slices_to_top_k():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, None, top_k=2)
+    assert result == candidates[:2]
+
+
+def test_rerank_candidates_empty_list_no_reranker_call():
+    calls = []
+
+    class _Spy(Reranker):
+        def _score(self, query, texts):
+            calls.append(texts)
+            return []
+
+    assert _rerank_candidates("q", [], _Spy(), top_k=5) == []
+    assert calls == []
+
+
+def test_rerank_candidates_reorders_by_score():
+    candidates = _candidates("a", "bb", "ccc")  # retrieval order: a, bb, ccc
+    result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
+    assert [c.text for _s, c in result] == ["ccc", "bb", "a"]  # longest first
+
+
+def test_rerank_candidates_truncates_to_top_k_after_reranking():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=1)
+    assert [c.text for _s, c in result] == ["ccc"]
+
+
+def test_rerank_candidates_falls_back_on_scoring_failure():
+    candidates = _candidates("a", "bb", "ccc")
+    result = _rerank_candidates("q", candidates, _BoomReranker(), top_k=2)
+    assert result == candidates[:2]  # pre-rerank order preserved
+
+
+def test_rerank_candidates_does_not_mutate_input():
+    candidates = _candidates("a", "bb", "ccc")
+    original = list(candidates)
+    _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
+    assert candidates == original

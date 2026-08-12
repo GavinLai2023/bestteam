@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -7,7 +8,10 @@ from typing import Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
+from .reranking import Reranker
 from .text_tokenize import significant_terms, tokenize
+
+_logger = logging.getLogger(__name__)
 
 _SUPPORTED_SUFFIXES = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
@@ -147,6 +151,30 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
         for piece in _chunk_text(text, chunk_size, chunk_overlap):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
+
+
+def _rerank_candidates(
+    query: str,
+    candidates: List["tuple[float, _Chunk]"],
+    reranker: Optional[Reranker],
+    top_k: int,
+) -> List["tuple[float, _Chunk]"]:
+    """Never mutates `candidates`. `candidates` is already sorted by
+    retrieval score and sliced to `candidate_k` by the caller. Empty input
+    or no reranker configured is a pure slice -- no model call, no logging.
+    Any exception during scoring (including a `_RerankScoringError` contract
+    violation) falls back to the pre-rerank `candidates[:top_k]` slice,
+    logged as a warning: rerank is a quality layer, never a reason the
+    knowledge base query itself fails."""
+    if reranker is None or not candidates:
+        return candidates[:top_k]
+    try:
+        rerank_scores = reranker.score(query, [chunk.text for _score, chunk in candidates])
+    except Exception:
+        _logger.warning("Rerank failed; falling back to retrieval order", exc_info=True)
+        return candidates[:top_k]
+    order = sorted(range(len(candidates)), key=lambda i: (-rerank_scores[i], i))
+    return [candidates[i] for i in order[:top_k]]
 
 
 def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
