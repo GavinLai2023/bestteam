@@ -13,9 +13,12 @@ from __future__ import annotations
 import math
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..exceptions import ConfigurationError
+
+
+_MAX_RERANK_CANDIDATE_K = 100
 
 
 class _RerankScoringError(RuntimeError):
@@ -87,6 +90,19 @@ class _CrossEncoderReranker(Reranker):
 
     def _score(self, query: str, texts: List[str]) -> Sequence[float]:
         return self._model.predict([(query, text) for text in texts])
+
+
+def _resolve_candidate_k(candidate_k: Optional[int], top_k: int) -> int:
+    """`None` defaults to `top_k * 4`; the result is always clamped into
+    `[top_k, _MAX_RERANK_CANDIDATE_K]`. Pure clamp, never raises: a caller
+    that wants "reject bad config" (knowledge bases, YAML-authored) checks
+    the caller-supplied value against these same bounds itself and raises
+    before calling this; a caller that wants "clamp silently"
+    (`MemoryManager`, env-authored) just uses this function's return value
+    directly."""
+    if candidate_k is None:
+        candidate_k = top_k * 4
+    return max(top_k, min(candidate_k, _MAX_RERANK_CANDIDATE_K))
 
 
 def resolve_reranker(spec: Any) -> Reranker:

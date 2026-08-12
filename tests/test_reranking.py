@@ -122,3 +122,27 @@ def test_cross_encoder_reranker_scores_via_predict():
         scores = reranker.score("q", ["a", "b"])
     assert scores == [0.9, 0.1]
     mock_instance.predict.assert_called_once_with([("q", "a"), ("q", "b")])
+
+
+from bestteam.core.reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k
+
+
+def test_resolve_candidate_k_none_defaults_to_four_times_top_k():
+    assert _resolve_candidate_k(None, top_k=5) == 20
+
+
+def test_resolve_candidate_k_clamps_below_top_k_up_to_top_k():
+    assert _resolve_candidate_k(2, top_k=5) == 5
+
+
+def test_resolve_candidate_k_clamps_above_max_down_to_max():
+    assert _resolve_candidate_k(500, top_k=5) == _MAX_RERANK_CANDIDATE_K
+
+
+def test_resolve_candidate_k_passthrough_within_bounds():
+    assert _resolve_candidate_k(30, top_k=5) == 30
+
+
+def test_resolve_candidate_k_default_also_clamped_to_max():
+    # top_k=30 -> default would be 120, clamped to 100
+    assert _resolve_candidate_k(None, top_k=30) == _MAX_RERANK_CANDIDATE_K
