@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -121,21 +122,97 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         return "\n".join(lines)
 
 
-def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    """Split text into overlapping fixed-size chunks."""
+_DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
+
+_MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", "。", "！", "？", ". ", " ", ""]
+
+_XML_TOP_LEVEL_BOUNDARY = re.compile(r"(?=\n  <)")
+
+
+def _separators_for_suffix(suffix: str) -> List[str]:
+    return _MARKDOWN_SEPARATORS if suffix == ".md" else _DEFAULT_SEPARATORS
+
+
+def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
+    """Greedily merge adjacent pieces up to chunk_size; recurse into
+    fallback_separators for any individual piece that's still too large on
+    its own. When recursing, try to merge whatever's accumulated in
+    `current` (often a short heading/tag) onto the front of the
+    recursion's first resulting chunk, so it never gets stranded as its
+    own content-free chunk."""
+    results: List[str] = []
+    current = ""
+    for piece in pieces:
+        candidate = current + piece
+        if len(candidate) <= chunk_size:
+            current = candidate
+        elif len(piece) > chunk_size:
+            sub = _recursive_split(piece, fallback_separators, chunk_size)
+            if current and sub and len(current + sub[0]) <= chunk_size:
+                sub[0] = current + sub[0]
+            elif current:
+                results.append(current)
+            results.extend(sub)
+            current = ""
+        else:
+            if current:
+                results.append(current)
+            current = piece
+    if current:
+        results.append(current)
+    return results
+
+
+def _recursive_split(text: str, separators: List[str], chunk_size: int) -> List[str]:
+    """Split text on the coarsest separator that fits chunk_size, recursing
+    into finer separators only for pieces that are still too large."""
+    if len(text) <= chunk_size:
+        return [text] if text else []
+    if not separators:
+        return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+    sep, *rest = separators
+    raw_pieces = text.split(sep) if sep else list(text)
+    # Re-attach the separator to every piece but the first, so a piece that
+    # ends up starting its own chunk still carries its own marker (e.g. a
+    # Markdown "## Heading" or an XML tag) instead of silently losing it.
+    pieces = [raw_pieces[0]] + [sep + p for p in raw_pieces[1:]]
+    return _pack_pieces(pieces, chunk_size, rest)
+
+
+def _apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> List[str]:
+    """Prepend each chunk (after the first) with up to chunk_overlap trailing
+    characters of the previous chunk, capped so no chunk ever exceeds
+    chunk_size -- the piece's own content is never trimmed, only how much
+    cross-boundary context gets borrowed shrinks (down to zero) when a piece
+    is already at or near chunk_size.
+
+    Note: the borrowed prefix is a raw character slice, not separator-aware
+    -- it can land mid-word/mid-tag/mid-heading. Structure-aware splitting
+    (this module's main feature) applies to how chunks are cut, not to the
+    overlap glued onto their boundaries."""
+    if chunk_overlap <= 0 or len(pieces) <= 1:
+        return pieces
+    result = [pieces[0]]
+    for prev, piece in zip(pieces, pieces[1:]):
+        available = max(0, min(chunk_overlap, chunk_size - len(piece)))
+        result.append(prev[-available:] + piece if available else piece)
+    return result
+
+
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = "") -> List[str]:
+    """Split text into chunks, preferring the document's own structure
+    (paragraphs, sentences, words) over blind fixed-size character cuts."""
     text = text.strip()
     if not text:
         return []
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    step = chunk_size - chunk_overlap
-    while start < len(text):
-        chunks.append(text[start : start + chunk_size])
-        start += step
-    return chunks
+    if suffix == ".xml":
+        sections = _XML_TOP_LEVEL_BOUNDARY.split(text)
+        pieces = _pack_pieces(sections, chunk_size, _DEFAULT_SEPARATORS)
+    else:
+        pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
+    pieces = [p for p in pieces if p.strip()]
+    return _apply_overlap(pieces, chunk_overlap, chunk_size)
 
 
 def _validate_chunk_params(name: str, chunk_size: int, chunk_overlap: int) -> None:
@@ -164,7 +241,7 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
             warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
             continue
         source = file_path.relative_to(path).as_posix()
-        for piece in _chunk_text(text, chunk_size, chunk_overlap):
+        for piece in _chunk_text(text, chunk_size, chunk_overlap, suffix=file_path.suffix.lower()):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
 

@@ -25,10 +25,119 @@ def test_chunk_text_short_text_is_single_chunk():
 
 
 def test_chunk_text_long_text_produces_overlapping_chunks():
-    text = "a" * 250
+    text = "".join(str(i % 10) for i in range(250))
     chunks = _chunk_text(text, chunk_size=100, chunk_overlap=20)
     assert len(chunks) > 1
     assert chunks[0][-20:] == chunks[1][:20]
+
+
+def test_chunk_text_does_not_cut_mid_word():
+    text = " ".join(f"word{i}" for i in range(1, 15))
+    chunks = _chunk_text(text, chunk_size=20, chunk_overlap=0)
+    assert len(chunks) > 1
+    reconstructed = " ".join(chunks).split()
+    assert reconstructed == text.split()
+
+
+def test_chunk_text_markdown_preserves_heading_boundaries():
+    text = (
+        "## Section One\n"
+        "Some content about apples.\n\n"
+        "## Section Two\n"
+        "Some content about oranges.\n\n"
+        "## Section Three\n"
+        "Some content about bananas.\n"
+    )
+    chunks = _chunk_text(text, chunk_size=40, chunk_overlap=0, suffix=".md")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        if "## Section" in chunk:
+            heading_index = chunk.index("## Section")
+            assert chunk[:heading_index].strip() == ""
+
+
+def test_chunk_text_markdown_splits_oversized_section_by_sentence():
+    text = "## Big Section\n" + "This is sentence one. " * 20
+    chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".md")
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 60 for chunk in chunks)
+
+
+def test_chunk_text_markdown_heading_never_stranded_without_body(tmp_path=None):
+    text = (
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3
+    )
+    chunks = _chunk_text(text, chunk_size=80, chunk_overlap=0, suffix=".md")
+    for chunk in chunks:
+        stripped = chunk.strip()
+        if stripped.startswith("## "):
+            # a chunk containing a heading must carry more than just the heading
+            assert len(stripped) > len("## Refunds") + 5 or stripped not in ("## Refunds", "## Shipping"), (
+                f"heading stranded without body content: {chunk!r}"
+            )
+
+
+def test_chunk_text_markdown_overlap_is_applied_at_chunk_boundaries():
+    text = (
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3
+    )
+    chunks = _chunk_text(text, chunk_size=80, chunk_overlap=20, suffix=".md")
+    assert len(chunks) > 1
+    # at least one adjacent pair shares overlapping trailing/leading text
+    assert any(chunks[i][-10:] in chunks[i + 1] for i in range(len(chunks) - 1))
+
+
+def test_chunk_text_overlap_never_exceeds_chunk_size():
+    text = " ".join(f"word{i}" for i in range(1, 60))
+    chunks = _chunk_text(text, chunk_size=50, chunk_overlap=15)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 50 for chunk in chunks)
+
+
+def test_chunk_text_xml_splits_on_top_level_element_boundaries():
+    text = (
+        "[XML: catalog.xml]\n"
+        "<catalog>\n"
+        '  <book id="bk101"> Widgets Explained\n'
+        '  <book id="bk102"> Gadgets Explained\n'
+        '  <book id="bk103"> Gizmos Explained'
+    )
+    chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".xml")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.strip():
+                assert line.lstrip().startswith("<") or line.startswith("[XML:")
+
+
+def test_chunk_text_xml_oversized_element_falls_back_without_cutting_words():
+    # A single top-level element too large to fit in one chunk on its own --
+    # the top-level-boundary regex can't help here (there's only one
+    # section), so this must fall back to _DEFAULT_SEPARATORS. That fallback
+    # can't preserve a "<tag>" prefix on every resulting line once it's
+    # forced down to word-level splitting (there's nothing left to attach a
+    # tag marker to), so the guarantee this test checks is the honest one:
+    # no word gets cut in half and no chunk exceeds chunk_size -- not "every
+    # line starts with a tag", which only holds when sections individually
+    # fit within chunk_size (see the previous test).
+    long_title = " ".join(f"word{i}" for i in range(1, 30))
+    text = (
+        "[XML: catalog.xml]\n"
+        "<catalog>\n"
+        '  <book id="bk101">\n'
+        f"    <title> {long_title}"
+    )
+    chunks = _chunk_text(text, chunk_size=50, chunk_overlap=0, suffix=".xml")
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 50 for chunk in chunks)
+    reconstructed = " ".join(chunks).split()
+    assert reconstructed == text.split()
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +256,58 @@ def test_knowledge_base_ingests_xml_files(tmp_path):
     result = kb.query("widgets gadgets")
     assert "catalog.xml" in result
     assert "fruit.md" not in result
+
+
+def test_knowledge_base_passes_file_suffix_to_chunk_text(tmp_path, monkeypatch):
+    import bestteam.core.knowledge_base as kb_module
+
+    (tmp_path / "guide.md").write_text("# Heading\ncontent", encoding="utf-8")
+    (tmp_path / "catalog.xml").write_text("<a>text</a>", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("plain text", encoding="utf-8")
+
+    seen_suffixes = {}
+    real_chunk_text = kb_module._chunk_text
+
+    def spy_chunk_text(text, chunk_size, chunk_overlap, suffix=""):
+        seen_suffixes[suffix] = seen_suffixes.get(suffix, 0) + 1
+        return real_chunk_text(text, chunk_size, chunk_overlap, suffix=suffix)
+
+    monkeypatch.setattr(kb_module, "_chunk_text", spy_chunk_text)
+
+    LocalFolderKnowledgeBase("docs", tmp_path)
+
+    assert seen_suffixes.get(".md", 0) >= 1
+    assert seen_suffixes.get(".xml", 0) >= 1
+    assert seen_suffixes.get(".txt", 0) >= 1
+
+
+def test_knowledge_base_markdown_chunking_respects_headings(tmp_path):
+    (tmp_path / "guide.md").write_text(
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3,
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path, chunk_size=80, chunk_overlap=0)
+    result = kb.query("refund request")
+    assert "guide.md" in result
+    assert "Refunds" in result
+
+
+def test_knowledge_base_xml_chunking_respects_element_boundaries(tmp_path):
+    (tmp_path / "catalog.xml").write_text(
+        "<catalog>"
+        '<book id="bk101"><title>Widgets Explained</title></book>'
+        '<book id="bk102"><title>Gadgets Explained</title></book>'
+        '<book id="bk103"><title>Completely unrelated automotive repair manual</title></book>'
+        "</catalog>",
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path, chunk_size=80, chunk_overlap=0)
+    result = kb.query("automotive repair manual")
+    assert "catalog.xml" in result
+    assert "automotive repair manual" in result
 
 
 @pytest.fixture

@@ -136,6 +136,17 @@ all chunks (real embedding APIs incur cost/latency on each run). There's no
 DMS connector (SharePoint/Confluence/Google Drive) for either knowledge base
 type.
 
+**Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by both
+KB types) now splits on the document's own structure — Markdown heading
+boundaries, XML element boundaries (via the renderer's indentation), and a
+generic paragraph/sentence/word fallback (with CJK sentence terminators
+`。！？`) — replacing the old fixed-offset character slicing. This closes the
+"chunking is naive" half of the gap above; small-to-big multi-level retrieval
+is still the remaining, unaddressed half. Overlap between chunks is still a
+raw character-slice of the previous chunk's tail (not structure-aware), and
+can drop to zero when greedy packing fills a piece to exactly `chunk_size`
+with no headroom left to borrow from.
+
 **Reranking (opt-in, both KB types, `core/reranking.py`).**
 `LocalFolderKnowledgeBase` and `VectorKnowledgeBase` both accept
 `rerank_model` (a spec string or a live `Reranker` instance) and

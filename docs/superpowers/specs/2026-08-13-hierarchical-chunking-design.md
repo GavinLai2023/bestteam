@@ -170,7 +170,16 @@ the already-overlapped `result`), so overlap doesn't compound across chunks.
   working unchanged.
 - **Degenerate text with no natural separators** (e.g. one very long token)
   falls through to the char-level split — byte-for-byte the same worst-case
-  behavior as today's fixed-offset slicing, so nothing regresses.
+  behavior as today's fixed-offset slicing for the *splitting* itself.
+  However, unlike the old slicer, greedy packing can leave a piece at or
+  very near `chunk_size` with zero headroom for `_apply_overlap` to borrow
+  context from the previous chunk — overlap can silently drop to 0
+  characters even when `chunk_overlap > 0` is configured.
+  `_DEFAULT_SEPARATORS`/`_MARKDOWN_SEPARATORS` include CJK sentence
+  terminators (`。！？`) specifically to reduce how often this happens for
+  CJK content, but it is not eliminated for any language — a known
+  limitation of the current design, not addressed by this branch beyond the
+  CJK separator addition.
 - **Malformed XML never reaches this code.** `parse_file` already raises
   `ConfigurationError` for that upstream (existing behavior, unchanged) —
   `_chunk_text`'s XML path only ever sees a successfully-rendered document.
