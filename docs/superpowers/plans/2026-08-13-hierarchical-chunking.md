@@ -58,7 +58,7 @@ are confined to `src/bestteam/core/knowledge_base.py` and
 - Produces (used by Task 2 and Task 3):
   - `_pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]`
   - `_recursive_split(text: str, separators: List[str], chunk_size: int) -> List[str]`
-  - `_apply_overlap(pieces: List[str], chunk_overlap: int) -> List[str]`
+  - `_apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> List[str]` (takes `chunk_size` so it can cap every chunk at that ceiling — see Task 1's fix-round addendum below)
   - `_DEFAULT_SEPARATORS: List[str]` (module-level constant)
   - `_chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = "") -> List[str]` (new `suffix` kwarg, unused by this task's logic — every suffix maps to `_DEFAULT_SEPARATORS` until Task 2/3 add real dispatch)
 
@@ -128,16 +128,18 @@ def _recursive_split(text: str, separators: List[str], chunk_size: int) -> List[
     return _pack_pieces(pieces, chunk_size, rest)
 
 
-def _apply_overlap(pieces: List[str], chunk_overlap: int) -> List[str]:
-    """Prepend each chunk (after the first) with the previous chunk's
-    trailing chunk_overlap characters, so retrieval keeps context across a
-    chunk boundary -- same intent as the old fixed-offset overlap, applied
-    between semantically-bounded chunks instead."""
+def _apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> List[str]:
+    """Prepend each chunk (after the first) with up to chunk_overlap trailing
+    characters of the previous chunk, capped so no chunk ever exceeds
+    chunk_size -- the piece's own content is never trimmed, only how much
+    cross-boundary context gets borrowed shrinks (down to zero) when a piece
+    is already at or near chunk_size."""
     if chunk_overlap <= 0 or len(pieces) <= 1:
         return pieces
     result = [pieces[0]]
     for prev, piece in zip(pieces, pieces[1:]):
-        result.append(prev[-chunk_overlap:] + piece)
+        available = max(0, min(chunk_overlap, chunk_size - len(piece)))
+        result.append(prev[-available:] + piece if available else piece)
     return result
 
 
@@ -149,8 +151,23 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
         return []
     pieces = _recursive_split(text, _DEFAULT_SEPARATORS, chunk_size)
     pieces = [p for p in pieces if p.strip()]
-    return _apply_overlap(pieces, chunk_overlap)
+    return _apply_overlap(pieces, chunk_overlap, chunk_size)
 ```
+
+**Fix-round addendum (round 1, human-approved):** the task reviewer found
+the version above (as originally drafted) could produce a chunk up to
+`chunk_size + chunk_overlap` characters — prepending overlap onto an
+already-`chunk_size`-bounded piece with no re-capping. The human partner
+chose "fix: cap every chunk at chunk_size" over "accept as a documented
+trade-off." The code above already reflects the fix: `available` is capped
+by both `chunk_overlap` and the room actually left in the piece
+(`chunk_size - len(piece)`), so `len(piece) + available <= chunk_size`
+always holds, and the piece's own content is never truncated — only the
+borrowed context from the previous chunk shrinks. `_apply_overlap` gained a
+third parameter (`chunk_size`) as a result; every `_apply_overlap(pieces,
+chunk_overlap)` call elsewhere in this plan (Tasks 2 and 3) must be
+`_apply_overlap(pieces, chunk_overlap, chunk_size)` instead — both call
+sites below are already updated to match.
 
 - [ ] **Step 4: Run the new test and the three pre-existing `_chunk_text` tests**
 
@@ -261,7 +278,7 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
         return []
     pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
     pieces = [p for p in pieces if p.strip()]
-    return _apply_overlap(pieces, chunk_overlap)
+    return _apply_overlap(pieces, chunk_overlap, chunk_size)
 ```
 
 - [ ] **Step 4: Run the new tests plus Task 1's tests**
@@ -394,7 +411,7 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
     else:
         pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
     pieces = [p for p in pieces if p.strip()]
-    return _apply_overlap(pieces, chunk_overlap)
+    return _apply_overlap(pieces, chunk_overlap, chunk_size)
 ```
 
 - [ ] **Step 4: Run the new test plus all prior `_chunk_text` tests**
