@@ -39,6 +39,13 @@ def test_chunk_text_does_not_cut_mid_word():
     assert reconstructed == text.split()
 
 
+def test_chunk_text_overlap_never_exceeds_chunk_size():
+    text = " ".join(f"word{i}" for i in range(1, 60))
+    chunks = _chunk_text(text, chunk_size=50, chunk_overlap=15)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 50 for chunk in chunks)
+
+
 # ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase construction
 # ---------------------------------------------------------------------------

@@ -164,16 +164,18 @@ def _recursive_split(text: str, separators: List[str], chunk_size: int) -> List[
     return _pack_pieces(pieces, chunk_size, rest)
 
 
-def _apply_overlap(pieces: List[str], chunk_overlap: int) -> List[str]:
-    """Prepend each chunk (after the first) with the previous chunk's
-    trailing chunk_overlap characters, so retrieval keeps context across a
-    chunk boundary -- same intent as the old fixed-offset overlap, applied
-    between semantically-bounded chunks instead."""
+def _apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> List[str]:
+    """Prepend each chunk (after the first) with up to chunk_overlap trailing
+    characters of the previous chunk, capped so no chunk ever exceeds
+    chunk_size -- the piece's own content is never trimmed, only how much
+    cross-boundary context gets borrowed shrinks (down to zero) when a piece
+    is already at or near chunk_size."""
     if chunk_overlap <= 0 or len(pieces) <= 1:
         return pieces
     result = [pieces[0]]
     for prev, piece in zip(pieces, pieces[1:]):
-        result.append(prev[-chunk_overlap:] + piece)
+        available = max(0, min(chunk_overlap, chunk_size - len(piece)))
+        result.append(prev[-available:] + piece if available else piece)
     return result
 
 
@@ -185,7 +187,7 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
         return []
     pieces = _recursive_split(text, _DEFAULT_SEPARATORS, chunk_size)
     pieces = [p for p in pieces if p.strip()]
-    return _apply_overlap(pieces, chunk_overlap)
+    return _apply_overlap(pieces, chunk_overlap, chunk_size)
 
 
 def _validate_chunk_params(name: str, chunk_size: int, chunk_overlap: int) -> None:
