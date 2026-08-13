@@ -158,9 +158,11 @@ def test_t4_5_deploy_then_run_for_real(page):
 
 def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
     """Revisiting Documents after a specification already exists must
-    refine the existing design (submitSolution) rather than silently
-    discarding prior feedback and regenerating from scratch -- see
-    DocumentsPage.tsx's comment on this exact regression."""
+    refine the existing design (submitSolution, POST .../solution) rather
+    than silently discarding prior feedback and regenerating from scratch
+    (submitSpecification, POST .../specification) -- see DocumentsPage.tsx's
+    comment on this exact regression (the `session.specification_json ?
+    submitSolution(...) : submitSpecification(...)` branch)."""
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
     page.fill("#solution-feedback", "Always sign off with 'Best, the Support Team'.")
@@ -170,7 +172,19 @@ def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
 
     page.click("text=Need to add or update a document? Upload it here")
     page.wait_for_url("**/documents", timeout=8000)
-    page.click("button:has-text('Skip for now')")
+    # This is the assertion that actually guards the regression: checking a
+    # UI side effect (e.g. the feedback banner) doesn't work here, because
+    # feedback_history is untouched by both endpoints when there's no
+    # kbHint (no files uploaded), and the fake architect's
+    # generate_specification returns a fixed canned Specification
+    # regardless of which endpoint/input produced it -- so nothing
+    # user-visible would differ even if this "Skip for now" click
+    # regressed to calling submitSpecification instead of submitSolution.
+    # Assert on the network request itself instead.
+    with page.expect_request(
+        lambda r: r.method == "POST" and r.url.endswith("/solution"), timeout=8000
+    ):
+        page.click("button:has-text('Skip for now')")
     page.wait_for_url("**/preview", timeout=20000)
     page.click("button:has-text('Continue')")
     page.wait_for_url("**/confirm", timeout=8000)
