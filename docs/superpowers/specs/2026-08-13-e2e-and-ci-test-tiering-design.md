@@ -115,53 +115,76 @@ structured-output support, which becomes a customer-facing
 model..."). A deterministic E2E architect therefore needs a genuinely new
 mechanism, not a redirect to the existing `fake:` spec.
 
-`_resolve_model()` (`src/bestteam/adapters/langgraph_adapter.py`) gains a
-`fake-architect:<name>` prefix, resolved to a small class exposing
-`.with_structured_output(schema, **kwargs).invoke(messages)` — the same
-shape already proven in `tests/test_builder_api.py`'s
-`_FakeArchitectChatModel` (currently reached only via `monkeypatch` inside
+**It also needs to be a fully runnable chat model, not just a
+structured-output stub** — this was the key thing research for the
+implementation plan corrected. `submit_solution_feedback` (Stage 4,
+`ui/backend/builder.py:545-546`) unconditionally re-pins every agent's model
+to the literal architect model string used for that call
+(`for agent in spec.agents: agent.model = req.model`), overwriting whatever
+the architect itself assigned. Combined with the wizard's fully-automatic
+model selection (below), a stub that only implements
+`with_structured_output()` would end up assigned as a deployed agent's model
+— then break the moment that team is actually run (a "test run" on the
+Preview page, or a real Monitor run), since ordinary agent execution calls
+plain `.invoke()`, not structured output.
+
+So `fake-architect:<name>` resolves (`_resolve_model()`,
+`src/bestteam/adapters/langgraph_adapter.py`) to a small `FakeListChatModel`
+subclass that is a complete drop-in: ordinary `.invoke()` behaves exactly
+like `fake:` (a canned string response, safe to run as a real agent), and
+`.with_structured_output(schema, **kwargs)` is additionally overridden to
+return one canned instance keyed by schema identity — `Requirements` (for
+Stage 2, `generate_requirements`) or `Specification` (for Stages 3/4,
+`generate_specification`) — mirroring the shape already proven in
+`tests/test_builder_api.py`'s `_FakeArchitectChatModel`, but reachable as a
+real code path (that test reaches its version only via `monkeypatch` inside
 the test process; Playwright drives a real, separately-running backend
-process, so this needs to be a real, reachable code path instead). It
-returns one canned, deterministic `Specification` (a small support-bot
-team) regardless of input — sufficient to exercise the full plumbing
-(Requirements → Specification → validate → deploy → run), not to assess AI
-output quality.
+process). Any other schema raises `NotImplementedError`, matching how a real
+model would fail on an unexpected structured-output request. The canned
+`Specification`'s agents carry `"fake:ok"` models internally, but since
+Stage 4 can overwrite that with the literal `"fake-architect:e2e"` string
+regardless, `deploy_validation.validate_agent_models`
+(`ui/backend/deploy_validation.py:37`) gains a second exemption prefix
+alongside the existing `fake:` one, so a `fake-architect:`-pinned agent
+deploys and runs cleanly too.
 
 `fake-architect:` is deliberately **not** added to `DEFAULT_MODEL_CATALOG`
-(`db/model_catalog.py`), so it never appears as a selectable option in a real
-deployment's wizard. However, the wizard's model picker
-(`components/ModelPicker.tsx`) is a native `<select>` whose `<option>`s come
-*exclusively* from the fetched `/api/model-catalog` entries — there is no
-free-text field, so Playwright cannot simply type the spec string into a
-form field. Instead, the E2E session fixture seeds one `fake-architect:e2e`
-row into that test session's own ephemeral DB via the existing admin-only
-`POST /api/config/model-catalog` endpoint (the same mechanism
-`docs/run_ui_tests.py`'s `T3-8` already uses to create a throwaway catalog
-entry through the Advanced page), authenticated as the auto-provisioned `op`
-account. Playwright then picks it from the wizard's `<select>` by its
-`spec` value like any other catalog entry. This only ever touches the
-per-test temp DB — a real deployment's seed data never includes it.
+(`db/model_catalog.py`), so it never appears in a real deployment's catalog.
+The current 4-stage wizard (Intent → Documents → Preview → Confirm → Deploy)
+has **no model-picker UI at all** — `components/ModelPicker.tsx` exists but
+is unused/dead in this flow. Every generation step (`IntentPage`'s
+Requirements call, `DocumentsPage`'s Specification/Solution call) instead
+calls `pickDefaultModel(entries)` (`lib/models.ts:6-10`) automatically,
+client-side: "the first catalog entry whose `spec` doesn't start with
+`fake:`, else the first entry, else `fake:ok`" — with zero user interaction.
+`db_session.py:41` auto-seeds the full `DEFAULT_MODEL_CATALOG` (including
+real provider specs like `openai:gpt-4o-mini`) into every fresh DB at
+backend startup via `seed_default_catalog()`.
 
-Stage 3 (`submit_specification`) does not re-pin `AgentSpec.model` after
-generation, so the canned `Specification`'s agents must themselves carry
-`"fake:..."` models — already exempt in
-`deploy_validation.validate_agent_models` (`model.startswith("fake:") or
-model in allowed`, `ui/backend/deploy_validation.py:37`) — so deploy
-succeeds without those agent models needing a catalog entry either. Stage 4's
-"which assistant should make this change?" picker (`submit_solution_feedback`,
-which *does* re-pin every agent to `req.model`) is exercised in the full T4
-scenarios using the catalog's already-seeded `"fake:ok"` ("Demo Assistant")
-entry — no new mechanism needed there, since it's a normal `<select>` choice
-from `DEFAULT_MODEL_CATALOG`.
+So the E2E fixture doesn't touch the wizard UI to pick a model at all — it
+reshapes the catalog before any wizard scenario runs, authenticated as the
+auto-provisioned `op` account: delete every auto-seeded entry whose `spec`
+does **not** start with `fake:` (via `DELETE /api/config/model-catalog/{spec}`),
+then `PUT /api/config/model-catalog/fake-architect:e2e` to add the new entry
+(same CRUD endpoints `docs/run_ui_tests.py`'s `T3-8` already exercises through
+the Advanced page, called directly here instead of through the browser).
+What's left is `fake:ok` (ignored by `pickDefaultModel`'s non-`fake:` filter)
+plus `fake-architect:e2e` (the only qualifying entry) — so every wizard
+generation step, at every stage, automatically resolves to the fake
+architect, and — because it's a full drop-in chat model, not just a
+structured-output stub — every subsequent test-run/deploy/production-run of
+the resulting team works too. This only touches that test session's own
+ephemeral DB; a real deployment's seed data is untouched.
 
-Two scenario tiers, both using `fake-architect:`:
+Two scenario tiers, both relying on the reshaped catalog:
 
 - **PR-gate scenario** (`e2e`, not `slow`): intent → generate → Preview →
   Deploy → confirm the team appears in Monitor. Stops once deployed.
 - **Full T4 scenarios** (`e2e` + `slow`, main-only): the 6 existing
-  currently-skipped scenarios (feedback/regeneration loop, test-run before
-  deploy, validation-error recovery, etc.), un-skipped and driven against
-  the fake architect instead of requiring a real LLM key.
+  currently-skipped scenarios (feedback/regeneration loop via revisiting
+  Documents after a specification exists, test-run before deploy,
+  validation-error recovery, etc.), un-skipped and driven against the fake
+  architect instead of requiring a real LLM key.
 
 ### 4. pytest markers
 
@@ -195,9 +218,12 @@ silently fall outside every CI job's selection.
 - `backend-optional-deps` job: confirm the 16 `test_interview_api.py`
   tests go from "skipped" to "passed" (not just "job exists").
 - Unit test asserting `"fake-architect:"` never appears in
-  `db/model_catalog.py`'s listed options, alongside a test that
-  `_resolve_model("fake-architect:x")` resolves and produces a working
-  structured-output stub.
+  `DEFAULT_MODEL_CATALOG` (`db/model_catalog.py`), alongside tests that
+  `_resolve_model("fake-architect:x")` resolves to a model that (a) answers
+  `.invoke()` like an ordinary fake chat model and (b) returns the canned
+  `Requirements`/`Specification` via `.with_structured_output(...)`, and that
+  `deploy_validation.validate_agent_models` accepts a `fake-architect:`-pinned
+  agent.
 - Push the branch and confirm all 6 CI jobs go green, with the 4 PR-gate
   jobs landing in the 5–8 minute target window (parallelized).
 
@@ -207,6 +233,8 @@ silently fall outside every CI job's selection.
   self-contained, headless by default)
 - `src/bestteam/adapters/langgraph_adapter.py`: new `fake-architect:` spec
   in `_resolve_model()`
+- `ui/backend/deploy_validation.py`: `validate_agent_models` also exempts
+  the `fake-architect:` prefix
 - `pyproject.toml`: `[tool.pytest.ini_options]` markers/strict-markers,
   new `test` extra (`pytest-playwright`)
 - ~62 existing test files: one-time `pytestmark` sweep
