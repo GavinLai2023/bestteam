@@ -39,6 +39,30 @@ def test_chunk_text_does_not_cut_mid_word():
     assert reconstructed == text.split()
 
 
+def test_chunk_text_markdown_preserves_heading_boundaries():
+    text = (
+        "## Section One\n"
+        "Some content about apples.\n\n"
+        "## Section Two\n"
+        "Some content about oranges.\n\n"
+        "## Section Three\n"
+        "Some content about bananas.\n"
+    )
+    chunks = _chunk_text(text, chunk_size=40, chunk_overlap=0, suffix=".md")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        if "## Section" in chunk:
+            heading_index = chunk.index("## Section")
+            assert chunk[:heading_index].strip() == ""
+
+
+def test_chunk_text_markdown_splits_oversized_section_by_sentence():
+    text = "## Big Section\n" + "This is sentence one. " * 20
+    chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".md")
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 60 for chunk in chunks)
+
+
 def test_chunk_text_overlap_never_exceeds_chunk_size():
     text = " ".join(f"word{i}" for i in range(1, 60))
     chunks = _chunk_text(text, chunk_size=50, chunk_overlap=15)

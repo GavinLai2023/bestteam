@@ -123,6 +123,12 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
 
 _DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
+_MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", ". ", " ", ""]
+
+
+def _separators_for_suffix(suffix: str) -> List[str]:
+    return _MARKDOWN_SEPARATORS if suffix == ".md" else _DEFAULT_SEPARATORS
+
 
 def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
     """Greedily merge adjacent pieces up to chunk_size; recurse into
@@ -185,7 +191,7 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
     text = text.strip()
     if not text:
         return []
-    pieces = _recursive_split(text, _DEFAULT_SEPARATORS, chunk_size)
+    pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
     pieces = [p for p in pieces if p.strip()]
     return _apply_overlap(pieces, chunk_overlap, chunk_size)
 
