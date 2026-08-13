@@ -34,3 +34,6 @@ ui/backend/data/
 
 # Subagent-driven-development scratch workspace (ledgers, briefs, reports)
 .superpowers/
+
+# Git worktrees for isolated feature work
+.worktrees/
