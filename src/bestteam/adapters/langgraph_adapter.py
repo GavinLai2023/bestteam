@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import operator
 import time
-from typing import Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
@@ -15,6 +16,10 @@ from ..core.trace import TraceEvent
 from ..core.workflow import Workflow, WorkflowResult
 from ..exceptions import BestTeamError, ConfigurationError, EngineError
 from .base import EngineAdapter
+
+if TYPE_CHECKING:
+    from ..core.requirements import Requirements
+    from ..core.specification import Specification
 
 _logger = logging.getLogger(__name__)
 
@@ -60,6 +65,71 @@ class _TeamState(TypedDict):
     memory_preamble: str
 
 
+def _fake_architect_specification() -> "Specification":
+    from ..core.specification import AgentSpec, Specification, TeamSpec, WorkflowSpec
+
+    return Specification(
+        name="e2e_support_team",
+        display_name="Support Team (E2E)",
+        agents=[
+            AgentSpec(
+                name="support_agent",
+                role="Customer Support Specialist",
+                goal="Answer customer questions clearly and politely.",
+                backstory="A friendly, patient support assistant.",
+                model="fake:Thanks for reaching out! Here's how I can help.",
+            ),
+        ],
+        teams=[TeamSpec(name="support_team", mode="sequential", agents=["support_agent"])],
+        workflow=WorkflowSpec(steps=["support_team"]),
+    )
+
+
+def _fake_architect_requirements() -> "Requirements":
+    from ..core.requirements import Requirements
+
+    return Requirements(
+        summary="Customers need faster, friendlier email support.",
+        pain_points=["Replies take too long."],
+        goals=["Answer common questions quickly."],
+        success_criteria=["Customers get a reply within minutes."],
+        constraints=["Must stay professional and on-topic."],
+        clarifying_questions=[],
+    )
+
+
+class _FakeArchitectStructuredResult:
+    """Returned by `_FakeArchitectChatModel.with_structured_output(...).invoke(...)`."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def invoke(self, messages: Any) -> Any:
+        return self._value
+
+
+class _FakeArchitectChatModel(FakeListChatModel):
+    """A deterministic, $0 stand-in for E2E tests that is a full drop-in
+    chat model (ordinary `.invoke()` works, so it's safe to also run as a
+    deployed agent's model -- see the design doc) that ADDITIONALLY
+    supports `with_structured_output()` for the two schemas the Team
+    Builder wizard needs. Not listed in `DEFAULT_MODEL_CATALOG`; only
+    reachable by resolving the `fake-architect:` spec string directly.
+    """
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> _FakeArchitectStructuredResult:
+        from ..core.requirements import Requirements
+        from ..core.specification import Specification
+
+        if schema is Requirements:
+            return _FakeArchitectStructuredResult(_fake_architect_requirements())
+        if schema is Specification:
+            return _FakeArchitectStructuredResult(_fake_architect_specification())
+        raise NotImplementedError(
+            f"fake-architect: has no canned response for schema {schema!r}"
+        )
+
+
 def _resolve_model(model: Any) -> BaseChatModel:
     """Accept either a ready-made chat model or a provider model name string.
 
@@ -77,6 +147,11 @@ def _resolve_model(model: Any) -> BaseChatModel:
             from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
             return FakeListChatModel(responses=[model[len("fake:") :]])
+        # "fake-architect:<name>" is like "fake:" but additionally supports
+        # `with_structured_output()` for the Team Builder wizard's Requirements/
+        # Specification schemas -- see `_FakeArchitectChatModel`.
+        if model.startswith("fake-architect:"):
+            return _FakeArchitectChatModel(responses=[model[len("fake-architect:") :] or "OK, done."])
         try:
             from langchain.chat_models import init_chat_model
         except ImportError as exc:
