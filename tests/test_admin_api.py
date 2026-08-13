@@ -15,6 +15,7 @@ from ui.backend.db.orgs import get_or_create_org, set_org_active
 from ui.backend.db.users import create_user
 from ui.backend.db_session import get_db
 
+pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):

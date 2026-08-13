@@ -1,4 +1,8 @@
+import pytest
+
 from ui.backend.deploy_validation import validate_agent_models
+
+pytestmark = pytest.mark.unit
 
 
 def _spec(*models):

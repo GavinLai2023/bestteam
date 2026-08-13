@@ -15,6 +15,8 @@ from bestteam.tools import (
     web_search,
 )
 
+pytestmark = pytest.mark.unit
+
 
 # ---------------------------------------------------------------------------
 # REGISTRY

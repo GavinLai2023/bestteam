@@ -6,6 +6,8 @@ IMAP connection is made -- the point is which mailbox each org's tools bind to.
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("cryptography")
 

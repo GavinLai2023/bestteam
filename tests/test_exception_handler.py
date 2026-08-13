@@ -1,6 +1,8 @@
 """Tests for the global unhandled-exception handler (ui/backend/main.py)."""
 import pytest
 
+
+pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 

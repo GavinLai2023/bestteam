@@ -7,6 +7,8 @@ from datetime import date as _date, datetime, timezone
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 
 from ui.backend.automation_results import (

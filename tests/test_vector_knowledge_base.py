@@ -17,6 +17,8 @@ from bestteam.exceptions import ConfigurationError
 # suitable for asserting *which* document should rank higher.
 # ---------------------------------------------------------------------------
 
+
+pytestmark = pytest.mark.unit
 _VOCAB = ["fruit", "apple", "orchard", "car", "engine", "tire"]
 
 

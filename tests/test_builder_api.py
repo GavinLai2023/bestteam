@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 

@@ -4,6 +4,10 @@ from bestteam import Agent
 from bestteam.exceptions import ConfigurationError
 
 
+
+pytestmark = pytest.mark.unit
+
+
 def test_agent_requires_role_and_goal():
     with pytest.raises(ConfigurationError):
         Agent(name="bot", role="", goal="do things")

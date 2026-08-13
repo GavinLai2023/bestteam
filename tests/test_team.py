@@ -4,6 +4,10 @@ from bestteam import Agent, CollaborationMode, Team
 from bestteam.exceptions import ConfigurationError
 
 
+
+pytestmark = pytest.mark.unit
+
+
 def _agent(name="a"):
     return Agent(name=name, role="role", goal="goal")
 

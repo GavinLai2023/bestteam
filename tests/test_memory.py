@@ -17,6 +17,8 @@ from bestteam.core.memory import (
     _recency_weight,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class _LegacyStore(Memory):
     """A pre-SP-2 store: implements only the original ABC (no org_id kwarg)."""

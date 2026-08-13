@@ -17,6 +17,7 @@ import pytest
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend
 
+pytestmark = pytest.mark.unit
 
 def _logged_in_conn():
     conn = MagicMock()

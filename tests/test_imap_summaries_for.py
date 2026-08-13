@@ -4,6 +4,8 @@ import pytest
 
 from bestteam.tools.email_client import _ImapBackend
 
+
+pytestmark = pytest.mark.unit
 _HDR = b"From: a@b\r\nSubject: hello\r\nDate: today\r\n\r\n"
 
 

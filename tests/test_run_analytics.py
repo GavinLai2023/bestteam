@@ -3,7 +3,11 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from ui.backend.run_analytics import TraceEventLite, agent_timings, common_failure_points, run_duration_seconds
+
+pytestmark = pytest.mark.unit
 
 
 def _t(seconds: int) -> datetime:

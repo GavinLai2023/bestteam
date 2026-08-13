@@ -3,6 +3,8 @@ stats over runs/trace_events/usage_records for the admin Trace page."""
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 

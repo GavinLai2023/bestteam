@@ -1,10 +1,13 @@
 from typing import Any, List
 
+import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
 from bestteam import Requirements, generate_requirements
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeAnalystChatModel(BaseChatModel):

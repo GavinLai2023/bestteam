@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("fastapi")
 

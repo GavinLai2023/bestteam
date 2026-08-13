@@ -18,6 +18,8 @@ from bestteam import (
 )
 from bestteam.exceptions import ConfigurationError
 
+pytestmark = pytest.mark.unit
+
 
 class _FakeArchitectChatModel(BaseChatModel):
     """Cycles through pre-scripted Specification objects via `with_structured_output`,

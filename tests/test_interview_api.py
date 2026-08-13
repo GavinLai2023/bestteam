@@ -5,6 +5,8 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, patch
 
+
+pytestmark = [pytest.mark.integration, pytest.mark.optional]
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("openai")  # these tests patch openai.OpenAI; skip when the optional dep is absent
