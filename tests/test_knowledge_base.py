@@ -133,6 +133,22 @@ def test_knowledge_base_query_no_match_returns_message(docs_kb):
     assert "No results found in knowledge base 'docs'" in result
 
 
+def test_knowledge_base_ingests_xml_files(tmp_path):
+    (tmp_path / "fruit.md").write_text(
+        "Cars require regular maintenance such as oil changes.",
+        encoding="utf-8",
+    )
+    (tmp_path / "catalog.xml").write_text(
+        '<catalog><book><title>Widgets and gadgets explained</title></book></catalog>',
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path)
+
+    result = kb.query("widgets gadgets")
+    assert "catalog.xml" in result
+    assert "fruit.md" not in result
+
+
 @pytest.fixture
 def chinese_docs_kb(tmp_path):
     (tmp_path / "policy.txt").write_text(

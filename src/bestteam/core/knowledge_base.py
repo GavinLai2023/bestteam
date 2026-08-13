@@ -20,7 +20,7 @@ _logger = logging.getLogger(__name__)
 
 _SUPPORTED_SUFFIXES = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
-    ".pdf", ".xlsx", ".xlsm", ".docx",
+    ".pdf", ".xlsx", ".xlsm", ".docx", ".xml",
 }
 
 

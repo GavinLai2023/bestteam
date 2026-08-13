@@ -11,8 +11,9 @@ def parse_file(path: str) -> str:
     """Extract text content from a file.
 
     Supports PDF (text extraction), Excel (.xlsx/.xlsm, rendered as CSV rows),
-    Word (.docx, including tables), and common plain-text formats (.txt, .md,
-    .csv, .json, .yaml). Legacy .xls (BIFF) is not supported -- the openpyxl
+    Word (.docx, including tables), XML (structural rendering of tags,
+    attributes and text), and common plain-text formats (.txt, .md, .csv,
+    .json, .yaml). Legacy .xls (BIFF) is not supported -- the openpyxl
     backend reads only the modern Office Open XML formats.
 
     This tool reads whatever local path it is given, with no sandboxing —
@@ -38,12 +39,14 @@ def parse_file(path: str) -> str:
         return _parse_excel(file_path)
     if suffix == ".docx":
         return _parse_docx(file_path)
+    if suffix == ".xml":
+        return _parse_xml(file_path)
     if suffix in _TEXT_SUFFIXES:
         return file_path.read_text(encoding="utf-8")
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
-        f"Supported types: .pdf, .xlsx, .xlsm, .docx, {', '.join(sorted(_TEXT_SUFFIXES))}"
+        f"Supported types: .pdf, .xlsx, .xlsm, .docx, .xml, {', '.join(sorted(_TEXT_SUFFIXES))}"
     )
 
 
@@ -87,6 +90,33 @@ def _parse_docx(path: Path) -> str:
     if table_parts:
         body += "\n\n" + "\n\n".join(table_parts)
     return header + body
+
+
+def _parse_xml(path: Path) -> str:
+    import xml.etree.ElementTree as ET
+
+    try:
+        tree = ET.parse(str(path))
+    except ET.ParseError as exc:
+        raise ConfigurationError(
+            f"Failed to parse XML file '{path.name}': {exc}"
+        ) from exc
+
+    lines = [f"[XML: {path.name}]"]
+    _render_xml_element(tree.getroot(), lines, depth=0)
+    return "\n".join(lines)
+
+
+def _render_xml_element(elem, lines: list, depth: int) -> None:
+    indent = "  " * depth
+    attrs = " ".join(f'{k}="{v}"' for k, v in elem.attrib.items())
+    line = f"{indent}<{elem.tag}" + (f" {attrs}" if attrs else "") + ">"
+    text = (elem.text or "").strip()
+    if text:
+        line += f" {text}"
+    lines.append(line)
+    for child in elem:
+        _render_xml_element(child, lines, depth + 1)
 
 
 def _parse_excel(path: Path) -> str:

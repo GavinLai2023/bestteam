@@ -35,6 +35,7 @@ def test_knowledge_base_discovery_excludes_legacy_xls():
 
     assert ".xls" not in _SUPPORTED_SUFFIXES
     assert ".xlsx" in _SUPPORTED_SUFFIXES
+    assert ".xml" in _SUPPORTED_SUFFIXES
 
 
 def test_parse_file_rejects_legacy_xls(tmp_path):
@@ -439,6 +440,38 @@ def test_parse_file_reads_docx(tmp_path):
     result = parse_file(str(f))
     assert "Hello from Word." in result
     assert "Second paragraph." in result
+
+
+def test_parse_file_reads_xml(tmp_path):
+    f = tmp_path / "catalog.xml"
+    f.write_text(
+        '<?xml version="1.0"?>\n'
+        '<catalog>\n'
+        '  <book id="bk101">\n'
+        '    <title>Widgets Explained</title>\n'
+        '  </book>\n'
+        '</catalog>\n',
+        encoding="utf-8",
+    )
+
+    result = parse_file(str(f))
+    lines = result.splitlines()
+    assert lines[0] == "[XML: catalog.xml]"
+
+    book_line = next(line for line in lines if "<book" in line)
+    title_line = next(line for line in lines if "<title" in line)
+    assert book_line.strip() == '<book id="bk101">'
+    assert title_line.strip() == "<title> Widgets Explained"
+    # the title element is nested one level deeper than book
+    assert len(title_line) - len(title_line.lstrip(" ")) > len(book_line) - len(book_line.lstrip(" "))
+
+
+def test_parse_file_rejects_malformed_xml(tmp_path):
+    f = tmp_path / "broken.xml"
+    f.write_text("<catalog><book></catalog>", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="Failed to parse XML file"):
+        parse_file(str(f))
 
 
 def test_parse_file_reads_docx_tables(tmp_path):
