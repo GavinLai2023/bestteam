@@ -190,3 +190,14 @@ def test_read_model_catalog_requires_authentication(client):
     assert client.get(
         "/api/model-catalog", headers={"Authorization": "Bearer nope"}
     ).status_code == 401
+
+
+def test_fake_architect_is_never_in_the_default_catalog():
+    """fake-architect: is a full drop-in chat model (see
+    src/bestteam/adapters/langgraph_adapter.py) and is deliberately kept out
+    of the seeded catalog so a real customer never sees it as a choice --
+    it's only added to a test session's own ephemeral DB by the E2E fixture
+    (see docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md)."""
+    from ui.backend.db.model_catalog import DEFAULT_MODEL_CATALOG
+
+    assert all(not entry["spec"].startswith("fake-architect:") for entry in DEFAULT_MODEL_CATALOG)
