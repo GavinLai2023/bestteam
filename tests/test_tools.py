@@ -474,6 +474,63 @@ def test_parse_file_rejects_malformed_xml(tmp_path):
         parse_file(str(f))
 
 
+def test_parse_file_xml_preserves_mixed_content_tail_text(tmp_path):
+    f = tmp_path / "mixed.xml"
+    f.write_text(
+        "<p>Hello <b>world</b>, how are you?</p>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    assert "how are you?" in result
+
+
+def test_parse_file_xml_escapes_quotes_in_attributes(tmp_path):
+    f = tmp_path / "quoted.xml"
+    f.write_text(
+        '<book note="He said &quot;hi&quot;"></book>',
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    # the embedded quote must not appear to close the attribute value early
+    assert 'note="He said "hi""' not in result
+    assert "He said" in result and "hi" in result
+
+
+def test_parse_file_xml_resolves_namespace_prefixes(tmp_path):
+    f = tmp_path / "ns.xml"
+    f.write_text(
+        '<ns:root xmlns:ns="http://example.com">'
+        "<ns:child>text</ns:child>"
+        "</ns:root>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    assert "<ns:root>" in result
+    assert "<ns:child>" in result
+    assert "{http://example.com}" not in result
+
+
+def test_parse_file_xml_normalizes_multiline_text(tmp_path):
+    f = tmp_path / "pretty.xml"
+    f.write_text(
+        "<root>\n  <item>\n    line one\n    line two\n  </item>\n</root>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    item_line = next(line for line in result.splitlines() if "<item>" in line)
+    assert item_line.strip() == "<item> line one line two"
+
+
+def test_parse_file_xml_handles_deeply_nested_elements_without_recursion_error(tmp_path):
+    depth = 2000
+    xml_content = "<a>" * depth + "text" + "</a>" * depth
+    f = tmp_path / "deep.xml"
+    f.write_text(xml_content, encoding="utf-8")
+
+    result = parse_file(str(f))
+    assert result.count("<a>") == depth
+
+
 def test_parse_file_reads_docx_tables(tmp_path):
     docx = pytest.importorskip("docx")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
 from ..exceptions import ConfigurationError
 
@@ -12,8 +14,10 @@ def parse_file(path: str) -> str:
 
     Supports PDF (text extraction), Excel (.xlsx/.xlsm, rendered as CSV rows),
     Word (.docx, including tables), XML (structural rendering of tags,
-    attributes and text), and common plain-text formats (.txt, .md, .csv,
-    .json, .yaml). Legacy .xls (BIFF) is not supported -- the openpyxl
+    attributes, and text, including mixed-content tail text and namespace
+    prefixes -- comments and processing instructions are dropped, matching
+    ElementTree's default parser), and common plain-text formats (.txt, .md,
+    .csv, .json, .yaml). Legacy .xls (BIFF) is not supported -- the openpyxl
     backend reads only the modern Office Open XML formats.
 
     This tool reads whatever local path it is given, with no sandboxing —
@@ -93,9 +97,11 @@ def _parse_docx(path: Path) -> str:
 
 
 def _parse_xml(path: Path) -> str:
-    import xml.etree.ElementTree as ET
-
     try:
+        ns_prefixes = {
+            uri: prefix
+            for _, (prefix, uri) in ET.iterparse(str(path), events=("start-ns",))
+        }
         tree = ET.parse(str(path))
     except ET.ParseError as exc:
         raise ConfigurationError(
@@ -103,20 +109,63 @@ def _parse_xml(path: Path) -> str:
         ) from exc
 
     lines = [f"[XML: {path.name}]"]
-    _render_xml_element(tree.getroot(), lines, depth=0)
+    _render_xml_tree(tree.getroot(), lines, ns_prefixes)
     return "\n".join(lines)
 
 
-def _render_xml_element(elem, lines: list, depth: int) -> None:
+def _qualified_name(name: str, ns_prefixes: dict) -> str:
+    """Render a Clark-notation `{uri}local` name as `prefix:local` using the
+    document's own namespace declarations, falling back to the bare local
+    name when no prefix is known (e.g. the default namespace)."""
+    if not name.startswith("{"):
+        return name
+    uri, _, local = name[1:].partition("}")
+    prefix = ns_prefixes.get(uri)
+    return f"{prefix}:{local}" if prefix else local
+
+
+def _normalize_xml_text(text: "str | None") -> str:
+    return " ".join(text.split()) if text else ""
+
+
+def _render_element_open_line(elem, depth: int, ns_prefixes: dict) -> str:
     indent = "  " * depth
-    attrs = " ".join(f'{k}="{v}"' for k, v in elem.attrib.items())
-    line = f"{indent}<{elem.tag}" + (f" {attrs}" if attrs else "") + ">"
-    text = (elem.text or "").strip()
+    tag = _qualified_name(elem.tag, ns_prefixes)
+    attrs = " ".join(
+        f"{_qualified_name(k, ns_prefixes)}={quoteattr(v)}"
+        for k, v in elem.attrib.items()
+    )
+    line = f"{indent}<{tag}" + (f" {attrs}" if attrs else "") + ">"
+    text = _normalize_xml_text(elem.text)
     if text:
         line += f" {text}"
-    lines.append(line)
-    for child in elem:
-        _render_xml_element(child, lines, depth + 1)
+    return line
+
+
+def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
+    """Depth-first render of the element tree, including each element's tail
+    text (mixed content following a child's closing tag). Iterative rather
+    than recursive so a pathologically deep-but-narrow document can't blow
+    the Python call stack -- an explicit stack is bounded only by memory,
+    matching what `ET.parse` itself can already handle."""
+    RENDER, TAIL = 0, 1
+    stack = [(RENDER, root, 0)]
+    while stack:
+        kind, payload, depth = stack.pop()
+        if kind == TAIL:
+            lines.append(f"{'  ' * depth}{payload}")
+            continue
+
+        elem = payload
+        lines.append(_render_element_open_line(elem, depth, ns_prefixes))
+
+        items = []
+        for child in elem:
+            items.append((RENDER, child, depth + 1))
+            tail = _normalize_xml_text(child.tail)
+            if tail:
+                items.append((TAIL, tail, depth + 1))
+        stack.extend(reversed(items))
 
 
 def _parse_excel(path: Path) -> str:
