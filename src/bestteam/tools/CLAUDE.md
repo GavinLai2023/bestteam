@@ -11,7 +11,7 @@ Eight ready-made tools clients can attach directly to any Agent:
 |---|---|---|---|
 | `web_search(query, max_results=5)` | `from bestteam import web_search` | `TAVILY_API_KEY` | `pip install 'bestteam[tools-search]'` |
 | `local_business_search(query, max_results=5)` | `from bestteam import local_business_search` | `GOOGLE_MAPS_API_KEY` | `pip install 'bestteam[tools-places]'` (httpx) |
-| `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word) |
+| `parse_file(path)` | `from bestteam import parse_file` | — | `pip install 'bestteam[tools-files]'` (PDF/Excel/Word); `.xml` needs no extra (stdlib) |
 | `http_get(url, headers_json="{}")` | `from bestteam import http_get` | — | `pip install 'bestteam[tools-http]'` (httpx) |
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
 | `email_find(query="")` | `from bestteam import email_find` | `BESTTEAM_EMAIL_BACKEND` + backend creds | `graph`: `pip install 'bestteam[tools-email]'` (httpx); `imap`: none |
@@ -75,7 +75,12 @@ failover for that guarantee. Both tools are still intentionally broad — their
 purpose is to read files / fetch URLs the agent is told to — so callers exposing
 them to an LLM agent remain responsible for constraining which paths/URLs the
 agent can be prompted to access, and for network-layer egress controls where
-internal services are reachable.
+internal services are reachable. `.xml` parsing uses stdlib
+`xml.etree.ElementTree`, which doesn't resolve external entities (not
+XXE-vulnerable) but has no protection against entity-expansion ("billion
+laughs") DoS — the same unmitigated-DoS posture the PDF/Excel/Word parsers
+already have against decompression bombs, not a new risk class for this
+tool's trust boundary.
 
 **Email trust boundaries**: email bodies are attacker-controlled input to
 the LLM (prompt injection). Mitigations: no send capability exists (bounded

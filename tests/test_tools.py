@@ -35,6 +35,7 @@ def test_knowledge_base_discovery_excludes_legacy_xls():
 
     assert ".xls" not in _SUPPORTED_SUFFIXES
     assert ".xlsx" in _SUPPORTED_SUFFIXES
+    assert ".xml" in _SUPPORTED_SUFFIXES
 
 
 def test_parse_file_rejects_legacy_xls(tmp_path):
@@ -439,6 +440,95 @@ def test_parse_file_reads_docx(tmp_path):
     result = parse_file(str(f))
     assert "Hello from Word." in result
     assert "Second paragraph." in result
+
+
+def test_parse_file_reads_xml(tmp_path):
+    f = tmp_path / "catalog.xml"
+    f.write_text(
+        '<?xml version="1.0"?>\n'
+        '<catalog>\n'
+        '  <book id="bk101">\n'
+        '    <title>Widgets Explained</title>\n'
+        '  </book>\n'
+        '</catalog>\n',
+        encoding="utf-8",
+    )
+
+    result = parse_file(str(f))
+    lines = result.splitlines()
+    assert lines[0] == "[XML: catalog.xml]"
+
+    book_line = next(line for line in lines if "<book" in line)
+    title_line = next(line for line in lines if "<title" in line)
+    assert book_line.strip() == '<book id="bk101">'
+    assert title_line.strip() == "<title> Widgets Explained"
+    # the title element is nested one level deeper than book
+    assert len(title_line) - len(title_line.lstrip(" ")) > len(book_line) - len(book_line.lstrip(" "))
+
+
+def test_parse_file_rejects_malformed_xml(tmp_path):
+    f = tmp_path / "broken.xml"
+    f.write_text("<catalog><book></catalog>", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="Failed to parse XML file"):
+        parse_file(str(f))
+
+
+def test_parse_file_xml_preserves_mixed_content_tail_text(tmp_path):
+    f = tmp_path / "mixed.xml"
+    f.write_text(
+        "<p>Hello <b>world</b>, how are you?</p>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    assert "how are you?" in result
+
+
+def test_parse_file_xml_escapes_quotes_in_attributes(tmp_path):
+    f = tmp_path / "quoted.xml"
+    f.write_text(
+        '<book note="He said &quot;hi&quot;"></book>',
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    # the embedded quote must not appear to close the attribute value early
+    assert 'note="He said "hi""' not in result
+    assert "He said" in result and "hi" in result
+
+
+def test_parse_file_xml_resolves_namespace_prefixes(tmp_path):
+    f = tmp_path / "ns.xml"
+    f.write_text(
+        '<ns:root xmlns:ns="http://example.com">'
+        "<ns:child>text</ns:child>"
+        "</ns:root>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    assert "<ns:root>" in result
+    assert "<ns:child>" in result
+    assert "{http://example.com}" not in result
+
+
+def test_parse_file_xml_normalizes_multiline_text(tmp_path):
+    f = tmp_path / "pretty.xml"
+    f.write_text(
+        "<root>\n  <item>\n    line one\n    line two\n  </item>\n</root>",
+        encoding="utf-8",
+    )
+    result = parse_file(str(f))
+    item_line = next(line for line in result.splitlines() if "<item>" in line)
+    assert item_line.strip() == "<item> line one line two"
+
+
+def test_parse_file_xml_handles_deeply_nested_elements_without_recursion_error(tmp_path):
+    depth = 2000
+    xml_content = "<a>" * depth + "text" + "</a>" * depth
+    f = tmp_path / "deep.xml"
+    f.write_text(xml_content, encoding="utf-8")
+
+    result = parse_file(str(f))
+    assert result.count("<a>") == depth
 
 
 def test_parse_file_reads_docx_tables(tmp_path):
