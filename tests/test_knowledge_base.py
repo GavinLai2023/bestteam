@@ -228,6 +228,29 @@ def test_knowledge_base_ingests_xml_files(tmp_path):
     assert "fruit.md" not in result
 
 
+def test_knowledge_base_passes_file_suffix_to_chunk_text(tmp_path, monkeypatch):
+    import bestteam.core.knowledge_base as kb_module
+
+    (tmp_path / "guide.md").write_text("# Heading\ncontent", encoding="utf-8")
+    (tmp_path / "catalog.xml").write_text("<a>text</a>", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("plain text", encoding="utf-8")
+
+    seen_suffixes = {}
+    real_chunk_text = kb_module._chunk_text
+
+    def spy_chunk_text(text, chunk_size, chunk_overlap, suffix=""):
+        seen_suffixes[suffix] = seen_suffixes.get(suffix, 0) + 1
+        return real_chunk_text(text, chunk_size, chunk_overlap, suffix=suffix)
+
+    monkeypatch.setattr(kb_module, "_chunk_text", spy_chunk_text)
+
+    LocalFolderKnowledgeBase("docs", tmp_path)
+
+    assert seen_suffixes.get(".md", 0) >= 1
+    assert seen_suffixes.get(".xml", 0) >= 1
+    assert seen_suffixes.get(".txt", 0) >= 1
+
+
 def test_knowledge_base_markdown_chunking_respects_headings(tmp_path):
     (tmp_path / "guide.md").write_text(
         "## Refunds\n"
