@@ -70,6 +70,46 @@ def test_chunk_text_overlap_never_exceeds_chunk_size():
     assert all(len(chunk) <= 50 for chunk in chunks)
 
 
+def test_chunk_text_xml_splits_on_top_level_element_boundaries():
+    text = (
+        "[XML: catalog.xml]\n"
+        "<catalog>\n"
+        '  <book id="bk101"> Widgets Explained\n'
+        '  <book id="bk102"> Gadgets Explained\n'
+        '  <book id="bk103"> Gizmos Explained'
+    )
+    chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".xml")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.strip():
+                assert line.lstrip().startswith("<") or line.startswith("[XML:")
+
+
+def test_chunk_text_xml_oversized_element_falls_back_without_cutting_words():
+    # A single top-level element too large to fit in one chunk on its own --
+    # the top-level-boundary regex can't help here (there's only one
+    # section), so this must fall back to _DEFAULT_SEPARATORS. That fallback
+    # can't preserve a "<tag>" prefix on every resulting line once it's
+    # forced down to word-level splitting (there's nothing left to attach a
+    # tag marker to), so the guarantee this test checks is the honest one:
+    # no word gets cut in half and no chunk exceeds chunk_size -- not "every
+    # line starts with a tag", which only holds when sections individually
+    # fit within chunk_size (see the previous test).
+    long_title = " ".join(f"word{i}" for i in range(1, 30))
+    text = (
+        "[XML: catalog.xml]\n"
+        "<catalog>\n"
+        '  <book id="bk101">\n'
+        f"    <title> {long_title}"
+    )
+    chunks = _chunk_text(text, chunk_size=50, chunk_overlap=0, suffix=".xml")
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 50 for chunk in chunks)
+    reconstructed = " ".join(chunks).split()
+    assert reconstructed == text.split()
+
+
 # ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase construction
 # ---------------------------------------------------------------------------

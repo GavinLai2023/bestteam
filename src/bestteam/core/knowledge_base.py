@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -125,6 +126,8 @@ _DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 _MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", ". ", " ", ""]
 
+_XML_TOP_LEVEL_BOUNDARY = re.compile(r"(?=\n  <)")
+
 
 def _separators_for_suffix(suffix: str) -> List[str]:
     return _MARKDOWN_SEPARATORS if suffix == ".md" else _DEFAULT_SEPARATORS
@@ -191,7 +194,11 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
     text = text.strip()
     if not text:
         return []
-    pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
+    if suffix == ".xml":
+        sections = _XML_TOP_LEVEL_BOUNDARY.split(text)
+        pieces = _pack_pieces(sections, chunk_size, _DEFAULT_SEPARATORS)
+    else:
+        pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
     pieces = [p for p in pieces if p.strip()]
     return _apply_overlap(pieces, chunk_overlap, chunk_size)
 
