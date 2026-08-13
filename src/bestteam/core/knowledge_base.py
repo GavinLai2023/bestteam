@@ -128,6 +128,12 @@ _MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", "。
 
 _XML_TOP_LEVEL_BOUNDARY = re.compile(r"(?=\n  <)")
 
+# Separators that mark the START of the content they introduce (a heading
+# line) rather than the END of what precedes them (like sentence-terminating
+# punctuation) -- these get reattached as a prefix on the following piece;
+# everything else is reattached as a suffix on the preceding piece.
+_PREFIX_SEPARATORS = {"\n# ", "\n## ", "\n### ", "\n#### "}
+
 
 def _separators_for_suffix(suffix: str) -> List[str]:
     return _MARKDOWN_SEPARATORS if suffix == ".md" else _DEFAULT_SEPARATORS
@@ -136,10 +142,9 @@ def _separators_for_suffix(suffix: str) -> List[str]:
 def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
     """Greedily merge adjacent pieces up to chunk_size; recurse into
     fallback_separators for any individual piece that's still too large on
-    its own. When recursing, try to merge whatever's accumulated in
-    `current` (often a short heading/tag) onto the front of the
-    recursion's first resulting chunk, so it never gets stranded as its
-    own content-free chunk."""
+    its own, folding whatever's accumulated in `current` (often a short
+    heading/tag) into the text being split, so it always ends up packed
+    with content rather than stranded as its own content-free chunk."""
     results: List[str] = []
     current = ""
     for piece in pieces:
@@ -147,11 +152,12 @@ def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[s
         if len(candidate) <= chunk_size:
             current = candidate
         elif len(piece) > chunk_size:
-            sub = _recursive_split(piece, fallback_separators, chunk_size)
-            if current and sub and len(current + sub[0]) <= chunk_size:
-                sub[0] = current + sub[0]
-            elif current:
-                results.append(current)
+            # Split `current + piece` as one text rather than `piece` alone,
+            # so whatever's accumulated in `current` (often a short
+            # heading/tag) gets packed together with as much of the
+            # oversized piece as fits, instead of being left to fend for
+            # itself as a separate, content-free chunk.
+            sub = _recursive_split(current + piece, fallback_separators, chunk_size)
             results.extend(sub)
             current = ""
         else:
@@ -168,15 +174,31 @@ def _recursive_split(text: str, separators: List[str], chunk_size: int) -> List[
     into finer separators only for pieces that are still too large."""
     if len(text) <= chunk_size:
         return [text] if text else []
-    if not separators:
-        return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    if not separators or separators[0] == "":
+        # Last resort: no separator left to split on. Balance the split
+        # evenly across the minimum number of chunks that fit chunk_size,
+        # rather than greedily packing char-by-char at a fixed offset --
+        # greedy fixed-size packing can strand a tiny (even single-character)
+        # remainder as its own chunk, e.g. a lone trailing punctuation mark.
+        length = len(text)
+        num_chunks = -(-length // chunk_size)
+        size = -(-length // num_chunks)
+        return [text[i : i + size] for i in range(0, length, size)]
 
     sep, *rest = separators
-    raw_pieces = text.split(sep) if sep else list(text)
-    # Re-attach the separator to every piece but the first, so a piece that
-    # ends up starting its own chunk still carries its own marker (e.g. a
-    # Markdown "## Heading" or an XML tag) instead of silently losing it.
-    pieces = [raw_pieces[0]] + [sep + p for p in raw_pieces[1:]]
+    raw_pieces = text.split(sep)
+    if sep in _PREFIX_SEPARATORS:
+        # Re-attach the separator to every piece but the first, so a
+        # piece that ends up starting its own chunk still carries its
+        # own marker (e.g. a Markdown "## Heading") instead of silently
+        # losing it.
+        pieces = [raw_pieces[0]] + [sep + p for p in raw_pieces[1:]]
+    else:
+        # Suffix-style separators (sentence terminators, paragraph/line
+        # breaks) end the piece before them, not start the piece after
+        # -- re-attaching them as a prefix would strand a lone
+        # punctuation mark as its own chunk when the split lands there.
+        pieces = [p + sep for p in raw_pieces[:-1]] + [raw_pieces[-1]]
     return _pack_pieces(pieces, chunk_size, rest)
 
 

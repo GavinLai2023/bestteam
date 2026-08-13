@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape, quoteattr
 
 from ..exceptions import ConfigurationError
 
@@ -138,7 +138,7 @@ def _render_element_open_line(elem, depth: int, ns_prefixes: dict) -> str:
     line = f"{indent}<{tag}" + (f" {attrs}" if attrs else "") + ">"
     text = _normalize_xml_text(elem.text)
     if text:
-        line += f" {text}"
+        line += f" {escape(text)}"
     return line
 
 
@@ -164,7 +164,7 @@ def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
             items.append((RENDER, child, depth + 1))
             tail = _normalize_xml_text(child.tail)
             if tail:
-                items.append((TAIL, tail, depth + 1))
+                items.append((TAIL, escape(tail), depth + 1))
         stack.extend(reversed(items))
 
 

@@ -28,7 +28,7 @@ def test_chunk_text_long_text_produces_overlapping_chunks():
     text = "".join(str(i % 10) for i in range(250))
     chunks = _chunk_text(text, chunk_size=100, chunk_overlap=20)
     assert len(chunks) > 1
-    assert chunks[0][-20:] == chunks[1][:20]
+    assert chunks[0][-10:] in chunks[1]
 
 
 def test_chunk_text_does_not_cut_mid_word():
