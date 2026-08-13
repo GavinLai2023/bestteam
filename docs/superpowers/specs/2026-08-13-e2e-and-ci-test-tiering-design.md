@@ -127,12 +127,32 @@ team) regardless of input — sufficient to exercise the full plumbing
 (Requirements → Specification → validate → deploy → run), not to assess AI
 output quality.
 
-`fake-architect:` is deliberately **not** added to `db/model_catalog.py`,
-so it never appears as a selectable option in the real wizard UI. Playwright
-reaches it by filling the wizard's model field directly with the string
-`fake-architect:e2e`, the same way it fills any other form field. This
-mirrors the existing `fake:` convention (usable, but unlisted) rather than
-introducing a new mechanism shape.
+`fake-architect:` is deliberately **not** added to `DEFAULT_MODEL_CATALOG`
+(`db/model_catalog.py`), so it never appears as a selectable option in a real
+deployment's wizard. However, the wizard's model picker
+(`components/ModelPicker.tsx`) is a native `<select>` whose `<option>`s come
+*exclusively* from the fetched `/api/model-catalog` entries — there is no
+free-text field, so Playwright cannot simply type the spec string into a
+form field. Instead, the E2E session fixture seeds one `fake-architect:e2e`
+row into that test session's own ephemeral DB via the existing admin-only
+`POST /api/config/model-catalog` endpoint (the same mechanism
+`docs/run_ui_tests.py`'s `T3-8` already uses to create a throwaway catalog
+entry through the Advanced page), authenticated as the auto-provisioned `op`
+account. Playwright then picks it from the wizard's `<select>` by its
+`spec` value like any other catalog entry. This only ever touches the
+per-test temp DB — a real deployment's seed data never includes it.
+
+Stage 3 (`submit_specification`) does not re-pin `AgentSpec.model` after
+generation, so the canned `Specification`'s agents must themselves carry
+`"fake:..."` models — already exempt in
+`deploy_validation.validate_agent_models` (`model.startswith("fake:") or
+model in allowed`, `ui/backend/deploy_validation.py:37`) — so deploy
+succeeds without those agent models needing a catalog entry either. Stage 4's
+"which assistant should make this change?" picker (`submit_solution_feedback`,
+which *does* re-pin every agent to `req.model`) is exercised in the full T4
+scenarios using the catalog's already-seeded `"fake:ok"` ("Demo Assistant")
+entry — no new mechanism needed there, since it's a normal `<select>` choice
+from `DEFAULT_MODEL_CATALOG`.
 
 Two scenario tiers, both using `fake-architect:`:
 
