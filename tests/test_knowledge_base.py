@@ -228,6 +228,35 @@ def test_knowledge_base_ingests_xml_files(tmp_path):
     assert "fruit.md" not in result
 
 
+def test_knowledge_base_markdown_chunking_respects_headings(tmp_path):
+    (tmp_path / "guide.md").write_text(
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3,
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path, chunk_size=80, chunk_overlap=0)
+    result = kb.query("refund request")
+    assert "guide.md" in result
+    assert "Refunds" in result
+
+
+def test_knowledge_base_xml_chunking_respects_element_boundaries(tmp_path):
+    (tmp_path / "catalog.xml").write_text(
+        "<catalog>"
+        '<book id="bk101"><title>Widgets Explained</title></book>'
+        '<book id="bk102"><title>Gadgets Explained</title></book>'
+        '<book id="bk103"><title>Completely unrelated automotive repair manual</title></book>'
+        "</catalog>",
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path, chunk_size=80, chunk_overlap=0)
+    result = kb.query("automotive repair manual")
+    assert "catalog.xml" in result
+    assert "automotive repair manual" in result
+
+
 @pytest.fixture
 def chinese_docs_kb(tmp_path):
     (tmp_path / "policy.txt").write_text(

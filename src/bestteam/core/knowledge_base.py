@@ -229,7 +229,7 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
             warnings.warn(f"Skipping unreadable file '{file_path}': {exc}", stacklevel=2)
             continue
         source = file_path.relative_to(path).as_posix()
-        for piece in _chunk_text(text, chunk_size, chunk_overlap):
+        for piece in _chunk_text(text, chunk_size, chunk_overlap, suffix=file_path.suffix.lower()):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
 
