@@ -25,7 +25,7 @@ def test_chunk_text_short_text_is_single_chunk():
 
 
 def test_chunk_text_long_text_produces_overlapping_chunks():
-    text = "a" * 250
+    text = "".join(str(i % 10) for i in range(250))
     chunks = _chunk_text(text, chunk_size=100, chunk_overlap=20)
     assert len(chunks) > 1
     assert chunks[0][-20:] == chunks[1][:20]
@@ -61,6 +61,36 @@ def test_chunk_text_markdown_splits_oversized_section_by_sentence():
     chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".md")
     assert len(chunks) > 1
     assert all(len(chunk) <= 60 for chunk in chunks)
+
+
+def test_chunk_text_markdown_heading_never_stranded_without_body(tmp_path=None):
+    text = (
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3
+    )
+    chunks = _chunk_text(text, chunk_size=80, chunk_overlap=0, suffix=".md")
+    for chunk in chunks:
+        stripped = chunk.strip()
+        if stripped.startswith("## "):
+            # a chunk containing a heading must carry more than just the heading
+            assert len(stripped) > len("## Refunds") + 5 or stripped not in ("## Refunds", "## Shipping"), (
+                f"heading stranded without body content: {chunk!r}"
+            )
+
+
+def test_chunk_text_markdown_overlap_is_applied_at_chunk_boundaries():
+    text = (
+        "## Refunds\n"
+        + "Refunds are issued within 7 days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3
+    )
+    chunks = _chunk_text(text, chunk_size=80, chunk_overlap=20, suffix=".md")
+    assert len(chunks) > 1
+    # at least one adjacent pair shares overlapping trailing/leading text
+    assert any(chunks[i][-10:] in chunks[i + 1] for i in range(len(chunks) - 1))
 
 
 def test_chunk_text_overlap_never_exceeds_chunk_size():

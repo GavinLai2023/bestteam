@@ -122,9 +122,9 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         return "\n".join(lines)
 
 
-_DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+_DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
 
-_MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", ". ", " ", ""]
+_MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", "。", "！", "？", ". ", " ", ""]
 
 _XML_TOP_LEVEL_BOUNDARY = re.compile(r"(?=\n  <)")
 
@@ -136,21 +136,28 @@ def _separators_for_suffix(suffix: str) -> List[str]:
 def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
     """Greedily merge adjacent pieces up to chunk_size; recurse into
     fallback_separators for any individual piece that's still too large on
-    its own."""
+    its own. When recursing, try to merge whatever's accumulated in
+    `current` (often a short heading/tag) onto the front of the
+    recursion's first resulting chunk, so it never gets stranded as its
+    own content-free chunk."""
     results: List[str] = []
     current = ""
     for piece in pieces:
         candidate = current + piece
         if len(candidate) <= chunk_size:
             current = candidate
+        elif len(piece) > chunk_size:
+            sub = _recursive_split(piece, fallback_separators, chunk_size)
+            if current and sub and len(current + sub[0]) <= chunk_size:
+                sub[0] = current + sub[0]
+            elif current:
+                results.append(current)
+            results.extend(sub)
+            current = ""
         else:
             if current:
                 results.append(current)
-            if len(piece) > chunk_size:
-                results.extend(_recursive_split(piece, fallback_separators, chunk_size))
-                current = ""
-            else:
-                current = piece
+            current = piece
     if current:
         results.append(current)
     return results
@@ -178,7 +185,12 @@ def _apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> Li
     characters of the previous chunk, capped so no chunk ever exceeds
     chunk_size -- the piece's own content is never trimmed, only how much
     cross-boundary context gets borrowed shrinks (down to zero) when a piece
-    is already at or near chunk_size."""
+    is already at or near chunk_size.
+
+    Note: the borrowed prefix is a raw character slice, not separator-aware
+    -- it can land mid-word/mid-tag/mid-heading. Structure-aware splitting
+    (this module's main feature) applies to how chunks are cut, not to the
+    overlap glued onto their boundaries."""
     if chunk_overlap <= 0 or len(pieces) <= 1:
         return pieces
     result = [pieces[0]]
