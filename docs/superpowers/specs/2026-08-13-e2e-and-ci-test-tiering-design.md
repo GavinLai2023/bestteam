@@ -150,41 +150,49 @@ deploys and runs cleanly too.
 
 `fake-architect:` is deliberately **not** added to `DEFAULT_MODEL_CATALOG`
 (`db/model_catalog.py`), so it never appears in a real deployment's catalog.
-The current 4-stage wizard (Intent → Documents → Preview → Confirm → Deploy)
-has **no model-picker UI at all** — `components/ModelPicker.tsx` exists but
-is unused/dead in this flow. Every generation step (`IntentPage`'s
-Requirements call, `DocumentsPage`'s Specification/Solution call) instead
-calls `pickDefaultModel(entries)` (`lib/models.ts:6-10`) automatically,
-client-side: "the first catalog entry whose `spec` doesn't start with
-`fake:`, else the first entry, else `fake:ok`" — with zero user interaction.
-`db_session.py:41` auto-seeds the full `DEFAULT_MODEL_CATALOG` (including
-real provider specs like `openai:gpt-4o-mini`) into every fresh DB at
-backend startup via `seed_default_catalog()`.
+`IntentPage` and `DocumentsPage` have **no model-picker UI** for their
+generation steps (Stage 1→2's Requirements call, Stage 3's Specification
+call) — both call `pickDefaultModel(entries)` (`lib/models.ts:6-10`)
+automatically, client-side: "the first catalog entry whose `spec` doesn't
+start with `fake:`, else the first entry, else `fake:ok`" — with zero user
+interaction. `ConfirmPage`, however, *does* render a real `<select>`
+(`components/ModelPicker.tsx`, populated from `/api/model-catalog`) for its
+two optional actions — "Which assistant should your team use?" (Stage 4
+solution feedback, `ConfirmPage.tsx:150`) and "Which assistant should redo
+this?" (Requirements regeneration, `ConfirmPage.tsx:247`) — so a T4 scenario
+exercising those picks `fake-architect:e2e` from that dropdown by its
+`display_name`/`spec`, same as picking any other option. `db_session.py:41`
+auto-seeds the full `DEFAULT_MODEL_CATALOG` (including real provider specs
+like `openai:gpt-4o-mini`) into every fresh DB at backend startup via
+`seed_default_catalog()`.
 
-So the E2E fixture doesn't touch the wizard UI to pick a model at all — it
-reshapes the catalog before any wizard scenario runs, authenticated as the
-auto-provisioned `op` account: delete every auto-seeded entry whose `spec`
-does **not** start with `fake:` (via `DELETE /api/config/model-catalog/{spec}`),
-then `PUT /api/config/model-catalog/fake-architect:e2e` to add the new entry
-(same CRUD endpoints `docs/run_ui_tests.py`'s `T3-8` already exercises through
-the Advanced page, called directly here instead of through the browser).
-What's left is `fake:ok` (ignored by `pickDefaultModel`'s non-`fake:` filter)
-plus `fake-architect:e2e` (the only qualifying entry) — so every wizard
-generation step, at every stage, automatically resolves to the fake
-architect, and — because it's a full drop-in chat model, not just a
-structured-output stub — every subsequent test-run/deploy/production-run of
-the resulting team works too. This only touches that test session's own
-ephemeral DB; a real deployment's seed data is untouched.
+So the E2E fixture reshapes the catalog before any wizard scenario runs,
+authenticated as the auto-provisioned `op` account: delete every auto-seeded
+entry whose `spec` does **not** start with `fake:` (via
+`DELETE /api/config/model-catalog/{spec}`), then
+`PUT /api/config/model-catalog/fake-architect:e2e` to add the new entry with
+a friendly `display_name` (same CRUD endpoints `docs/run_ui_tests.py`'s
+`T3-8` already exercises through the Advanced page, called directly here
+instead of through the browser). What's left is `fake:ok` (ignored by
+`pickDefaultModel`'s non-`fake:` filter) plus `fake-architect:e2e` (the only
+qualifying entry, and the only non-`fake:ok` option in `ConfirmPage`'s
+dropdown) — so every automatic generation step resolves to the fake
+architect, and any scenario that explicitly opens the dropdown also has
+exactly one real choice to make. Because it's a full drop-in chat model, not
+just a structured-output stub, every subsequent test-run/deploy/
+production-run of the resulting team works too. This only touches that test
+session's own ephemeral DB; a real deployment's seed data is untouched.
 
 Two scenario tiers, both relying on the reshaped catalog:
 
 - **PR-gate scenario** (`e2e`, not `slow`): intent → generate → Preview →
-  Deploy → confirm the team appears in Monitor. Stops once deployed.
+  Deploy → confirm the team appears in Monitor. Stops once deployed; never
+  opens the Confirm-page dropdown.
 - **Full T4 scenarios** (`e2e` + `slow`, main-only): the 6 existing
-  currently-skipped scenarios (feedback/regeneration loop via revisiting
-  Documents after a specification exists, test-run before deploy,
-  validation-error recovery, etc.), un-skipped and driven against the fake
-  architect instead of requiring a real LLM key.
+  currently-skipped scenarios — including the Confirm-page feedback/
+  regeneration loop (picking `fake-architect:e2e` from `ModelPicker`),
+  test-run before deploy, validation-error recovery, etc. — un-skipped and
+  driven against the fake architect instead of requiring a real LLM key.
 
 ### 4. pytest markers
 
