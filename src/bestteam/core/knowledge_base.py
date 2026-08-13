@@ -121,21 +121,71 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         return "\n".join(lines)
 
 
-def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    """Split text into overlapping fixed-size chunks."""
+_DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
+
+def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
+    """Greedily merge adjacent pieces up to chunk_size; recurse into
+    fallback_separators for any individual piece that's still too large on
+    its own."""
+    results: List[str] = []
+    current = ""
+    for piece in pieces:
+        candidate = current + piece
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            if current:
+                results.append(current)
+            if len(piece) > chunk_size:
+                results.extend(_recursive_split(piece, fallback_separators, chunk_size))
+                current = ""
+            else:
+                current = piece
+    if current:
+        results.append(current)
+    return results
+
+
+def _recursive_split(text: str, separators: List[str], chunk_size: int) -> List[str]:
+    """Split text on the coarsest separator that fits chunk_size, recursing
+    into finer separators only for pieces that are still too large."""
+    if len(text) <= chunk_size:
+        return [text] if text else []
+    if not separators:
+        return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+    sep, *rest = separators
+    raw_pieces = text.split(sep) if sep else list(text)
+    # Re-attach the separator to every piece but the first, so a piece that
+    # ends up starting its own chunk still carries its own marker (e.g. a
+    # Markdown "## Heading" or an XML tag) instead of silently losing it.
+    pieces = [raw_pieces[0]] + [sep + p for p in raw_pieces[1:]]
+    return _pack_pieces(pieces, chunk_size, rest)
+
+
+def _apply_overlap(pieces: List[str], chunk_overlap: int) -> List[str]:
+    """Prepend each chunk (after the first) with the previous chunk's
+    trailing chunk_overlap characters, so retrieval keeps context across a
+    chunk boundary -- same intent as the old fixed-offset overlap, applied
+    between semantically-bounded chunks instead."""
+    if chunk_overlap <= 0 or len(pieces) <= 1:
+        return pieces
+    result = [pieces[0]]
+    for prev, piece in zip(pieces, pieces[1:]):
+        result.append(prev[-chunk_overlap:] + piece)
+    return result
+
+
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = "") -> List[str]:
+    """Split text into chunks, preferring the document's own structure
+    (paragraphs, sentences, words) over blind fixed-size character cuts."""
     text = text.strip()
     if not text:
         return []
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    step = chunk_size - chunk_overlap
-    while start < len(text):
-        chunks.append(text[start : start + chunk_size])
-        start += step
-    return chunks
+    pieces = _recursive_split(text, _DEFAULT_SEPARATORS, chunk_size)
+    pieces = [p for p in pieces if p.strip()]
+    return _apply_overlap(pieces, chunk_overlap)
 
 
 def _validate_chunk_params(name: str, chunk_size: int, chunk_overlap: int) -> None:
