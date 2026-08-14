@@ -538,7 +538,15 @@ def list_workflows(
     yaml_names = (
         {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
     )
-    return {"workflows": sorted(db_names | yaml_names)}
+    id_by_name = {
+        row.name: row.id
+        for row in db.query(WorkflowRecord.name, WorkflowRecord.id).filter(
+            WorkflowRecord.org_id == org.id,
+            WorkflowRecord.status == "deployed",
+            or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
+        )
+    }
+    return {"workflows": sorted(db_names | yaml_names), "workflow_ids": id_by_name}
 
 
 @app.get("/api/workflows/{name}/graph")

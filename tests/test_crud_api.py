@@ -1797,3 +1797,23 @@ def test_delete_workflow_allowed_with_only_revoked_share_link(client):
 
     resp = client.delete("/api/config/workflows/revoked_share_team?org=default")
     assert resp.status_code == 204
+
+
+def test_list_workflows_includes_workflow_ids(client):
+    with open_test_db() as db:
+        record = WorkflowRecord(
+            name="idtest", org_id=get_org_id(),
+            config={"name": "idtest", "agents": [], "teams": [], "workflow": {"steps": []}},
+            status="deployed",
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        expected_id = record.id
+
+    headers = _org_user_headers(client)
+    resp = client.get("/api/workflows", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "idtest" in body["workflows"]
+    assert body["workflow_ids"]["idtest"] == expected_id

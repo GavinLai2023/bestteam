@@ -215,7 +215,7 @@ export const api = {
     request<void>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
 
   // Monitoring
-  listWorkflows: () => request<{ workflows: string[] }>('/api/workflows'),
+  listWorkflows: () => request<{ workflows: string[]; workflow_ids?: Record<string, number> }>('/api/workflows'),
   workflowGraph: (name: string) => request<{ mermaid: string }>(`/api/workflows/${encodeURIComponent(name)}/graph`),
   createRun: (workflow: string, input: string) =>
     request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ workflow, input }) }),

@@ -6,6 +6,7 @@ import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
 import RunDetail from '../components/RunDetail'
 import RunsPager from '../components/RunsPager'
+import SharedSessionsPanel from '../components/SharedSessionsPanel'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -40,7 +41,7 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState<'automations' | 'runs'>('automations') // automations | runs
+  const [tab, setTab] = useState<'automations' | 'runs' | 'shared'>('automations') // automations | runs | shared
   const [workflows, setWorkflows] = useState<string[]>([])
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -49,6 +50,8 @@ export default function ActivityPage() {
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState({ total: 0, limit: 50 })
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
+  const [sharedWorkflowId, setSharedWorkflowId] = useState<number | null>(null)
+  const [workflowIds, setWorkflowIds] = useState<Record<string, number>>({})
   const hasRunningRun = runs.some((run) => run.status === 'running')
   const runDetailRef = useRef<HTMLElement>(null)
 
@@ -69,7 +72,10 @@ export default function ActivityPage() {
   useEffect(() => {
     api
       .listWorkflows()
-      .then((d) => setWorkflows(d.workflows))
+      .then((d) => {
+        setWorkflows(d.workflows)
+        setWorkflowIds(d.workflow_ids ?? {})
+      })
       .catch(() => {})
   }, [])
 
@@ -136,6 +142,9 @@ export default function ActivityPage() {
         <button type="button" className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
           Runs
         </button>
+        <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
+          Shared
+        </button>
       </div>
 
       {tab === 'automations' && (
@@ -168,6 +177,26 @@ export default function ActivityPage() {
             }}
           />
         </>
+      )}
+
+      {tab === 'shared' && (
+        <section className="activity-shared">
+          <label>
+            Team
+            <select
+              value={sharedWorkflowId ?? ''}
+              onChange={(e) => setSharedWorkflowId(e.target.value ? Number(e.target.value) : null)}
+            >
+              <option value="">Pick a team…</option>
+              {workflows.map((name) => (
+                <option key={name} value={workflowIds[name] ?? ''}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {sharedWorkflowId != null && <SharedSessionsPanel workflowId={sharedWorkflowId} />}
+        </section>
       )}
 
       {tab === 'runs' && (
