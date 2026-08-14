@@ -210,12 +210,14 @@ def get_share_messages(token: str, request: Request, db: Session = Depends(get_d
 
 
 def _link_and_org_active(engine, link_id: int) -> bool:
-    """Fresh re-check used before delivering every WS event -- a revoke or
-    org deactivation mid-stream must stop delivery immediately (mirrors
-    main.py::stream_run's own per-event `_stream_access` re-check)."""
+    """Fresh re-check of link active/expiry/org-active state -- used both at
+    WS connect and before delivering every event, so a revoke, expiry, or
+    org deactivation (whether it already happened before connect or occurs
+    mid-stream) stops delivery immediately (mirrors main.py::stream_run's
+    own per-event `_stream_access` re-check)."""
     with Session(engine) as check_db:
         link = check_db.get(ShareLink, link_id)
-        if link is None or not link.active:
+        if link is None or not link.active or _is_expired(link):
             return False
         org = check_db.get(Organization, link.org_id)
         return org is not None and org.active
@@ -245,6 +247,7 @@ async def stream_share_run(
         and run_row is not None
         and run_row.trigger_context is not None
         and run_row.trigger_context.get("share_session_id") == session.id
+        and _link_and_org_active(engine, link.id)
     )
     run = registry.get(run_id)
     if not authorized or run is None:

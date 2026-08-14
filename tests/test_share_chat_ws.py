@@ -1,6 +1,8 @@
 """Tests for the share-chat WebSocket stream (/api/share/{token}/stream/{run_id})
 -- cookie-authenticated, no ticket (contrast tests/test_ws_stream.py)."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -14,9 +16,12 @@ from ui.backend import main as backend_main
 from ui.backend import runtime
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import Run, WorkflowRecord
-from ui.backend.db.share_links import create_share_link
+from ui.backend.db.orgs import set_org_active
+from ui.backend.db.share_links import create_share_link, get_share_link_by_token, patch_share_link
+from ui.backend.db.share_sessions import create_share_session
 from ui.backend.db.users import create_user
 from ui.backend.db_session import get_db
+from ui.backend.share_auth import COOKIE_NAME, sign_session_token
 
 _TEAM_CONFIG = {
     "name": "greeter",
@@ -94,3 +99,85 @@ def test_stream_rejects_a_run_id_belonging_to_another_session(client):
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(f"/api/share/{token}/stream/{run_id_b}") as ws:
             ws.receive_json()
+
+
+def _session_and_run(client, token):
+    """Create a ShareSession directly (not via the real POST /messages flow,
+    so the run's events can be driven manually/deterministically) and a
+    matching Run/registry entry, and set the session cookie on `client`.
+    Returns (link, run_id)."""
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, token)
+        session = create_share_session(db, link.id)
+        run = runtime.registry.create("greeter", "hi", org_id=link.org_id, username="share-link")
+        db.add(
+            Run(
+                id=run.id,
+                workflow="greeter",
+                input="hi",
+                org_id=link.org_id,
+                username="share-link",
+                trigger_context={
+                    "share_link_id": link.id,
+                    "share_session_id": session.id,
+                    "turn_number": 1,
+                },
+            )
+        )
+        db.commit()
+    client.cookies.set(COOKIE_NAME, sign_session_token(session.session_token))
+    return link, run.id
+
+
+def test_stream_closes_when_org_deactivated_midstream(client):
+    token = _make_link()
+    link, run_id = _session_and_run(client, token)
+
+    runtime.registry.publish(
+        run_id, {"type": "agent_completed", "workflow": "greeter", "agent": "a", "data": "x", "usage": []}
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
+            assert ws.receive_json()["type"] == "agent_completed"
+            with open_test_db() as db:
+                set_org_active(db, "default", False)
+            runtime.registry.publish(
+                run_id, {"type": "run_completed", "workflow": "greeter", "agent": None, "data": "done", "usage": []}
+            )
+            ws.receive_json()  # revalidation must close before delivering this
+    assert exc.value.code == 4404
+
+
+def test_stream_closes_when_link_revoked_midstream(client):
+    token = _make_link()
+    link, run_id = _session_and_run(client, token)
+
+    runtime.registry.publish(
+        run_id, {"type": "agent_completed", "workflow": "greeter", "agent": "a", "data": "x", "usage": []}
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
+            assert ws.receive_json()["type"] == "agent_completed"
+            with open_test_db() as db:
+                patch_share_link(db, get_share_link_by_token(db, token), active=False)
+            runtime.registry.publish(
+                run_id, {"type": "run_completed", "workflow": "greeter", "agent": None, "data": "done", "usage": []}
+            )
+            ws.receive_json()  # revalidation must close before delivering this
+    assert exc.value.code == 4404
+
+
+def test_stream_rejects_connect_to_an_already_expired_link(client):
+    token = _make_link()
+    link, run_id = _session_and_run(client, token)
+    with open_test_db() as db:
+        patch_share_link(
+            db, get_share_link_by_token(db, token), expires_at=datetime.now(timezone.utc) - timedelta(days=1)
+        )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
+            ws.receive_json()
+    assert exc.value.code == 4404
