@@ -19,6 +19,14 @@ export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelP
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    // Reset stale state left over from the previous `workflowId` -- this
+    // component isn't remounted on a team-switch (no `key` from
+    // ActivityPage.tsx), so without this an open transcript or error banner
+    // from the old team would otherwise keep showing, now silently
+    // mislabeled as if it belonged to the newly-selected team.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset transcript/error on workflow change
+    setTranscript(null)
+    setError(null)
     api
       .listShareLinks(workflowId)
       .then(async (fetchedLinks) => {

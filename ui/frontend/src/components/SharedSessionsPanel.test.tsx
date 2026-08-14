@@ -38,4 +38,25 @@ describe('SharedSessionsPanel', () => {
     fireEvent.click(await screen.findByText(/view/i))
     await waitFor(() => expect(screen.getByText('hello!')).toBeInTheDocument())
   })
+
+  it('closes an open transcript when the workflow changes, instead of mislabeling it as the new team', async () => {
+    mockedApi.getShareSessionMessages.mockResolvedValue([
+      { role: 'user', content: 'hi', turn_number: 1 },
+      { role: 'assistant', content: 'hello!', turn_number: 2 },
+    ])
+    const { rerender } = render(<SharedSessionsPanel workflowId={5} />)
+    fireEvent.click(await screen.findByText(/view/i))
+    await waitFor(() => expect(screen.getByText('hello!')).toBeInTheDocument())
+
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 2, workflow_id: 6, token: 'tok2', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+    ])
+    mockedApi.listShareSessions.mockResolvedValue([
+      { id: 10, created_at: '2026-08-14T00:00:00+00:00', last_active_at: '2026-08-14T02:00:00+00:00', turns_today: 7 },
+    ])
+    rerender(<SharedSessionsPanel workflowId={6} />)
+
+    expect(screen.queryByText('hello!')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/7/)).toBeInTheDocument())
+  })
 })
