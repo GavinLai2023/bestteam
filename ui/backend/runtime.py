@@ -24,6 +24,7 @@ from .automation_results import RESULT_TYPE_BATCH_MARKER, normalize_run_result
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
+from .share_transcript import record_share_reply
 
 _logger = logging.getLogger(__name__)
 
@@ -328,6 +329,16 @@ def run_in_background(
                 raw_output_override=raw_output_override,
             )
 
+    def _maybe_record_share_reply(output: Optional[str]) -> None:
+        # Share-chat turns (share_chat.py) are regular runs stamped with
+        # trigger_context["share_session_id"] -- append the assistant's
+        # reply (or record_share_reply's own friendly fallback) so the
+        # visitor's chat page sees an answer and share_chat.py's
+        # "last message is unanswered" guard never wedges the session shut.
+        # No-op for every other run (see record_share_reply's own guard).
+        if run_row is not None:
+            record_share_reply(db, run_row, output)
+
     try:
         if db is not None:
             # Persist the run up front so usage_records/trace_events foreign
@@ -388,6 +399,7 @@ def run_in_background(
                 run_row.output = cancelled.data
                 db.commit()
                 _maybe_normalize()
+                _maybe_record_share_reply("This conversation was stopped before a reply was ready.")
             registry.publish(run_id, dataclasses.asdict(cancelled))
             if db is not None:
                 _safe_record_trace_event(db, run_id=run_id, seq=seq, event=cancelled)
@@ -469,6 +481,9 @@ def run_in_background(
                         # never race ahead of these rows.
                         db.commit()
                         _maybe_normalize(raw_run_completed_output)
+                        _maybe_record_share_reply(
+                            run_row.output if event.type == "run_completed" else None
+                        )
                     terminal_seen = True
                 registry.publish(run_id, payload)
                 if db is not None:
@@ -579,6 +594,7 @@ def run_in_background(
                     # synthetic error rows spec 10.1 requires (Codex review
                     # finding).
                     _maybe_normalize()
+                    _maybe_record_share_reply(None)
                 except Exception:  # noqa: BLE001
                     _logger.warning("Could not persist failed status for run %s", run_id)
             registry.publish(run_id, dataclasses.asdict(failed_event))
