@@ -271,3 +271,12 @@ def test_undeployed_team_404_matches_revoked_link_404(client):
     assert revoked_resp.status_code == 404
 
     assert undeployed_resp.json() == revoked_resp.json()
+
+
+def test_cors_allows_credentials():
+    from ui.backend.main import app
+
+    cors_middleware = next(
+        m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"
+    )
+    assert cors_middleware.kwargs.get("allow_credentials") is True
