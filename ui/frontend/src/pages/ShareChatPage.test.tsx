@@ -17,12 +17,16 @@ const mockedApi = vi.mocked(shareChatApi)
 class FakeWebSocket {
   static instances: FakeWebSocket[] = []
   onmessage?: (event: { data: string }) => void
+  onclose?: () => void
   constructor(public url: string) {
     FakeWebSocket.instances.push(this)
   }
   close() {}
   emit(event: unknown) {
     this.onmessage?.({ data: JSON.stringify(event) })
+  }
+  triggerClose() {
+    this.onclose?.()
   }
 }
 
@@ -81,5 +85,56 @@ describe('ShareChatPage', () => {
     mockedApi.getMessages.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
     renderPage()
     expect(await screen.findByText(/no longer available/i)).toBeInTheDocument()
+  })
+
+  it('recovers when the websocket closes without ever sending a terminal event', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalled())
+    expect(await screen.findByText(/sending your message|working on/i)).toBeInTheDocument()
+
+    const ws = FakeWebSocket.instances.at(-1)!
+    await act(async () => {
+      ws.triggerClose()
+    })
+
+    // The "working on it" status must clear, a recoverable message must
+    // appear, and the visitor must be able to try again without reloading.
+    // (Anchored so it doesn't also match the recovery notice's own text,
+    // which itself contains the phrase "sending your message".)
+    expect(screen.queryByText(/^(sending your message|working on)/i)).not.toBeInTheDocument()
+    expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
+  })
+
+  it('shows a friendly error and re-enables the form when sendMessage fails for a reason other than 429/404', async () => {
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/something went wrong sending your message/i)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
+  })
+
+  it('shows the backend message and re-enables the form on a 409 (already-pending turn)', async () => {
+    mockedApi.sendMessage.mockRejectedValue(
+      Object.assign(new Error('Please wait for the previous reply to finish.'), { status: 409 }),
+    )
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/please wait for the previous reply to finish/i)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
   })
 })
