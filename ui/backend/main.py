@@ -48,6 +48,7 @@ from .memory_api import router as memory_router
 from .org_knowledge_bases import router as org_knowledge_bases_router
 from .org_settings import router as org_settings_router
 from .run_analytics_api import router as run_analytics_router
+from .share_chat import router as share_chat_router
 from .share_links_api import router as share_links_router
 from .db.models import (
     KnowledgeBaseRecord,
@@ -278,6 +279,7 @@ app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
 app.include_router(run_analytics_router)
 app.include_router(share_links_router)
+app.include_router(share_chat_router)
 
 logger = logging.getLogger("bestteam.api")
 
