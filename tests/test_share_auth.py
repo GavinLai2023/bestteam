@@ -1,0 +1,26 @@
+"""Tests for the anonymous share-session signed cookie (share_auth.py) --
+deliberately separate from auth.py's JWT bearer tokens."""
+
+from ui.backend.share_auth import sign_session_token, verify_cookie_value
+
+
+def test_sign_then_verify_round_trips():
+    signed = sign_session_token("abc123")
+    assert verify_cookie_value(signed) == "abc123"
+
+
+def test_verify_rejects_tampered_token():
+    signed = sign_session_token("abc123")
+    tampered = signed.replace("abc123", "xyz999")
+    assert verify_cookie_value(tampered) is None
+
+
+def test_verify_rejects_tampered_signature():
+    signed = sign_session_token("abc123")
+    token_part, _sig = signed.rsplit(".", 1)
+    assert verify_cookie_value(f"{token_part}.notarealsignature") is None
+
+
+def test_verify_rejects_malformed_value():
+    assert verify_cookie_value("no-dot-separator") is None
+    assert verify_cookie_value("") is None
