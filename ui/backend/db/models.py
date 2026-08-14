@@ -496,3 +496,70 @@ class ModelCatalogEntry(Base):
     output_price_per_1k: Mapped[float] = mapped_column(default=0.0)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class ShareLink(Base):
+    """A shareable, revocable entry point letting anonymous colleagues chat
+    with one deployed team without a real account.
+
+    Visitor identity is a per-browser ShareSession, never a `users` row --
+    this exists specifically so sharing a team doesn't require lifting the
+    one-member-per-org constraint (docs/DECISIONS.md). See
+    docs/superpowers/specs/2026-08-14-team-sharing-continuous-chat-design.md.
+    """
+
+    __tablename__ = "share_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"), nullable=False)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    token: Mapped[str] = mapped_column(unique=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    active: Mapped[bool] = mapped_column(default=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    daily_cap: Mapped[int] = mapped_column(default=30)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class ShareSession(Base):
+    """One anonymous visitor's browser against one ShareLink.
+
+    Cookie-identified (`session_token`, embedded in a signed cookie by
+    `ui/backend/share_auth.py`) -- never cross-visible to another session on
+    the same link. `turns_today`/`turns_date` is the daily rate-limit CAS,
+    same shape as `EmailTrigger.runs_today`/`runs_date`.
+    """
+
+    __tablename__ = "share_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    share_link_id: Mapped[int] = mapped_column(ForeignKey("share_links.id"), nullable=False)
+    session_token: Mapped[str] = mapped_column(unique=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    turns_today: Mapped[int] = mapped_column(default=0)
+    turns_date: Mapped[Optional[str]] = mapped_column(nullable=True)
+
+
+class ShareMessage(Base):
+    """One turn of a ShareSession's human-readable transcript.
+
+    Deliberately separate from the replay-formatted text actually sent as a
+    Run's `input` (see `ui/backend/share_chat.py`) -- this is the clean chat
+    log the visitor UI and the org's audit view render. `run_id` links a
+    turn to the Run that produced it (metering/trace/cancellation all reuse
+    the existing `runs` machinery unchanged).
+    """
+
+    __tablename__ = "share_messages"
+    __table_args__ = (
+        UniqueConstraint("share_session_id", "turn_number", name="uq_share_messages_session_turn"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    share_session_id: Mapped[int] = mapped_column(ForeignKey("share_sessions.id"), nullable=False)
+    turn_number: Mapped[int]
+    role: Mapped[str]  # "user" | "assistant"
+    content: Mapped[str]
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

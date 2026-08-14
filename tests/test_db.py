@@ -51,6 +51,9 @@ def test_init_db_creates_all_tables():
         "usage_records",
         "org_email_credentials",
         "automation_item_results",
+        "share_links",
+        "share_sessions",
+        "share_messages",
     }
 
 
@@ -210,3 +213,14 @@ def test_skill_record_round_trip(db_session):
     fetched = db_session.query(SkillRecord).filter_by(name="research_skill").one()
     assert fetched.config["instructions"] == "Use web_search."
     assert fetched.config["tools"] == ["web_search"]
+
+
+def test_share_tables_exist():
+    from sqlalchemy import inspect
+
+    from ui.backend.db import init_db, make_engine
+
+    engine = make_engine(":memory:")
+    init_db(engine)
+    tables = set(inspect(engine).get_table_names())
+    assert {"share_links", "share_sessions", "share_messages"} <= tables
