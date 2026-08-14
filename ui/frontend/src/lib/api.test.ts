@@ -73,3 +73,93 @@ describe('automationResultsSummary', () => {
     expect(params.get('tz_offset_minutes')).toBe('-600')
   })
 })
+
+describe('share links (org self-service)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.restoreAllMocks()
+  })
+
+  it('createShareLink posts to the workflow share-links endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        id: 1,
+        workflow_id: 5,
+        token: 'tok',
+        active: true,
+        daily_cap: 30,
+        expires_at: null,
+        created_at: '2026-08-14T00:00:00+00:00',
+      }),
+    })
+    globalThis.fetch = fetchMock
+
+    const result = await api.createShareLink(5, { daily_cap: 30 })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/workflows/5/share-links'),
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ daily_cap: 30 }) }),
+    )
+    expect(result.token).toBe('tok')
+  })
+
+  it('listShareLinks gets the workflow share-links endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] })
+    globalThis.fetch = fetchMock
+
+    await api.listShareLinks(5)
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/workflows/5/share-links'), expect.anything())
+  })
+
+  it('patchShareLink sends a PATCH to the share-link endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 1,
+        workflow_id: 5,
+        token: 'tok',
+        active: false,
+        daily_cap: 30,
+        expires_at: null,
+        created_at: '2026-08-14T00:00:00+00:00',
+      }),
+    })
+    globalThis.fetch = fetchMock
+
+    const result = await api.patchShareLink(1, { active: false })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/share-links/1'),
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ active: false }) }),
+    )
+    expect(result.active).toBe(false)
+  })
+
+  it('listShareSessions gets the share-link sessions endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] })
+    globalThis.fetch = fetchMock
+
+    await api.listShareSessions(1)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/share-links/1/sessions'),
+      expect.anything(),
+    )
+  })
+
+  it('getShareSessionMessages gets the share-link session messages endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] })
+    globalThis.fetch = fetchMock
+
+    await api.getShareSessionMessages(1, 9)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/share-links/1/sessions/9/messages'),
+      expect.anything(),
+    )
+  })
+})

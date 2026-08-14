@@ -222,3 +222,27 @@ export interface MemoryRecord {
 // point — it's a generic editor over whatever config shape the backend
 // accepts, not a form with known fields.
 export type ConfigItem = Record<string, unknown>
+
+export interface ShareLink {
+  id: number
+  workflow_id: number
+  token: string
+  active: boolean
+  daily_cap: number
+  expires_at: string | null
+  created_at: string
+}
+
+export interface ShareSessionSummary {
+  id: number
+  created_at: string
+  last_active_at: string
+  turns_today: number
+}
+
+export interface ShareMessage {
+  role: 'user' | 'assistant'
+  content: string
+  turn_number: number
+  created_at?: string
+}

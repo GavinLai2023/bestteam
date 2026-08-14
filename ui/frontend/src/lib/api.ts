@@ -1,7 +1,8 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
-  Requirements, UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
+  Requirements, ShareLink, ShareMessage, ShareSessionSummary, UsageRecord, WorkflowAnalyticsDetail,
+  WorkflowAnalyticsSummary,
 } from './types'
 
 export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
@@ -352,6 +353,26 @@ export const api = {
   testOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
     request<{ ok: boolean; error?: string }>('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
   clearOrgEmail: () => request<void>('/api/org/email', { method: 'DELETE' }),
+
+  // Org self-service: share a deployed team with colleagues via a
+  // revocable, anonymous link (see docs/superpowers/specs/
+  // 2026-08-14-team-sharing-continuous-chat-design.md).
+  createShareLink: (workflowId: number, payload: { daily_cap?: number; expires_at?: string | null }) =>
+    request<ShareLink>(`/api/workflows/${workflowId}/share-links`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  listShareLinks: (workflowId: number) =>
+    request<ShareLink[]>(`/api/workflows/${workflowId}/share-links`),
+  patchShareLink: (
+    linkId: number,
+    payload: { active?: boolean; daily_cap?: number; expires_at?: string | null; clear_expiry?: boolean },
+  ) =>
+    request<ShareLink>(`/api/share-links/${linkId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  listShareSessions: (linkId: number) =>
+    request<ShareSessionSummary[]>(`/api/share-links/${linkId}/sessions`),
+  getShareSessionMessages: (linkId: number, sessionId: number) =>
+    request<ShareMessage[]>(`/api/share-links/${linkId}/sessions/${sessionId}/messages`),
 
   // Autonomous email trigger: org-level "run on new mail" opt-in + activity.
   getEmailTrigger: () => request<EmailTrigger>('/api/org/email-trigger'),
