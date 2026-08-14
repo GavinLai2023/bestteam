@@ -15,6 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -103,18 +104,30 @@ def send_share_message(
 
     if _has_pending_turn(db, session):
         raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
-    if not try_consume_turn(db, session, link.daily_cap):
-        raise HTTPException(
-            status_code=429, detail="Today's message limit has been reached -- try again tomorrow."
-        )
 
+    # Resolved before try_consume_turn (below) deliberately: it's a
+    # read-only lookup with no side effects, so checking the team is
+    # actually usable first means a 404 here never burns a daily-cap turn
+    # for a message that was never persisted and no run that was ever
+    # created (controller-ruled fix, Task 8 review finding 1a).
     workflow_record = (
         db.query(WorkflowRecord)
         .filter_by(id=link.workflow_id, org_id=link.org_id, status="deployed")
         .one_or_none()
     )
     if workflow_record is None:
-        raise HTTPException(status_code=404, detail="This team is temporarily unavailable.")
+        # Same detail text as _resolve_active_link's failures -- a
+        # distinguishable message here would let a prober tell "real,
+        # active link whose team just isn't deployed" apart from
+        # "fake/revoked/expired/org-deactivated", breaking the project's
+        # single-404-message convention for invalid/unusable access
+        # (controller-ruled fix, Task 8 review finding 2).
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+
+    if not try_consume_turn(db, session, link.daily_cap):
+        raise HTTPException(
+            status_code=429, detail="Today's message limit has been reached -- try again tomorrow."
+        )
 
     from .main import _resolve_workflow_and_version  # local import: main.py imports this router
 
@@ -133,6 +146,16 @@ def send_share_message(
         # the narrower race between next_turn_number's read and this insert
         # that guard doesn't fully close.
         db.rollback()
+        # Refund the cap turn try_consume_turn already claimed above: the
+        # losing request's message was never persisted and no run was ever
+        # created for it, so it must not cost the visitor a turn against
+        # their daily cap (controller-ruled fix, Task 8 review finding 1b).
+        db.execute(
+            update(ShareSession)
+            .where(ShareSession.id == session.id, ShareSession.turns_today > 0)
+            .values(turns_today=ShareSession.turns_today - 1)
+        )
+        db.commit()
         raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
 
     history = list_messages(db, session.id)[-(MAX_HISTORY_TURNS * 2):]

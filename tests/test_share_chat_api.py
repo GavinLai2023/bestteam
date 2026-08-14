@@ -192,3 +192,82 @@ def test_send_message_returns_409_when_turn_number_collides(client, monkeypatch)
     resp = client.post(f"/api/share/{token}/messages", json={"content": "colliding turn"})
     assert resp.status_code == 409
     assert resp.json()["detail"] == share_chat_module._PENDING_TURN_MESSAGE
+
+
+def test_turn_collision_refunds_the_daily_cap_turn(client, monkeypatch):
+    """The losing request in the IntegrityError race must not cost the
+    visitor a turn against their daily cap: its message was never persisted
+    and no run was ever created for it (Task 8 review finding 1b). Forces the
+    same collision as `test_send_message_returns_409_when_turn_number_collides`
+    and asserts `turns_today` afterward equals what it was immediately before
+    the colliding request -- not just that a 409 came back.
+    """
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.models import ShareSession
+    from ui.backend.db.share_links import get_share_link_by_token
+    from ui.backend.db.share_messages import append_message
+    from ui.backend.db.share_sessions import create_share_session
+
+    token, _ = _make_link()
+
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, token)
+        session = create_share_session(db, link.id)
+        append_message(db, session.id, turn_number=1, role="user", content="already here")
+        session_token = session.session_token
+        session_id = session.id
+
+    monkeypatch.setattr(share_chat_module, "next_turn_number", lambda db, session_id: 1)
+    monkeypatch.setattr(share_chat_module, "_has_pending_turn", lambda db, session: False)
+
+    client.cookies.set(
+        "bestteam_share_session",
+        share_chat_module.sign_session_token(session_token),
+    )
+
+    with open_test_db() as db:
+        turns_before = db.query(ShareSession).filter_by(id=session_id).one().turns_today
+
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "colliding turn"})
+    assert resp.status_code == 409
+
+    with open_test_db() as db:
+        turns_after = db.query(ShareSession).filter_by(id=session_id).one().turns_today
+
+    assert turns_after == turns_before
+
+
+def test_undeployed_team_404_matches_revoked_link_404(client):
+    """A workflow-not-deployed 404 must be indistinguishable from every other
+    "can't use this link" 404 (Task 8 review finding 2) -- a differing detail
+    string would let a prober tell "real, active link whose team just isn't
+    deployed" apart from "fake/revoked/expired/org-deactivated".
+    """
+    from ui.backend.db.share_links import create_share_link, get_share_link_by_token
+
+    undeployed_token, _ = _make_link()
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, undeployed_token)
+        team = db.query(WorkflowRecord).filter_by(id=link.workflow_id).one()
+        team.status = "draft"
+        db.commit()
+
+    undeployed_resp = client.post(f"/api/share/{undeployed_token}/messages", json={"content": "hi"})
+    assert undeployed_resp.status_code == 404
+
+    # Reuse the same org/user/team to mint a second, independent link that we
+    # revoke -- _make_link can't be called twice in one test (it provisions a
+    # fixed "owner" username, globally unique).
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, undeployed_token)
+        revoked_link = create_share_link(
+            db, workflow_id=link.workflow_id, org_id=link.org_id, created_by=link.created_by
+        )
+        revoked_token = revoked_link.token
+        patch_share_link(db, revoked_link, active=False)
+
+    other_client = TestClient(backend_main.app)
+    revoked_resp = other_client.post(f"/api/share/{revoked_token}/messages", json={"content": "hi"})
+    assert revoked_resp.status_code == 404
+
+    assert undeployed_resp.json() == revoked_resp.json()
