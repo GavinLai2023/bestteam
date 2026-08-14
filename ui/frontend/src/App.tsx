@@ -15,6 +15,7 @@ import PreviewPage from './pages/wizard/PreviewPage'
 import ConfirmPage from './pages/wizard/ConfirmPage'
 import DeployPage from './pages/wizard/DeployPage'
 import SessionsPage from './pages/wizard/SessionsPage'
+import ShareChatPage from './pages/ShareChatPage'
 import { useMe } from './lib/useMe'
 
 function RequireAuth() {
@@ -43,6 +44,7 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/share/:token" element={<ShareChatPage />} />
 
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
