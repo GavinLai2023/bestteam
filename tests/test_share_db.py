@@ -180,3 +180,34 @@ def test_try_consume_turn_resets_on_new_day(db, monkeypatch):
 
     monkeypatch.setattr(share_sessions_module, "_today", lambda: "2026-08-15")
     assert try_consume_turn(db, session, daily_cap=1) is True
+
+
+from ui.backend.db.share_messages import append_message, list_messages, next_turn_number
+
+
+def test_next_turn_number_starts_at_one(db):
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+    session = create_share_session(db, link.id)
+
+    assert next_turn_number(db, session.id) == 1
+
+
+def test_append_and_list_messages_in_turn_order(db):
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+    session = create_share_session(db, link.id)
+
+    append_message(db, session.id, turn_number=1, role="user", content="hi")
+    assert next_turn_number(db, session.id) == 2
+    append_message(db, session.id, turn_number=2, role="assistant", content="hello", run_id=None)
+
+    messages = list_messages(db, session.id)
+    assert [(m.turn_number, m.role, m.content) for m in messages] == [
+        (1, "user", "hi"),
+        (2, "assistant", "hello"),
+    ]
