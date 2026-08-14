@@ -14,7 +14,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from .models import ShareSession
@@ -48,19 +48,22 @@ def list_share_sessions(db: Session, share_link_id: int) -> List[ShareSession]:
 def try_consume_turn(db: Session, session: ShareSession, daily_cap: int) -> bool:
     """Atomically claim one turn against today's cap. Returns True if granted.
 
-    Resets the counter first if the stored date has rolled over, then does a
-    single conditional UPDATE so two near-simultaneous sends from the same
-    session can't both slip through under the cap.
+    Resets the counter first if the stored date has rolled over using a guarded
+    UPDATE (no Python-level read-check-then-write race), then does a single
+    conditional UPDATE so two near-simultaneous sends from the same session
+    can't both slip through under the cap.
     """
     today = _today()
-    if session.turns_date != today:
-        db.execute(
-            update(ShareSession)
-            .where(ShareSession.id == session.id)
-            .values(turns_today=0, turns_date=today)
+    db.execute(
+        update(ShareSession)
+        .where(
+            ShareSession.id == session.id,
+            or_(ShareSession.turns_date.is_(None), ShareSession.turns_date != today),
         )
-        db.commit()
-        db.refresh(session)
+        .values(turns_today=0, turns_date=today)
+    )
+    db.commit()
+    db.refresh(session)
     advanced = db.execute(
         update(ShareSession)
         .where(ShareSession.id == session.id, ShareSession.turns_today < daily_cap)
