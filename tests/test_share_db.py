@@ -117,3 +117,66 @@ def test_count_active_share_links(db):
     assert count_active_share_links(db, team.id) == 2
     patch_share_link(db, a, active=False)
     assert count_active_share_links(db, team.id) == 1
+
+
+from ui.backend.db.share_sessions import (
+    create_share_session,
+    get_share_session_by_token,
+    list_share_sessions,
+    try_consume_turn,
+)
+
+
+def test_create_and_get_share_session(db):
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+
+    session = create_share_session(db, link.id)
+    assert session.turns_today == 0
+    fetched = get_share_session_by_token(db, session.session_token)
+    assert fetched.id == session.id
+
+
+def test_list_share_sessions_newest_active_first(db):
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+    first = create_share_session(db, link.id)
+    second = create_share_session(db, link.id)
+
+    sessions = list_share_sessions(db, link.id)
+    assert [s.id for s in sessions] == [second.id, first.id]
+
+
+def test_try_consume_turn_respects_daily_cap(db):
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+    session = create_share_session(db, link.id)
+
+    assert try_consume_turn(db, session, daily_cap=2) is True
+    assert try_consume_turn(db, session, daily_cap=2) is True
+    assert try_consume_turn(db, session, daily_cap=2) is False
+    db.refresh(session)
+    assert session.turns_today == 2
+
+
+def test_try_consume_turn_resets_on_new_day(db, monkeypatch):
+    import ui.backend.db.share_sessions as share_sessions_module
+
+    org = get_or_create_org(db, "acme")
+    user = create_user(db, "owner", "pw", org_id=org.id)
+    team = _deployed_team(db, org.id)
+    link = create_share_link(db, workflow_id=team.id, org_id=org.id, created_by=user.id)
+    session = create_share_session(db, link.id)
+
+    monkeypatch.setattr(share_sessions_module, "_today", lambda: "2026-08-14")
+    assert try_consume_turn(db, session, daily_cap=1) is True
+    assert try_consume_turn(db, session, daily_cap=1) is False
+
+    monkeypatch.setattr(share_sessions_module, "_today", lambda: "2026-08-15")
+    assert try_consume_turn(db, session, daily_cap=1) is True
