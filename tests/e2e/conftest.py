@@ -6,6 +6,7 @@ docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md."""
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -55,10 +56,42 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
         proc.terminate()
 
 
-def _wait_healthy(url: str, timeout: float = 30.0) -> None:
+def _assert_port_free(host: str, port: int) -> None:
+    """Raise a clear error if something is already listening on host:port.
+
+    A successful connect means a real process -- possibly a developer's own
+    dev stack, started per the local workflow documented in the root
+    CLAUDE.md, which uses these same ports -- is already bound there.
+    Spawning our own server on top of it wouldn't fail: `_wait_healthy`
+    would silently attach to that pre-existing process instead of ours,
+    and this fixture would go on to destructively reshape its real model
+    catalog and mutate its real database."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    try:
+        in_use = sock.connect_ex((host, port)) == 0
+    finally:
+        sock.close()
+    if in_use:
+        raise RuntimeError(
+            f"Port {port} on {host} is already in use -- refusing to start "
+            "the E2E backend/frontend on top of a possibly-running dev "
+            "stack. Stop whatever is listening on "
+            f"{host}:{port} (e.g. your own `uvicorn`/`npm run dev`) and "
+            "re-run the E2E suite."
+        )
+
+
+def _wait_healthy(url: str, proc: subprocess.Popen, log_path: Path, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            log_text = log_path.read_text(errors="replace") if log_path.exists() else "<no log captured>"
+            raise RuntimeError(
+                f"process for {url} exited early (code {proc.returncode}) "
+                f"before becoming healthy -- output:\n{log_text}"
+            )
         try:
             urllib.request.urlopen(url, timeout=2).read()
             return
@@ -120,6 +153,9 @@ def _reshape_model_catalog() -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def e2e_backend():
+    _assert_port_free("127.0.0.1", 8000)
+    _assert_port_free("localhost", 5173)
+
     tmp_dir = tempfile.mkdtemp(prefix="bestteam_e2e_")
     db_path = str(Path(tmp_dir) / "e2e.db")
     secret = "e2e-test-secret-" + secrets.token_hex(16)
@@ -133,27 +169,50 @@ def e2e_backend():
         "BESTTEAM_DB_PATH": db_path,
         "BESTTEAM_SECRET_KEY": secret,
         "BESTTEAM_DEMO_WORKFLOWS": "1",
+        # Neutralize every BESTTEAM_* var that could otherwise route this
+        # supposedly $0, side-effect-free E2E run at a real external
+        # service or a real persistent store outside tmp_dir, regardless
+        # of what's already set in the invoking developer's shell.
+        "BESTTEAM_MEMORY_DB": "",
+        "BESTTEAM_MEMORY_MODEL": "",
+        "BESTTEAM_MEMORY_EMBEDDING_MODEL": "",
+        "BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL": "",
+        "BESTTEAM_MEMORY_RERANK_MODEL": "",
+        "BESTTEAM_EMAIL_BACKEND": "",
     }
 
-    backend = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "ui.backend.main:app", "--port", "8000", "--host", "127.0.0.1"],
-        cwd=str(REPO_ROOT), env=env,
-    )
     npm = shutil.which("npm")
     assert npm is not None, "npm not found on PATH -- required to start the frontend dev server"
-    frontend = subprocess.Popen(
-        [npm, "run", "dev", "--", "--port", "5173"],
-        cwd=str(REPO_ROOT / "ui" / "frontend"), env=env,
-    )
+
+    backend_log = Path(tmp_dir) / "backend.log"
+    frontend_log = Path(tmp_dir) / "frontend.log"
+    backend = None
+    frontend = None
 
     try:
-        _wait_healthy(f"{API_URL}/api/health")
-        _wait_healthy(BASE_URL)
+        with open(backend_log, "w") as f:
+            backend = subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "ui.backend.main:app", "--port", "8000", "--host", "127.0.0.1"],
+                cwd=str(REPO_ROOT), env=env, stdout=f, stderr=subprocess.STDOUT,
+            )
+        with open(frontend_log, "w") as f:
+            frontend = subprocess.Popen(
+                # --strictPort: fail instead of silently auto-incrementing
+                # to 5174 if 5173 is taken, which would leave BASE_URL
+                # pointing at the wrong server.
+                [npm, "run", "dev", "--", "--port", "5173", "--strictPort"],
+                cwd=str(REPO_ROOT / "ui" / "frontend"), env=env, stdout=f, stderr=subprocess.STDOUT,
+            )
+
+        _wait_healthy(f"{API_URL}/api/health", backend, backend_log)
+        _wait_healthy(BASE_URL, frontend, frontend_log)
         _reshape_model_catalog()
         yield
     finally:
-        _kill_process_tree(backend)
-        _kill_process_tree(frontend)
-        backend.wait(timeout=10)
-        frontend.wait(timeout=10)
+        if backend is not None:
+            _kill_process_tree(backend)
+            backend.wait(timeout=10)
+        if frontend is not None:
+            _kill_process_tree(frontend)
+            frontend.wait(timeout=10)
         shutil.rmtree(tmp_dir, ignore_errors=True)
