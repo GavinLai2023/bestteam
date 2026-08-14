@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -207,3 +207,68 @@ def get_share_messages(token: str, request: Request, db: Session = Depends(get_d
             for m in list_messages(db, session.id)
         ]
     }
+
+
+def _link_and_org_active(engine, link_id: int) -> bool:
+    """Fresh re-check used before delivering every WS event -- a revoke or
+    org deactivation mid-stream must stop delivery immediately (mirrors
+    main.py::stream_run's own per-event `_stream_access` re-check)."""
+    with Session(engine) as check_db:
+        link = check_db.get(ShareLink, link_id)
+        if link is None or not link.active:
+            return False
+        org = check_db.get(Organization, link.org_id)
+        return org is not None and org.active
+
+
+@router.websocket("/{token}/stream/{run_id}")
+async def stream_share_run(
+    websocket: WebSocket, token: str, run_id: str, db: Session = Depends(get_db)
+):
+    """Replays a share-chat run's trace events for the visitor session that
+    started it. Authenticated by the signed session cookie (`share_auth.py`)
+    -- sent automatically on the WS handshake, so no ticket exchange is
+    needed here (contrast `main.py::stream_run`'s `?ticket=`, which exists
+    only to work around a WebSocket handshake not carrying an
+    `Authorization` header)."""
+    engine = db.get_bind()
+    cookie_value = websocket.cookies.get(COOKIE_NAME)
+    session_token = verify_cookie_value(cookie_value) if cookie_value else None
+    link = get_share_link_by_token(db, token)
+    session = get_share_session_by_token(db, session_token) if session_token else None
+    run_row = db.get(Run, run_id)
+
+    authorized = (
+        link is not None
+        and session is not None
+        and session.share_link_id == link.id
+        and run_row is not None
+        and run_row.trigger_context is not None
+        and run_row.trigger_context.get("share_session_id") == session.id
+    )
+    run = registry.get(run_id)
+    if not authorized or run is None:
+        db.close()
+        await websocket.close(code=4404)
+        return
+    link_id = link.id
+    db.close()
+
+    await websocket.accept()
+    subscriber_queue = registry.subscribe(run_id)
+    if subscriber_queue is None:
+        await websocket.close(code=4404)
+        return
+    try:
+        while True:
+            event = await subscriber_queue.get()
+            if not _link_and_org_active(engine, link_id):
+                await websocket.close(code=4404)
+                return
+            await websocket.send_json(event)
+            if event["type"] in ("run_completed", "run_failed", "run_cancelled"):
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        registry.unsubscribe(run_id, subscriber_queue)
