@@ -1,6 +1,7 @@
 """Guards that every collected test carries at least one CI-selecting
 marker, so a new test file can't silently fall outside every CI job's
 `-m` selection (see docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md)."""
+import re
 import subprocess
 import sys
 
@@ -10,14 +11,25 @@ pytestmark = pytest.mark.unit
 
 _CI_MARKERS = {"unit", "integration", "e2e", "optional"}
 
+# Strips ANSI colour escapes: pytest emits these even when stdout is
+# captured (non-tty), e.g. under FORCE_COLOR.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Matches pytest's collection summary line in either of its two real forms:
+#   "1229 tests collected in 5.04s"
+#   "590/1229 tests collected (639 deselected) in 15.28s"
+# Real pytest always appends a trailing "in N.NNs" timing suffix.
+_COLLECTED_RE = re.compile(
+    r"^(?:(?P<selected>\d+)/\d+|(?P<count>\d+)) tests? collected"
+    r"(?: \(\d+ deselected\))? in [\d.]+s?$"
+)
+
 
 def test_every_item_has_a_ci_marker():
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header"],
-        capture_output=True, text=True, cwd=".",
-    )
-    # Re-collect with each marker excluded in turn and diff against the full
-    # set would be slow; instead ask pytest directly for markers per item.
+    # One collect-only pass with the CI-marker union gives us the selected
+    # count (and, via "S/T ... deselected", pytest already tells us T too)
+    # -- but relying on that would couple us to the deselected form's
+    # presence, so we still do a second pass for an unambiguous total.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-m", " or ".join(_CI_MARKERS)],
@@ -40,7 +52,25 @@ def test_every_item_has_a_ci_marker():
 
 
 def _count_collected(output: str) -> int:
-    for line in output.splitlines():
-        if line.strip().endswith(("test collected", "tests collected")):
-            return int(line.strip().split()[0])
-    return 0
+    """Extract the collected-item count from pytest's collection summary
+    line (the last non-blank line of `--collect-only -q` output). Handles
+    both the plain form ("N tests collected in T") and the filtered form
+    ("S/T tests collected (D deselected) in T"), with or without ANSI
+    colour codes. Raises loudly if no line matches, rather than falling
+    back to a value like 0 that would make the caller's assertion
+    vacuously pass regardless of what pytest actually reported.
+    """
+    for line in reversed(output.splitlines()):
+        clean = _ANSI_RE.sub("", line).strip()
+        if not clean:
+            continue
+        match = _COLLECTED_RE.match(clean)
+        if match:
+            if match.group("selected") is not None:
+                return int(match.group("selected"))
+            return int(match.group("count"))
+    raise AssertionError(
+        "Could not parse a pytest collection summary line (expected "
+        "something like 'N tests collected in T' or 'S/T tests collected "
+        f"(D deselected) in T') from output:\n{output}"
+    )
