@@ -109,3 +109,22 @@ implemented** — don't assume they exist:
   `ui/backend/workflows/vector_knowledge_base_demo_live.yaml`, both
   `ChatOpenAI`/OpenAI-embeddings-based) exist but require real API quota to
   run.
+- Every test file needs a `pytestmark` (`unit`/`integration`/`e2e`/
+  `optional`, optionally also `slow`) — `tests/test_marker_completeness.py`
+  fails the suite if any collected test carries none of those markers, so a
+  new test file can't silently fall outside every CI job's `-m` selection.
+- Running the E2E suite requires the `test` extra
+  (`pip install -e ".[ui,dev,tools,test]"`), `playwright install chromium`,
+  and `npm` on PATH — `tests/e2e/conftest.py`'s fixture spawns real
+  `uvicorn`/`vite` dev-server subprocesses. It needs ports 8000 and 5173
+  free; it now fails loudly (naming the conflicting port) rather than
+  silently attaching to a developer's own running dev stack if they're not.
+- CI is split into 6 jobs: 4 fast PR-gate jobs
+  (`backend-unit-integration`, `backend-optional-deps`, `frontend`,
+  `e2e-smoke`) run on every PR/push; 2 full-regression jobs
+  (`backend-full`, `e2e-full`) are gated to `main` only, and are also
+  manually dispatchable (`workflow_dispatch`) for a pre-merge run from a
+  feature branch.
+- `fake-architect:` is a deterministic drop-in model for E2E coverage of
+  the Team Builder wizard's AI-generation steps, and is deliberately never
+  present in `DEFAULT_MODEL_CATALOG`.
