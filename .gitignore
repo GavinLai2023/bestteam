@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 
+# pytest-playwright trace/screenshot artifacts written on E2E test failure
+test-results/
+
 # Logs
 *.log
 

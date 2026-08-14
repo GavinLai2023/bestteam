@@ -115,6 +115,17 @@ class _FakeArchitectChatModel(FakeListChatModel):
     supports `with_structured_output()` for the two schemas the Team
     Builder wizard needs. Not listed in `DEFAULT_MODEL_CATALOG`; only
     reachable by resolving the `fake-architect:` spec string directly.
+
+    Note the asymmetry vs. `fake:` in `deploy_validation.validate_agent_models`:
+    both spec prefixes are exempted from the model-catalog check there, but
+    an unauthorized/malformed request using `fake:` fails loudly at deploy or
+    first run with a customer-facing `ConfigurationError` (`fake:` models
+    don't support `with_structured_output`), whereas one using
+    `fake-architect:` would succeed silently and return a plausible-looking
+    but entirely canned team. Not a security regression -- same reachability
+    as the pre-existing `fake:` exemption, no privilege escalation, and
+    admin-only catalog CRUD keeps it out of the real UI -- just worth being
+    explicit about here.
     """
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> _FakeArchitectStructuredResult:
@@ -144,8 +155,6 @@ def _resolve_model(model: Any) -> BaseChatModel:
         # "fake:<canned response>" lets customers dry-run a pipeline's wiring
         # from plain YAML — no provider package or API key required, $0 cost.
         if model.startswith("fake:"):
-            from langchain_core.language_models.fake_chat_models import FakeListChatModel
-
             return FakeListChatModel(responses=[model[len("fake:") :]])
         # "fake-architect:<name>" is like "fake:" but additionally supports
         # `with_structured_output()` for the Team Builder wizard's Requirements/
