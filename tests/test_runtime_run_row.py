@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
 from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification

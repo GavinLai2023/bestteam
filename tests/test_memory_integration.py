@@ -5,6 +5,7 @@ Asserts that a recalled memory reaches an agent's SystemMessage (the
 all three collaboration modes.
 """
 
+import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
@@ -13,6 +14,8 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from bestteam import Agent, CollaborationMode, MemoryManager, SqliteBM25Memory, Team, Workflow
 from bestteam.core.memory import EPISODIC, SEMANTIC
+
+pytestmark = pytest.mark.unit
 
 
 class _RecordingChatModel(FakeMessagesListChatModel):

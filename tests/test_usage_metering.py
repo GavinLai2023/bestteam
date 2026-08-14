@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 
 from bestteam import Agent, CollaborationMode, Team, Workflow
 
+pytestmark = pytest.mark.integration
 
 def _agent(name, response):
     return Agent(name=name, role=f"role-{name}", goal=f"goal-{name}", model=FakeListChatModel(responses=[response]))

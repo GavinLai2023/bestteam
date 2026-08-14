@@ -5,13 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  backend:
+  backend-unit-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,7 +25,22 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[ui,dev,tools]"
       - name: Run pytest
-        run: python -m pytest
+        run: python -m pytest -m "not e2e and not slow and not optional"
+
+  backend-optional-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[ui,dev,tools,interview]"
+      - name: Run pytest
+        run: python -m pytest -m optional
 
   frontend:
     runs-on: ubuntu-latest
@@ -47,3 +63,82 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/frontend/package-lock.json
+      - name: Install backend dependencies
+        run: pip install -e ".[ui,dev,tools,test]"
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui/frontend
+      - name: Run E2E smoke suite
+        run: python -m pytest tests/e2e/ -m "e2e and not slow" --tracing retain-on-failure
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-smoke
+          path: test-results/
+          retention-days: 7
+
+  backend-full:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[ui,dev,tools,interview]"
+      - name: Run pytest
+        run: python -m pytest -m "not e2e"
+
+  e2e-full:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/frontend/package-lock.json
+      - name: Install backend dependencies
+        run: pip install -e ".[ui,dev,tools,test]"
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui/frontend
+      - name: Run full E2E suite
+        run: python -m pytest tests/e2e/ -m e2e --tracing retain-on-failure
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-full
+          path: test-results/
+          retention-days: 7

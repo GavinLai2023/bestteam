@@ -5,6 +5,7 @@ Follows the direct-call pattern of `test_usage_metering.py` (invoking
 executor path.
 """
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from bestteam import (
@@ -19,6 +20,8 @@ from bestteam.core.memory import EPISODIC
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.usage import list_usage_for_run
 from ui.backend.runtime import _make_memory, registry, run_in_background
+
+pytestmark = pytest.mark.unit
 
 
 class _CloseSpyManager(MemoryManager):

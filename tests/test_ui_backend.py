@@ -3,6 +3,8 @@ import os
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 
 from fastapi import HTTPException

@@ -10,6 +10,8 @@ from bestteam.core.knowledge_base import (
 )
 from bestteam.exceptions import ConfigurationError
 
+pytestmark = pytest.mark.unit
+
 
 # ---------------------------------------------------------------------------
 # _chunk_text

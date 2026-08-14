@@ -17,3 +17,7 @@ import os
 
 os.environ.setdefault("BESTTEAM_SECRET_KEY", "test-secret-key-not-for-production-use")
 os.environ["BESTTEAM_DB_PATH"] = ":memory:"
+
+import importlib.util
+
+collect_ignore_glob = [] if importlib.util.find_spec("playwright") else ["e2e/*"]

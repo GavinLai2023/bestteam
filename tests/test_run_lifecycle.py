@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 
 from bestteam.core.trace import TraceEvent

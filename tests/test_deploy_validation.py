@@ -1,4 +1,8 @@
+import pytest
+
 from ui.backend.deploy_validation import validate_agent_models
+
+pytestmark = pytest.mark.unit
 
 
 def _spec(*models):
@@ -63,3 +67,8 @@ def test_non_colliding_kb_names_pass():
 def test_collisions_sorted_and_deduped():
     raw = {"knowledge_bases": [{"name": "web_search"}], "agents": []}
     assert find_kb_tool_collisions(raw, ["calculator", "web_search"], {"calculator", "web_search"}) == ["calculator", "web_search"]
+
+
+def test_validate_agent_models_exempts_fake_architect():
+    raw_spec = {"agents": [{"name": "a", "model": "fake-architect:e2e"}]}
+    assert validate_agent_models(raw_spec, catalog_specs=[]) == []

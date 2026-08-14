@@ -853,6 +853,27 @@
   before running the list query. 958 backend + 92 frontend tests, lint
   clean.
 
+- E2E harness + CI test tiering (`2026-08-13-e2e-and-ci-test-tiering-design.md`):
+  a self-contained Playwright E2E suite (`tests/e2e/`) whose `e2e_backend`
+  session fixture provisions its own temp SQLite DB, spawns real
+  `uvicorn`/`vite` dev-server subprocesses, auto-provisions accounts, and
+  reshapes the model catalog to a deterministic `fake-architect:` model
+  (never present in `DEFAULT_MODEL_CATALOG`) so the Team Builder wizard's
+  AI-generation steps are covered without a real LLM key. Every test file
+  now carries a `pytestmark` (`unit`/`integration`/`e2e`/`optional`,
+  optionally `slow`), enforced by `tests/test_marker_completeness.py`. CI
+  is split into 6 jobs: 4 fast PR-gate jobs run on every PR/push, 2
+  full-regression jobs (`backend-full`, `e2e-full`) are gated to `main`
+  (also now manually dispatchable). Final whole-branch review fix round:
+  the marker-completeness guard's collection-summary parser was fixed
+  (it never matched real pytest output, so it asserted nothing); the E2E
+  fixture was hardened with a port pre-flight check, a liveness check
+  while polling for health, `--strictPort` for vite, and explicit
+  neutralization of `BESTTEAM_MEMORY_*`/`BESTTEAM_EMAIL_BACKEND` env vars
+  so a developer's real dev stack/config can't be silently attached to or
+  leaked into; `workflow_dispatch` added to CI. See
+  `.superpowers/sdd/2026-08-13-e2e-and-ci-test-tiering/`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

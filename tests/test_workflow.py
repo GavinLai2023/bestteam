@@ -9,6 +9,8 @@ from bestteam import Agent, CollaborationMode, Team, Workflow
 from bestteam.adapters.langgraph_adapter import _MAX_TOOL_ITERATIONS, _tool_loop_exhausted_notice
 from bestteam.exceptions import ConfigurationError
 
+pytestmark = pytest.mark.unit
+
 
 def _agent(name, response):
     return Agent(

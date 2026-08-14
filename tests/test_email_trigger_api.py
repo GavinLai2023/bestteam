@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("cryptography")

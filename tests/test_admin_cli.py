@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
 from ui.backend import admin as admin_cli

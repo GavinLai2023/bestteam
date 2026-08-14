@@ -1,10 +1,14 @@
 """Immutable skill versioning and workflow pinning unit tests."""
 
+import pytest
+
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import SkillVersion, WorkflowDependency
 from ui.backend.db.skills import publish_skill_version
 from ui.backend.db.workflows import publish_workflow_version
 from ui.backend.skills import load_skills
+
+pytestmark = pytest.mark.unit
 
 
 def _db():

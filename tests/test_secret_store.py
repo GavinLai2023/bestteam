@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.unit
 pytest.importorskip("cryptography")
 
 from cryptography.fernet import Fernet, InvalidToken
