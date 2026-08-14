@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
 import type { BuilderSession, EmailTrigger } from '../../lib/types'
+import ShareLinksPanel from '../../components/ShareLinksPanel'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
 
@@ -145,6 +146,9 @@ export default function SessionsPage() {
                         <span className="session-updated">Updated {formatDateTime(session.updated_at)}</span>
                       </div>
                     </button>
+                    {session.status === 'deployed' && session.workflow_id != null && (
+                      <ShareLinksPanel workflowId={session.workflow_id} />
+                    )}
                     {session.workflow_id == null && (
                       <button
                         type="button"
