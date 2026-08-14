@@ -24,3 +24,13 @@ def test_verify_rejects_tampered_signature():
 def test_verify_rejects_malformed_value():
     assert verify_cookie_value("no-dot-separator") is None
     assert verify_cookie_value("") is None
+
+
+def test_verify_rejects_non_ascii_token():
+    """Non-ASCII token causes UnicodeEncodeError in _signature_for; should return None."""
+    assert verify_cookie_value("café.somehash") is None
+
+
+def test_verify_rejects_non_ascii_signature():
+    """Non-ASCII signature causes UnicodeError in hmac.compare_digest; should return None."""
+    assert verify_cookie_value("abc123.café") is None

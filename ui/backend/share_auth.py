@@ -33,11 +33,11 @@ def verify_cookie_value(value: str) -> Optional[str]:
     else None (malformed, empty, or tampered)."""
     try:
         session_token, signature = value.rsplit(".", 1)
-    except ValueError:
+        if not session_token:
+            return None
+        expected = _signature_for(session_token)
+        if not hmac.compare_digest(expected, signature):
+            return None
+        return session_token
+    except (ValueError, UnicodeError, TypeError):
         return None
-    if not session_token:
-        return None
-    expected = _signature_for(session_token)
-    if not hmac.compare_digest(expected, signature):
-        return None
-    return session_token
