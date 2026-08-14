@@ -10,14 +10,10 @@ vi.mock('../../lib/api', () => ({
     listSessions: vi.fn(),
     getEmailTrigger: vi.fn(),
     deleteSession: vi.fn(),
-    listShareLinks: vi.fn(),
-    createShareLink: vi.fn(),
-    patchShareLink: vi.fn(),
   },
 }))
 
 const mockedApi = vi.mocked(api)
-mockedApi.listShareLinks.mockResolvedValue([])
 
 const mockNavigate = vi.fn()
 vi.mock('react-router-dom', async () => {

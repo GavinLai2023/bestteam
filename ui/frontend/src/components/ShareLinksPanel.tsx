@@ -13,9 +13,13 @@ function shareUrlFor(token: string): string {
 // Lets the org's one user generate/revoke anonymous, continuous-chat links
 // for a deployed team (see docs/superpowers/specs/
 // 2026-08-14-team-sharing-continuous-chat-design.md). Rendered inline on
-// each deployed team's card in "My teams" (SessionsPage.tsx).
+// each deployed team's card in "My teams" (SessionsPage.tsx). Collapsed by
+// default -- SessionsPage can list many teams, and this keeps the page from
+// firing a share-links fetch per card on every load; the list only loads
+// once the user opts in by clicking "Share".
 export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
   const [links, setLinks] = useState<ShareLink[]>([])
+  const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<number | null>(null)
 
@@ -27,9 +31,9 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
   }
 
   useEffect(() => {
-    refresh()
+    if (open) refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowId])
+  }, [open])
 
   const handleCreate = async () => {
     try {
@@ -55,6 +59,14 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
     setTimeout(() => setCopiedId(null), 2000)
   }
 
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)}>
+        Share
+      </button>
+    )
+  }
+
   return (
     <div className="share-links-panel" onClick={(e) => e.stopPropagation()}>
       {error && <p className="banner banner-error">{error}</p>}
@@ -78,6 +90,9 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
           </li>
         ))}
       </ul>
+      <button type="button" onClick={() => setOpen(false)}>
+        Close
+      </button>
     </div>
   )
 }

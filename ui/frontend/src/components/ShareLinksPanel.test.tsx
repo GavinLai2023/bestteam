@@ -24,6 +24,7 @@ describe('ShareLinksPanel', () => {
       { id: 1, workflow_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
     ])
     render(<ShareLinksPanel workflowId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
     await waitFor(() => expect(screen.getByText(/active/i)).toBeInTheDocument())
   })
 
@@ -32,6 +33,7 @@ describe('ShareLinksPanel', () => {
       id: 2, workflow_id: 5, token: 'newtoken', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
     render(<ShareLinksPanel workflowId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
     await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
   })
@@ -44,6 +46,7 @@ describe('ShareLinksPanel', () => {
       id: 1, workflow_id: 5, token: 'abc123token', active: false, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
     render(<ShareLinksPanel workflowId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
     await waitFor(() => expect(mockedApi.patchShareLink).toHaveBeenCalledWith(1, { active: false }))
   })
