@@ -1745,3 +1745,55 @@ def test_run_fails_closed_on_legacy_inline_kb_shadowing_builtin(client):
                        headers=_org_user_headers(client))
     assert resp.status_code == 400
     assert "built-in" in resp.json()["detail"]
+
+
+def test_delete_workflow_blocked_by_active_share_link(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.share_links import create_share_link
+    from ui.backend.db.users import get_user_by_username
+
+    org_id = get_org_id()
+    config = {
+        "name": "shared_team",
+        "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+        "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    with open_test_db() as db:
+        record = WorkflowRecord(name="shared_team", org_id=org_id, config=config, status="deployed")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        user = get_user_by_username(db, "test")
+        create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+
+    resp = client.delete("/api/config/workflows/shared_team?org=default")
+    assert resp.status_code == 409
+    assert "share" in resp.json()["detail"].lower()
+
+
+def test_delete_workflow_allowed_with_only_revoked_share_link(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.share_links import create_share_link, patch_share_link
+    from ui.backend.db.users import get_user_by_username
+
+    org_id = get_org_id()
+    config = {
+        "name": "revoked_share_team",
+        "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+        "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    with open_test_db() as db:
+        record = WorkflowRecord(name="revoked_share_team", org_id=org_id, config=config, status="deployed")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        user = get_user_by_username(db, "test")
+        link = create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        patch_share_link(db, link, active=False)
+
+    resp = client.delete("/api/config/workflows/revoked_share_team?org=default")
+    assert resp.status_code == 204

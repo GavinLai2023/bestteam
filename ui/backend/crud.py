@@ -43,6 +43,7 @@ from .db.models import (
     KnowledgeBaseRecord,
     Organization,
     Run,
+    ShareLink,
     SkillRecord,
     SkillVersion,
     User,
@@ -52,6 +53,7 @@ from .db.models import (
     iso_utc,
 )
 from .db.dependencies import workflows_referencing
+from .db.share_links import count_active_share_links
 from .db.skills import publish_skill_version
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
@@ -498,6 +500,15 @@ def delete_workflow_config(
                 detail=(
                     f"Can't delete '{item_name}': {run_refs} run(s) recorded a version "
                     "of it. Deleting would orphan their provenance."
+                ),
+            )
+        active_share_links = count_active_share_links(db, item.id)
+        if active_share_links:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': {active_share_links} active share "
+                    "link(s) point at it. Revoke them first."
                 ),
             )
         # Detach any builder sessions that deployed this head so none is left
