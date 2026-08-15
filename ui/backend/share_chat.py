@@ -73,6 +73,15 @@ def _get_or_create_session(request: Request, response: Response, db: Session, li
     if session is not None:
         return session
     session = create_share_session(db, link.id)
+    # `samesite="lax"` means the frontend and this API must be served under the
+    # same site (same registrable domain -- ports don't matter) or the browser
+    # never sends this cookie back, and the visitor silently gets a brand-new
+    # session per message with no continuous chat at all. Our own dev defaults
+    # honour that (`ui/frontend/src/lib/api.ts` points at `localhost:8000`
+    # against Vite's `localhost:5173`). A genuinely cross-site deployment
+    # (different domains) needs `samesite="none"` + `secure=True` + HTTPS
+    # instead -- a deliberate future deployment-config decision, not something
+    # to flip here (final whole-branch review C2).
     response.set_cookie(
         COOKIE_NAME,
         sign_session_token(session.session_token),

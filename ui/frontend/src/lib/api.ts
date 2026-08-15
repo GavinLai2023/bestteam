@@ -5,8 +5,17 @@ import type {
   WorkflowAnalyticsSummary,
 } from './types'
 
-export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
-export const WS_BASE: string = import.meta.env.VITE_WS_BASE ?? 'ws://127.0.0.1:8000'
+// `localhost`, NOT `127.0.0.1` -- do not "simplify" this back. The anonymous
+// share-chat visitor cookie (`share_chat.py`, SameSite=Lax) is only sent back
+// on same-SITE requests, and a browser treats `localhost` and `127.0.0.1` as
+// different sites. Vite's dev server serves this app on `localhost:5173`, so
+// pointing the API at `127.0.0.1:8000` means the cookie is set but never
+// returned: every message silently starts a brand-new session (no continuous
+// chat at all) and the WS handshake carries no cookie, so it closes 4404.
+// Same-site cares about the registrable domain, not the port, so
+// `localhost:5173` -> `localhost:8000` is fine.
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
+export const WS_BASE: string = import.meta.env.VITE_WS_BASE ?? 'ws://localhost:8000'
 
 export const TOKEN_KEY = 'bestteam_token'
 
