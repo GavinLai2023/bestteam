@@ -492,6 +492,94 @@ def test_sending_while_the_previous_turn_is_unanswered_is_409(client, monkeypatc
     assert second.json()["detail"] == share_chat_module._PENDING_TURN_MESSAGE
 
 
+def test_concurrent_sends_for_the_same_session_are_serialized(client):
+    """Mirrors test_email_trigger.py's `_dispatch_lock` tests: manually hold
+    the per-session lock and confirm a second send for that session blocks
+    on it instead of racing `_has_pending_turn`/`next_turn_number`/
+    `append_message` -- closing a race a Codex review found, where two
+    near-simultaneous sends that both pass `_has_pending_turn` before either
+    commits could get non-colliding turn numbers, and the second's number
+    then lands on what becomes the first run's reply slot once it
+    completes, silently dropping that reply.
+    """
+    import threading
+
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.share_messages import append_message
+
+    token, _ = _make_link()
+    first = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+    assert first.status_code == 202
+    session_id = _session_id_for(client, token)
+
+    # Simulate the first turn having already been answered, so a second send
+    # would otherwise be free to proceed -- isolating what the lock itself
+    # protects, rather than the (already-covered) coarse `_has_pending_turn`
+    # 409 for a still-pending turn.
+    with open_test_db() as db:
+        append_message(db, session_id, turn_number=2, role="assistant", content="reply")
+
+    lock = share_chat_module._session_lock(session_id)
+    lock.acquire()
+    result: dict = {}
+
+    def send():
+        resp = client.post(f"/api/share/{token}/messages", json={"content": "second"})
+        result["status"] = resp.status_code
+
+    t = threading.Thread(target=send)
+    t.start()
+    try:
+        t.join(timeout=0.3)
+        assert "status" not in result, "send must block while the session's lock is held"
+    finally:
+        lock.release()
+
+    t.join(timeout=2)
+    assert result.get("status") == 202
+
+
+def test_workflow_build_failure_does_not_create_a_session_or_burn_a_cap_turn(client, monkeypatch):
+    """A malformed team config must fail before any session/cap side effect
+    -- otherwise every retry burns another link-wide daily-cap turn until
+    the link goes dark for the whole day despite never dispatching a run
+    (Codex review finding)."""
+    from fastapi import HTTPException
+
+    from ui.backend import main as backend_main
+    from ui.backend.db.models import ShareLink, ShareSession
+
+    token, link_id = _make_link()
+
+    def boom(name, db, org_id):
+        raise HTTPException(status_code=400, detail="broken team config")
+
+    monkeypatch.setattr(backend_main, "_resolve_workflow_and_version", boom)
+
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+    assert resp.status_code == 400
+    assert "bestteam_share_session" not in resp.cookies
+
+    with open_test_db() as db:
+        assert db.query(ShareSession).count() == 0
+        link = db.get(ShareLink, link_id)
+        assert link.turns_today == 0
+
+
+def test_session_cookie_is_scoped_to_this_links_path(client):
+    """Every share link uses the same cookie NAME -- an unscoped cookie
+    would let sending a message through link B overwrite the credential for
+    link A, breaking continuous chat for a visitor using multiple shared
+    teams (Codex review finding). The cookie's `Path` must isolate it to
+    this one token."""
+    token, _ = _make_link()
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+    assert resp.status_code == 202
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert f"/api/share/{token}" in set_cookie
+    assert "path=" in set_cookie.lower()
+
+
 def test_cors_allows_credentials():
     from ui.backend.main import app
 

@@ -11,6 +11,7 @@ stream WebSocket's own re-authorize-per-event philosophy, see
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -39,6 +40,28 @@ _RATE_LIMITED_MESSAGE = "Today's message limit has been reached -- try again tom
 _DISPATCH_FAILED_MESSAGE = "Couldn't start a reply just now. Please try sending your message again."
 
 _logger = logging.getLogger(__name__)
+
+# Per-session lock serializing the pending-turn-check through the user-
+# message insert -- mirrors email_trigger.py's per-org `_dispatch_lock` for
+# the identical class of race. Without it, two near-simultaneous sends for
+# the same session can both pass `_has_pending_turn` before either's insert
+# commits; the second's turn number (computed by `next_turn_number` after
+# the first's insert has already landed) then does NOT collide with the
+# first's, so it lands cleanly on what becomes the first run's reply slot
+# once `record_share_reply` runs -- which silently no-ops there (its
+# idempotency check only looks at whether *a* row occupies that slot, not
+# its role), dropping the first run's reply entirely (Codex review finding).
+_session_locks: dict[int, threading.Lock] = {}
+_session_locks_guard = threading.Lock()
+
+
+def _session_lock(session_id: int) -> threading.Lock:
+    with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
 
 
 class ShareMessageCreate(BaseModel):
@@ -87,11 +110,21 @@ def _get_or_create_session(request: Request, response: Response, db: Session, li
     # (different domains) needs `samesite="none"` + `secure=True` + HTTPS
     # instead -- a deliberate future deployment-config decision, not something
     # to flip here (final whole-branch review C2).
+    #
+    # `path` is scoped to this one link's token, not the default `/`: every
+    # share link uses the same cookie NAME, so an unscoped cookie set while
+    # chatting through link B overwrites the credential for link A, and
+    # returning to link A in the same browser then shows an empty
+    # conversation and mints a yet another new session (Codex review
+    # finding). Every route this cookie needs to reach --
+    # POST/GET /api/share/{token}/messages and the WS at
+    # /api/share/{token}/stream/{run_id} -- shares this same path prefix.
     response.set_cookie(
         COOKIE_NAME,
         sign_session_token(session.session_token),
         httponly=True,
         samesite="lax",
+        path=f"/api/share/{link.token}",
         max_age=60 * 60 * 24 * 365,
     )
     return session
@@ -172,55 +205,67 @@ def send_share_message(
         # (controller-ruled fix, Task 8 review finding 2).
         raise HTTPException(status_code=404, detail=_UNAVAILABLE)
 
-    session = _get_or_create_session(request, response, db, link)
-
-    if _has_pending_turn(db, session):
-        raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
-
-    # Link-level aggregate cap FIRST, then the per-session one -- the
-    # per-session counter caps nobody on its own, since a client that never
-    # stores the cookie gets a brand-new, free session (and allowance) on
-    # every request. Both must pass for a turn to proceed.
-    if not try_consume_link_turn(db, link, link.daily_cap):
-        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
-
-    if not try_consume_turn(db, session, link.daily_cap):
-        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
-
+    # Resolved (and, on a first call, built/compiled) before any session or
+    # cap side effect. A malformed team config raises a plain 400 here --
+    # doing this before _get_or_create_session/either try_consume_* call
+    # means a broken config can never mint another session and burn another
+    # link-wide daily-cap turn on every retry until the link goes dark for
+    # the whole day despite never actually dispatching a run (Codex review
+    # finding).
     from .main import _resolve_workflow_and_version  # local import: main.py imports this router
 
     workflow, version_id, workflow_id = _resolve_workflow_and_version(
         workflow_record.name, db, link.org_id
     )
 
-    turn_number = next_turn_number(db, session.id)
-    try:
-        append_message(db, session.id, turn_number=turn_number, role="user", content=body.content)
-    except IntegrityError:
-        # A UniqueConstraint(share_session_id, turn_number) collision means
-        # another near-simultaneous request already won the race for this
-        # turn (e.g. a visitor double-clicking Send) -- same user-facing
-        # meaning as the coarse _has_pending_turn guard above, just catching
-        # the narrower race between next_turn_number's read and this insert
-        # that guard doesn't fully close.
-        db.rollback()
-        # Refund the cap turns both try_consume_* calls already claimed
-        # above: the losing request's message was never persisted and no run
-        # was ever created for it, so it must not cost the visitor a turn
-        # against their daily cap (controller-ruled fix, Task 8 review
-        # finding 1b) -- nor the link a turn against its aggregate one.
-        db.execute(
-            update(ShareSession)
-            .where(ShareSession.id == session.id, ShareSession.turns_today > 0)
-            .values(turns_today=ShareSession.turns_today - 1)
-        )
-        db.execute(
-            update(ShareLink)
-            .where(ShareLink.id == link.id, ShareLink.turns_today > 0)
-            .values(turns_today=ShareLink.turns_today - 1)
-        )
-        db.commit()
-        raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
+    session = _get_or_create_session(request, response, db, link)
+
+    # Serializes pending-turn-check through the user-message insert for this
+    # one session -- mirrors email_trigger.py's per-org `_dispatch_lock` for
+    # the identical class of race (see `_session_lock`'s own docstring for
+    # exactly what it closes; Codex review finding).
+    with _session_lock(session.id):
+        if _has_pending_turn(db, session):
+            raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
+
+        # Link-level aggregate cap FIRST, then the per-session one -- the
+        # per-session counter caps nobody on its own, since a client that
+        # never stores the cookie gets a brand-new, free session (and
+        # allowance) on every request. Both must pass for a turn to proceed.
+        if not try_consume_link_turn(db, link, link.daily_cap):
+            raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
+
+        if not try_consume_turn(db, session, link.daily_cap):
+            raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
+
+        turn_number = next_turn_number(db, session.id)
+        try:
+            append_message(db, session.id, turn_number=turn_number, role="user", content=body.content)
+        except IntegrityError:
+            # A UniqueConstraint(share_session_id, turn_number) collision --
+            # should no longer be reachable now that the lock above
+            # serializes this whole section per session, but kept as
+            # defense-in-depth. Same user-facing meaning as the
+            # _has_pending_turn guard above.
+            db.rollback()
+            # Refund the cap turns both try_consume_* calls already claimed
+            # above: the losing request's message was never persisted and no
+            # run was ever created for it, so it must not cost the visitor a
+            # turn against their daily cap (controller-ruled fix, Task 8
+            # review finding 1b) -- nor the link a turn against its
+            # aggregate one.
+            db.execute(
+                update(ShareSession)
+                .where(ShareSession.id == session.id, ShareSession.turns_today > 0)
+                .values(turns_today=ShareSession.turns_today - 1)
+            )
+            db.execute(
+                update(ShareLink)
+                .where(ShareLink.id == link.id, ShareLink.turns_today > 0)
+                .values(turns_today=ShareLink.turns_today - 1)
+            )
+            db.commit()
+            raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
 
     history = list_messages(db, session.id)[-(MAX_HISTORY_TURNS * 2):]
     transcript = format_transcript(history)
