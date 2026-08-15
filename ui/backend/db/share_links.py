@@ -6,12 +6,17 @@ over one table, no business logic beyond straightforward reads/writes.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from .models import ShareLink
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def create_share_link(
@@ -76,6 +81,39 @@ def patch_share_link(
     db.commit()
     db.refresh(link)
     return link
+
+
+def try_consume_link_turn(db: Session, link: ShareLink, daily_cap: int) -> bool:
+    """Atomically claim one turn against this LINK's aggregate daily cap.
+
+    Same shape as `db/share_sessions.py::try_consume_turn` (reset-if-stale
+    guarded by a WHERE clause, then one conditional UPDATE matched by
+    rowcount), but counted per ShareLink rather than per ShareSession -- the
+    per-session counter alone caps nobody, since a client that never stores
+    the session cookie gets a brand-new, free session on every request
+    (final whole-branch review C1). `daily_cap` is deliberately reused as
+    both ceilings: no one session may exceed it, and neither may everyone
+    on the link put together.
+    """
+    today = _today()
+    db.execute(
+        update(ShareLink)
+        .where(
+            ShareLink.id == link.id,
+            or_(ShareLink.turns_date.is_(None), ShareLink.turns_date != today),
+        )
+        .values(turns_today=0, turns_date=today)
+    )
+    db.commit()
+    db.refresh(link)
+    advanced = db.execute(
+        update(ShareLink)
+        .where(ShareLink.id == link.id, ShareLink.turns_today < daily_cap)
+        .values(turns_today=ShareLink.turns_today + 1)
+    ).rowcount
+    db.commit()
+    db.refresh(link)
+    return bool(advanced)
 
 
 def count_active_share_links(db: Session, workflow_id: int) -> int:

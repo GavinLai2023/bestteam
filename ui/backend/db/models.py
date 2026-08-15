@@ -519,6 +519,14 @@ class ShareLink(Base):
     expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     daily_cap: Mapped[int] = mapped_column(default=30)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # `daily_cap` is also the AGGREGATE ceiling across every session using
+    # this link, per day -- the per-session counter alone is not a real cost
+    # control, since a cookie-less client gets a fresh ShareSession (and so a
+    # fresh allowance) on every request. Same CAS shape as
+    # `ShareSession.turns_today`/`turns_date` (db/share_links.py::
+    # try_consume_link_turn).
+    turns_today: Mapped[int] = mapped_column(default=0)
+    turns_date: Mapped[Optional[str]] = mapped_column(nullable=True)
 
 
 class ShareSession(Base):

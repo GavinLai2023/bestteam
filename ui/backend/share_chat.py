@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db.models import Organization, Run, ShareLink, ShareSession, WorkflowRecord
-from .db.share_links import get_share_link_by_token
+from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
 from .db.share_sessions import create_share_session, get_share_session_by_token, try_consume_turn
 from .db_session import get_db
@@ -33,6 +33,7 @@ MAX_MESSAGE_LENGTH = 4000
 MAX_HISTORY_TURNS = 20
 _UNAVAILABLE = "This share link is no longer available."
 _PENDING_TURN_MESSAGE = "Please wait for the previous reply to finish."
+_RATE_LIMITED_MESSAGE = "Today's message limit has been reached -- try again tomorrow."
 
 
 class ShareMessageCreate(BaseModel):
@@ -99,13 +100,16 @@ def send_share_message(
     response: Response,
     db: Session = Depends(get_db),
 ) -> dict:
+    # Order matters (final whole-branch review C1/M12). Every pure read that
+    # can reject the request runs BEFORE _get_or_create_session, which both
+    # INSERTs a share_sessions row and sets a cookie: an undeployed team's
+    # link hammered in a loop used to grow share_sessions unboundedly with
+    # orphaned rows. Both caps are then consumed after the session exists but
+    # before anything is persisted for this turn, so a rejected request never
+    # leaves a message or a run behind.
     link = _resolve_active_link(db, token)
-    session = _get_or_create_session(request, response, db, link)
 
-    if _has_pending_turn(db, session):
-        raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
-
-    # Resolved before try_consume_turn (below) deliberately: it's a
+    # Resolved before either try_consume_* call deliberately: it's a
     # read-only lookup with no side effects, so checking the team is
     # actually usable first means a 404 here never burns a daily-cap turn
     # for a message that was never persisted and no run that was ever
@@ -124,10 +128,20 @@ def send_share_message(
         # (controller-ruled fix, Task 8 review finding 2).
         raise HTTPException(status_code=404, detail=_UNAVAILABLE)
 
+    session = _get_or_create_session(request, response, db, link)
+
+    if _has_pending_turn(db, session):
+        raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
+
+    # Link-level aggregate cap FIRST, then the per-session one -- the
+    # per-session counter caps nobody on its own, since a client that never
+    # stores the cookie gets a brand-new, free session (and allowance) on
+    # every request. Both must pass for a turn to proceed.
+    if not try_consume_link_turn(db, link, link.daily_cap):
+        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
+
     if not try_consume_turn(db, session, link.daily_cap):
-        raise HTTPException(
-            status_code=429, detail="Today's message limit has been reached -- try again tomorrow."
-        )
+        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
 
     from .main import _resolve_workflow_and_version  # local import: main.py imports this router
 
@@ -146,14 +160,20 @@ def send_share_message(
         # the narrower race between next_turn_number's read and this insert
         # that guard doesn't fully close.
         db.rollback()
-        # Refund the cap turn try_consume_turn already claimed above: the
-        # losing request's message was never persisted and no run was ever
-        # created for it, so it must not cost the visitor a turn against
-        # their daily cap (controller-ruled fix, Task 8 review finding 1b).
+        # Refund the cap turns both try_consume_* calls already claimed
+        # above: the losing request's message was never persisted and no run
+        # was ever created for it, so it must not cost the visitor a turn
+        # against their daily cap (controller-ruled fix, Task 8 review
+        # finding 1b) -- nor the link a turn against its aggregate one.
         db.execute(
             update(ShareSession)
             .where(ShareSession.id == session.id, ShareSession.turns_today > 0)
             .values(turns_today=ShareSession.turns_today - 1)
+        )
+        db.execute(
+            update(ShareLink)
+            .where(ShareLink.id == link.id, ShareLink.turns_today > 0)
+            .values(turns_today=ShareLink.turns_today - 1)
         )
         db.commit()
         raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)

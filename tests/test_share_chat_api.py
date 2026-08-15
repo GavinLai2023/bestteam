@@ -273,6 +273,51 @@ def test_undeployed_team_404_matches_revoked_link_404(client):
     assert undeployed_resp.json() == revoked_resp.json()
 
 
+def test_link_level_cap_stops_a_burst_of_cookieless_requests(client):
+    """The per-session cap alone caps nobody: a client that never stores the
+    session cookie gets a brand-new, free ShareSession -- and so a fresh
+    allowance -- on every request. `daily_cap` is therefore also the
+    aggregate ceiling across every session on one link (final whole-branch
+    review C1). Each request below uses its own cookie-less TestClient, so
+    every one of them is a "new visitor" as far as the session cap is
+    concerned.
+    """
+    token, _ = _make_link(daily_cap=2)
+
+    statuses = []
+    for _ in range(4):
+        fresh = TestClient(backend_main.app)  # no cookies carried over
+        statuses.append(fresh.post(f"/api/share/{token}/messages", json={"content": "hi"}).status_code)
+
+    assert statuses == [202, 202, 429, 429]
+
+
+def test_undeployed_team_link_never_creates_a_share_session_row(client):
+    """A valid-but-undeployed link, hammered in a loop, used to grow
+    `share_sessions` unboundedly with orphaned rows, because the session was
+    created (and committed) before the deployed check ran (final whole-branch
+    review M12).
+    """
+    from ui.backend.db.models import ShareSession
+    from ui.backend.db.share_links import get_share_link_by_token
+
+    token, _ = _make_link()
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, token)
+        team = db.query(WorkflowRecord).filter_by(id=link.workflow_id).one()
+        team.status = "draft"
+        db.commit()
+
+    with open_test_db() as db:
+        before = db.query(ShareSession).count()
+
+    for _ in range(3):
+        assert client.post(f"/api/share/{token}/messages", json={"content": "hi"}).status_code == 404
+
+    with open_test_db() as db:
+        assert db.query(ShareSession).count() == before
+
+
 def test_cors_allows_credentials():
     from ui.backend.main import app
 
