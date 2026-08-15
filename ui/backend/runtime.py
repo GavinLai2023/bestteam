@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -137,6 +138,10 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             pass
 
 
+_SHARE_REPLY_MAX_ATTEMPTS = 3
+_SHARE_REPLY_RETRY_DELAY_SECONDS = 0.05
+
+
 def _safe_record_share_reply(db: Optional[Session], run_row: Run, output: Optional[str]) -> None:
     """Append a share-chat run's assistant reply, isolating failures from the
     run's own terminal handling -- same rationale as `_safe_record_usage`.
@@ -147,18 +152,42 @@ def _safe_record_share_reply(db: Optional[Session], run_row: Run, output: Option
     the whole terminal branch: the terminal event never reached the live WS
     subscriber and the outer handler then treated the run as crashed and
     recorded a SECOND reply for it (final whole-branch review I5).
+
+    A single attempt still left a gap: a transient DB failure here (nothing
+    else in this function's own history has ever raised for a non-transient
+    reason) left the session's last message an unanswered user turn with no
+    way to recover -- every later send is rejected by `_has_pending_turn`
+    forever, since nothing retries or repairs the write (Codex review
+    finding). Retries a few times, with a brief pause to let a transient
+    fault (e.g. momentary SQLite lock contention) clear, before giving up and
+    logging loudly enough for an operator to notice and repair by hand.
     """
-    try:
-        record_share_reply(db, run_row, output)
-    except Exception:  # noqa: BLE001 -- a transcript write must never break a run
-        _logger.warning(
-            "Share reply recording failed for run %s; run unaffected", run_row.id, exc_info=True
-        )
+    for attempt in range(1, _SHARE_REPLY_MAX_ATTEMPTS + 1):
         try:
-            if db is not None:
-                db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+            record_share_reply(db, run_row, output)
+            return
+        except Exception:  # noqa: BLE001 -- a transcript write must never break a run
+            _logger.warning(
+                "Share reply recording failed for run %s (attempt %d/%d); run unaffected",
+                run_row.id,
+                attempt,
+                _SHARE_REPLY_MAX_ATTEMPTS,
+                exc_info=True,
+            )
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt < _SHARE_REPLY_MAX_ATTEMPTS:
+                time.sleep(_SHARE_REPLY_RETRY_DELAY_SECONDS)
+    _logger.error(
+        "Share reply recording permanently failed for run %s after %d attempts; "
+        "the visitor session will appear to have a pending turn until an "
+        "operator repairs it",
+        run_row.id,
+        _SHARE_REPLY_MAX_ATTEMPTS,
+    )
 
 
 def _env_int(name: str, default: Optional[int], *, min_value: Optional[int] = 1) -> Optional[int]:
