@@ -9,6 +9,7 @@ from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
+from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
     _MAX_RERANK_CANDIDATE_K,
     _resolve_candidate_k,
@@ -266,6 +267,34 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
         for piece in _chunk_text(text, chunk_size, chunk_overlap, suffix=file_path.suffix.lower()):
             chunks.append(_Chunk(source=source, text=piece))
     return chunks
+
+
+def _rrf_retrieve(
+    query_variants: List[str],
+    legs: List[Callable[[str, int], List[int]]],
+    fetch_k: int,
+) -> List[int]:
+    """Run every (query_variant, leg) pair -- each leg returns a ranked list
+    of chunk indices capped at fetch_k -- and fuse ALL resulting lists
+    (variants x legs) with one unweighted `reciprocal_rank_fusion` call.
+    Returns chunk indices ordered by fused score, descending. A leg is a
+    closure over one KB's own chunks/index (BM25 scoring, or cosine
+    scoring); parameterizing on `(query_text, fetch_k) -> List[int]` lets
+    one function serve local_folder (1 leg), vector (1 leg), and hybrid (2
+    legs) identically. With exactly one variant and one leg this reproduces
+    that leg's own order exactly (RRF over a single ranked list is
+    order-preserving -- see the design spec's "Key facts")."""
+    ranked_lists = [leg(variant, fetch_k) for variant in query_variants for leg in legs]
+    fused = reciprocal_rank_fusion(*ranked_lists)
+    return [idx for idx, _score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)]
+
+
+def _query_variants(query: str, query_expansion_model: Any, query_expansion_count: int) -> List[str]:
+    """`[query]` plus up to `query_expansion_count` LLM-generated alternative
+    phrasings. Expansion failures/unset already degrade to `[]` inside
+    `expand_query`, so this never raises and never returns an empty list."""
+    expansions, _response = expand_query(query_expansion_model, query, query_expansion_count)
+    return [query] + expansions
 
 
 def _rerank_fetch_k(top_k: int, candidate_k: int, reranker: Optional[Reranker]) -> int:

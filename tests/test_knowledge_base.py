@@ -483,6 +483,60 @@ def test_rerank_candidates_does_not_mutate_input():
 
 
 # ---------------------------------------------------------------------------
+# _rrf_retrieve / _query_variants
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import _query_variants, _rrf_retrieve
+
+
+def test_rrf_retrieve_single_variant_single_leg_preserves_leg_order():
+    def leg(query_text, fetch_k):
+        return [3, 1, 2][:fetch_k]
+
+    result = _rrf_retrieve(["q"], [leg], fetch_k=3)
+    assert result == [3, 1, 2]
+
+
+def test_rrf_retrieve_fuses_across_legs():
+    def leg_a(query_text, fetch_k):
+        return [1, 2][:fetch_k]
+
+    def leg_b(query_text, fetch_k):
+        return [2, 1][:fetch_k]
+
+    result = _rrf_retrieve(["q"], [leg_a, leg_b], fetch_k=2)
+    # Both indices appear at rank 1 once and rank 2 once -- tied, both present.
+    assert set(result) == {1, 2}
+
+
+def test_rrf_retrieve_fuses_across_variants():
+    calls = []
+
+    def leg(query_text, fetch_k):
+        calls.append(query_text)
+        return {"q": [1], "alt": [2]}.get(query_text, [])
+
+    result = _rrf_retrieve(["q", "alt"], [leg], fetch_k=1)
+    assert calls == ["q", "alt"]
+    assert set(result) == {1, 2}
+
+
+def test_rrf_retrieve_empty_legs_returns_empty():
+    assert _rrf_retrieve(["q"], [lambda q, k: []], fetch_k=5) == []
+
+
+def test_query_variants_no_expansion_model_returns_just_the_query():
+    assert _query_variants("refund", None, 3) == ["refund"]
+
+
+def test_query_variants_expansion_adds_alternatives():
+    variants = _query_variants(
+        "refund", 'fake:{"queries": ["money back"]}', 3
+    )
+    assert variants == ["refund", "money back"]
+
+
+# ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase rerank wiring
 # ---------------------------------------------------------------------------
 
