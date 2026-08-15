@@ -65,7 +65,7 @@ backed by a folder of documents (`tools.parse_file` + chunking):
   **cosine similarity** for semantic search (e.g. a query about "refunds"
   matches a chunk that says "money back" with no shared keywords). Query
   expansion and reranking are both available, opt-in (see "Query expansion"
-  and "Known limitation: vector knowledge base retrieval is single-stage"
+  and "Known limitations: knowledge base storage, chunking, and reranking"
   below).
 - `hybrid` (`core/hybrid_knowledge_base.py`): indexes chunks with BOTH BM25
   and embeddings, fusing the two rankings via Reciprocal Rank Fusion so a
@@ -149,7 +149,7 @@ at the `Workflow.stream()` orchestration layer) -- the same pre-existing gap
 `VectorKnowledgeBase`'s embedding calls already have. See
 `docs/superpowers/specs/2026-08-15-kb-hybrid-retrieval-design.md`.
 
-## Known limitation: vector knowledge base retrieval is single-stage
+## Known limitations: knowledge base storage, chunking, and reranking
 
 `VectorKnowledgeBase` is also in-memory plus an optional JSON embedding
 cache (`cache_path`) — no external vector store (Chroma/FAISS/Pinecone) and
