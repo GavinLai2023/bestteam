@@ -15,7 +15,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from .db.models import Run
+from .db.models import Run, ShareMessage
 from .db.share_messages import append_message
 
 _FALLBACK_REPLY = "Sorry, something went wrong producing a reply."
@@ -33,6 +33,18 @@ def record_share_reply(db: Optional[Session], run_row: Run, output: Optional[str
     share_session_id = run_row.trigger_context.get("share_session_id")
     turn_number = run_row.trigger_context.get("turn_number")
     if share_session_id is None or turn_number is None:
+        return
+    already_recorded = (
+        db.query(ShareMessage.id)
+        .filter_by(share_session_id=share_session_id, turn_number=turn_number + 1)
+        .first()
+    )
+    if already_recorded is not None:
+        # Idempotent: a run's terminal handling can reach here more than once
+        # for the same turn (a terminal branch that partially failed and then
+        # fell through to the outer crash handler), and a second append would
+        # otherwise raise on ShareMessage's (share_session_id, turn_number)
+        # unique constraint. First reply wins (final whole-branch review I5).
         return
     append_message(
         db,

@@ -137,6 +137,30 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             pass
 
 
+def _safe_record_share_reply(db: Optional[Session], run_row: Run, output: Optional[str]) -> None:
+    """Append a share-chat run's assistant reply, isolating failures from the
+    run's own terminal handling -- same rationale as `_safe_record_usage`.
+
+    This used to be called unguarded, before `terminal_seen = True` and before
+    `registry.publish`, so an `append_message` failure (a
+    `(share_session_id, turn_number)` collision, a transient DB error) aborted
+    the whole terminal branch: the terminal event never reached the live WS
+    subscriber and the outer handler then treated the run as crashed and
+    recorded a SECOND reply for it (final whole-branch review I5).
+    """
+    try:
+        record_share_reply(db, run_row, output)
+    except Exception:  # noqa: BLE001 -- a transcript write must never break a run
+        _logger.warning(
+            "Share reply recording failed for run %s; run unaffected", run_row.id, exc_info=True
+        )
+        try:
+            if db is not None:
+                db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _env_int(name: str, default: Optional[int], *, min_value: Optional[int] = 1) -> Optional[int]:
     """Int env config, or `default` when unset/blank/invalid. `min_value` (1 by
     default, matching every other caller's "positive-int" knobs) also falls
@@ -336,8 +360,11 @@ def run_in_background(
         # visitor's chat page sees an answer and share_chat.py's
         # "last message is unanswered" guard never wedges the session shut.
         # No-op for every other run (see record_share_reply's own guard).
+        # Always via _safe_record_share_reply: this is a secondary write, and
+        # a failure here must never abort the terminal branch it sits in
+        # (final whole-branch review I5).
         if run_row is not None:
-            record_share_reply(db, run_row, output)
+            _safe_record_share_reply(db, run_row, output)
 
     try:
         if db is not None:

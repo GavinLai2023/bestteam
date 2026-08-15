@@ -80,6 +80,35 @@ def test_falls_back_to_a_friendly_message_when_output_is_none(db):
     assert messages[-1].content  # non-empty friendly fallback
 
 
+def test_calling_twice_for_the_same_turn_is_a_no_op(db):
+    """`record_share_reply` is reachable twice for one run: if the streaming
+    loop's terminal branch raises partway through, `terminal_seen` stays
+    False and the outer crash handler records a reply for the same run again
+    (final whole-branch review I5). The second call must not raise on the
+    (share_session_id, turn_number) unique constraint, and must not overwrite
+    the real reply with the failure fallback -- first reply wins.
+    """
+    from ui.backend.db.models import ShareMessage
+
+    session = _share_session(db)
+    append_message(db, session.id, turn_number=1, role="user", content="hi")
+    run_row = Run(
+        id="run-6", workflow="t", input="hi", org_id=1,
+        trigger_context={"share_link_id": 1, "share_session_id": session.id, "turn_number": 1},
+    )
+    db.add(run_row)
+    db.commit()
+
+    record_share_reply(db, run_row, "the real reply")
+    record_share_reply(db, run_row, "a second, later reply")
+
+    assistant_rows = (
+        db.query(ShareMessage).filter_by(share_session_id=session.id, role="assistant").all()
+    )
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0].content == "the real reply"
+
+
 def test_no_op_for_a_run_without_trigger_context(db):
     from ui.backend.db.models import ShareMessage
 
