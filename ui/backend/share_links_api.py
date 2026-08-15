@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org, get_current_user
-from .db.models import Organization, ShareLink, ShareSession, User, WorkflowRecord
+from .db.models import Organization, ShareLink, ShareSession, User, WorkflowRecord, iso_utc
 from .db.share_links import create_share_link, get_share_link, list_share_links, patch_share_link
 from .db.share_messages import list_messages
 from .db.share_sessions import list_share_sessions
@@ -74,8 +74,13 @@ def _share_link_dict(link: ShareLink) -> dict:
 def _share_session_dict(session: ShareSession) -> dict:
     return {
         "id": session.id,
-        "created_at": session.created_at.isoformat(),
-        "last_active_at": session.last_active_at.isoformat(),
+        # SQLite round-trips these as tzinfo-naive datetimes -- plain
+        # `.isoformat()` then omits the UTC marker, and `SharedSessionsPanel`
+        # passes `last_active_at` straight into `new Date(...)`, which
+        # interprets an offset-less string as browser-LOCAL time, shifting
+        # activity times for any visitor outside UTC (Codex review finding).
+        "created_at": iso_utc(session.created_at),
+        "last_active_at": iso_utc(session.last_active_at),
         "turns_today": session.turns_today,
     }
 

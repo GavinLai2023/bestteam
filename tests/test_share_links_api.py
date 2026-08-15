@@ -128,6 +128,27 @@ def test_list_sessions_and_messages_for_a_link(client):
     ]
 
 
+def test_session_timestamps_include_the_utc_offset(client):
+    """`_share_session_dict` used to call `.isoformat()` directly on a
+    tzinfo-naive column, omitting the UTC marker -- `SharedSessionsPanel`
+    passes these straight into `new Date(...)`, which then misreads them as
+    browser-local time for any visitor outside UTC (Codex review finding).
+    """
+    from ui.backend.db.share_sessions import create_share_session
+
+    workflow_id = _deploy_team()
+    link = client.post(f"/api/workflows/{workflow_id}/share-links", json={}).json()
+
+    with open_test_db() as db:
+        session = create_share_session(db, link["id"])
+        session_id = session.id
+
+    sessions = client.get(f"/api/share-links/{link['id']}/sessions").json()
+    body = next(s for s in sessions if s["id"] == session_id)
+    assert body["created_at"].endswith("+00:00")
+    assert body["last_active_at"].endswith("+00:00")
+
+
 def test_offset_aware_expires_at_is_stored_as_naive_utc(client):
     """`share_links.expires_at` is a naive column and `share_chat._is_expired`
     compares against naive UTC, so an offset-aware input used to have its
