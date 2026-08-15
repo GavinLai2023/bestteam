@@ -251,6 +251,35 @@ describe('ShareChatPage', () => {
     expect(screen.getAllByText('hi there')).toHaveLength(1)
   })
 
+  it('does not let a slow initial history fetch overwrite a message sent before it resolves', async () => {
+    // The mount-time getMessages() is a snapshot taken at mount -- if it's
+    // still in flight when the visitor sends a message, its (now stale)
+    // resolution must not wipe out what handleSend already put in state
+    // (Codex review finding).
+    let resolveInitial: (value: unknown) => void = () => {}
+    const initialRequest = new Promise((resolve) => {
+      resolveInitial = resolve
+    })
+    mockedApi.getMessages.mockReturnValueOnce(initialRequest as ReturnType<typeof mockedApi.getMessages>)
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalled())
+    expect(screen.getByText('hi there')).toBeInTheDocument()
+
+    await act(async () => {
+      resolveInitial({ messages: [] })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('hi there')).toBeInTheDocument()
+  })
+
   it('shows the backend message and re-enables the form on a 409 (already-pending turn)', async () => {
     mockedApi.sendMessage.mockRejectedValue(
       Object.assign(new Error('Please wait for the previous reply to finish.'), { status: 409 }),

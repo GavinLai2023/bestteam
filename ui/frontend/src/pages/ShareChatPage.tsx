@@ -38,18 +38,32 @@ export default function ShareChatPage() {
   // without this a visitor is left staring at a "Working on it..." line
   // forever with no way to recover short of reloading (review finding).
   const terminalSeenRef = useRef(false)
+  // Set at the start of handleSend, before this effect's fetch can possibly
+  // resolve. The initial history fetch is a snapshot taken at mount time --
+  // if the visitor sends a message while it's still in flight, its (now
+  // stale) resolution must not overwrite the optimistic message/live reply
+  // handleSend has already put in state (Codex review finding).
+  const hasSentRef = useRef(false)
 
   useEffect(() => {
+    let ignore = false
     shareChatApi
       .getMessages(token)
-      .then((data) => setMessages(data.messages))
+      .then((data) => {
+        if (ignore || hasSentRef.current) return
+        setMessages(data.messages)
+      })
       .catch((e: Error & { status?: number }) => {
+        if (ignore || hasSentRef.current) return
         setUnavailable(
           e.status === 404
             ? 'This share link is no longer available.'
             : "Couldn't load this conversation.",
         )
       })
+    return () => {
+      ignore = true
+    }
   }, [token])
 
   useEffect(() => {
@@ -67,6 +81,7 @@ export default function ShareChatPage() {
     const content = draft.trim()
     if (!content || sending) return
 
+    hasSentRef.current = true
     setSending(true)
     setRateLimited(false)
     setNotice(null)
