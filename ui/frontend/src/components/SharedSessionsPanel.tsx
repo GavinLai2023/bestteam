@@ -21,22 +21,35 @@ export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelP
   useEffect(() => {
     // Reset stale state left over from the previous `workflowId` -- this
     // component isn't remounted on a team-switch (no `key` from
-    // ActivityPage.tsx), so without this an open transcript or error banner
-    // from the old team would otherwise keep showing, now silently
-    // mislabeled as if it belonged to the newly-selected team.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset transcript/error on workflow change
+    // ActivityPage.tsx), so without this the old team's links/sessions (not
+    // just an open transcript or error banner) would otherwise keep showing
+    // while the new team's request is still in flight, silently mislabeled
+    // as if they belonged to the newly-selected team (Codex review finding).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset all panel state on workflow change
     setTranscript(null)
     setError(null)
+    setLinks([])
+    setSessionsByLink({})
+    // Guards against an older request resolving after a newer one and
+    // overwriting the panel with the wrong team's data (same pattern as
+    // TracePage.tsx's own `ignore` flag for its fetch-on-selection effect).
+    let ignore = false
     api
       .listShareLinks(workflowId)
       .then(async (fetchedLinks) => {
-        setLinks(fetchedLinks)
         const entries = await Promise.all(
           fetchedLinks.map(async (link) => [link.id, await api.listShareSessions(link.id)] as const),
         )
+        if (ignore) return
+        setLinks(fetchedLinks)
         setSessionsByLink(Object.fromEntries(entries))
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => {
+        if (!ignore) setError(e.message)
+      })
+    return () => {
+      ignore = true
+    }
   }, [workflowId])
 
   const openTranscript = async (linkId: number, sessionId: number) => {

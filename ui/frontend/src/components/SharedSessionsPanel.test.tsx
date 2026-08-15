@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import SharedSessionsPanel from './SharedSessionsPanel'
 import { api } from '../lib/api'
 
@@ -58,5 +58,57 @@ describe('SharedSessionsPanel', () => {
 
     expect(screen.queryByText('hello!')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByText(/7/)).toBeInTheDocument())
+  })
+
+  it('clears the old teams links immediately on a workflow change, not just the transcript', async () => {
+    // Only `transcript`/`error` used to be reset on a team switch -- the old
+    // team's links/sessions kept showing while the new team's request was
+    // still in flight, silently mislabeled as belonging to the new team
+    // (Codex review finding).
+    const { rerender } = render(<SharedSessionsPanel workflowId={5} />)
+    await waitFor(() => expect(screen.getByText(/3/)).toBeInTheDocument())
+
+    // The new team's request hangs forever in this test -- the old team's
+    // row must already be gone rather than lingering.
+    mockedApi.listShareLinks.mockReturnValue(new Promise(() => {}))
+    rerender(<SharedSessionsPanel workflowId={6} />)
+
+    await waitFor(() => expect(screen.queryByText(/3/)).not.toBeInTheDocument())
+  })
+
+  it('ignores a stale response from a superseded workflow request', async () => {
+    // An older, slower request resolving after a newer one must not
+    // overwrite the panel with the wrong team's data (Codex review
+    // finding).
+    let resolveFirst: (value: unknown) => void = () => {}
+    const firstRequest = new Promise((resolve) => {
+      resolveFirst = resolve
+    })
+    mockedApi.listShareLinks.mockReturnValueOnce(firstRequest as ReturnType<typeof mockedApi.listShareLinks>)
+
+    const { rerender } = render(<SharedSessionsPanel workflowId={5} />)
+
+    mockedApi.listShareLinks.mockResolvedValueOnce([
+      { id: 2, workflow_id: 6, token: 'tok2', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+    ])
+    mockedApi.listShareSessions.mockResolvedValue([
+      { id: 10, created_at: '2026-08-14T00:00:00+00:00', last_active_at: '2026-08-14T02:00:00+00:00', turns_today: 7 },
+    ])
+    rerender(<SharedSessionsPanel workflowId={6} />)
+    await waitFor(() => expect(screen.getByText(/7/)).toBeInTheDocument())
+
+    // The stale workflowId=5 request finally resolves -- it must not clobber
+    // the already-displayed workflowId=6 data.
+    await act(async () => {
+      resolveFirst([
+        { id: 1, workflow_id: 5, token: 'tok', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      ])
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText(/7/)).toBeInTheDocument()
+    expect(screen.queryByText(/3/)).not.toBeInTheDocument()
   })
 })
