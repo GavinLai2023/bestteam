@@ -43,7 +43,6 @@ from .db.models import (
     KnowledgeBaseRecord,
     Organization,
     Run,
-    ShareLink,
     SkillRecord,
     SkillVersion,
     User,

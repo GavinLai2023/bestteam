@@ -537,17 +537,6 @@ def list_workflows(
     # - Personal teams: user-created via builder, visible only to creator
     # - Shared templates: admin-created via /api/config, visible to all org members
     # Plus the global YAML demos only where they're deliberately enabled.
-    db_names = {
-        row.name
-        for row in db.query(WorkflowRecord.name).filter(
-            WorkflowRecord.org_id == org.id,
-            WorkflowRecord.status == "deployed",
-            or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
-        )
-    }
-    yaml_names = (
-        {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
-    )
     id_by_name = {
         row.name: row.id
         for row in db.query(WorkflowRecord.name, WorkflowRecord.id).filter(
@@ -556,6 +545,10 @@ def list_workflows(
             or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
         )
     }
+    db_names = set(id_by_name)
+    yaml_names = (
+        {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
+    )
     return {"workflows": sorted(db_names | yaml_names), "workflow_ids": id_by_name}
 
 

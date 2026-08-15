@@ -67,7 +67,12 @@ def try_consume_turn(db: Session, session: ShareSession, daily_cap: int) -> bool
     advanced = db.execute(
         update(ShareSession)
         .where(ShareSession.id == session.id, ShareSession.turns_today < daily_cap)
-        .values(turns_today=ShareSession.turns_today + 1, last_active_at=datetime.now(timezone.utc))
+        # Naive UTC, matching what every other writer here round-trips
+        # through SQLite (final whole-branch review M23).
+        .values(
+            turns_today=ShareSession.turns_today + 1,
+            last_active_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
     ).rowcount
     db.commit()
     db.refresh(session)

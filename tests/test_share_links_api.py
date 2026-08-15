@@ -126,3 +126,44 @@ def test_list_sessions_and_messages_for_a_link(client):
         ("user", "hi there"),
         ("assistant", "hello!"),
     ]
+
+
+def test_offset_aware_expires_at_is_stored_as_naive_utc(client):
+    """`share_links.expires_at` is a naive column and `share_chat._is_expired`
+    compares against naive UTC, so an offset-aware input used to have its
+    offset silently dropped -- a link created with `+08:00` then expired up
+    to 8 hours off (final whole-branch review M13/M23).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from ui.backend.db.models import ShareLink
+
+    workflow_id = _deploy_team()
+    aware = datetime(2030, 1, 2, 8, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    created = client.post(
+        f"/api/workflows/{workflow_id}/share-links", json={"expires_at": aware.isoformat()}
+    )
+    assert created.status_code == 201
+
+    with open_test_db() as db:
+        stored = db.get(ShareLink, created.json()["id"]).expires_at
+    assert stored.tzinfo is None
+    assert stored == datetime(2030, 1, 2, 0, 0, 0)  # the same instant, in UTC
+
+
+def test_offset_aware_expires_at_is_normalized_on_patch(client):
+    from datetime import datetime, timedelta, timezone
+
+    from ui.backend.db.models import ShareLink
+
+    workflow_id = _deploy_team()
+    link = client.post(f"/api/workflows/{workflow_id}/share-links", json={}).json()
+    aware = datetime(2030, 3, 4, 1, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+
+    patched = client.patch(f"/api/share-links/{link['id']}", json={"expires_at": aware.isoformat()})
+    assert patched.status_code == 200
+
+    with open_test_db() as db:
+        stored = db.get(ShareLink, link["id"]).expires_at
+    assert stored.tzinfo is None
+    assert stored == datetime(2030, 3, 4, 6, 0, 0)

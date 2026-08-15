@@ -9,11 +9,11 @@ colleague using the resulting link never authenticates this way -- see
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org, get_current_user
@@ -26,9 +26,25 @@ from .db_session import get_db
 router = APIRouter(prefix="/api", tags=["share-links"])
 
 
+def _to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalize an offset-aware `expires_at` to naive UTC before it reaches
+    the DB. `share_links.expires_at` is a naive column and `share_chat.py`'s
+    `_is_expired` compares against naive UTC, so an offset-aware input used to
+    have its offset silently dropped -- a link created with `+08:00` then
+    expired up to 8 hours off (final whole-branch review M13/M23)."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 class ShareLinkCreate(BaseModel):
     daily_cap: int = Field(default=30, ge=1, le=1000)
     expires_at: Optional[datetime] = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _normalize_expires_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _to_naive_utc(value)
 
 
 class ShareLinkPatch(BaseModel):
@@ -36,6 +52,11 @@ class ShareLinkPatch(BaseModel):
     daily_cap: Optional[int] = Field(default=None, ge=1, le=1000)
     expires_at: Optional[datetime] = None
     clear_expiry: bool = False
+
+    @field_validator("expires_at")
+    @classmethod
+    def _normalize_expires_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _to_naive_utc(value)
 
 
 def _share_link_dict(link: ShareLink) -> dict:
