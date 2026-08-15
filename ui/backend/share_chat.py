@@ -270,6 +270,30 @@ def _link_and_org_active(engine, link_id: int) -> bool:
         return org is not None and org.active
 
 
+def visitor_safe_event(event: dict) -> dict:
+    """Strip a trace event down to what an anonymous visitor may see.
+
+    The raw event (`dataclasses.asdict(TraceEvent)`: `type`, `workflow`,
+    `agent`, `data`, `usage`) carries the org's internals -- agent names, the
+    team name, full intermediate agent output, tool names/summaries, and the
+    model identities and token counts in `usage`. The design's visitor
+    experience is a friendly, non-technical status line, and the frontend's
+    `friendlyStatusFor` mapping is purely cosmetic: anyone can open devtools
+    and read the real payloads. Only the event type crosses this boundary,
+    plus `run_completed`'s `data` -- the final answer, which the chat page
+    needs to render the reply. Same spirit as `runtime.py`'s
+    `_PM_TRACE_REDACTED` redaction (final whole-branch review I4).
+    """
+    event_type = event.get("type")
+    return {
+        "type": event_type,
+        "workflow": None,
+        "agent": None,
+        "data": event.get("data") if event_type == "run_completed" else None,
+        "usage": [],
+    }
+
+
 @router.websocket("/{token}/stream/{run_id}")
 async def stream_share_run(
     websocket: WebSocket, token: str, run_id: str, db: Session = Depends(get_db)
@@ -315,7 +339,7 @@ async def stream_share_run(
             if not _link_and_org_active(engine, link_id):
                 await websocket.close(code=4404)
                 return
-            await websocket.send_json(event)
+            await websocket.send_json(visitor_safe_event(event))
             if event["type"] in ("run_completed", "run_failed", "run_cancelled"):
                 break
     except WebSocketDisconnect:

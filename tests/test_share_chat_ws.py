@@ -169,6 +169,68 @@ def test_stream_closes_when_link_revoked_midstream(client):
     assert exc.value.code == 4404
 
 
+def test_stream_redacts_internals_from_a_non_terminal_event(client):
+    """A visitor must never receive the org's internals over this socket:
+    agent names, intermediate agent output, tool names/summaries, the team
+    name, or the model identities/token counts in `usage` (final whole-branch
+    review I4). Only the event type crosses the boundary for a non-terminal
+    event -- the frontend's friendly status mapping keys off nothing else.
+    """
+    token = _make_link()
+    link, run_id = _session_and_run(client, token)
+
+    runtime.registry.publish(
+        run_id,
+        {
+            "type": "agent_completed",
+            "workflow": "greeter",
+            "agent": "Secret Internal Analyst",
+            "data": "raw intermediate output nobody outside the org may read",
+            "usage": [{"model": "openai:gpt-4o-mini", "input_tokens": 123, "output_tokens": 45}],
+        },
+    )
+
+    with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
+        event = ws.receive_json()
+
+    assert event["type"] == "agent_completed"
+    assert event["agent"] is None
+    assert event["data"] is None
+    assert event["usage"] == []
+    assert event["workflow"] is None
+    serialized = str(event)
+    assert "Secret Internal Analyst" not in serialized
+    assert "raw intermediate output" not in serialized
+    assert "gpt-4o-mini" not in serialized
+    assert "greeter" not in serialized
+
+
+def test_stream_still_delivers_the_final_answer_on_run_completed(client):
+    """The one field a visitor DOES need: `run_completed.data` is the reply
+    the chat page renders, so the I4 redaction must not strip it."""
+    token = _make_link()
+    link, run_id = _session_and_run(client, token)
+
+    runtime.registry.publish(
+        run_id,
+        {
+            "type": "run_completed",
+            "workflow": "greeter",
+            "agent": "a",
+            "data": "here is your answer",
+            "usage": [{"model": "openai:gpt-4o-mini", "input_tokens": 1, "output_tokens": 2}],
+        },
+    )
+
+    with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
+        event = ws.receive_json()
+
+    assert event["type"] == "run_completed"
+    assert event["data"] == "here is your answer"
+    assert event["agent"] is None
+    assert event["usage"] == []
+
+
 def test_stream_rejects_connect_to_an_already_expired_link(client):
     token = _make_link()
     link, run_id = _session_and_run(client, token)
