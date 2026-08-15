@@ -1,11 +1,21 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
-  Requirements, UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
+  Requirements, ShareLink, ShareMessage, ShareSessionSummary, UsageRecord, WorkflowAnalyticsDetail,
+  WorkflowAnalyticsSummary,
 } from './types'
 
-export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
-export const WS_BASE: string = import.meta.env.VITE_WS_BASE ?? 'ws://127.0.0.1:8000'
+// `localhost`, NOT `127.0.0.1` -- do not "simplify" this back. The anonymous
+// share-chat visitor cookie (`share_chat.py`, SameSite=Lax) is only sent back
+// on same-SITE requests, and a browser treats `localhost` and `127.0.0.1` as
+// different sites. Vite's dev server serves this app on `localhost:5173`, so
+// pointing the API at `127.0.0.1:8000` means the cookie is set but never
+// returned: every message silently starts a brand-new session (no continuous
+// chat at all) and the WS handshake carries no cookie, so it closes 4404.
+// Same-site cares about the registrable domain, not the port, so
+// `localhost:5173` -> `localhost:8000` is fine.
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
+export const WS_BASE: string = import.meta.env.VITE_WS_BASE ?? 'ws://localhost:8000'
 
 export const TOKEN_KEY = 'bestteam_token'
 
@@ -214,7 +224,7 @@ export const api = {
     request<void>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
 
   // Monitoring
-  listWorkflows: () => request<{ workflows: string[] }>('/api/workflows'),
+  listWorkflows: () => request<{ workflows: string[]; workflow_ids?: Record<string, number> }>('/api/workflows'),
   workflowGraph: (name: string) => request<{ mermaid: string }>(`/api/workflows/${encodeURIComponent(name)}/graph`),
   createRun: (workflow: string, input: string) =>
     request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ workflow, input }) }),
@@ -352,6 +362,26 @@ export const api = {
   testOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
     request<{ ok: boolean; error?: string }>('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
   clearOrgEmail: () => request<void>('/api/org/email', { method: 'DELETE' }),
+
+  // Org self-service: share a deployed team with colleagues via a
+  // revocable, anonymous link (see docs/superpowers/specs/
+  // 2026-08-14-team-sharing-continuous-chat-design.md).
+  createShareLink: (workflowId: number, payload: { daily_cap?: number; expires_at?: string | null }) =>
+    request<ShareLink>(`/api/workflows/${workflowId}/share-links`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  listShareLinks: (workflowId: number) =>
+    request<ShareLink[]>(`/api/workflows/${workflowId}/share-links`),
+  patchShareLink: (
+    linkId: number,
+    payload: { active?: boolean; daily_cap?: number; expires_at?: string | null; clear_expiry?: boolean },
+  ) =>
+    request<ShareLink>(`/api/share-links/${linkId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  listShareSessions: (linkId: number) =>
+    request<ShareSessionSummary[]>(`/api/share-links/${linkId}/sessions`),
+  getShareSessionMessages: (linkId: number, sessionId: number) =>
+    request<ShareMessage[]>(`/api/share-links/${linkId}/sessions/${sessionId}/messages`),
 
   // Autonomous email trigger: org-level "run on new mail" opt-in + activity.
   getEmailTrigger: () => request<EmailTrigger>('/api/org/email-trigger'),

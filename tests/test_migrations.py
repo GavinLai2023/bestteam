@@ -54,6 +54,9 @@ _EXPECTED_HEAD_TABLES = {
     "trace_events",
     "usage_records",
     "org_email_credentials",
+    "share_links",
+    "share_sessions",
+    "share_messages",
 }
 
 

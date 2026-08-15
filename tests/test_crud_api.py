@@ -1747,3 +1747,116 @@ def test_run_fails_closed_on_legacy_inline_kb_shadowing_builtin(client):
                        headers=_org_user_headers(client))
     assert resp.status_code == 400
     assert "built-in" in resp.json()["detail"]
+
+
+def test_delete_workflow_blocked_by_active_share_link(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.share_links import create_share_link
+    from ui.backend.db.users import get_user_by_username
+
+    org_id = get_org_id()
+    config = {
+        "name": "shared_team",
+        "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+        "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    with open_test_db() as db:
+        record = WorkflowRecord(name="shared_team", org_id=org_id, config=config, status="deployed")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        user = get_user_by_username(db, "test")
+        create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+
+    resp = client.delete("/api/config/workflows/shared_team?org=default")
+    assert resp.status_code == 409
+    assert "share" in resp.json()["detail"].lower()
+
+
+def test_delete_workflow_allowed_with_only_revoked_share_link(client):
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.share_links import create_share_link, patch_share_link
+    from ui.backend.db.users import get_user_by_username
+
+    org_id = get_org_id()
+    config = {
+        "name": "revoked_share_team",
+        "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+        "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    with open_test_db() as db:
+        record = WorkflowRecord(name="revoked_share_team", org_id=org_id, config=config, status="deployed")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        user = get_user_by_username(db, "test")
+        link = create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        patch_share_link(db, link, active=False)
+
+    resp = client.delete("/api/config/workflows/revoked_share_team?org=default")
+    assert resp.status_code == 204
+
+
+def test_deleting_workflow_removes_revoked_share_links_sessions_and_messages(client):
+    """A revoked share_links row (and its sessions/messages) must not become
+    a permanent orphan when its team is deleted -- FK enforcement is off, so
+    nothing else does this, and SQLite's non-AUTOINCREMENT integer primary
+    key means a later workflow could otherwise silently inherit another
+    team's old share links and visitor transcripts (Codex review finding)."""
+    from helpers import get_org_id, open_test_db
+    from ui.backend.db.models import ShareLink, ShareMessage, ShareSession, WorkflowRecord
+    from ui.backend.db.share_links import create_share_link, patch_share_link
+    from ui.backend.db.share_messages import append_message
+    from ui.backend.db.share_sessions import create_share_session
+    from ui.backend.db.users import get_user_by_username
+
+    org_id = get_org_id()
+    config = {
+        "name": "orphan_check_team",
+        "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+        "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
+        "workflow": {"steps": ["tm"]},
+    }
+    with open_test_db() as db:
+        record = WorkflowRecord(name="orphan_check_team", org_id=org_id, config=config, status="deployed")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        user = get_user_by_username(db, "test")
+        link = create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        session = create_share_session(db, link.id)
+        append_message(db, session.id, turn_number=1, role="user", content="hi")
+        link_id, session_id = link.id, session.id
+        patch_share_link(db, link, active=False)
+
+    resp = client.delete("/api/config/workflows/orphan_check_team?org=default")
+    assert resp.status_code == 204
+
+    with open_test_db() as db:
+        assert db.get(ShareLink, link_id) is None
+        assert db.get(ShareSession, session_id) is None
+        assert db.query(ShareMessage).filter_by(share_session_id=session_id).count() == 0
+
+
+def test_list_workflows_includes_workflow_ids(client):
+    with open_test_db() as db:
+        record = WorkflowRecord(
+            name="idtest", org_id=get_org_id(),
+            config={"name": "idtest", "agents": [], "teams": [], "workflow": {"steps": []}},
+            status="deployed",
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        expected_id = record.id
+
+    headers = _org_user_headers(client)
+    resp = client.get("/api/workflows", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "idtest" in body["workflows"]
+    assert body["workflow_ids"]["idtest"] == expected_id

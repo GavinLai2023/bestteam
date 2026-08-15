@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -24,6 +25,7 @@ from .automation_results import RESULT_TYPE_BATCH_MARKER, normalize_run_result
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
+from .share_transcript import record_share_reply
 
 _logger = logging.getLogger(__name__)
 
@@ -134,6 +136,58 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
+
+
+_SHARE_REPLY_MAX_ATTEMPTS = 3
+_SHARE_REPLY_RETRY_DELAY_SECONDS = 0.05
+
+
+def _safe_record_share_reply(db: Optional[Session], run_row: Run, output: Optional[str]) -> None:
+    """Append a share-chat run's assistant reply, isolating failures from the
+    run's own terminal handling -- same rationale as `_safe_record_usage`.
+
+    This used to be called unguarded, before `terminal_seen = True` and before
+    `registry.publish`, so an `append_message` failure (a
+    `(share_session_id, turn_number)` collision, a transient DB error) aborted
+    the whole terminal branch: the terminal event never reached the live WS
+    subscriber and the outer handler then treated the run as crashed and
+    recorded a SECOND reply for it (final whole-branch review I5).
+
+    A single attempt still left a gap: a transient DB failure here (nothing
+    else in this function's own history has ever raised for a non-transient
+    reason) left the session's last message an unanswered user turn with no
+    way to recover -- every later send is rejected by `_has_pending_turn`
+    forever, since nothing retries or repairs the write (Codex review
+    finding). Retries a few times, with a brief pause to let a transient
+    fault (e.g. momentary SQLite lock contention) clear, before giving up and
+    logging loudly enough for an operator to notice and repair by hand.
+    """
+    for attempt in range(1, _SHARE_REPLY_MAX_ATTEMPTS + 1):
+        try:
+            record_share_reply(db, run_row, output)
+            return
+        except Exception:  # noqa: BLE001 -- a transcript write must never break a run
+            _logger.warning(
+                "Share reply recording failed for run %s (attempt %d/%d); run unaffected",
+                run_row.id,
+                attempt,
+                _SHARE_REPLY_MAX_ATTEMPTS,
+                exc_info=True,
+            )
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt < _SHARE_REPLY_MAX_ATTEMPTS:
+                time.sleep(_SHARE_REPLY_RETRY_DELAY_SECONDS)
+    _logger.error(
+        "Share reply recording permanently failed for run %s after %d attempts; "
+        "the visitor session will appear to have a pending turn until an "
+        "operator repairs it",
+        run_row.id,
+        _SHARE_REPLY_MAX_ATTEMPTS,
+    )
 
 
 def _env_int(name: str, default: Optional[int], *, min_value: Optional[int] = 1) -> Optional[int]:
@@ -328,6 +382,19 @@ def run_in_background(
                 raw_output_override=raw_output_override,
             )
 
+    def _maybe_record_share_reply(output: Optional[str]) -> None:
+        # Share-chat turns (share_chat.py) are regular runs stamped with
+        # trigger_context["share_session_id"] -- append the assistant's
+        # reply (or record_share_reply's own friendly fallback) so the
+        # visitor's chat page sees an answer and share_chat.py's
+        # "last message is unanswered" guard never wedges the session shut.
+        # No-op for every other run (see record_share_reply's own guard).
+        # Always via _safe_record_share_reply: this is a secondary write, and
+        # a failure here must never abort the terminal branch it sits in
+        # (final whole-branch review I5).
+        if run_row is not None:
+            _safe_record_share_reply(db, run_row, output)
+
     try:
         if db is not None:
             # Persist the run up front so usage_records/trace_events foreign
@@ -388,6 +455,7 @@ def run_in_background(
                 run_row.output = cancelled.data
                 db.commit()
                 _maybe_normalize()
+                _maybe_record_share_reply("This conversation was stopped before a reply was ready.")
             registry.publish(run_id, dataclasses.asdict(cancelled))
             if db is not None:
                 _safe_record_trace_event(db, run_id=run_id, seq=seq, event=cancelled)
@@ -469,6 +537,9 @@ def run_in_background(
                         # never race ahead of these rows.
                         db.commit()
                         _maybe_normalize(raw_run_completed_output)
+                        _maybe_record_share_reply(
+                            run_row.output if event.type == "run_completed" else None
+                        )
                     terminal_seen = True
                 registry.publish(run_id, payload)
                 if db is not None:
@@ -579,6 +650,7 @@ def run_in_background(
                     # synthetic error rows spec 10.1 requires (Codex review
                     # finding).
                     _maybe_normalize()
+                    _maybe_record_share_reply(None)
                 except Exception:  # noqa: BLE001
                     _logger.warning("Could not persist failed status for run %s", run_id)
             registry.publish(run_id, dataclasses.asdict(failed_event))

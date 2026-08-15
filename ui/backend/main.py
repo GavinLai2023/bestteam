@@ -48,6 +48,8 @@ from .memory_api import router as memory_router
 from .org_knowledge_bases import router as org_knowledge_bases_router
 from .org_settings import router as org_settings_router
 from .run_analytics_api import router as run_analytics_router
+from .share_chat import router as share_chat_router
+from .share_links_api import router as share_links_router
 from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
@@ -173,6 +175,16 @@ with SessionLocal() as _startup_session:
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
 
+if "*" in _cors_origins:
+    raise RuntimeError(
+        "BESTTEAM_CORS_ORIGINS is set to a wildcard '*', which is incompatible with the "
+        "credentialed anonymous share-session cookie this service now sets. With "
+        "allow_credentials=True, Starlette reflects the caller's own Origin back instead of "
+        "sending '*', so any website could drive credentialed cross-origin requests carrying "
+        "a visitor's share-session cookie. Set BESTTEAM_CORS_ORIGINS to an explicit "
+        "comma-separated list of the origins that serve this app's frontend."
+    )
+
 app = FastAPI(title="bestteam monitoring dashboard", lifespan=_lifespan)
 
 # Generous ceiling on any request body; the interview endpoint keeps its own
@@ -262,6 +274,7 @@ app.add_middleware(_RequestBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -276,6 +289,8 @@ app.include_router(org_settings_router)
 app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
 app.include_router(run_analytics_router)
+app.include_router(share_links_router)
+app.include_router(share_chat_router)
 
 logger = logging.getLogger("bestteam.api")
 
@@ -522,18 +537,19 @@ def list_workflows(
     # - Personal teams: user-created via builder, visible only to creator
     # - Shared templates: admin-created via /api/config, visible to all org members
     # Plus the global YAML demos only where they're deliberately enabled.
-    db_names = {
-        row.name
-        for row in db.query(WorkflowRecord.name).filter(
+    id_by_name = {
+        row.name: row.id
+        for row in db.query(WorkflowRecord.name, WorkflowRecord.id).filter(
             WorkflowRecord.org_id == org.id,
             WorkflowRecord.status == "deployed",
             or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
         )
     }
+    db_names = set(id_by_name)
     yaml_names = (
         {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
     )
-    return {"workflows": sorted(db_names | yaml_names)}
+    return {"workflows": sorted(db_names | yaml_names), "workflow_ids": id_by_name}
 
 
 @app.get("/api/workflows/{name}/graph")

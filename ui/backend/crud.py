@@ -43,6 +43,9 @@ from .db.models import (
     KnowledgeBaseRecord,
     Organization,
     Run,
+    ShareLink,
+    ShareMessage,
+    ShareSession,
     SkillRecord,
     SkillVersion,
     User,
@@ -52,6 +55,7 @@ from .db.models import (
     iso_utc,
 )
 from .db.dependencies import workflows_referencing
+from .db.share_links import count_active_share_links
 from .db.skills import publish_skill_version
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
@@ -500,6 +504,43 @@ def delete_workflow_config(
                     "of it. Deleting would orphan their provenance."
                 ),
             )
+        active_share_links = count_active_share_links(db, item.id)
+        if active_share_links:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': {active_share_links} active share "
+                    "link(s) point at it. Revoke them first."
+                ),
+            )
+        # Every share_links row still pointing at this workflow is revoked
+        # (the guard above already refused if any are active) -- delete them
+        # and their dependent sessions/messages too, or they become
+        # permanent orphans (FK enforcement is off, so nothing does this for
+        # us). SQLite's INTEGER PRIMARY KEY is not AUTOINCREMENT here, so a
+        # later workflow reusing this same id could otherwise silently
+        # inherit another team's old share links and visitor transcripts
+        # (Codex review finding).
+        revoked_link_ids = [
+            link_id for (link_id,) in db.query(ShareLink.id).filter_by(workflow_id=item.id)
+        ]
+        if revoked_link_ids:
+            session_ids = [
+                session_id
+                for (session_id,) in db.query(ShareSession.id).filter(
+                    ShareSession.share_link_id.in_(revoked_link_ids)
+                )
+            ]
+            if session_ids:
+                db.query(ShareMessage).filter(
+                    ShareMessage.share_session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(ShareSession).filter(
+                    ShareSession.id.in_(session_ids)
+                ).delete(synchronize_session=False)
+            db.query(ShareLink).filter(
+                ShareLink.id.in_(revoked_link_ids)
+            ).delete(synchronize_session=False)
         # Detach any builder sessions that deployed this head so none is left
         # pointing at a deleted workflow. A nulled workflow_id self-heals: the
         # session's next deploy resolve-or-creates a fresh head by (org_id, name)
