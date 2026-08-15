@@ -181,7 +181,8 @@ def test_send_message_returns_409_when_turn_number_collides(client, monkeypatch)
     monkeypatch.setattr(share_chat_module, "next_turn_number", lambda db, session_id: 1)
     # Bypass the coarse _has_pending_turn guard so the request reaches the
     # IntegrityError-handling code path this test targets, not the earlier
-    # coarse 409 (which is exercised separately elsewhere).
+    # coarse 409 (covered by
+    # test_sending_while_the_previous_turn_is_unanswered_is_409 below).
     monkeypatch.setattr(share_chat_module, "_has_pending_turn", lambda db, session: False)
 
     client.cookies.set(
@@ -370,6 +371,125 @@ def test_failed_dispatch_returns_an_error_and_does_not_wedge_the_session(client,
     # _has_pending_turn 409 (the executor works again here).
     monkeypatch.undo()
     assert client.post(f"/api/share/{token}/messages", json={"content": "second"}).status_code == 202
+
+
+class _RecordingExecutor:
+    """Captures dispatches instead of running them, so a test can inspect the
+    exact transcript string handed to `run_in_background` (and so the first
+    turn never "completes" unless the test says it does)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, fn, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
+def _dispatched_transcript(executor) -> str:
+    # run_in_background(run_id, workflow, input, ...) -- the transcript is the
+    # third positional argument, and the same text lands in Run.input.
+    return executor.calls[-1][0][2]
+
+
+def _session_id_for(client, token) -> int:
+    from ui.backend.db.models import ShareSession
+    from ui.backend.db.share_links import get_share_link_by_token
+
+    with open_test_db() as db:
+        link = get_share_link_by_token(db, token)
+        return db.query(ShareSession).filter_by(share_link_id=link.id).one().id
+
+
+def test_second_turn_replays_the_first_turns_exchange(client, monkeypatch):
+    """The one assertion that proves this feature's central architectural bet:
+    multi-turn works by replaying the whole transcript as one input string to
+    the existing single-shot `Workflow.run()` (spec "Approach"), rather than
+    LangGraph checkpointing. Turn 2's dispatched input must contain both turn
+    1's question and turn 1's answer (final whole-branch review I10).
+    """
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.models import Run
+    from ui.backend.db.share_messages import append_message
+
+    executor = _RecordingExecutor()
+    monkeypatch.setattr(share_chat_module, "_executor", executor)
+
+    token, _ = _make_link()
+    first = client.post(f"/api/share/{token}/messages", json={"content": "what is our refund policy?"})
+    assert first.status_code == 202
+
+    # Simulate the first run completing (normally runtime.py does this via
+    # record_share_reply when the run reaches a terminal event).
+    session_id = _session_id_for(client, token)
+    with open_test_db() as db:
+        append_message(
+            db, session_id, turn_number=2, role="assistant",
+            content="Refunds are available within 30 days.",
+        )
+
+    second = client.post(f"/api/share/{token}/messages", json={"content": "and for digital goods?"})
+    assert second.status_code == 202
+
+    transcript = _dispatched_transcript(executor)
+    assert "what is our refund policy?" in transcript
+    assert "Refunds are available within 30 days." in transcript
+    assert "and for digital goods?" in transcript
+
+    # The same text is what the Run row records as its input.
+    with open_test_db() as db:
+        assert db.get(Run, second.json()["run_id"]).input == transcript
+
+
+def test_history_is_truncated_to_max_history_turns(client, monkeypatch):
+    """MAX_HISTORY_TURNS caps the replay at the most recent 20 turns (40
+    messages) -- untested until now (final whole-branch review I10)."""
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.share_messages import append_message
+
+    executor = _RecordingExecutor()
+    monkeypatch.setattr(share_chat_module, "_executor", executor)
+
+    token, _ = _make_link(daily_cap=1000)
+    client.post(f"/api/share/{token}/messages", json={"content": "OLDEST-TURN-MARKER"})
+    session_id = _session_id_for(client, token)
+
+    # Pad well past the 40-message window; turn 1 (the marker above) falls out.
+    with open_test_db() as db:
+        turn = 2
+        for i in range(share_chat_module.MAX_HISTORY_TURNS + 5):
+            append_message(db, session_id, turn_number=turn, role="assistant", content=f"reply {i}")
+            turn += 1
+            append_message(db, session_id, turn_number=turn, role="user", content=f"question {i}")
+            turn += 1
+        append_message(db, session_id, turn_number=turn, role="assistant", content="latest reply")
+
+    client.post(f"/api/share/{token}/messages", json={"content": "NEWEST-TURN-MARKER"})
+
+    transcript = _dispatched_transcript(executor)
+    assert "NEWEST-TURN-MARKER" in transcript
+    assert "latest reply" in transcript
+    assert "OLDEST-TURN-MARKER" not in transcript
+    assert transcript.count("<user>") + transcript.count("<assistant>") <= (
+        share_chat_module.MAX_HISTORY_TURNS * 2
+    )
+
+
+def test_sending_while_the_previous_turn_is_unanswered_is_409(client, monkeypatch):
+    """`_has_pending_turn`'s 409 through the real HTTP endpoint: the first
+    run never completes here (the recording executor drops it), so the
+    session's last message is still an unanswered user turn when the second
+    send arrives (final whole-branch review I10).
+    """
+    import ui.backend.share_chat as share_chat_module
+
+    monkeypatch.setattr(share_chat_module, "_executor", _RecordingExecutor())
+
+    token, _ = _make_link()
+    assert client.post(f"/api/share/{token}/messages", json={"content": "first"}).status_code == 202
+
+    second = client.post(f"/api/share/{token}/messages", json={"content": "second"})
+    assert second.status_code == 409
+    assert second.json()["detail"] == share_chat_module._PENDING_TURN_MESSAGE
 
 
 def test_cors_allows_credentials():
