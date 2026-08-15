@@ -144,6 +144,30 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   the latter links a manually-retried run back to the one it retried
   (`email_trigger.py::retry_triggered_run`) -- a retry always inserts a new
   `runs` row, never mutates the original.
+- `share_links` — one revocable, anonymous entry point to one deployed team
+  (`db/share_links.py`; `workflow_id`/`org_id`/`created_by` FKs, a unique
+  random `token`, `active`, optional naive-UTC `expires_at`, `daily_cap`).
+  `turns_today`/`turns_date` is the link-wide **aggregate** daily-turn CAS
+  (`try_consume_link_turn`) -- `daily_cap` is both the per-session and the
+  per-link-per-day ceiling, because a visitor who never stores the session
+  cookie would otherwise get a fresh allowance on every request. An active
+  link blocks deleting the team it points at (`count_active_share_links`,
+  used by `crud.py`).
+- `share_sessions` — one anonymous visitor's browser against one
+  `share_links` row (`db/share_sessions.py`; unique `session_token`, carried
+  in an HMAC-signed cookie by `ui/backend/share_auth.py` -- never a `users`
+  row). `turns_today`/`turns_date` is the per-session daily-turn CAS
+  (`try_consume_turn`), same shape as `EmailTrigger.runs_today`/`runs_date`.
+  Never cross-visible to another session on the same link.
+- `share_messages` — one turn of a session's human-readable transcript
+  (`db/share_messages.py`; `share_session_id` FK, `turn_number`, `role`
+  (`user`|`assistant`), `content`, nullable `run_id` FK to the `runs` row
+  that produced an assistant turn). `UniqueConstraint(share_session_id,
+  turn_number)` makes a duplicate reply-recording call a no-op. Deliberately
+  separate from the replay-formatted string actually sent as a run's `input`
+  (see `ui/backend/CLAUDE.md`): this is the clean chat log the visitor UI and
+  the org's audit view render. No retention/deletion policy yet — see
+  `docs/STATUS.md`, Known issues.
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing

@@ -853,6 +853,30 @@
   before running the list query. 958 backend + 92 frontend tests, lint
   clean.
 
+- **Anonymous team sharing with continuous chat** (spec:
+  `docs/superpowers/specs/2026-08-14-team-sharing-continuous-chat-design.md`).
+  An org member generates a revocable `/share/:token` link for one deployed
+  team; a colleague opens it, never logs in, and gets a real multi-turn
+  conversation. Three tables (`share_links`/`share_sessions`/
+  `share_messages`), two routers (`share_links_api.py` org-side,
+  `share_chat.py` public), a signed session cookie instead of a JWT, and
+  transcript replay into the existing single-shot `Workflow.run()` (no
+  engine change, no checkpointing). Rate-limited by `daily_cap` at both the
+  session and the link-aggregate level. See `ui/backend/CLAUDE.md`,
+  `ui/backend/db/CLAUDE.md`, `ui/frontend/CLAUDE.md`.
+
+  **Final whole-branch review** (after every task had passed its own review):
+  the per-session cap alone capped nobody (a cookie-less client got a fresh
+  allowance per request -- fixed with a link-level aggregate cap); the dev
+  defaults pointed the API at `127.0.0.1` while Vite serves `localhost`, so
+  the `SameSite=Lax` visitor cookie never round-tripped in this app's own
+  default setup; the replayed transcript was forgeable by visitor input; raw
+  trace/tool/model data was streamed verbatim to anonymous visitors; a failed
+  `_executor.submit` wedged a visitor's chat permanently; and a wildcard
+  `BESTTEAM_CORS_ORIGINS` became a real CSRF exposure once
+  `allow_credentials=True` was needed for the cookie (now refused at
+  startup). All fixed on the branch.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -892,6 +916,18 @@
   older ones from the UI today (flagged by independent review; accepted as a
   follow-up, not blocking, since the backend bound itself is the load-bearing
   fix). See `ui/backend/CLAUDE.md`.
+- **Share-link tokens travel in URL paths** — `/share/:token` and
+  `/api/share/{token}/...` put the secret in the path, so it lands in
+  reverse-proxy/access logs and outbound `Referer` headers. Inherent to
+  link-based sharing (the link *is* the credential), not a bug, but worth
+  operational awareness: treat access logs for these routes as containing
+  credentials, and rely on revoke/expiry rather than log hygiene.
+- **Visitor transcripts have no retention or deletion policy** —
+  `share_sessions`/`share_messages` accumulate indefinitely, and an org user
+  can read a session's transcript (Activity → Shared) but has no way to
+  delete one. Revoking a link stops new turns; it doesn't remove history.
+  Needs a retention/erasure story before a customer with a real privacy
+  policy uses this at volume.
 - **No general-purpose cache layer** — only local per-process caches
   (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage

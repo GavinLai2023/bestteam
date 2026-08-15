@@ -85,8 +85,8 @@ customer nav is Build a team / My teams / Run a team / Activity):
 - **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
   — the six-stage Team Builder wizard, `components/WizardLayout.tsx` as the
   shared chrome:
-  - `lib/api.ts` — shared `fetch` wrapper (`API_BASE`/`WS_BASE` point at
-    `http://127.0.0.1:8000`) exposing every backend endpoint as `api.*`
+  - `lib/api.ts` — shared `fetch` wrapper (`API_BASE`/`WS_BASE` default to
+    `http://localhost:8000`) exposing every backend endpoint as `api.*`
     methods.
   - `lib/useBuilderSession.ts` / `lib/useModelCatalog.ts` — fetch-on-mount
     hooks; `WizardLayout` calls `useBuilderSession(sessionId)` once and hands
@@ -116,6 +116,33 @@ customer nav is Build a team / My teams / Run a team / Activity):
   - All wizard pages/components share styles from
     `components/WizardLayout.css` (cards, fields, buttons, banners, bullet
     editor, team-flow/employee-card, activity feed).
+
+## Anonymous team sharing (`/share/:token`)
+
+The one **public, unauthenticated route** in this app (outside `RequireAuth`
+entirely): `pages/ShareChatPage.tsx`, a multi-turn chat a colleague reaches
+via a link an org member generated. Design:
+`docs/superpowers/specs/2026-08-14-team-sharing-continuous-chat-design.md`;
+backend: `ui/backend/CLAUDE.md`.
+
+- `lib/shareChatApi.ts` is a **separate client from `lib/api.ts`** and must
+  stay one: it sends no bearer token and instead passes
+  `credentials: 'include'` so the backend's signed `share_auth` session
+  cookie round-trips. `lib/api.ts`'s `request` never needs cookies at all.
+  Both share `API_BASE`/`WS_BASE`, which default to **`localhost`, not
+  `127.0.0.1`** — the visitor cookie is `SameSite=Lax` and a browser treats
+  those as different sites, so a mismatch with Vite's own `localhost:5173`
+  silently breaks continuous chat entirely.
+- `lib/shareTraceEvents.ts`'s `friendlyStatusFor` maps a run's event stream
+  to one short non-technical line. It's cosmetic only — the backend already
+  strips everything but the event `type` (plus the final answer) before it
+  reaches this socket, so devtools show nothing more than the UI does.
+- Org side: `components/ShareLinksPanel.tsx` is the click-to-expand "Share"
+  panel on **My teams** (generate/copy/revoke links for one deployed team),
+  and `components/SharedSessionsPanel.tsx` backs the **Shared** audit tab on
+  `pages/ActivityPage.tsx` (pick a team, list its visitor sessions, read a
+  session's transcript). The Shared tab's team picker lists only workflows
+  with a real DB id — a YAML-only demo can't have share links.
 
 ## Auth and login UI
 
@@ -151,5 +178,5 @@ and a "memory not enabled" state). All of this gating is cosmetic — the backen
 enforces admin on every `/api/config` and `/api/memory` call and org scoping on
 every customer surface, so a tampered client still gets 403.
 `API_BASE`/`WS_BASE` are configurable via `VITE_API_BASE`/`VITE_WS_BASE`
-(see `ui/frontend/.env.example`), falling back to the `127.0.0.1:8000`
-defaults above for local dev.
+(see `ui/frontend/.env.example`), falling back to `localhost:8000` for local
+dev — `localhost`, not `127.0.0.1`, for the SameSite reason above.

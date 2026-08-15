@@ -448,6 +448,69 @@ instead of UTC midnight -- passing a local date string alone still misdates
 rows created in a timezone-ahead-of-UTC org's first few local hours of a new
 day, since those rows' UTC timestamp is still the previous UTC date.
 
+## Anonymous team sharing with continuous chat (`share_links_api.py` + `share_chat.py`)
+
+An org member shares one deployed team via a revocable link; a colleague
+opens it, never logs in, and gets a real multi-turn conversation. Full
+design: `docs/superpowers/specs/2026-08-14-team-sharing-continuous-chat-design.md`.
+Schema (`share_links`/`share_sessions`/`share_messages`): `db/CLAUDE.md`.
+
+Two routers, deliberately separate surfaces:
+
+- **`share_links_api.py`** (`/api/workflows/{id}/share-links`,
+  `/api/share-links/{id}`, `.../sessions[/{id}/messages]`) -- org-side
+  management, every route behind `get_current_org`. Create/list/revoke a
+  link, and audit any visitor session's transcript. `expires_at` is
+  normalized to naive UTC on the way in (the column is naive and
+  `share_chat._is_expired` compares against naive UTC).
+- **`share_chat.py`** (`/api/share/{token}/messages`, and a WS at
+  `/api/share/{token}/stream/{run_id}`) -- the public, anonymous surface. No
+  `users` row is ever created. Every route re-validates link
+  active/expiry/org-active state fresh from the DB, and the WS re-checks it
+  before delivering each event (same philosophy as `main.py::stream_run`'s
+  per-event `_stream_access`). Every "can't use this link" case returns the
+  same single 404 detail, including "the team isn't deployed" -- a
+  distinguishable message there is an existence oracle.
+
+**Auth is a signed session cookie** (`share_auth.py`), not a JWT: a visitor
+has no account, no org, and no `users` row, so nothing `get_current_user`
+returns could describe them -- and sharing a team must not require lifting
+the one-member-per-org invariant (`docs/DECISIONS.md`). The cookie carries
+only an opaque `ShareSession.session_token`, HMAC-signed with
+**`auth.SECRET_KEY`** -- so rotating that key invalidates every in-progress
+visitor session (as well as every JWT), by design. The WS needs no `?ticket=`
+workaround: unlike an `Authorization` header, a cookie IS sent on the
+handshake. **Operational note:** the cookie is `SameSite=Lax`, so the
+frontend and this API must be served same-site (same registrable domain;
+ports don't matter) or it never comes back and every message silently starts
+a new session. A genuinely cross-site deployment needs `samesite="none"` +
+`secure=True` + HTTPS -- a deliberate config decision, not a silent change.
+
+**A turn is a normal run.** `send_share_message` builds the whole transcript
+(`format_transcript`, capped at `MAX_HISTORY_TURNS`) into one input string and
+dispatches it through the same `registry`/`_executor`/`run_in_background`
+machinery every other run uses -- so metering, trace persistence, and
+cancellation all work unchanged, and no LangGraph checkpointing is involved.
+The run is stamped `trigger_context = {"share_link_id", "share_session_id",
+"turn_number"}`; `runtime.py`'s `_safe_record_share_reply` keys off
+`share_session_id` to append the assistant turn on **every** terminal path
+(completed/failed/cancelled/crashed), so `_has_pending_turn` can never wedge
+a visitor's chat shut. `record_share_reply` is idempotent per turn.
+
+Transcript content is untrusted: each turn is wrapped in `<user>`/
+`<assistant>` tags with `<`/`>` escaped inside, so a visitor can't inject a
+fabricated prior assistant turn. The visitor WS is redacted to `type` only
+(plus `run_completed.data`, the reply itself) -- agent names, intermediate
+output, tool summaries and `usage` never leave the org, same spirit as the
+`_PM_TRACE_REDACTED` boundary above.
+
+Rate limiting is `ShareLink.daily_cap` applied **twice**: as the per-session
+ceiling (`db/share_sessions.py::try_consume_turn`) and as the link-wide
+aggregate ceiling (`db/share_links.py::try_consume_link_turn`), both the same
+atomic reset-then-conditional-UPDATE CAS. The aggregate one is load-bearing:
+a client that never stores the cookie gets a brand-new, free session on every
+request, so the per-session cap alone caps nobody.
+
 ## Sync-to-async streaming bridge
 
 `Workflow.stream()` / `compiled.stream()` are blocking generators. The
