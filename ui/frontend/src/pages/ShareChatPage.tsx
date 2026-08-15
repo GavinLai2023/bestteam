@@ -7,6 +7,14 @@ import './ShareChatPage.css'
 
 const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
 
+// Mirrors share_transcript.py's `_FALLBACK_REPLY`, which the backend has
+// already persisted for a failed/cancelled run by the time that terminal
+// event arrives. Showing the same string keeps the screen consistent with
+// what a page reload would render, without an extra round-trip.
+const FALLBACK_REPLY = 'Sorry, something went wrong producing a reply.'
+
+const MAX_MESSAGE_LENGTH = 4000 // matches share_chat.py's own cap
+
 // The public, anonymous, multi-turn counterpart to MonitorPage's one-shot
 // "Run a team" -- a colleague reaches this page via a link an org member
 // generated (ShareLinksPanel), never logs in, and gets a real back-and-forth
@@ -63,7 +71,15 @@ export default function ShareChatPage() {
     setRateLimited(false)
     setNotice(null)
     setDraft('')
-    setMessages((prev) => [...prev, { role: 'user', content, turn_number: prev.length + 1 }])
+    // Held by reference so any send failure below can take it back off screen
+    // -- the server never persisted it, so leaving it there showed the visitor
+    // a message that silently vanishes on the next reload.
+    const optimisticUserMessage: ShareMessage = {
+      role: 'user',
+      content,
+      turn_number: messages.length + 1,
+    }
+    setMessages((prev) => [...prev, optimisticUserMessage])
     setLiveEvents([])
     terminalSeenRef.current = false
 
@@ -82,7 +98,15 @@ export default function ShareChatPage() {
           ])
           setSending(false)
         } else if (TERMINAL_TYPES.includes(traceEvent.type)) {
+          // run_failed / run_cancelled: the backend has already persisted its
+          // own friendly fallback reply for this turn, so show the same thing
+          // now instead of leaving the visitor's message looking unanswered
+          // until they happen to reload the page.
           terminalSeenRef.current = true
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', content: FALLBACK_REPLY, turn_number: prev.length + 1 },
+          ])
           setSending(false)
         }
       }
@@ -100,6 +124,10 @@ export default function ShareChatPage() {
     } catch (e) {
       const status = (e as Error & { status?: number }).status
       setSending(false)
+      // The server persisted nothing for this send, so the optimistic bubble
+      // must come back off screen -- otherwise what's rendered disagrees with
+      // server state until a reload silently drops it.
+      setMessages((prev) => prev.filter((m) => m !== optimisticUserMessage))
       if (status === 429) {
         setRateLimited(true)
       } else if (status === 404) {
@@ -108,9 +136,14 @@ export default function ShareChatPage() {
         // The message was never persisted/no run was created for it -- the
         // backend's own detail text already says what to do.
         setNotice((e as Error).message || 'Please wait for the previous reply to finish.')
+      } else if (status === 422) {
+        // The backend's length cap (Pydantic validation) -- its own detail is
+        // a validation-error structure, not a sentence a visitor can read.
+        setNotice(`That message is too long. Please keep it under ${MAX_MESSAGE_LENGTH} characters.`)
       } else {
         setNotice('Something went wrong sending your message. Please try again.')
       }
+      setDraft(content)
     }
   }
 
@@ -142,6 +175,7 @@ export default function ShareChatPage() {
           type="text"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          maxLength={MAX_MESSAGE_LENGTH}
           placeholder="Type a message…"
           disabled={sending || rateLimited}
         />

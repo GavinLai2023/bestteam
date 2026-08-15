@@ -54,9 +54,16 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
   }
 
   const handleCopy = async (link: ShareLink) => {
-    await navigator.clipboard.writeText(shareUrlFor(link.token))
-    setCopiedId(link.id)
-    setTimeout(() => setCopiedId(null), 2000)
+    // `navigator.clipboard` rejects (or is undefined) in a non-secure
+    // context -- any HTTP origin that isn't localhost -- so this can't be
+    // left unguarded.
+    try {
+      await navigator.clipboard.writeText(shareUrlFor(link.token))
+      setCopiedId(link.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch {
+      setError("Couldn't copy the link automatically. Select and copy it by hand.")
+    }
   }
 
   if (!open) {

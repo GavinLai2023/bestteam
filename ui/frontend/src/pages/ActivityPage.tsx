@@ -188,11 +188,18 @@ export default function ActivityPage() {
               onChange={(e) => setSharedWorkflowId(e.target.value ? Number(e.target.value) : null)}
             >
               <option value="">Pick a team…</option>
-              {workflows.map((name) => (
-                <option key={name} value={workflowIds[name] ?? ''}>
-                  {name}
-                </option>
-              ))}
+              {/* Only teams with a real DB id: a YAML-only demo workflow has
+                  no `workflow_ids` entry, so it rendered with value="" --
+                  indistinguishable from the placeholder and silently doing
+                  nothing when picked. Such a workflow can't have share links
+                  at all (no WorkflowRecord.id to hang one off). */}
+              {workflows
+                .filter((name) => workflowIds[name] != null)
+                .map((name) => (
+                  <option key={name} value={workflowIds[name]}>
+                    {name}
+                  </option>
+                ))}
             </select>
           </label>
           {sharedWorkflowId != null && <SharedSessionsPanel workflowId={sharedWorkflowId} />}

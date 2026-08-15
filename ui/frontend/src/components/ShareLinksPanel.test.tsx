@@ -50,4 +50,24 @@ describe('ShareLinksPanel', () => {
     fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
     await waitFor(() => expect(mockedApi.patchShareLink).toHaveBeenCalledWith(1, { active: false }))
   })
+
+  it('shows a friendly error when the clipboard write is refused', async () => {
+    // navigator.clipboard rejects in any non-secure context (plain HTTP on a
+    // real host), which used to surface as an unhandled rejection and no
+    // feedback at all.
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 1, workflow_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+    ])
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('not allowed')) },
+    })
+
+    render(<ShareLinksPanel workflowId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /copy link/i }))
+
+    expect(await screen.findByText(/copy the link/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /copied/i })).not.toBeInTheDocument()
+  })
 })
