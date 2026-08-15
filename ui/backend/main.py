@@ -175,6 +175,16 @@ with SessionLocal() as _startup_session:
 _default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("BESTTEAM_CORS_ORIGINS", _default_cors_origins).split(",") if o.strip()]
 
+if "*" in _cors_origins:
+    raise RuntimeError(
+        "BESTTEAM_CORS_ORIGINS is set to a wildcard '*', which is incompatible with the "
+        "credentialed anonymous share-session cookie this service now sets. With "
+        "allow_credentials=True, Starlette reflects the caller's own Origin back instead of "
+        "sending '*', so any website could drive credentialed cross-origin requests carrying "
+        "a visitor's share-session cookie. Set BESTTEAM_CORS_ORIGINS to an explicit "
+        "comma-separated list of the origins that serve this app's frontend."
+    )
+
 app = FastAPI(title="bestteam monitoring dashboard", lifespan=_lifespan)
 
 # Generous ceiling on any request body; the interview endpoint keeps its own

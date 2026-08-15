@@ -458,6 +458,23 @@ def test_secret_key_guard_allows_custom_secret_without_env(monkeypatch):
     importlib.reload(backend_main)
 
 
+def test_wildcard_cors_origin_guard_fires(monkeypatch):
+    """A wildcard CORS origin plus allow_credentials=True makes Starlette
+    reflect the caller's own Origin back, so any website could drive
+    credentialed cross-origin requests carrying an anonymous visitor's
+    share-session cookie (final whole-branch review I8)."""
+    monkeypatch.delenv("BESTTEAM_ENV", raising=False)
+    monkeypatch.setenv("BESTTEAM_CORS_ORIGINS", "*")
+
+    with pytest.raises(RuntimeError, match="BESTTEAM_CORS_ORIGINS"):
+        importlib.reload(backend_main)
+
+    # Restore a valid value and reload again so later tests in this process
+    # (which import backend_main.app directly) see a working app.
+    monkeypatch.delenv("BESTTEAM_CORS_ORIGINS", raising=False)
+    importlib.reload(backend_main)
+
+
 def test_trigger_env_guard_fires_on_bad_value(monkeypatch):
     monkeypatch.delenv("BESTTEAM_ENV", raising=False)
     monkeypatch.setenv("BESTTEAM_TRIGGER_POLL_SECONDS", "not-a-number")
