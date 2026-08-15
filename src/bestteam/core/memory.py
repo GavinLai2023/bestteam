@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
+from .fusion import expand_query as _expand_query_impl
+from .fusion import reciprocal_rank_fusion as _reciprocal_rank_fusion
 from .reranking import Reranker, _resolve_candidate_k, resolve_reranker
 
 _logger = logging.getLogger(__name__)
@@ -121,25 +123,6 @@ _DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
 # strong signal conflict, not a bug. Internal constant for v1; revisit once
 # there's eval data to tune against.
 _RERANK_RRF_WEIGHT = 8.0
-
-
-def _reciprocal_rank_fusion(
-    *ranked_id_lists: Sequence[str], k: int = 60, weights: Optional[Sequence[float]] = None
-) -> Dict[str, float]:
-    """Merge ranked-id lists into one fused score per id: the sum, across
-    every list an id appears in, of ``weight / (k + rank)`` (1-based rank).
-    Standard Reciprocal Rank Fusion -- rank-based, so it needs no score
-    calibration between signals on different scales (BM25 vs. cosine vs. a
-    cross-encoder's raw logits). `weights` defaults to `1.0` per list
-    (today's behavior, unchanged); the rerank combination step (see
-    `_fused_search`) passes an explicit weight to keep the reranker's signal
-    from being diluted by the pre-rerank ordering."""
-    resolved_weights = weights if weights is not None else [1.0] * len(ranked_id_lists)
-    scores: Dict[str, float] = {}
-    for weight, ranked_ids in zip(resolved_weights, ranked_id_lists):
-        for rank, record_id in enumerate(ranked_ids, start=1):
-            scores[record_id] = scores.get(record_id, 0.0) + weight / (k + rank)
-    return scores
 
 
 def _recency_weight(
@@ -1106,21 +1089,6 @@ _EXTRACTION_SYSTEM_PROMPT = (
 # configurable -- kept minimal, matching the rest of this module's knobs.
 _DEDUP_CANDIDATE_LIMIT = 20
 
-# Instructs the query-expansion model to rewrite a recall query into
-# alternative phrasings -- the MultiQueryRetriever pattern, applied to
-# per-user memory recall so a query worded differently from how a fact was
-# stored can still match it. Same JSON-only, cheap-model-friendly shape as
-# `_EXTRACTION_SYSTEM_PROMPT`.
-_QUERY_EXPANSION_SYSTEM_PROMPT = (
-    "You rewrite a memory-recall query into alternative phrasings that might "
-    "match a differently-worded stored note with the same meaning (synonyms, "
-    "rephrasing, a more/less formal register). Respond with ONLY a JSON object "
-    'of the form {{"queries": ["...", "..."]}} containing up to {n} alternative '
-    "phrasings of the given query -- NOT the original query itself, NOT an "
-    "answer to it, NOT a follow-up question. Use an empty list if no useful "
-    "alternative phrasing exists. No prose outside the JSON."
-)
-
 
 def _format_candidates(candidates: Sequence["MemoryRecord"]) -> str:
     """Render existing semantic memories as `- id=<id>: <content>` lines for the
@@ -1313,63 +1281,13 @@ class MemoryManager:
         e.g. a `fake:` model). NEVER raises -- any failure (no model
         configured, count<=0, invoke error, unparseable response) returns
         ``([], None)``, so `recall()` always has a safe fallback to the
-        literal query alone and never bills for a call that didn't happen."""
-        if self.query_expansion_model is None or self.query_expansion_count <= 0:
-            return [], None
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        # Same resolver as extraction, so "fake:" specs stay $0 in tests.
-        from ..adapters.langgraph_adapter import _resolve_model
-
-        try:
-            model = _resolve_model(self.query_expansion_model)
-            response = model.invoke(
-                [
-                    SystemMessage(
-                        content=_QUERY_EXPANSION_SYSTEM_PROMPT.format(n=self.query_expansion_count)
-                    ),
-                    HumanMessage(content=f"Query: {query}"),
-                ]
-            )
-        except Exception as exc:  # noqa: BLE001 -- no call succeeded, nothing billable
-            _logger.warning(
-                "Memory: query expansion failed, recalling with the original query only: %s",
-                exc,
-                exc_info=True,
-            )
-            return [], None
-
-        # Capture usage IMMEDIATELY after the call succeeds: the tokens were
-        # consumed regardless of whether parsing the response later fails
-        # (mirrors `_extract_and_store`'s usage-capture ordering).
+        literal query alone and never bills for a call that didn't happen.
+        Thin wrapper around `fusion.expand_query()`: adds this manager's own
+        usage-metering on top of the shared expansion logic."""
+        expansions, response = _expand_query_impl(
+            self.query_expansion_model, query, self.query_expansion_count
+        )
         usage = self._usage_entry(response, self.query_expansion_model)
-
-        try:
-            content = response.content if hasattr(response, "content") else str(response)
-            parsed = _parse_extraction(content)
-        except Exception as exc:  # noqa: BLE001 -- parse failure, usage still billable
-            _logger.warning(
-                "Memory: query expansion response parse failed, recalling with the "
-                "original query only: %s",
-                exc,
-                exc_info=True,
-            )
-            return [], usage
-        if not parsed or not isinstance(parsed.get("queries"), list):
-            return [], usage
-
-        seen = {query.strip().lower()}
-        expansions: List[str] = []
-        for item in parsed["queries"]:
-            if not isinstance(item, str):
-                continue
-            text = item.strip()
-            if not text or text.lower() in seen:
-                continue
-            seen.add(text.lower())
-            expansions.append(text)
-            if len(expansions) >= self.query_expansion_count:
-                break
         return expansions, usage
 
     def _get_reranker(self) -> Optional[Reranker]:
