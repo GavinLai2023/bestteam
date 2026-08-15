@@ -77,10 +77,12 @@ relevant file below the first time it reads a file in that directory:
 These are intentionally abstracted behind interfaces but **not yet
 implemented** — don't assume they exist:
 
-- **Vector knowledge base retrieval has no query rewriting/expansion, no
-  external vector store, no DMS connectors** (reranking is available,
-  opt-in, for both knowledge base types via `rerank_model`/`candidate_k` —
-  `core/reranking.py`) — see `src/bestteam/core/CLAUDE.md`.
+- **Knowledge bases have no external vector store, no DMS connectors.**
+  Three types are supported: `local_folder` (BM25), `vector` (cosine), and
+  `hybrid` (BM25 + vector, RRF-fused). All three support opt-in query
+  expansion (`query_expansion_model`/`query_expansion_count`, MultiQueryRetriever-style,
+  unmetered) and opt-in reranking (`rerank_model`/`candidate_k`) —
+  see `src/bestteam/core/CLAUDE.md`.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or

@@ -54,7 +54,7 @@ keeps it).
 ## Knowledge bases (`core/knowledge_base.py`, `core/vector_knowledge_base.py`)
 
 The most common client request is "connect our agents to the client's
-knowledge base." The loader supports two knowledge base `type:`s, both
+knowledge base." The loader supports three knowledge base `type:`s, all
 backed by a folder of documents (`tools.parse_file` + chunking):
 
 - `local_folder` (default, `core/knowledge_base.py`): indexes chunks in
@@ -63,16 +63,22 @@ backed by a folder of documents (`tools.parse_file` + chunking):
   dozen documents.
 - `vector` (`core/vector_knowledge_base.py`): embeds each chunk and ranks by
   **cosine similarity** for semantic search (e.g. a query about "refunds"
-  matches a chunk that says "money back" with no shared keywords). Retrieval
-  has no query rewriting/expansion; reranking is available, opt-in (see
-  "Known limitation: vector knowledge base retrieval is single-stage"
+  matches a chunk that says "money back" with no shared keywords). Query
+  expansion and reranking are both available, opt-in (see "Query expansion"
+  and "Known limitation: vector knowledge base retrieval is single-stage"
   below).
+- `hybrid` (`core/hybrid_knowledge_base.py`): indexes chunks with BOTH BM25
+  and embeddings, fusing the two rankings via Reciprocal Rank Fusion so a
+  chunk either method alone would miss (e.g. a semantically relevant chunk
+  with zero keyword overlap with the query) can still surface. Requires
+  both `pip install 'bestteam[tools-rag,tools-rag-vector]'`. See
+  `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`.
 
-Both expose the resulting knowledge base to agents as an ordinary tool (named
-after the KB), so it slots into the existing `tools:` / `REGISTRY` mechanism
-with no `LangGraphAdapter` changes — `query()` returns the same formatted
-`"...results for: <query>\n\n1. [source: ...]\n<text>..."` / `"No results
-found..."` string shape regardless of type.
+All three expose the resulting knowledge base to agents as an ordinary tool
+(named after the KB), so it slots into the existing `tools:` / `REGISTRY`
+mechanism with no `LangGraphAdapter` changes — `query()` returns the same
+formatted `"...results for: <query>\n\n1. [source: ...]\n<text>..."` / `"No
+results found..."` string shape regardless of type.
 
 **YAML usage — `local_folder`:**
 ```yaml
@@ -124,17 +130,33 @@ workflow wired to real OpenAI embeddings + chat model
 retrieval (e.g. matching "money back" queries to a "refund" policy doc with
 no shared keywords). The live variant requires `OPENAI_API_KEY`.
 
+## Query expansion (opt-in, all three KB types)
+
+All three KB types accept `query_expansion_model`/`query_expansion_count`
+(same spec-string convention and MultiQueryRetriever-style behavior as
+Memory's `query_expansion_model` -- see "Per-user memory", below): when set,
+`query()` rewrites the query into up to `query_expansion_count` alternative
+phrasings via one LLM call, searches with the literal query plus every
+alternative, and fuses the per-variant ranked results with Reciprocal Rank
+Fusion (`core/fusion.py`, shared with Memory) before slicing to `top_k`.
+Unset (the default) -> `query()` is byte-for-byte unchanged. A bad spec /
+invoke error / unparseable response degrades to searching the literal query
+alone -- a query never fails because expansion failed. **This call's cost is
+unmetered**: KB tools run inside the agent's generic tool-calling loop
+(`adapters/langgraph_adapter.py`), which has no hook to report a nested LLM
+call's token usage back to the backend (unlike Memory's recall, which runs
+at the `Workflow.stream()` orchestration layer) -- the same pre-existing gap
+`VectorKnowledgeBase`'s embedding calls already have. See
+`docs/superpowers/specs/2026-08-15-kb-hybrid-retrieval-design.md`.
+
 ## Known limitation: vector knowledge base retrieval is single-stage
 
-`VectorKnowledgeBase` does cosine-similarity search only — no query
-rewriting/expansion for KB (see Memory's `query_expansion_model`, below, for
-a possible pattern to mirror); reranking is available, opt-in (see below).
-It's also in-memory plus an optional JSON embedding cache (`cache_path`) — no
-external vector store (Chroma/FAISS/Pinecone) and no hierarchical/
-"small-to-big" indexing. Without `cache_path`, every workflow load re-embeds
-all chunks (real embedding APIs incur cost/latency on each run). There's no
-DMS connector (SharePoint/Confluence/Google Drive) for either knowledge base
-type.
+`VectorKnowledgeBase` is also in-memory plus an optional JSON embedding
+cache (`cache_path`) — no external vector store (Chroma/FAISS/Pinecone) and
+no hierarchical/"small-to-big" indexing. Without `cache_path`, every
+workflow load re-embeds all chunks (real embedding APIs incur cost/latency
+on each run). There's no DMS connector (SharePoint/Confluence/Google Drive)
+for either knowledge base type.
 
 **Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by both
 KB types) now splits on the document's own structure — Markdown heading
