@@ -146,11 +146,11 @@ class KnowledgeBaseSpec(BaseModel):
     """Mirrors a `knowledge_bases:` entry in the loader's raw dict (see `core/loader.py`).
 
     `embedding_model`/`score_threshold`/`cache_path` only apply to
-    `type: vector` -- `to_raw()` omits them for `local_folder` so an
-    architect that sets them on the wrong type doesn't trigger an unexpected
-    `TypeError` from the knowledge base constructor. `rerank_model`/
-    `candidate_k` apply to BOTH types (rerank is retrieval-method-agnostic)
-    and are always emitted when set.
+    `type: vector` or `type: hybrid` -- `to_raw()` omits them for
+    `local_folder` so an architect that sets them on the wrong type doesn't
+    trigger an unexpected `TypeError` from the knowledge base constructor.
+    `rerank_model`/`candidate_k`/`query_expansion_model`/
+    `query_expansion_count` apply to ALL THREE types (retrieval-method-agnostic).
     """
 
     name: str
@@ -164,6 +164,8 @@ class KnowledgeBaseSpec(BaseModel):
     cache_path: Optional[str] = None
     rerank_model: Optional[str] = None
     candidate_k: Optional[int] = None
+    query_expansion_model: Optional[str] = None
+    query_expansion_count: int = 3
 
     @field_validator("name")
     @classmethod
@@ -179,12 +181,14 @@ class KnowledgeBaseSpec(BaseModel):
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "top_k": self.top_k,
+            "query_expansion_model": self.query_expansion_model,
+            "query_expansion_count": self.query_expansion_count,
         }
         if self.rerank_model is not None:
             raw["rerank_model"] = self.rerank_model
         if self.candidate_k is not None:
             raw["candidate_k"] = self.candidate_k
-        if self.type == "vector":
+        if self.type in ("vector", "hybrid"):
             if self.embedding_model is not None:
                 raw["embedding_model"] = self.embedding_model
             if self.score_threshold is not None:

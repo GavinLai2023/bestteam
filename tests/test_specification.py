@@ -266,6 +266,57 @@ def test_knowledge_base_spec_rerank_fields_omitted_when_unset():
     assert "candidate_k" not in raw
 
 
+def test_knowledge_base_spec_query_expansion_emitted_for_every_type():
+    for kb_type, extra in [("local_folder", {}), ("vector", {"embedding_model": "fake:8"}), ("hybrid", {"embedding_model": "fake:8"})]:
+        spec = KnowledgeBaseSpec(
+            name="kb", path="./docs", type=kb_type,
+            query_expansion_model="fake:{}", query_expansion_count=2, **extra,
+        )
+        raw = spec.to_raw()
+        assert raw["query_expansion_model"] == "fake:{}"
+        assert raw["query_expansion_count"] == 2
+
+
+def test_knowledge_base_spec_query_expansion_defaults():
+    spec = KnowledgeBaseSpec(name="kb", path="./docs")
+    raw = spec.to_raw()
+    assert raw["query_expansion_model"] is None
+    assert raw["query_expansion_count"] == 3
+
+
+def test_knowledge_base_spec_hybrid_emits_vector_only_fields():
+    spec = KnowledgeBaseSpec(
+        name="kb", path="./docs", type="hybrid",
+        embedding_model="fake:8", score_threshold=0.5, cache_path="./cache.json",
+    )
+    raw = spec.to_raw()
+    assert raw["embedding_model"] == "fake:8"
+    assert raw["score_threshold"] == 0.5
+    assert raw["cache_path"] == "./cache.json"
+
+
+def test_validate_specification_accepts_hybrid_knowledge_base(tmp_path):
+    from bestteam.core.specification import AgentSpec, Specification, TeamSpec, WorkflowSpec
+    from bestteam.core.specification import KnowledgeBaseSpec as KBSpec
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "doc.txt").write_text("hello world", encoding="utf-8")
+
+    spec = Specification(
+        name="wf",
+        knowledge_bases=[
+            KBSpec(name="kb", path=str(docs_dir), type="hybrid", embedding_model="fake:8")
+        ],
+        agents=[AgentSpec(name="a", role="r", goal="g", model="fake:done", tools=["kb"])],
+        teams=[TeamSpec(name="t", agents=["a"])],
+        workflow=WorkflowSpec(steps=["t"]),
+    )
+
+    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml")
+    assert workflow.name == "wf"
+
+
 def test_knowledge_base_spec_rejects_name_with_spaces():
     with pytest.raises(ValueError, match="not a valid knowledge base name"):
         KnowledgeBaseSpec(name="bad name", path="./docs")
