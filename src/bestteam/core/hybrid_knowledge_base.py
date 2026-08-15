@@ -179,6 +179,9 @@ class HybridKnowledgeBase(KnowledgeBase):
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
         ranked_indices = _rrf_retrieve(variants, [self._bm25_leg, self._vector_leg], fetch_k)
+        # The score half of each tuple is a synthetic rank-derived placeholder,
+        # not a real retrieval score -- RRF has already re-ordered by fused
+        # rank, and _rerank_candidates only reads candidate order/chunk.text.
         results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 

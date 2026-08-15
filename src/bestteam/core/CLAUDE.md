@@ -51,7 +51,7 @@ keeps it).
 `validate_specification()`/`generate_specification()` accept the same
 `extra_skills` parameter, passed through to `_build_workflow()`.
 
-## Knowledge bases (`core/knowledge_base.py`, `core/vector_knowledge_base.py`)
+## Knowledge bases (`core/knowledge_base.py`, `core/vector_knowledge_base.py`, `core/hybrid_knowledge_base.py`)
 
 The most common client request is "connect our agents to the client's
 knowledge base." The loader supports three knowledge base `type:`s, all
@@ -72,7 +72,14 @@ backed by a folder of documents (`tools.parse_file` + chunking):
   chunk either method alone would miss (e.g. a semantically relevant chunk
   with zero keyword overlap with the query) can still surface. Requires
   both `pip install 'bestteam[tools-rag,tools-rag-vector]'`. See
-  `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`.
+  `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`. The two legs are
+  equal-weighted in the RRF formula itself, but `_rrf_retrieve` builds its
+  ranked lists BM25-leg-before-vector-leg, and Python's stable sort keeps
+  insertion order on a tie -- so a tied fused score (both legs agreeing
+  exactly, or a shallow `fetch_k`/`top_k` where each leg contributes only
+  its own top hit) resolves to BM25's pick. This is a side effect of
+  fusion order, not a deliberate BM25-priority policy, and is most visible
+  at small `top_k` with no reranker configured.
 
 All three expose the resulting knowledge base to agents as an ordinary tool
 (named after the KB), so it slots into the existing `tools:` / `REGISTRY`
@@ -130,6 +137,26 @@ workflow wired to real OpenAI embeddings + chat model
 retrieval (e.g. matching "money back" queries to a "refund" policy doc with
 no shared keywords). The live variant requires `OPENAI_API_KEY`.
 
+**YAML usage — `hybrid`:**
+```yaml
+knowledge_bases:
+  - name: product_docs
+    type: hybrid
+    path: ./docs/product
+    embedding_model: "openai:text-embedding-3-small"  # or "fake:<dim>" for $0 dry runs
+    # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
+    # optional: score_threshold — cosine-similarity cutoff in [-1, 1], but it filters
+    #           ONLY the vector leg: a chunk below the cutoff can still surface via a
+    #           BM25 keyword match, so unlike `vector`, setting this does not
+    #           guarantee "No results found" when no chunk meets it.
+    # optional: cache_path — same per-chunk embedding cache as `vector` (see above)
+    cache_path: ./.bestteam_cache/product_docs.json
+```
+
+Requires BOTH `pip install 'bestteam[tools-rag,tools-rag-vector]'` extras
+(BM25 + embeddings). See `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`
+for a $0 dry-run example using `"fake:"` specs.
+
 ## Query expansion (opt-in, all three KB types)
 
 All three KB types accept `query_expansion_model`/`query_expansion_count`
@@ -156,10 +183,10 @@ cache (`cache_path`) — no external vector store (Chroma/FAISS/Pinecone) and
 no hierarchical/"small-to-big" indexing. Without `cache_path`, every
 workflow load re-embeds all chunks (real embedding APIs incur cost/latency
 on each run). There's no DMS connector (SharePoint/Confluence/Google Drive)
-for either knowledge base type.
+for any of the three knowledge base types.
 
-**Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by both
-KB types) now splits on the document's own structure — Markdown heading
+**Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by all
+three KB types) now splits on the document's own structure — Markdown heading
 boundaries, XML element boundaries (via the renderer's indentation), and a
 generic paragraph/sentence/word fallback (with CJK sentence terminators
 `。！？`) — replacing the old fixed-offset character slicing. This closes the
@@ -169,21 +196,22 @@ raw character-slice of the previous chunk's tail (not structure-aware), and
 can drop to zero when greedy packing fills a piece to exactly `chunk_size`
 with no headroom left to borrow from.
 
-**Reranking (opt-in, both KB types, `core/reranking.py`).**
-`LocalFolderKnowledgeBase` and `VectorKnowledgeBase` both accept
-`rerank_model` (a spec string or a live `Reranker` instance) and
+**Reranking (opt-in, all three KB types, `core/reranking.py`).**
+`LocalFolderKnowledgeBase`, `VectorKnowledgeBase`, and `HybridKnowledgeBase`
+all accept `rerank_model` (a spec string or a live `Reranker` instance) and
 `candidate_k`. When `rerank_model` is set, `query()` over-fetches
-`candidate_k` results from the existing BM25/cosine ranking (default
+`candidate_k` results from the existing BM25/cosine/fused ranking (default
 `top_k * 4`, clamped to `[top_k, 100]`) instead of just `top_k`, scores each
 candidate against the query with the reranker, and returns the top `top_k`
 by rerank score (`_rerank_candidates()`, a shared helper in
-`knowledge_base.py` that `vector_knowledge_base.py` reuses). `rerank_model`
+`knowledge_base.py` that `vector_knowledge_base.py` and
+`hybrid_knowledge_base.py` both reuse). `rerank_model`
 follows the same spec-string convention as `embedding_model`: `"fake:"`
 (deterministic, $0, scores by negative length-distance to the query — for
 tests/dry runs) or `"cross-encoder:<model-name>"` (a real local
 `sentence_transformers.CrossEncoder`, cached at process scope by model
 name); requires `pip install 'bestteam[tools-rerank]'`. Unset (the default,
-both types) → `query()` is byte-for-byte unchanged (no over-fetch, no rerank
+all three types) → `query()` is byte-for-byte unchanged (no over-fetch, no rerank
 call). A bad reranker spec or an out-of-`[top_k, 100]` `candidate_k` raises
 `ConfigurationError` at construction (fail-hard, like a bad `chunk_size`); a
 rerank-time failure (a cross-encoder inference error) logs a warning and

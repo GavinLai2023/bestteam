@@ -120,6 +120,9 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
         ranked_indices = _rrf_retrieve(variants, [self._bm25_leg], fetch_k)
+        # The score half of each tuple is a synthetic rank-derived placeholder,
+        # not a real retrieval score -- RRF has already re-ordered by fused
+        # rank, and _rerank_candidates only reads candidate order/chunk.text.
         results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 
@@ -329,12 +332,14 @@ def _rerank_candidates(
     top_k: int,
 ) -> List["tuple[float, _Chunk]"]:
     """Never mutates `candidates`. `candidates` is already sorted by
-    retrieval score and sliced to `candidate_k` by the caller. Empty input
-    or no reranker configured is a pure slice -- no model call, no logging.
-    Any exception during scoring (including a `_RerankScoringError` contract
-    violation) falls back to the pre-rerank `candidates[:top_k]` slice,
-    logged as a warning: rerank is a quality layer, never a reason the
-    knowledge base query itself fails."""
+    retrieval rank (the score half of each tuple may be a synthetic
+    placeholder, not a real score -- this function never reads it) and
+    sliced to `candidate_k` by the caller. Empty input or no reranker
+    configured is a pure slice -- no model call, no logging. Any exception
+    during scoring (including a `_RerankScoringError` contract violation)
+    falls back to the pre-rerank `candidates[:top_k]` slice, logged as a
+    warning: rerank is a quality layer, never a reason the knowledge base
+    query itself fails."""
     if reranker is None or not candidates:
         return candidates[:top_k]
     try:

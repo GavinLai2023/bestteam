@@ -114,6 +114,34 @@ def test_hybrid_kb_rerank_changes_result_order(tmp_path):
     assert plain.query("fruit") != reranked.query("fruit")
 
 
+class _MarkerEmbedding(Embeddings):
+    """Embeds independent of the literal words the BM25 leg matches on, so a
+    chunk can be a strong keyword match yet score low on the vector leg --
+    used to verify `score_threshold` gates only the vector leg (a chunk
+    below the cosine cutoff can still surface via a BM25 match)."""
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return [1.0, 0.0] if "VECMATCH" in text else [0.0, 1.0]
+
+
+def test_hybrid_score_threshold_only_gates_vector_leg(tmp_path):
+    # doc0 is a strong BM25 match for "widget" but, via _MarkerEmbedding,
+    # orthogonal (cosine 0) to the query -- score_threshold=0.5 filters it
+    # out of the vector leg entirely, yet it must still surface via BM25.
+    docs = (
+        "widget widget widget installation and assembly instructions VECMATCH",
+        "unrelated filler content about nothing relevant",
+    )
+    kb = _kb_with_docs(
+        tmp_path, *docs, top_k=2, embedding_model=_MarkerEmbedding(), score_threshold=0.5
+    )
+    result = kb.query("widget")
+    assert "doc0.txt" in result
+
+
 def test_hybrid_kb_query_expansion_recovers_chunk_literal_query_misses(tmp_path):
     # "sprocket" embeds as the zero vector on both concept dimensions, so
     # the vector leg's cosine scores are uniformly 0 across every chunk --
