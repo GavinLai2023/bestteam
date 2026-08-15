@@ -13,6 +13,7 @@ import pytest
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools import REGISTRY, email_draft_reply, email_find, email_read
 
+pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------
 # Registry / backend selection

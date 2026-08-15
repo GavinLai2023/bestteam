@@ -853,6 +853,27 @@
   before running the list query. 958 backend + 92 frontend tests, lint
   clean.
 
+- E2E harness + CI test tiering (`2026-08-13-e2e-and-ci-test-tiering-design.md`):
+  a self-contained Playwright E2E suite (`tests/e2e/`) whose `e2e_backend`
+  session fixture provisions its own temp SQLite DB, spawns real
+  `uvicorn`/`vite` dev-server subprocesses, auto-provisions accounts, and
+  reshapes the model catalog to a deterministic `fake-architect:` model
+  (never present in `DEFAULT_MODEL_CATALOG`) so the Team Builder wizard's
+  AI-generation steps are covered without a real LLM key. Every test file
+  now carries a `pytestmark` (`unit`/`integration`/`e2e`/`optional`,
+  optionally `slow`), enforced by `tests/test_marker_completeness.py`. CI
+  is split into 6 jobs: 4 fast PR-gate jobs run on every PR/push, 2
+  full-regression jobs (`backend-full`, `e2e-full`) are gated to `main`
+  (also now manually dispatchable). Final whole-branch review fix round:
+  the marker-completeness guard's collection-summary parser was fixed
+  (it never matched real pytest output, so it asserted nothing); the E2E
+  fixture was hardened with a port pre-flight check, a liveness check
+  while polling for health, `--strictPort` for vite, and explicit
+  neutralization of `BESTTEAM_MEMORY_*`/`BESTTEAM_EMAIL_BACKEND` env vars
+  so a developer's real dev stack/config can't be silently attached to or
+  leaked into; `workflow_dispatch` added to CI. See
+  `.superpowers/sdd/2026-08-13-e2e-and-ci-test-tiering/`.
+
 - **Anonymous team sharing with continuous chat** (spec:
   `docs/superpowers/specs/2026-08-14-team-sharing-continuous-chat-design.md`).
   An org member generates a revocable `/share/:token` link for one deployed
@@ -876,6 +897,22 @@
   `BESTTEAM_CORS_ORIGINS` became a real CSRF exposure once
   `allow_credentials=True` was needed for the cookie (now refused at
   startup). All fixed on the branch.
+
+  **Second Codex review pass** (post-merge follow-up, against `main`): the
+  link-wide daily cap was consumed before the visitor's session existed, so
+  a cap-exhausted link still minted a fresh `ShareSession` (and its lock)
+  per request -- claiming order flipped and rejections now refund the
+  link-level turn. Transcript replay was bounded by turn count only, not by
+  size, so a long history could still blow past a smaller model's context
+  window -- added a character budget (`MAX_HISTORY_CHARS`) trimmed
+  oldest-first. `_share_session_dict`'s timestamps omitted the UTC offset,
+  which `SharedSessionsPanel`'s `new Date(...)` then misread as local time
+  for non-UTC viewers -- switched to the existing `iso_utc()` helper. A slow
+  initial history fetch could resolve after a visitor's own send and
+  clobber it -- `ShareChatPage` now guards with an `ignore` flag plus a
+  has-sent ref. A failed share-reply write had no repair path -- it now
+  retries a bounded number of times before giving up. 1290 backend + 169
+  frontend tests, `tsc`/eslint clean.
 
 ## In Progress
 

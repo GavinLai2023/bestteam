@@ -1,7 +1,11 @@
 """Tests for the anonymous share-session signed cookie (share_auth.py) --
 deliberately separate from auth.py's JWT bearer tokens."""
 
+import pytest
+
 from ui.backend.share_auth import sign_session_token, verify_cookie_value
+
+pytestmark = pytest.mark.unit
 
 
 def test_sign_then_verify_round_trips():

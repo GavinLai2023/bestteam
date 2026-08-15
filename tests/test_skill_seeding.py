@@ -8,6 +8,10 @@ from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
 from ui.backend.skills import DEFAULT_SKILLS, load_skills, seed_default_skills
 
 
+
+pytestmark = pytest.mark.unit
+
+
 @pytest.fixture
 def db_session():
     engine = make_engine(":memory:")

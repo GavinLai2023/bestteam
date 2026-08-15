@@ -3,6 +3,8 @@ mailbox trigger (`spec_uses_email`, deploy gate, `uses_email` flag)."""
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("cryptography")

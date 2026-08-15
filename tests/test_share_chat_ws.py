@@ -8,6 +8,8 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
+pytestmark = pytest.mark.integration
+
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 

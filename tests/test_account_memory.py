@@ -5,7 +5,11 @@ See docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md.
 
 from __future__ import annotations
 
+import pytest
+
 from ui.backend.account_memory import purge_user_memory, reconcile_legacy_org
+
+pytestmark = pytest.mark.unit
 
 
 def test_purge_returns_none_when_no_store(monkeypatch):

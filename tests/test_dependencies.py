@@ -1,5 +1,7 @@
 import pytest
 
+
+pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
 from ui.backend.db import init_db, make_engine

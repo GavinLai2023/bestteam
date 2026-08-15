@@ -3,6 +3,8 @@ cancellation checkpoints, and the POST /api/runs/{id}/cancel endpoint."""
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 fastapi = pytest.importorskip("fastapi")
 

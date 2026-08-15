@@ -12,6 +12,7 @@ import pytest
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.http_client import check_host_allowed
 
+pytestmark = pytest.mark.unit
 
 def test_resolve_failure_does_not_leak_raw_os_error(monkeypatch):
     def _raise_gaierror(host, port):

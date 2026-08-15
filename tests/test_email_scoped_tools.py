@@ -4,6 +4,8 @@ import pytest
 
 from bestteam.tools.email_client import make_email_tools
 
+
+pytestmark = pytest.mark.unit
 _OUT_OF_BATCH = "That message isn't part of this batch of new mail."
 
 

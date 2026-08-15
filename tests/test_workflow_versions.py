@@ -1,6 +1,10 @@
+import pytest
+
 from ui.backend.db.database import make_engine, init_db, session_factory
 from ui.backend.db.models import WorkflowRecord, WorkflowVersion
 from ui.backend.db.workflows import publish_workflow_version, current_version_id
+
+pytestmark = pytest.mark.unit
 
 
 def _db():

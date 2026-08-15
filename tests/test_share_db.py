@@ -5,6 +5,8 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+pytestmark = pytest.mark.integration
+
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db.models import WorkflowRecord

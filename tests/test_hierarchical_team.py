@@ -1,8 +1,11 @@
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, SystemMessage
 
 from bestteam import Agent, CollaborationMode, Team, Workflow
 from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeToolCallingChatModel(FakeMessagesListChatModel):

@@ -6,6 +6,8 @@ these tests don't touch disk and run as fast as the rest of the suite.
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import inspect

@@ -7,6 +7,10 @@ import pytest
 from bestteam.core.reranking import Reranker, _FakeReranker, _RerankScoringError
 
 
+
+pytestmark = pytest.mark.unit
+
+
 class _StubReranker(Reranker):
     def __init__(self, scores):
         self._scores = scores

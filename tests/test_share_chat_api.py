@@ -5,6 +5,8 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
+pytestmark = pytest.mark.integration
+
 from fastapi.testclient import TestClient
 
 from helpers import get_org_id, open_test_db

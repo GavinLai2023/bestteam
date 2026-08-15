@@ -2,6 +2,8 @@
 
 import pytest
 
+
+pytestmark = pytest.mark.unit
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("cryptography")
 

@@ -34,7 +34,7 @@ def validate_agent_models(raw_spec: Dict[str, Any], catalog_specs: Iterable[str]
         if not isinstance(model, str) or not model:
             problems.append(f"agent '{name}' has no model set")
             continue
-        if model.startswith("fake:") or model in allowed:
+        if model.startswith("fake:") or model.startswith("fake-architect:") or model in allowed:
             continue
         problems.append(
             f"agent '{name}' uses model '{model}', which isn't available on this platform"

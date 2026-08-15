@@ -1,8 +1,12 @@
 """Unit tests for RunRegistry's bounded eviction (memory growth under the
 autonomous trigger's unattended, continuous run creation)."""
 
+import pytest
+
 import ui.backend.registry as registry_module
 from ui.backend.registry import RunRegistry
+
+pytestmark = pytest.mark.unit
 
 
 def _complete(reg, run_id):

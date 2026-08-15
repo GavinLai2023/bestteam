@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("sqlalchemy")
 fastapi = pytest.importorskip("fastapi")
 

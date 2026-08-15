@@ -11,6 +11,7 @@ from ui.backend.db.database import init_db, make_engine, session_factory
 from ui.backend.db.email_triggers import list_enabled_triggers, upsert_email_trigger
 from ui.backend.db.orgs import create_org, get_org_by_name, set_org_active
 
+pytestmark = pytest.mark.unit
 
 def _session():
     engine = make_engine(":memory:")
