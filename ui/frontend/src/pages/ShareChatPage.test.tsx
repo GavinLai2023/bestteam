@@ -122,7 +122,11 @@ describe('ShareChatPage', () => {
   })
 
   it('rolls the optimistic user bubble back when the send fails', async () => {
-    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    // 503 (not 500): 500 specifically means the backend's dispatch-failure
+    // path, which persists the turn server-side and gets its own refetch
+    // behavior (see the dedicated 500 test below) -- this test covers every
+    // other failure, where nothing was persisted and the rollback applies.
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 503 }))
     renderPage()
 
     const input = await screen.findByPlaceholderText(/type a message/i)
@@ -163,7 +167,20 @@ describe('ShareChatPage', () => {
   })
 
   it('recovers when the websocket closes without ever sending a terminal event', async () => {
+    // The run and this turn still exist server-side even though the socket
+    // closed with no terminal event (registry eviction, a transient
+    // connection drop) -- a reply may already have landed there, so onclose
+    // must refetch rather than just re-enabling the input (Codex review
+    // finding).
     mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    mockedApi.getMessages
+      .mockResolvedValueOnce({ messages: [] }) // initial mount fetch
+      .mockResolvedValueOnce({
+        messages: [
+          { role: 'user', content: 'hi there', turn_number: 1 },
+          { role: 'assistant', content: 'answer that arrived after all', turn_number: 2 },
+        ],
+      })
     renderPage()
 
     const input = await screen.findByPlaceholderText(/type a message/i)
@@ -185,10 +202,14 @@ describe('ShareChatPage', () => {
     expect(screen.queryByText(/^(sending your message|working on)/i)).not.toBeInTheDocument()
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
     expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
+    // The refetch surfaces the reply that actually landed while the socket
+    // was down, instead of leaving it invisible until a page reload.
+    await waitFor(() => expect(mockedApi.getMessages).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('answer that arrived after all')).toBeInTheDocument()
   })
 
   it('shows a friendly error and re-enables the form when sendMessage fails for a reason other than 429/404', async () => {
-    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 503 }))
     renderPage()
 
     const input = await screen.findByPlaceholderText(/type a message/i)
@@ -197,6 +218,37 @@ describe('ShareChatPage', () => {
 
     expect(await screen.findByText(/something went wrong sending your message/i)).toBeInTheDocument()
     expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
+  })
+
+  it('refetches instead of rolling back when a 500 means the turn was already recorded', async () => {
+    // Unlike every other failure, the backend persists BOTH the user's
+    // message and a fallback assistant reply when dispatch itself fails
+    // (share_chat.py's executor.submit failure path) -- rolling the
+    // optimistic bubble back here would let a retry duplicate an
+    // already-recorded turn (Codex review finding).
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    mockedApi.getMessages
+      .mockResolvedValueOnce({ messages: [] }) // initial mount fetch
+      .mockResolvedValueOnce({
+        messages: [
+          { role: 'user', content: 'hi there', turn_number: 1 },
+          {
+            role: 'assistant',
+            content: "Couldn't start a reply just now. Please try sending your message again.",
+            turn_number: 2,
+          },
+        ],
+      })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(mockedApi.getMessages).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText(/couldn't start a reply/i)).toBeInTheDocument()
+    // The recorded turn stays -- not rolled back, not duplicated.
+    expect(screen.getAllByText('hi there')).toHaveLength(1)
   })
 
   it('shows the backend message and re-enables the form on a 409 (already-pending turn)', async () => {

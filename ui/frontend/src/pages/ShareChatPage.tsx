@@ -112,21 +112,47 @@ export default function ShareChatPage() {
       }
       ws.onerror = () => setSending(false)
       // onclose always fires, including right after a clean terminal event
-      // onmessage already handled -- only show a recovery notice when the
-      // socket closed WITHOUT one (evicted queue, or the link/org going
-      // inactive mid-stream both close with no terminal event at all).
+      // onmessage already handled -- only act when the socket closed
+      // WITHOUT one (evicted queue, or the link/org going inactive
+      // mid-stream both close with no terminal event at all). The run and
+      // this turn still exist server-side either way, and a reply may
+      // already have landed there while this socket was down -- refetch
+      // instead of just re-enabling the input, or the visitor's real answer
+      // (or the friendly fallback the backend already recorded) stays
+      // invisible until they happen to reload the page (Codex review
+      // finding).
       ws.onclose = () => {
-        if (!terminalSeenRef.current) {
-          setSending(false)
-          setNotice('Something went wrong. Please try sending your message again.')
-        }
+        if (terminalSeenRef.current) return
+        shareChatApi
+          .getMessages(token)
+          .then((data) => setMessages(data.messages))
+          .catch(() => {})
+          .finally(() => {
+            setSending(false)
+            setNotice('Something went wrong. Please try sending your message again.')
+          })
       }
     } catch (e) {
       const status = (e as Error & { status?: number }).status
       setSending(false)
-      // The server persisted nothing for this send, so the optimistic bubble
-      // must come back off screen -- otherwise what's rendered disagrees with
-      // server state until a reload silently drops it.
+      if (status === 500) {
+        // Unlike every other failure here, the backend persists BOTH the
+        // user's message and a fallback assistant reply even when dispatch
+        // itself fails (share_chat.py's executor.submit failure path) --
+        // rolling the optimistic bubble back and letting the visitor retype
+        // would duplicate a turn that's already recorded server-side.
+        // Refetch instead, so what's on screen matches the server exactly
+        // (Codex review finding).
+        shareChatApi
+          .getMessages(token)
+          .then((data) => setMessages(data.messages))
+          .catch(() => {})
+        return
+      }
+      // Every other failure means nothing was persisted for this send, so
+      // the optimistic bubble must come back off screen -- otherwise what's
+      // rendered disagrees with server state until a reload silently drops
+      // it.
       setMessages((prev) => prev.filter((m) => m !== optimisticUserMessage))
       if (status === 429) {
         setRateLimited(true)
