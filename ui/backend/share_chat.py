@@ -10,6 +10,7 @@ stream WebSocket's own re-authorize-per-event philosophy, see
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -26,6 +27,7 @@ from .db.share_sessions import create_share_session, get_share_session_by_token,
 from .db_session import get_db
 from .runtime import _executor, registry, run_in_background
 from .share_auth import COOKIE_NAME, sign_session_token, verify_cookie_value
+from .share_transcript import record_share_reply
 
 router = APIRouter(prefix="/api/share", tags=["share-chat"])
 
@@ -34,6 +36,9 @@ MAX_HISTORY_TURNS = 20
 _UNAVAILABLE = "This share link is no longer available."
 _PENDING_TURN_MESSAGE = "Please wait for the previous reply to finish."
 _RATE_LIMITED_MESSAGE = "Today's message limit has been reached -- try again tomorrow."
+_DISPATCH_FAILED_MESSAGE = "Couldn't start a reply just now. Please try sending your message again."
+
+_logger = logging.getLogger(__name__)
 
 
 class ShareMessageCreate(BaseModel):
@@ -110,6 +115,16 @@ def format_transcript(messages) -> str:
         content = message.content.replace("<", "&lt;").replace(">", "&gt;")
         parts.append(f"<{tag}>{content}</{tag}>")
     return "\n".join(parts)
+
+
+def _cookie_headers(response: Response) -> dict:
+    """Any `Set-Cookie` already staged on the injected response, as a header
+    dict an `HTTPException` can carry (there is at most one here)."""
+    return {
+        key.decode("latin-1"): value.decode("latin-1")
+        for key, value in response.raw_headers
+        if key.decode("latin-1").lower() == "set-cookie"
+    }
 
 
 def _has_pending_turn(db: Session, session: ShareSession) -> bool:
@@ -211,34 +226,57 @@ def send_share_message(
     transcript = format_transcript(history)
 
     run = registry.create(workflow_record.name, transcript, org_id=link.org_id, username="share-link")
-    db.add(
-        Run(
-            id=run.id,
-            workflow=workflow_record.name,
-            input=transcript,
-            org_id=link.org_id,
-            username="share-link",
-            workflow_version_id=version_id,
-            trigger_context={
-                "share_link_id": link.id,
-                "share_session_id": session.id,
-                "turn_number": turn_number,
-            },
-        )
-    )
-    db.commit()
-
-    _executor.submit(
-        run_in_background,
-        run.id,
-        workflow,
-        transcript,
-        engine=db.get_bind(),
+    run_row = Run(
+        id=run.id,
+        workflow=workflow_record.name,
+        input=transcript,
         org_id=link.org_id,
         username="share-link",
         workflow_version_id=version_id,
-        workflow_id=workflow_id,
+        trigger_context={
+            "share_link_id": link.id,
+            "share_session_id": session.id,
+            "turn_number": turn_number,
+        },
     )
+    db.add(run_row)
+    db.commit()
+
+    try:
+        _executor.submit(
+            run_in_background,
+            run.id,
+            workflow,
+            transcript,
+            engine=db.get_bind(),
+            org_id=link.org_id,
+            username="share-link",
+            workflow_version_id=version_id,
+            workflow_id=workflow_id,
+        )
+    except Exception as exc:  # noqa: BLE001 -- submission must never wedge a visitor's chat
+        # The user's message and the Run row are already committed, so if no
+        # worker ever starts, `record_share_reply` never fires either: the
+        # session's last message stays an unanswered user turn and
+        # `_has_pending_turn` blocks that visitor from ever sending again
+        # (final whole-branch review I6). Mirrors email_trigger.py's identical
+        # submission-exception branch: mark the run failed, then record the
+        # reply here (bypassing the executor) so the transcript is consistent
+        # and the session is unblocked.
+        _logger.exception("share chat: failed to dispatch run %s for link %s", run.id, link.id)
+        run_row.status = "failed"
+        run_row.output = _DISPATCH_FAILED_MESSAGE
+        db.commit()
+        record_share_reply(db, run_row, None)
+        registry.discard(run.id)
+        # Carry the session cookie onto the error response by hand: FastAPI
+        # only merges the injected `Response`'s headers when the endpoint
+        # returns normally, so a first-message failure would otherwise strand
+        # the just-created session (and its recorded fallback reply) behind a
+        # cookie the visitor never received.
+        raise HTTPException(
+            status_code=500, detail=_DISPATCH_FAILED_MESSAGE, headers=_cookie_headers(response)
+        ) from exc
     return {"run_id": run.id, "turn_number": turn_number}
 
 

@@ -341,6 +341,37 @@ def test_undeployed_team_link_never_creates_a_share_session_row(client):
         assert db.query(ShareSession).count() == before
 
 
+def test_failed_dispatch_returns_an_error_and_does_not_wedge_the_session(client, monkeypatch):
+    """If `_executor.submit` itself raises (executor shutdown, pool
+    exhaustion), no worker ever runs, so `record_share_reply` never fires --
+    the session's last message stays an unanswered user turn and
+    `_has_pending_turn` blocked that visitor from ever sending again (final
+    whole-branch review I6). The caller must get a clean error, and the next
+    send must go through.
+    """
+    import ui.backend.share_chat as share_chat_module
+
+    class _BrokenExecutor:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    token, _ = _make_link()
+    monkeypatch.setattr(share_chat_module, "_executor", _BrokenExecutor())
+
+    failed = client.post(f"/api/share/{token}/messages", json={"content": "first"})
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == share_chat_module._DISPATCH_FAILED_MESSAGE
+
+    # The fallback reply was recorded, so the transcript is consistent...
+    history = client.get(f"/api/share/{token}/messages").json()["messages"]
+    assert [m["role"] for m in history] == ["user", "assistant"]
+
+    # ...and the session is not wedged: a later send is not blocked by the
+    # _has_pending_turn 409 (the executor works again here).
+    monkeypatch.undo()
+    assert client.post(f"/api/share/{token}/messages", json={"content": "second"}).status_code == 202
+
+
 def test_cors_allows_credentials():
     from ui.backend.main import app
 
