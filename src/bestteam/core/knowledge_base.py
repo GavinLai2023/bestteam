@@ -64,6 +64,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         top_k: int = 5,
         rerank_model: Any = None,
         candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
     ) -> None:
         try:
             from rank_bm25 import BM25Okapi
@@ -85,6 +87,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -96,20 +100,27 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
-        top_k = top_k or self.default_top_k
-        query_tokens = tokenize(query)
+    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[int]:
+        """Identical scoring logic to the pre-refactor `query()` body,
+        returning chunk indices instead of `(score, chunk)` tuples."""
+        query_tokens = tokenize(query_text)
         query_terms = significant_terms(query_tokens)
         scores = self._bm25.get_scores(query_tokens)
 
         matches = [
-            (len(query_terms & chunk_terms), score, chunk)
-            for score, chunk, chunk_terms in zip(scores, self._chunks, self._chunk_terms)
+            (len(query_terms & chunk_terms), score, idx)
+            for idx, (score, chunk_terms) in enumerate(zip(scores, self._chunk_terms))
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        return [idx for _overlap, _score, idx in matches[:fetch_k]]
+
+    def query(self, query: str, top_k: Optional[int] = None) -> str:
+        top_k = top_k or self.default_top_k
+        variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        results = [(score, chunk) for _overlap, score, chunk in matches[:fetch_k]]
+        ranked_indices = _rrf_retrieve(variants, [self._bm25_leg], fetch_k)
+        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:

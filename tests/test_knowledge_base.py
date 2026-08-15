@@ -622,3 +622,54 @@ def test_local_folder_kb_rerank_inference_failure_falls_back(tmp_path, monkeypat
     monkeypatch.setattr(kb._reranker.__class__, "_score", boom)
     result = kb.query("apples")
     assert "doc0.txt" in result  # still returns the retrieval-order result
+
+
+# ---------------------------------------------------------------------------
+# LocalFolderKnowledgeBase query expansion
+# ---------------------------------------------------------------------------
+
+def test_local_folder_kb_query_expansion_unset_is_byte_identical(tmp_path):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", top_k=2)
+    assert kb.query("apples") == kb.query("apples")
+
+
+def test_local_folder_kb_query_expansion_recovers_chunk_literal_query_misses(tmp_path):
+    # "sprocket" shares zero significant terms with either doc, so plain BM25
+    # (query_expansion unset) returns nothing. The expansion variant "widget"
+    # matches doc0 -- proving fusion recovers a chunk the literal query alone
+    # could never surface.
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _kb_with_docs(plain_dir, "widget assembly instructions", "gadget repair guide")
+    plain_result = plain.query("sprocket")
+    assert "No results found" in plain_result
+
+    expanded_dir = tmp_path / "expanded"
+    expanded_dir.mkdir()
+    expanded = _kb_with_docs(
+        expanded_dir,
+        "widget assembly instructions",
+        "gadget repair guide",
+        query_expansion_model='fake:{"queries": ["widget"]}',
+    )
+    expanded_result = expanded.query("sprocket")
+    assert "doc0.txt" in expanded_result
+
+
+def test_local_folder_kb_query_expansion_disabled_when_count_zero(tmp_path):
+    kb = _kb_with_docs(
+        tmp_path,
+        "widget assembly instructions",
+        query_expansion_model='fake:{"queries": ["widget"]}',
+        query_expansion_count=0,
+    )
+    assert "No results found" in kb.query("sprocket")
+
+
+def test_local_folder_kb_bad_query_expansion_spec_degrades_gracefully(tmp_path):
+    kb = _kb_with_docs(
+        tmp_path, "apples and oranges", query_expansion_model="not-a-real-spec"
+    )
+    # Never raises; falls back to the literal query.
+    result = kb.query("apples")
+    assert "doc0.txt" in result
