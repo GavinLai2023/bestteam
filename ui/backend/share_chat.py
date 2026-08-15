@@ -34,6 +34,15 @@ router = APIRouter(prefix="/api/share", tags=["share-chat"])
 
 MAX_MESSAGE_LENGTH = 4000
 MAX_HISTORY_TURNS = 20
+# MAX_HISTORY_TURNS alone bounds message COUNT, not size: at MAX_MESSAGE_LENGTH
+# per message, 40 messages could reach ~160,000 characters -- enough to exceed
+# a smaller model's context window or spend unexpectedly high per-turn cost
+# (Codex review finding; the design's own "Approach" section calls for
+# bounding replay by "the most recent N turns / a character cap", but only
+# the turn cap was implemented). Chosen to comfortably fit even a modest
+# context window alongside the system prompt, the new question, and room for
+# a reply.
+MAX_HISTORY_CHARS = 24000
 _UNAVAILABLE = "This share link is no longer available."
 _PENDING_TURN_MESSAGE = "Please wait for the previous reply to finish."
 _RATE_LIMITED_MESSAGE = "Today's message limit has been reached -- try again tomorrow."
@@ -130,6 +139,24 @@ def _get_or_create_session(request: Request, response: Response, db: Session, li
     return session
 
 
+def _trim_history_to_budget(messages, max_chars: int):
+    """Keep the most recent messages whose combined content fits within
+    `max_chars`, dropping the oldest first -- preserves the newest user
+    message and as many complete recent exchanges as fit. Always keeps at
+    least the single most recent message, even if it alone exceeds the
+    budget, so a reply is never sent with an empty transcript."""
+    kept = []
+    total = 0
+    for message in reversed(messages):
+        length = len(message.content)
+        if kept and total + length > max_chars:
+            break
+        kept.append(message)
+        total += length
+    kept.reverse()
+    return kept
+
+
 def format_transcript(messages) -> str:
     """Render a session's history as the single input string a run replays.
 
@@ -160,6 +187,20 @@ def _cookie_headers(response: Response) -> dict:
     }
 
 
+def _refund_link_turn(db: Session, link: ShareLink) -> None:
+    """Undo one already-claimed link-wide turn and commit immediately (the
+    request's `db` session has no auto-commit-on-return, so an uncommitted
+    `UPDATE` here would just roll back with the rest of the transaction) --
+    used when a later check in the same request rejects the send anyway, so
+    a blocked send never costs the link's aggregate daily allowance."""
+    db.execute(
+        update(ShareLink)
+        .where(ShareLink.id == link.id, ShareLink.turns_today > 0)
+        .values(turns_today=ShareLink.turns_today - 1)
+    )
+    db.commit()
+
+
 def _has_pending_turn(db: Session, session: ShareSession) -> bool:
     """True if the session's last message is an unanswered user turn --
     either a run still in flight, or one whose terminal event never made it
@@ -177,11 +218,14 @@ def send_share_message(
     response: Response,
     db: Session = Depends(get_db),
 ) -> dict:
-    # Order matters (final whole-branch review C1/M12). Every pure read that
-    # can reject the request runs BEFORE _get_or_create_session, which both
-    # INSERTs a share_sessions row and sets a cookie: an undeployed team's
-    # link hammered in a loop used to grow share_sessions unboundedly with
-    # orphaned rows. Both caps are then consumed after the session exists but
+    # Order matters (final whole-branch review C1/M12; Codex review finding
+    # on the link-cap check specifically). Every pure read that can reject
+    # the request, AND the link-wide aggregate cap check, run BEFORE
+    # _get_or_create_session, which both INSERTs a share_sessions row and
+    # sets a cookie: an undeployed team's link, or one already at its daily
+    # cap, hammered in a loop used to grow share_sessions (and, via
+    # `_session_lock`, process memory) unboundedly with orphaned rows/locks.
+    # The per-session cap is then consumed after the session exists but
     # before anything is persisted for this turn, so a rejected request never
     # leaves a message or a run behind.
     link = _resolve_active_link(db, token)
@@ -218,6 +262,19 @@ def send_share_message(
         workflow_record.name, db, link.org_id
     )
 
+    # Link-level aggregate cap claimed BEFORE any session is created (a new
+    # session also means a new, never-evicted lock in `_session_locks`) --
+    # otherwise a cookie-less client hammering an already-exhausted link
+    # grows both the database and process memory for free, forever (Codex
+    # review finding). Rejections further down in this same request that
+    # would otherwise leave a claimed-but-unused turn (an existing session
+    # with a pending turn already in flight, or its own per-session cap)
+    # refund it via `_refund_link_turn`, so an already-blocked send still
+    # never actually costs the link a turn -- matching the cap-neutral
+    # behavior every other rejection path here already has.
+    if not try_consume_link_turn(db, link, link.daily_cap):
+        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
+
     session = _get_or_create_session(request, response, db, link)
 
     # Serializes pending-turn-check through the user-message insert for this
@@ -226,16 +283,11 @@ def send_share_message(
     # exactly what it closes; Codex review finding).
     with _session_lock(session.id):
         if _has_pending_turn(db, session):
+            _refund_link_turn(db, link)
             raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
 
-        # Link-level aggregate cap FIRST, then the per-session one -- the
-        # per-session counter caps nobody on its own, since a client that
-        # never stores the cookie gets a brand-new, free session (and
-        # allowance) on every request. Both must pass for a turn to proceed.
-        if not try_consume_link_turn(db, link, link.daily_cap):
-            raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
-
         if not try_consume_turn(db, session, link.daily_cap):
+            _refund_link_turn(db, link)
             raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
 
         turn_number = next_turn_number(db, session.id)
@@ -268,6 +320,7 @@ def send_share_message(
             raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
 
     history = list_messages(db, session.id)[-(MAX_HISTORY_TURNS * 2):]
+    history = _trim_history_to_budget(history, MAX_HISTORY_CHARS)
     transcript = format_transcript(history)
 
     run = registry.create(workflow_record.name, transcript, org_id=link.org_id, username="share-link")

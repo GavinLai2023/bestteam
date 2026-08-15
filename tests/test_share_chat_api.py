@@ -580,6 +580,173 @@ def test_session_cookie_is_scoped_to_this_links_path(client):
     assert "path=" in set_cookie.lower()
 
 
+def test_link_cap_exhausted_does_not_create_new_sessions_for_cookieless_requests(client):
+    """Once the link's aggregate cap is exhausted, a cookie-less client
+    hammering it in a loop must not keep minting new ShareSession rows (and,
+    via `_session_lock`, new never-evicted locks) for free, forever (Codex
+    review finding).
+    """
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.models import ShareSession
+
+    token, _ = _make_link(daily_cap=1)
+    fresh = TestClient(backend_main.app)
+    first = fresh.post(f"/api/share/{token}/messages", json={"content": "one"})
+    assert first.status_code == 202
+
+    with open_test_db() as db:
+        sessions_after_first = db.query(ShareSession).count()
+    locks_after_first = len(share_chat_module._session_locks)
+
+    for _ in range(3):
+        again = TestClient(backend_main.app)  # cookie-less, like a scripted client
+        resp = again.post(f"/api/share/{token}/messages", json={"content": "hi"})
+        assert resp.status_code == 429
+
+    with open_test_db() as db:
+        assert db.query(ShareSession).count() == sessions_after_first
+    assert len(share_chat_module._session_locks) == locks_after_first
+
+
+def test_pending_turn_rejection_refunds_the_link_cap_turn(client, monkeypatch):
+    """A 409 from `_has_pending_turn` (an existing session mid-turn) must not
+    cost the link's aggregate daily cap either -- its message was never
+    persisted -- now that the link cap is claimed before the pending-turn
+    check runs (Codex review finding: closing the session-before-cap-check
+    ordering moved the link-cap claim earlier, so this rejection path needed
+    its own refund to stay cap-neutral like every other rejection here).
+    """
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.models import ShareLink
+
+    monkeypatch.setattr(share_chat_module, "_executor", _RecordingExecutor())
+
+    token, link_id = _make_link()
+    assert client.post(f"/api/share/{token}/messages", json={"content": "first"}).status_code == 202
+
+    with open_test_db() as db:
+        turns_before = db.get(ShareLink, link_id).turns_today
+
+    second = client.post(f"/api/share/{token}/messages", json={"content": "second"})
+    assert second.status_code == 409
+
+    with open_test_db() as db:
+        assert db.get(ShareLink, link_id).turns_today == turns_before
+
+
+def test_trim_history_to_budget_drops_oldest_messages_first():
+    from types import SimpleNamespace
+
+    from ui.backend.share_chat import _trim_history_to_budget
+
+    messages = [
+        SimpleNamespace(role="user", content="a" * 100),
+        SimpleNamespace(role="assistant", content="b" * 100),
+        SimpleNamespace(role="user", content="c" * 100),
+    ]
+    trimmed = _trim_history_to_budget(messages, max_chars=150)
+    assert trimmed == [messages[2]]
+
+
+def test_trim_history_to_budget_always_keeps_the_newest_message():
+    """Even a single message that alone exceeds the budget must survive --
+    otherwise a reply could be dispatched with an empty transcript."""
+    from types import SimpleNamespace
+
+    from ui.backend.share_chat import _trim_history_to_budget
+
+    messages = [SimpleNamespace(role="user", content="x" * 500)]
+    trimmed = _trim_history_to_budget(messages, max_chars=10)
+    assert trimmed == messages
+
+
+def test_transcript_is_bounded_by_max_history_chars(client, monkeypatch):
+    """MAX_HISTORY_TURNS alone bounds message COUNT, not size: with the
+    accepted 4,000-character messages, replay could otherwise reach roughly
+    160,000 characters -- enough to exceed a smaller model's context window
+    or spend unexpectedly high per-turn cost (Codex review finding).
+    """
+    import ui.backend.share_chat as share_chat_module
+    from ui.backend.db.share_messages import append_message
+
+    executor = _RecordingExecutor()
+    monkeypatch.setattr(share_chat_module, "_executor", executor)
+
+    token, _ = _make_link(daily_cap=1000)
+    client.post(f"/api/share/{token}/messages", json={"content": "OLDEST-TURN-MARKER"})
+    session_id = _session_id_for(client, token)
+
+    # Large messages, but still well within the 40-message (MAX_HISTORY_TURNS)
+    # window -- only the new character budget should trim these out.
+    with open_test_db() as db:
+        turn = 2
+        for i in range(6):
+            append_message(db, session_id, turn_number=turn, role="assistant", content="r" * 4000)
+            turn += 1
+            append_message(db, session_id, turn_number=turn, role="user", content="q" * 4000)
+            turn += 1
+        # Last message must be an assistant turn, or `_has_pending_turn`
+        # rejects the send below with 409 before a run is ever dispatched.
+        append_message(db, session_id, turn_number=turn, role="assistant", content="latest reply")
+
+    second = client.post(f"/api/share/{token}/messages", json={"content": "NEWEST-TURN-MARKER"})
+    assert second.status_code == 202
+
+    transcript = _dispatched_transcript(executor)
+    assert "NEWEST-TURN-MARKER" in transcript
+    assert "OLDEST-TURN-MARKER" not in transcript
+    assert len(transcript) < 30000  # well under the ~160,000 worst case
+
+
+def test_safe_record_share_reply_retries_transient_failures(monkeypatch):
+    """A transient write failure (e.g. momentary SQLite lock contention) must
+    not leave the session's last message an unanswered user turn forever --
+    _safe_record_share_reply retries a few times before giving up (Codex
+    review finding).
+    """
+    from types import SimpleNamespace
+
+    import ui.backend.runtime as runtime_module
+
+    calls = []
+
+    def flaky(db, run_row, output):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("transient DB error")
+
+    monkeypatch.setattr(runtime_module, "record_share_reply", flaky)
+    monkeypatch.setattr(runtime_module, "_SHARE_REPLY_RETRY_DELAY_SECONDS", 0)
+
+    run_row = SimpleNamespace(id="run-1")
+    runtime_module._safe_record_share_reply(None, run_row, "the reply")
+
+    assert len(calls) == 3
+
+
+def test_safe_record_share_reply_gives_up_after_max_attempts_without_raising(monkeypatch):
+    """A permanent failure must still never propagate and break the run's own
+    terminal handling -- same rationale as every other `_safe_record_*`
+    helper."""
+    from types import SimpleNamespace
+
+    import ui.backend.runtime as runtime_module
+
+    calls = []
+
+    def always_fails(db, run_row, output):
+        calls.append(1)
+        raise RuntimeError("permanent DB error")
+
+    monkeypatch.setattr(runtime_module, "record_share_reply", always_fails)
+    monkeypatch.setattr(runtime_module, "_SHARE_REPLY_RETRY_DELAY_SECONDS", 0)
+
+    run_row = SimpleNamespace(id="run-1")
+    runtime_module._safe_record_share_reply(None, run_row, "the reply")  # must not raise
+
+    assert len(calls) == runtime_module._SHARE_REPLY_MAX_ATTEMPTS
+
+
 def test_cors_allows_credentials():
     from ui.backend.main import app
 
