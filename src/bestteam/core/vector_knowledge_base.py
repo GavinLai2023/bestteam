@@ -12,8 +12,10 @@ from .embeddings import normalize_rows, resolve_embedding_model
 from .knowledge_base import (
     KnowledgeBase,
     _load_document_chunks,
+    _query_variants,
     _rerank_candidates,
     _rerank_fetch_k,
+    _rrf_retrieve,
     _validate_chunk_params,
 )
 from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
@@ -63,6 +65,8 @@ class VectorKnowledgeBase(KnowledgeBase):
         cache_path: Optional[str | Path] = None,
         rerank_model: Any = None,
         candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
     ) -> None:
         try:
             import numpy as np
@@ -85,6 +89,8 @@ class VectorKnowledgeBase(KnowledgeBase):
                 f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -136,29 +142,32 @@ class VectorKnowledgeBase(KnowledgeBase):
 
         return [cache[key] for key in keys]
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
+    def _vector_leg(self, query_text: str, fetch_k: int) -> List[int]:
         import numpy as np
 
-        # Mirrors LocalFolderKnowledgeBase.query()'s `top_k or self.default_top_k`:
-        # a caller-supplied top_k=0 falls back to default_top_k (intentional parity).
-        top_k = top_k or self.default_top_k
-
-        query_vec = np.array(self._embeddings.embed_query(query), dtype=np.float64)
+        query_vec = np.array(self._embeddings.embed_query(query_text), dtype=np.float64)
         norm = np.linalg.norm(query_vec)
         if norm > 0:
             query_vec = query_vec / norm
 
         scores = self._matrix @ query_vec
-
-        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
         k = min(fetch_k, len(scores))
         top_indices = np.argsort(scores)[::-1][:k]
 
-        results = [(scores[i], self._chunks[i]) for i in top_indices]
-
+        indices = [int(i) for i in top_indices]
         if self.score_threshold is not None:
-            results = [(s, c) for s, c in results if s >= self.score_threshold]
+            indices = [i for i in indices if scores[i] >= self.score_threshold]
+        return indices
 
+    def query(self, query: str, top_k: Optional[int] = None) -> str:
+        # Mirrors LocalFolderKnowledgeBase.query()'s `top_k or self.default_top_k`:
+        # a caller-supplied top_k=0 falls back to default_top_k (intentional parity).
+        top_k = top_k or self.default_top_k
+
+        variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
+        fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
+        ranked_indices = _rrf_retrieve(variants, [self._vector_leg], fetch_k)
+        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:

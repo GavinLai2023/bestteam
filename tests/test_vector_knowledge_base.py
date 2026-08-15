@@ -469,3 +469,55 @@ workflow:
     load_workflow(str(p))
 
     assert (tmp_path / ".cache" / "embeddings.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# VectorKnowledgeBase query expansion
+# ---------------------------------------------------------------------------
+
+class _VocabEmbedding(Embeddings):
+    """One-hot over a 2-word vocab: presence of "gadget"/"widget" only."""
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        lowered = text.lower()
+        return [1.0 if "gadget" in lowered else 0.0, 1.0 if "widget" in lowered else 0.0]
+
+
+def test_vector_kb_query_expansion_unset_is_byte_identical(tmp_path):
+    (tmp_path / "doc0.txt").write_text("gadget notes", encoding="utf-8")
+    kb = VectorKnowledgeBase("kb", tmp_path, embedding_model=_VocabEmbedding(), top_k=1)
+    assert kb.query("gadget") == kb.query("gadget")
+
+
+def test_vector_kb_query_expansion_recovers_chunk_literal_query_misses(tmp_path):
+    # score_threshold=0.5 filters out anything below a clean cosine match.
+    # The literal query "sprocket" is outside the 2-word vocab (embeds to the
+    # zero vector, cosine similarity 0 with everything -> filtered out
+    # entirely). The expansion variant "widget" matches doc0 exactly
+    # (similarity 1.0), which only fusion with the expansion leg can surface.
+    (tmp_path / "doc0.txt").write_text("widget notes", encoding="utf-8")
+    plain = VectorKnowledgeBase(
+        "kb", tmp_path, embedding_model=_VocabEmbedding(), top_k=1, score_threshold=0.5
+    )
+    assert "No results found" in plain.query("sprocket")
+
+    expanded_dir = tmp_path / "expanded"
+    expanded_dir.mkdir()
+    (expanded_dir / "doc0.txt").write_text("widget notes", encoding="utf-8")
+    expanded = VectorKnowledgeBase(
+        "kb", expanded_dir, embedding_model=_VocabEmbedding(), top_k=1,
+        score_threshold=0.5, query_expansion_model='fake:{"queries": ["widget"]}',
+    )
+    assert "doc0.txt" in expanded.query("sprocket")
+
+
+def test_vector_kb_query_expansion_disabled_when_count_zero(tmp_path):
+    (tmp_path / "doc0.txt").write_text("widget notes", encoding="utf-8")
+    kb = VectorKnowledgeBase(
+        "kb", tmp_path, embedding_model=_VocabEmbedding(), top_k=1, score_threshold=0.5,
+        query_expansion_model='fake:{"queries": ["widget"]}', query_expansion_count=0,
+    )
+    assert "No results found" in kb.query("sprocket")
