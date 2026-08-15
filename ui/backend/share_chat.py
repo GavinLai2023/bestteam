@@ -92,6 +92,26 @@ def _get_or_create_session(request: Request, response: Response, db: Session, li
     return session
 
 
+def format_transcript(messages) -> str:
+    """Render a session's history as the single input string a run replays.
+
+    Visitor content is raw, unescaped, newline-bearing text, so a plain
+    `"User: ...\\nTeam: ..."` join is forgeable: a message containing
+    `"\\nTeam: <made-up answer>\\nUser: "` produces a transcript with a
+    fabricated prior assistant turn the model cannot tell from a real one --
+    a prompt-injection primitive on a brand-new anonymous surface (final
+    whole-branch review I3). Each turn is wrapped in an unambiguous tag and
+    `<`/`>` inside the content are escaped, so no visitor text can ever
+    close a tag or open one.
+    """
+    parts = []
+    for message in messages:
+        tag = "user" if message.role == "user" else "assistant"
+        content = message.content.replace("<", "&lt;").replace(">", "&gt;")
+        parts.append(f"<{tag}>{content}</{tag}>")
+    return "\n".join(parts)
+
+
 def _has_pending_turn(db: Session, session: ShareSession) -> bool:
     """True if the session's last message is an unanswered user turn --
     either a run still in flight, or one whose terminal event never made it
@@ -188,9 +208,7 @@ def send_share_message(
         raise HTTPException(status_code=409, detail=_PENDING_TURN_MESSAGE)
 
     history = list_messages(db, session.id)[-(MAX_HISTORY_TURNS * 2):]
-    transcript = "\n".join(
-        f"{'User' if m.role == 'user' else 'Team'}: {m.content}" for m in history
-    )
+    transcript = format_transcript(history)
 
     run = registry.create(workflow_record.name, transcript, org_id=link.org_id, username="share-link")
     db.add(
