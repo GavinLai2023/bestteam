@@ -28,6 +28,33 @@ def test_hash_password_uses_unique_salts():
     assert auth.hash_password("same password") != auth.hash_password("same password")
 
 
+def test_production_pbkdf2_iterations_are_unchanged():
+    """The shipped iteration count must stay expensive.
+
+    tests/conftest.py lowers `auth._PBKDF2_ITERATIONS` for the test process --
+    it is 69% of this suite's runtime at the real value. That patch would also
+    hide someone weakening the shipped default, so this reads the literal out
+    of auth.py's own source rather than the (deliberately patched) runtime
+    attribute. If you are here because this failed, the iteration count is a
+    security parameter: change it only on purpose.
+    """
+    import ast
+    import inspect
+
+    literals = []
+    for node in ast.walk(ast.parse(inspect.getsource(auth))):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "_PBKDF2_ITERATIONS":
+                literals.append(node.value.value)
+
+    assert literals == [260_000], f"expected one 260,000 literal, found {literals}"
+    # The patch is what makes the suite fast; if it ever stops applying, the
+    # slowness returns silently. Assert it is actually in effect.
+    assert auth._PBKDF2_ITERATIONS == 1_000
+
+
 def test_access_token_round_trip():
     token = auth.create_access_token("alice")
 
