@@ -14,16 +14,16 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
-from helpers import create_user_and_login, get_org_id, open_test_db
+from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, WorkflowRecord, WorkflowVersion
 from ui.backend.db_session import get_db
 from ui.backend.runtime import registry, run_in_background
 
 
-def _engine():
-    e = make_engine(":memory:")
+def _engine(tmp_path):
+    e = make_concurrent_safe_engine(tmp_path)
     init_db(e)
     return e
 
@@ -43,7 +43,7 @@ def test_run_in_background_publishes_run_queued_to_the_live_registry_log(tmp_pat
     # (see test below); the live registry log a WS subscriber replays from
     # must carry the same event, or a live view starts at run_started while
     # the historical view starts at run_queued.
-    engine = _engine()
+    engine = _engine(tmp_path)
     wf = _workflow(tmp_path)
     run = registry.create("w", "in")
 
@@ -54,7 +54,7 @@ def test_run_in_background_publishes_run_queued_to_the_live_registry_log(tmp_pat
 
 
 def test_run_in_background_persists_trace_events_in_seq_order(tmp_path):
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     wf = _workflow(tmp_path)
     run = registry.create("w", "in")
@@ -86,7 +86,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # File-backed, not `:memory:` -- this fixture drives run_in_background,
+    # which opens its own Session on a worker thread (see
+    # make_concurrent_safe_engine's docstring in helpers.py).
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

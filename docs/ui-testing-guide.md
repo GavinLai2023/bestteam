@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - **Frontend** running: `cd ui/frontend && npm run dev`.
-- **Backend** running **with the demo workflows enabled**, so the Monitor
+- **Backend** running **with the demo workflows enabled**, so the "Run a team"
   dropdown has something to pick on a fresh database:
 
   ```bash
@@ -17,16 +17,22 @@
   fixtures, not tenant data); this guide needs them. See `docs/deployment.md`.
 
 - **Two accounts.** There is **no public registration** — accounts are
-  operator-provisioned. The two pages under test need different account types:
+  operator-provisioned. The customer and admin surfaces need different account
+  types, so you will switch between these two throughout:
 
   | Account | Password | Type | Use for |
   |---|---|---|---|
-  | `demo` | `demo-pass-123` | org user (`default` org) | Monitor (`/`), Wizard |
-  | `op` | `op-pass-123` | platform admin (no org) | Advanced (`/advanced`), Memory |
+  | `demo` | `demo-pass-123` | org user (`default` org) | Dashboard, Build a team, My teams, Run a team |
+  | `op` | `op-pass-123` | platform admin (no org) | Accounts, Advanced, Memory, Trace |
 
-  The Monitor page and Wizard are **org-user** surfaces — a platform admin
-  (org-less) gets 403 there. The Advanced and Memory pages are **admin-only** —
-  an org user is redirected to `/`. So switch account by page.
+  The two account types see **disjoint navs**. The customer pages are
+  **org-user** surfaces — a platform admin (org-less) is redirected to
+  `/advanced`. The admin pages are **admin-only** — an org user is redirected
+  to `/`. So switch account by page.
+
+  Note that `/` is **not** a page: it is a router that sends an org user to
+  `/activity` (the Dashboard), or to `/wizard` if their org has nothing
+  deployed yet, and an admin to `/advanced`. "Run a team" lives at `/run`.
 
   Create them if missing (they exist in the dev DB already):
 
@@ -43,13 +49,23 @@
 ### T1-1 · Log in
 1. Open http://localhost:5173 — you should be redirected to `/login`.
 2. Enter `demo` / `demo-pass-123` and click **Login**.
-3. **Expected:** Logged in and redirected to `/` (Monitor page).
+3. **Expected:** Logged in, and `/` forwards you to `/activity` ("Team
+   activity") — or to `/wizard` if `default` has no deployed workflow yet.
+   The nav shows **Dashboard / Build a team / My teams / Run a team**.
 
-### T1-2 · Log out and log back in
+### T1-2 · An admin lands somewhere else
+1. Log out, then log in as `op` / `op-pass-123`.
+2. **Expected:** You land on `/advanced`, and the nav shows
+   **Accounts / Advanced / Memory / Trace** — no customer links.
+3. Navigate to `/run`.
+4. **Expected:** Bounced back to `/advanced` (an org-less admin has no org
+   to run anything in).
+
+### T1-2a · Log out and log back in
 1. Click **Log out** in the top-right nav.
 2. **Expected:** Redirected to `/login`.
 3. Log in again as `demo`.
-4. **Expected:** Redirected to Monitor page.
+4. **Expected:** The same landing destination as T1-1.
 
 ### T1-3 · Wrong password
 1. On the login page, enter `demo` with a wrong password.
@@ -61,10 +77,10 @@
 
 ---
 
-## T2 · Monitor Page (`/`) — as `demo`
+## T2 · Run a team (`/run`) — as `demo`
 
 ### T2-1 · Workflow list loads
-1. Log in as `demo` and go to `/` (Monitor).
+1. Log in as `demo` and click **Run a team** in the nav (`/run`).
 2. **Expected:** The **Workflow** dropdown is populated (e.g. `code_review`,
    `research_brief`). No `workflows.map` error in the console.
    *If it's empty, the backend was started without `BESTTEAM_DEMO_WORKFLOWS=1`
@@ -81,8 +97,12 @@
 
 ### T2-3 · Unreachable backend banner
 1. Stop the backend (`Ctrl+C` in the backend terminal).
-2. Refresh the Monitor page.
-3. **Expected:** A red banner: `Can't reach the backend at http://127.0.0.1:8000...`.
+2. Refresh `/run`.
+3. **Expected:** A red banner reading *"Can't reach the backend at
+   http://localhost:8000. Is `uvicorn ui.backend.main:app` running?"* — the
+   host is whatever `VITE_API_BASE` is set to, defaulting to `localhost`,
+   **not** `127.0.0.1` (the share-chat cookie is `SameSite=Lax` and browsers
+   treat those as different sites).
 4. Restart the backend and refresh — the banner should disappear.
 
 ---
@@ -100,8 +120,8 @@ from `/advanced`).
    There are no Agents/Teams tabs — a deployed workflow carries its agents and
    teams inline in its own JSON.
 
-### T3-2 · Organization selector
-1. On an org-scoped tab (Workflows / Knowledge bases), note the **Organization**
+### T3-2 · Organisation selector
+1. On an org-scoped tab (Workflows / Knowledge bases), note the **Organisation**
    selector in the page header; it lists the orgs (e.g. `Default Organization`).
 2. On the **Skills** tab, the selector also offers **Platform (built-ins)** —
    the default — for the platform skill tier.
@@ -110,7 +130,7 @@ from `/advanced`).
 ### T3-3 · Switching org clears the editor (regression guard)
 1. On the **Workflows** tab, select any existing workflow so its JSON loads in
    the editor.
-2. Change the **Organization** selector to a different org (or, on **Skills**,
+2. Change the **Organisation** selector to a different org (or, on **Skills**,
    between an org and **Platform (built-ins)**).
 3. **Expected:** The editor **clears** back to "Select an item…" — the previous
    org's item and JSON must not linger. (Otherwise a Save would write it into
@@ -174,7 +194,7 @@ from `/advanced`).
 5. **Expected:** Green `"Saved."` banner; `fake:hello` appears in the list.
 
 ### T3-11 · Create a Workflow via Advanced
-1. Click the **Workflows** tab; set the **Organization** selector to
+1. Click the **Workflows** tab; set the **Organisation** selector to
    `Default Organization`.
 2. In the **New name** input, type `test_workflow`. Click **New**, then enter:
    ```json
@@ -194,7 +214,7 @@ from `/advanced`).
    }
    ```
 3. Click **Save** → green `"Saved."` banner.
-4. Log out, log in as `demo`, go to the Monitor page (`/`).
+4. Log out, log in as `demo`, go to **Run a team** (`/run`).
 5. **Expected:** `test_workflow` appears in the Workflow dropdown (it was created
    in `default`, and `demo` belongs to `default`). Note this doesn't need the
    demo flag — it's a real DB workflow, not a bundled demo.
@@ -216,7 +236,16 @@ from `/advanced`).
 1. Fill in the challenge and (optionally) the "how do you handle this today?" field.
 2. Click **Start building my team**.
 3. **Expected:** The button steps through its loading labels, then navigates to
-   `/wizard/<id>/preview` after ~30–60s.
+   `/wizard/<id>/documents` — step 2 of 5, **"Add your documents"**.
+
+### T4-2a · Documents step is skippable
+1. On **Add your documents**, click **Skip for now**.
+2. **Expected:** You reach `/wizard/<id>/preview` without uploading anything —
+   documents are optional.
+3. To test the upload path instead, name a knowledge base (e.g.
+   `Product policies`), attach a file, and click **Continue**.
+4. **Expected:** The button shows ingestion progress labels while the upload
+   job is polled, then navigates to Preview once it completes.
 
 ### T4-3 · Preview page — Meet your team
 1. **Expected:** A team diagram of agent cards (name, role, description).
@@ -235,26 +264,111 @@ from `/advanced`).
 
 ### T4-6 · Run a team (post-deploy)
 1. Click **Run a team**.
-2. **Expected:** Redirected to Monitor with the new workflow pre-selected.
+2. **Expected:** Redirected to `/run?workflow=<name>` with the new workflow
+   pre-selected.
 3. Enter an input and Run → output in the Live trace.
+
+### T4-7 · Wizard progress bar shows five steps
+1. On any wizard page, look at the progress bar.
+2. **Expected:** **Your challenge → Your documents → Meet your team →
+   Confirm → Go live**. Steps unlock on data presence, so revisiting an
+   earlier step after deploying must not re-lock the later ones.
 
 ---
 
-## T5 · Edge Cases & Error Handling
+## T5 · Dashboard (`/activity`) — as `demo`
 
-### T5-1 · 401 redirect on cleared token
+### T5-1 · The three tabs load
+1. Click **Dashboard** in the nav.
+2. **Expected:** Heading **"Team activity"** with tabs **Automations**,
+   **Runs**, **Shared**.
+
+### T5-2 · Runs tab lists history and opens a run
+1. Run something first (T2-2), then open the **Runs** tab.
+2. **Expected:** The run is listed. Filters by team / manual-or-automatic /
+   status narrow the list.
+3. Click the run.
+4. **Expected:** A detail panel shows its trace. A finished run fetches its
+   persisted trace once; a still-`running` one streams live over the
+   WebSocket.
+
+### T5-3 · Run history survives a backend restart
+1. With at least one finished run listed, restart the backend.
+2. Reload the **Runs** tab.
+3. **Expected:** The finished run is still listed with its trace — history is
+   persisted per run. (In-flight/live run state is *not* rehydrated; that is a
+   known limitation, not a bug to file.)
+
+---
+
+## T6 · My teams (`/teams`) — as `demo`
+
+### T6-1 · Deployed teams are listed
+1. Click **My teams** in the nav.
+2. **Expected:** Heading **"My teams"**; a team deployed in T4-5 appears under
+   the **Live** status.
+
+### T6-2 · Generate and revoke a share link
+1. On a deployed team, expand the **Share** panel.
+2. Click **Generate a new link**, then **Copy link**.
+3. Open the copied `/share/<token>` URL in a **private/incognito window**
+   (it is the one public, unauthenticated route — it must work with no login).
+4. **Expected:** A chat page for that team; a message gets a reply.
+5. Back in the normal window, click **Revoke** on the link, then reload the
+   share URL.
+6. **Expected:** The revoked link no longer works.
+
+### T6-3 · Shared sessions are auditable
+1. Go to **Dashboard** → **Shared**, pick the team from T6-2.
+2. **Expected:** The visitor session from step 3 above is listed, and opening
+   it shows that conversation's transcript.
+
+---
+
+## T7 · Admin pages — as `op`
+
+### T7-1 · Accounts page
+1. Go to `/accounts`.
+2. **Expected:** Heading **"Organisations & users"**; the orgs are listed with
+   an Active/Deactivated state, a **Deactivate**/**Reactivate** button, and
+   per-org user actions (create / reset password / move / delete). Platform
+   accounts are listed **read-only** — `promote`/`demote` stay CLI-only
+   (see `docs/ADMIN_GUIDE.md`).
+
+### T7-2 · Trace page
+1. Go to `/trace`.
+2. **Expected:** Heading **"Trace"** with tabs **Runs**, **Analytics**,
+   **Models**. The Runs tab filters by workflow; clicking a run opens its
+   detail.
+
+### T7-3 · Memory page
+1. Go to `/memory`.
+2. **Expected:** With `BESTTEAM_MEMORY_DB` unset, a clear "memory not enabled"
+   state — not an error. With it set, a user list with record counts,
+   search/type filters, per-record delete and clear-all.
+
+---
+
+## T8 · Edge Cases & Error Handling
+
+### T8-1 · 401 redirect on cleared token
 1. DevTools → Application → Local Storage → delete `bestteam_token`.
 2. Navigate to `/advanced`.
 3. **Expected:** Redirected to `/login`.
 
-### T5-2 · Duplicate workflow name is an upsert (as `op`)
+### T8-2 · Duplicate workflow name is an upsert (as `op`)
 1. In Advanced → Workflows (org `Default Organization`), create `duplicate_test`.
 2. Create another with the same name.
 3. **Expected:** The list has exactly one `duplicate_test` — the PUT upserts.
 
-### T5-3 · Monitor with no input (as `demo`)
-1. On Monitor, select a workflow but leave Input blank.
+### T8-3 · Run with no input (as `demo`)
+1. On `/run`, select a workflow but leave Input blank.
 2. **Expected:** The **Run** button is disabled.
+
+### T8-4 · Unknown path routes home
+1. Navigate to `/no-such-page`.
+2. **Expected:** You end up on the right home for your account — Dashboard (or
+   the wizard) as `demo`, Advanced as `op` — not a dead end.
 
 ---
 
@@ -263,7 +377,13 @@ from `/advanced`).
 | URL | Page | Account | What to test |
 |-----|------|---------|--------------|
 | `/login` | Login | — | Auth, wrong password, redirect |
-| `/` | Monitor | `demo` (org user) | Workflow list, run, live trace |
+| `/` | *(router, not a page)* | either | Forwards to `/activity` or `/wizard` (org user), `/advanced` (admin) |
+| `/activity` | Dashboard — "Team activity" | `demo` (org user) | Automations / Runs / Shared tabs, run detail, persisted history |
+| `/wizard` | Team Builder | `demo` (org user) | Challenge → Documents → Preview → Confirm → Deploy |
+| `/teams` | My teams | `demo` (org user) | Deployed teams, share links, resume a draft |
+| `/run` | Run a team | `demo` (org user) | Workflow list, run, live trace, Stop |
+| `/share/:token` | Public share chat | **none — logged out** | Anonymous multi-turn chat; revoked link is refused |
+| `/accounts` | Organisations & users | `op` (platform admin) | Org create/deactivate, per-org user management |
 | `/advanced` | Advanced config | `op` (platform admin) | Workflows/Skills/KB/Tools/Model catalog CRUD, org selector |
 | `/memory` | Memory admin | `op` (platform admin) | Per-user memory (if `BESTTEAM_MEMORY_DB` set) |
-| `/wizard` | Team Builder | `demo` (org user) | Intent → Preview → Confirm → Deploy |
+| `/trace` | Trace | `op` (platform admin) | Runs / Analytics / Models tabs |

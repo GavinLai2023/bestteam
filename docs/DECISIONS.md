@@ -127,9 +127,17 @@ Append new entries at the bottom using this template:
   - The `Memory` ABC keeps the store swappable — a `Mem0Memory(Memory)` (or
     Redis/Postgres-backed) implementation can drop in later with **no changes
     to agents, the adapter, or the API**.
-  - Recall is single-stage BM25 (no rerank/expansion) and semantic/procedural
-    records aren't auto-deduped — accepted trade-offs for the in-house MVP,
-    tracked in `STATUS.md`.
+  - Recall started as single-stage BM25 with no rerank/expansion, and no
+    dedup of semantic/procedural records — accepted trade-offs for the
+    in-house MVP. Most of that has since been lifted **without** taking on a
+    vector store or a new service, keeping this decision intact: recall is
+    still BM25 by default, with opt-in hybrid BM25+vector (RRF-fused, with
+    type-aware recency decay) via `BESTTEAM_MEMORY_EMBEDDING_MODEL`, opt-in
+    query expansion via `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`, and opt-in
+    reranking via `BESTTEAM_MEMORY_RERANK_MODEL`. Semantic records get exact
+    dedup on write plus LLM-mediated near-duplicate/update resolution.
+    **Procedural records still have no dedup or consolidation** — the
+    remaining piece, tracked in `STATUS.md`.
 
 ## Property Maintenance Inbox: no `Case`/work-item entity in Phase 1
 

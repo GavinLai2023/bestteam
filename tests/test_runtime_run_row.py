@@ -7,13 +7,14 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
 from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_concurrent_safe_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
 from ui.backend.runtime import registry, run_in_background
 
 
-def _engine():
-    e = make_engine(":memory:")
+def _engine(tmp_path):
+    e = make_concurrent_safe_engine(tmp_path)
     init_db(e)
     return e
 
@@ -29,7 +30,7 @@ def _workflow(tmp_path):
 
 
 def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     # registry.create() is what publishes the in-memory Run the worker thread
     # publishes trace events against (see test_usage_metering.py); its id is
@@ -49,7 +50,7 @@ def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
 
 
 def test_run_in_background_stamps_workflow_version_id(tmp_path):
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     wf = _workflow(tmp_path)
     run = registry.create("w", "in")
@@ -61,7 +62,7 @@ def test_run_in_background_stamps_workflow_version_id(tmp_path):
 
 
 def test_run_in_background_leaves_version_null_when_absent(tmp_path):
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     wf = _workflow(tmp_path)
     run = registry.create("w", "in")

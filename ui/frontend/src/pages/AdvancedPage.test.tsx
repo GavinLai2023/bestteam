@@ -23,7 +23,16 @@ const renderPage = () => render(<AdvancedPage />)
 // with a name and one file already filled in, ready for "Create from files".
 const setUpUploadForm = async () => {
   renderPage()
-  await waitFor(() => expect(mockedApi.listOrgs).toHaveBeenCalled())
+  // Wait for the orgs to have LANDED, not merely for listOrgs to have been
+  // called. Those are different moments, and clicking the tab in between is
+  // what made this flaky on CI: the load effect bails out while `org` is
+  // still null (knowledge_bases is orgScope 'required'), so the listConfig
+  // below only happens on the effect's later re-run, once listOrgs resolves
+  // and sets the org. That whole chain -- promise, setState, re-render,
+  // effect -- has to fit inside waitFor's 1s budget, and on a loaded 2-core
+  // runner it did not. Waiting here instead means the tab click issues the
+  // call directly, in one render cycle.
+  await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
 
   fireEvent.click(screen.getByText('Knowledge bases'))
   await waitFor(() => expect(mockedApi.listConfig).toHaveBeenCalledWith('knowledge_bases', 'acme'))

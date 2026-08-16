@@ -13,10 +13,10 @@ pytestmark = pytest.mark.integration
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from helpers import get_org_id, open_test_db
+from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend import runtime
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run, WorkflowRecord
 from ui.backend.db.orgs import set_org_active
 from ui.backend.db.share_links import create_share_link, get_share_link_by_token, patch_share_link
@@ -38,7 +38,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # POST /api/share/{token}/messages dispatches a real run, so a worker
+    # thread's Session overlaps the request's -- see the helper's docstring.
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

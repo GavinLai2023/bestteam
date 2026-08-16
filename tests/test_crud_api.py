@@ -2,6 +2,8 @@
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,8 +16,9 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id, open_test_db
+from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import crud as backend_crud
+from ui.backend import ingestion as backend_ingestion
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -42,16 +45,71 @@ def _active_kb_dir(uploads: Path, name: str) -> Path:
 
 def _wait_for_job_status(job_id, deadline_seconds=10):
     """Poll `IngestionJob.status` to a terminal state (completed/failed),
-    opening a fresh session each time so we see the worker thread's commits."""
+    opening a fresh session each time so we see the worker thread's commits.
+
+    The deadline is a hang detector, not a timing assumption: these uploads
+    are a handful of bytes, so a healthy worker resolves the job in
+    milliseconds and the bound is never approached. Blowing it therefore
+    means the job never resolved at all, which is reported as its own
+    failure naming the job and its last-seen status -- returning that
+    non-terminal status instead would surface as a bare
+    `assert 'queued' == 'completed'` that says nothing about what was
+    being waited for.
+    """
     deadline = time.monotonic() + deadline_seconds
-    job = None
+    status = None
     while time.monotonic() < deadline:
         with open_test_db() as db:
             job = db.get(IngestionJob, job_id)
-            if job is not None and job.status in ("completed", "failed"):
-                return job.status
+            status = None if job is None else job.status
+            if status in ("completed", "failed"):
+                return status
         time.sleep(0.05)
-    return job.status if job is not None else None
+    raise AssertionError(
+        f"ingestion job {job_id} never reached a terminal status within "
+        f"{deadline_seconds}s (last seen: {status!r})"
+    )
+
+
+@contextmanager
+def _ingestion_futures():
+    """Record the `Future` of every ingestion job dispatched inside the block.
+
+    `run_ingestion_job` commits `IngestionJob.status = "completed"` *before*
+    it invalidates the workflow cache and prunes older generations -- both
+    are deliberately best-effort steps that must never be able to
+    retroactively un-complete a durable job (see ui/backend/ingestion.py).
+    So a terminal status is the right signal for an assertion about the job
+    itself, but not for one about pruning: it can (and intermittently does)
+    arrive while the pruning that follows it has not run yet. A `Future`
+    resolves only once the whole worker function has returned, which is the
+    happens-before edge those assertions actually need.
+    """
+    futures = []
+    submit = backend_ingestion._executor.submit
+
+    def _recording_submit(*args, **kwargs):
+        future = submit(*args, **kwargs)
+        futures.append(future)
+        return future
+
+    with patch.object(backend_ingestion._executor, "submit", _recording_submit):
+        yield futures
+
+
+def _await_ingestion(future, deadline_seconds=10):
+    """Block until one ingestion worker has fully returned.
+
+    `run_ingestion_job` catches everything and never raises, so the only way
+    to reach this bound is a genuinely wedged worker -- a hang detector, not
+    a timing assumption.
+    """
+    try:
+        future.result(timeout=deadline_seconds)
+    except FutureTimeoutError:
+        raise AssertionError(
+            f"an ingestion worker did not finish within {deadline_seconds}s"
+        ) from None
 
 
 @pytest.fixture
@@ -65,7 +123,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_crud, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # A file database, not `:memory:`: every upload here dispatches an
+    # ingestion job onto `ingestion.py`'s executor, and that worker thread
+    # opens its own `Session` on this same engine while the request that
+    # dispatched it -- and the job-status polling below -- are still using it.
+    # `make_engine(":memory:")` backs every Session with ONE `StaticPool`
+    # connection, so those Sessions share a single transaction and a single
+    # sqlite3 cursor; see `helpers.make_concurrent_safe_engine` for why that
+    # is a harness artefact rather than production behaviour.
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -559,23 +625,32 @@ def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
     # "immediately-previous version survives, older ones are cleaned up"
     # invariant as the old CR-008 synchronous pointer swap, just driven by
     # job completion instead.
+    #
+    # Every assertion here is about what pruning left on disk, which the
+    # worker does *after* committing the job's terminal status -- so each
+    # upload waits on the worker's own `Future`, not on that status. See
+    # `_ingestion_futures`.
     uploads = tmp_path / "knowledge_base_uploads"
-    resp1 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v1.txt", b"one", "text/plain"))])
-    assert _wait_for_job_status(resp1.json()["job_id"]) == "completed"
-    v1 = _active_kb_dir(uploads, "kb")
+    with _ingestion_futures() as futures:
+        resp1 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v1.txt", b"one", "text/plain"))])
+        _await_ingestion(futures.pop())
+        assert _wait_for_job_status(resp1.json()["job_id"]) == "completed"
+        v1 = _active_kb_dir(uploads, "kb")
 
-    resp2 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v2.txt", b"two", "text/plain"))])
-    assert _wait_for_job_status(resp2.json()["job_id"]) == "completed"
-    v2 = _active_kb_dir(uploads, "kb")
+        resp2 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v2.txt", b"two", "text/plain"))])
+        _await_ingestion(futures.pop())
+        assert _wait_for_job_status(resp2.json()["job_id"]) == "completed"
+        v2 = _active_kb_dir(uploads, "kb")
 
-    assert v1 != v2
-    assert sorted(p.name for p in v2.iterdir()) == ["v2.txt"]  # active version
-    assert v1.is_dir()  # previous version kept as a grace window
+        assert v1 != v2
+        assert sorted(p.name for p in v2.iterdir()) == ["v2.txt"]  # active version
+        assert v1.is_dir()  # previous version kept as a grace window
 
-    # A third upload's completed job prunes the now-two-generations-old version.
-    resp3 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v3.txt", b"three", "text/plain"))])
-    assert _wait_for_job_status(resp3.json()["job_id"]) == "completed"
-    assert not v1.is_dir()
+        # A third upload's completed job prunes the now-two-generations-old version.
+        resp3 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v3.txt", b"three", "text/plain"))])
+        _await_ingestion(futures.pop())
+        assert _wait_for_job_status(resp3.json()["job_id"]) == "completed"
+        assert not v1.is_dir()
 
 
 def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
@@ -912,7 +987,15 @@ def test_uploaded_kb_is_queryable_by_a_workflow(client):
 
 def test_delete_knowledge_base_removes_uploaded_files(client):
     files = [("files", ("doc.txt", b"some content here", "text/plain"))]
-    client.post("/api/config/knowledge_bases/to_delete/upload?org=default", files=files)
+    with _ingestion_futures() as futures:
+        client.post("/api/config/knowledge_bases/to_delete/upload?org=default", files=files)
+        # Let the ingestion worker finish before deleting. It reads every
+        # staged file, and on Windows an open handle makes the delete route's
+        # `rmtree` fail with WinError 32 -- which the route deliberately only
+        # logs, leaving the directory behind. That is the route's documented
+        # behaviour under a live reader, not what this test is about, so the
+        # race is removed rather than asserted around.
+        _await_ingestion(futures.pop())
 
     from ui.backend.crud import _KB_UPLOADS_DIR
 

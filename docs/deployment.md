@@ -140,9 +140,9 @@ docker compose exec backend python -m ui.backend.admin create-user op --platform
 
 ## 4b. Grant the first admin
 
-New accounts are always non-admin. The **Advanced** config page and the
-per-user **Memory** management page require an admin, granted only with the
-operator CLI (never from an env list or by username match):
+New accounts are always non-admin. The admin surfaces — **Accounts**,
+**Advanced** (config), **Memory** and **Trace** — require an admin, granted
+only with the operator CLI (never from an env list or by username match):
 
 ```bash
 docker compose exec backend python -m ui.backend.admin promote op
@@ -223,8 +223,10 @@ startup with a clear error instead of silently stopping the poller later.
 - `curl http://localhost:8000/api/workflows -H "Authorization: Bearer <access_token>"`
   → `200`.
 - Open the frontend in a browser — you'll be redirected to `/login`. Log in
-  with the user created above; you should land on the monitoring page
-  (`/`) with a "Log out" link in the nav.
+  with the user created above; you should land on a page with a "Log out"
+  link in the nav. Which page depends on the account: `/` routes an org
+  member to `/activity` (the Dashboard), or to `/wizard` if the org has
+  nothing deployed yet, and a platform admin to `/advanced`.
 
 ## Updating built-in skills on an existing deployment
 

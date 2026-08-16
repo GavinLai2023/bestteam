@@ -11,8 +11,71 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
+  # Which tiers can this change possibly affect?
+  #
+  # These are deliberately allowlists rather than "everything except docs".
+  # The matcher ORs the patterns together, so a `!negation` entry matches every
+  # path outside the thing it excludes and the whole filter collapses to "always
+  # true" -- verified against picomatch before writing this. An allowlist is
+  # unambiguous under that semantics.
+  #
+  # The cost is that a NEW top-level directory falls outside every filter and
+  # would silently skip CI. If you add one, add it here. Note that root files
+  # look inert but are not: tests/test_packaging.py and tests/test_auth.py both
+  # read Dockerfile / docker-compose.yml / .env.example.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # The `*shared` aliases below nest one sequence inside another,
+          # which plain YAML does NOT splice. That is fine here and is not a
+          # bug to fix: paths-filter parses this string itself and flattens
+          # recursively (`parseFilterItemYaml`, src/filter.ts), and its README
+          # documents this anchor pattern. Confirmed in a real run --
+          # `backend` matched only `tests/**` files, a pattern that exists
+          # solely in `shared`. Flattening by hand would duplicate 12 patterns
+          # across two lists and make the "add a new top-level directory here"
+          # note above easier to get wrong.
+          filters: |
+            shared: &shared
+              - 'src/**'
+              - 'tests/**'
+              - 'alembic/**'
+              - 'alembic.ini'
+              - 'pyproject.toml'
+              - 'examples/**'
+              - 'scripts/**'
+              - 'Dockerfile'
+              - 'docker-compose.yml'
+              - '.dockerignore'
+              - '.env.example'
+              - '.github/workflows/**'
+            backend:
+              - *shared
+              - 'ui/backend/**'
+            frontend:
+              - 'ui/frontend/**'
+              - '.github/workflows/**'
+            e2e:
+              - *shared
+              - 'ui/**'
+
   backend-unit-integration:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,10 +87,14 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[ui,dev,tools]"
+      # -n auto: the PR gate optimises for wall clock. backend-full below
+      # deliberately does NOT, so something still checks test isolation.
       - name: Run pytest
-        run: python -m pytest -m "not e2e and not slow and not optional"
+        run: python -m pytest -m "not e2e and not slow and not optional" -n auto
 
   backend-optional-deps:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -39,10 +106,13 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[ui,dev,tools,interview]"
+      # 16 tests -- worker startup would cost more than it saves.
       - name: Run pytest
         run: python -m pytest -m optional
 
   frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -65,6 +135,8 @@ jobs:
         run: npm run build
 
   e2e-smoke:
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -85,6 +157,8 @@ jobs:
         run: playwright install --with-deps chromium
       - name: Install frontend dependencies
         run: npm ci --prefix ui/frontend
+      # Never -n auto: tests/e2e/conftest.py binds fixed ports 8000/5173, so
+      # parallel workers would fight over them.
       - name: Run E2E smoke suite
         run: python -m pytest tests/e2e/ -m "e2e and not slow" --tracing retain-on-failure
       - name: Upload Playwright traces on failure
@@ -95,8 +169,14 @@ jobs:
           path: test-results/
           retention-days: 7
 
+  # Runs the same selection as the PR gate plus `slow`/`optional`, but SERIALLY
+  # and in one process. That is the point: once the PR gate runs under `-n auto`
+  # its execution order is nondeterministic and tests are spread across workers,
+  # which hides ordering and cross-test isolation bugs. This job is the one that
+  # still asserts the suite is order-independent, so it must not gain `-n auto`.
   backend-full:
-    if: github.ref == 'refs/heads/main'
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -112,7 +192,8 @@ jobs:
         run: python -m pytest -m "not e2e"
 
   e2e-full:
-    if: github.ref == 'refs/heads/main'
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

@@ -7,6 +7,7 @@ import json
 import time
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import expect as pw_expect
 
 from ._env import BASE_URL, DEMO, OP, ORG_LABEL
@@ -24,6 +25,34 @@ def login_ui(page, account):
     # (LandingPage/RequireOrgMember redirect logic) -- wait for the
     # authenticated app shell rather than a specific path.
     page.wait_for_selector(".top-nav", timeout=8000)
+
+
+def goto_expecting_login_redirect(page, path, timeout=5000):
+    """Navigate to a guarded route and wait for the bounce to /login.
+
+    `page.goto()` waits for `load` by default, but the app's client-side auth
+    guard can redirect before that fires -- Playwright then raises
+    "Navigation to X is interrupted by another navigation to /login" rather
+    than returning. Whether it raises is a pure race between the redirect and
+    the load event, which is why the same assertion failed in `e2e-smoke` and
+    passed in `e2e-full` within a single CI run.
+
+    `wait_until="commit"` narrows that window but does not close it: on a fast
+    runner the guard can abort the navigation before it even commits, which
+    surfaces as `net::ERR_ABORTED` instead. There is no `wait_until` value that
+    reliably survives a navigation the app is deliberately cancelling, so the
+    navigation error is tolerated outright.
+
+    That is not a weakened assertion. `wait_for_url` below is the assertion,
+    and it still fails if the redirect does not happen -- including if the page
+    failed to load for some unrelated reason, since then no /login URL ever
+    arrives either.
+    """
+    try:
+        page.goto(BASE_URL + path, wait_until="commit")
+    except PlaywrightError:
+        pass
+    page.wait_for_url("**/login", timeout=timeout)
 
 
 def logout(page):
@@ -45,8 +74,7 @@ def test_smoke_journey(page):
     page.on("dialog", lambda dialog: dialog.accept())
 
     # -- T1. Authentication (as demo) --
-    page.goto(BASE_URL + "/")
-    page.wait_for_url("**/login", timeout=6000)
+    goto_expecting_login_redirect(page, "/", timeout=6000)
     login_ui(page, DEMO)
     assert "/login" not in page.url
 
@@ -66,8 +94,7 @@ def test_smoke_journey(page):
 
     ctx2 = page.context.browser.new_context()
     p2 = ctx2.new_page()
-    p2.goto(BASE_URL + "/advanced")
-    p2.wait_for_url("**/login", timeout=5000)
+    goto_expecting_login_redirect(p2, "/advanced")
     ctx2.close()
 
     # -- T2. Monitor page (as demo) --
@@ -226,8 +253,7 @@ def test_smoke_journey(page):
     # -- T5. Edge cases --
     page.goto(BASE_URL + "/")
     page.evaluate("localStorage.removeItem('bestteam_token')")
-    page.goto(BASE_URL + "/advanced")
-    page.wait_for_url("**/login", timeout=5000)
+    goto_expecting_login_redirect(page, "/advanced")
 
     login_ui(page, OP)
     page.goto(BASE_URL + "/advanced")

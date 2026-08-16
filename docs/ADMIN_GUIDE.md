@@ -26,9 +26,9 @@ the org/user subset of it.
 | Term | What it is | `org_id` | `is_admin` |
 |------|-----------|:--------:|:----------:|
 | **Organization** | A customer tenant. All customer data (teams, runs, mailbox, memory) is row-isolated by org. The `default` org is seeded automatically. | — | — |
-| **Org member** | A customer login that belongs to exactly one organization. Uses the customer UI: *Build a team*, *My teams*, *Run a team*, *Activity*. | set | `false` |
+| **Org member** | A customer login that belongs to exactly one organization. Uses the customer UI: *Dashboard*, *Build a team*, *My teams*, *Run a team*. | set | `false` |
 | **Platform operator** | An org-less account. Candidate for admin; runs the deployment rather than using a team. | `NULL` | `false` until promoted |
-| **Platform admin** | A platform operator that has been `promote`d. Gets the **Advanced** (config) and **Memory** pages and can target any org's config via `?org=`. | `NULL` | `true` |
+| **Platform admin** | A platform operator that has been `promote`d. Gets the **Accounts**, **Advanced** (config), **Memory** and **Trace** pages, and can target any org's config via `?org=`. | `NULL` | `true` |
 
 **Core rules the CLI enforces** (you'll see these as errors if you cross them):
 
@@ -82,6 +82,7 @@ never accept the password as an argument — so it never lands in shell history.
 | `list` | List current admins. |
 | `set-email <org> --host <h> --user <u> [--port 993] [--drafts <folder>] [--test]` | Connect an org's IMAP mailbox for the email tools. Prompts for the password. `--test` verifies with a real login before saving. |
 | `clear-email <org>` | Disconnect an org's mailbox (also disables its autonomous email trigger). |
+| `backfill-memory-principals` | One-off, **opt-in** upgrade step: bind each current user's legacy NULL-principal memory rows to their principal so their existing memory keeps being recalled (§6). |
 
 > **Note on visibility:** there is intentionally no "list all users" or "list org
 > members" command. `list` shows admins; `list-orgs` shows orgs. To see a
@@ -101,9 +102,9 @@ python -m ui.backend.admin promote op
 python -m ui.backend.admin list                            # -> op
 ```
 
-`op` can now log in and reach the **Advanced** and **Memory** pages. (A platform
-operator is routed to *Advanced* as their home; the customer pages are hidden
-from them because they have no org.)
+`op` can now log in and reach the **Accounts**, **Advanced**, **Memory** and
+**Trace** pages. (A platform operator is routed to *Advanced* as their home;
+the customer pages are hidden from them because they have no org.)
 
 ### 4.2 Onboard a customer organization
 
@@ -112,8 +113,8 @@ python -m ui.backend.admin create-org acme --display-name "Acme Corp"
 python -m ui.backend.admin create-user alice --org acme    # prompts for a password
 ```
 
-`alice` can now log in and use *Build a team* / *My teams* / *Run a team* /
-*Activity* within Acme. If Acme's teams use email, connect its mailbox (§5).
+`alice` can now log in and use *Dashboard* / *Build a team* / *My teams* /
+*Run a team* within Acme. If Acme's teams use email, connect its mailbox (§5).
 
 ### 4.3 Single-customer deployment
 
@@ -192,6 +193,16 @@ environment**:
 - **`move-user`** binds the user's legacy (pre-org-scoping) memory to their
   *source* org before moving, so old records stay attributable to the org they
   were created under rather than following the user.
+- **`backfill-memory-principals`** is a one-off upgrade step for a deployment
+  whose memory predates principal stamping. Memory is scoped by an immutable
+  `principal_id`, so rows written before stamping (`principal_id` NULL) are
+  **not** recalled by runs on the upgraded build — their owners silently lose
+  their history. This command binds each current user's NULL-principal rows,
+  within that user's own org scope, to their principal. It is deliberately
+  opt-in and never touches rows that already carry a principal, so it cannot
+  re-attribute one principal's or one org's memory to another. Run it once,
+  with the server's environment; a deployment that never ran memory before the
+  upgrade doesn't need it.
 
 Admins can also view, search, and delete a user's memory, and perform org-level
 erasure, from the **Memory** page (`/api/memory`).

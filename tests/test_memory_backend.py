@@ -17,7 +17,8 @@ from bestteam import (
     Workflow,
 )
 from bestteam.core.memory import EPISODIC
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_concurrent_safe_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.usage import list_usage_for_run
 from ui.backend.runtime import _make_memory, registry, run_in_background
 
@@ -286,7 +287,7 @@ def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
     store.close()
 
 
-def test_run_in_background_meters_memory_extraction(monkeypatch):
+def test_run_in_background_meters_memory_extraction(monkeypatch, tmp_path):
     # SP-3 M-04: the extraction LLM call's usage lands in usage_records tagged
     # agent="memory:extraction", carrying the run's org.
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -294,7 +295,7 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
 
     from bestteam import MemoryManager
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -320,7 +321,7 @@ def test_run_in_background_meters_memory_extraction(monkeypatch):
     assert mem_rows[0].org_id == 5
 
 
-def test_run_in_background_meters_memory_query_expansion(monkeypatch):
+def test_run_in_background_meters_memory_query_expansion(monkeypatch, tmp_path):
     # The query-expansion LLM call's usage lands in usage_records tagged
     # agent="memory:query_expansion", mirroring the extraction-side test above.
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -328,7 +329,7 @@ def test_run_in_background_meters_memory_query_expansion(monkeypatch):
 
     from bestteam import MemoryManager
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -353,7 +354,7 @@ def test_run_in_background_meters_memory_query_expansion(monkeypatch):
     assert mem_rows[0].org_id == 5
 
 
-def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_fails(monkeypatch):
+def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_fails(monkeypatch, tmp_path):
     # Mirrors test_total_write_failure_still_meters_extraction, applied to the
     # recall side: the expansion call already happened and is billable even
     # though the store search that follows it fails.
@@ -362,7 +363,7 @@ def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_
 
     from bestteam import MemoryManager
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -392,7 +393,7 @@ def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_
     assert any(e["type"] == "run_completed" for e in events)
 
 
-def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
+def test_usage_persistence_failure_does_not_fail_run(monkeypatch, tmp_path):
     # Review r5 #1: a usage_records write failing must not flip a successful run
     # to run_failed (metering is isolated from run status).
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -400,7 +401,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
 
     from bestteam import MemoryManager
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
 
     extraction = FakeMessagesListChatModel(
@@ -427,7 +428,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch):
     assert not any(e["type"] == "run_failed" for e in events)
 
 
-def test_total_write_failure_still_meters_extraction(monkeypatch):
+def test_total_write_failure_still_meters_extraction(monkeypatch, tmp_path):
     # Review r6 #1: a paid extraction call must be billed even when EVERY memory
     # write fails -- exactly one memory:extraction usage row.
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -435,7 +436,7 @@ def test_total_write_failure_still_meters_extraction(monkeypatch):
 
     from bestteam import MemoryManager
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 

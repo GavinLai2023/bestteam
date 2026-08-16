@@ -2,7 +2,7 @@
 
 How bestteam connects an agent to a client's documents — the most common
 customer request ("hook our agents up to our internal docs"). This page
-explains both implementations end to end: how they work, how to configure
+explains all three implementations end to end: how they work, how to configure
 them, how to manage them through the backend API, and what they
 deliberately don't do yet.
 

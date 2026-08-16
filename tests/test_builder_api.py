@@ -13,7 +13,7 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 
 from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec
-from helpers import create_user_and_login, get_user_principal_id
+from helpers import create_user_and_login, get_user_principal_id, make_concurrent_safe_engine
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
@@ -77,7 +77,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # Two tests in here drive real concurrency on purpose -- the deploy/
+    # skill-edit lock snapshot and the delete-during-sandbox-run test -- and
+    # both were intermittently failing because `make_engine(":memory:")` gives
+    # every Session in the process one shared transaction. See the helper's
+    # docstring for why that silently loses writes.
+    engine = make_concurrent_safe_engine(tmp_path)
+
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
