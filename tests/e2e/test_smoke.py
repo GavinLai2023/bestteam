@@ -26,6 +26,24 @@ def login_ui(page, account):
     page.wait_for_selector(".top-nav", timeout=8000)
 
 
+def goto_expecting_login_redirect(page, path, timeout=5000):
+    """Navigate to a guarded route and wait for the bounce to /login.
+
+    `page.goto()` waits for `load` by default, but the app's client-side auth
+    guard can redirect before that fires -- Playwright then raises
+    "Navigation to X is interrupted by another navigation to /login" rather
+    than returning. Whether it raises is a pure race between the redirect and
+    the load event, which is why the same assertion failed in `e2e-smoke` and
+    passed in `e2e-full` within a single CI run.
+
+    `wait_until="commit"` returns as soon as the response for `path` is
+    committed, so there is no `load` left to interrupt; the redirect is then
+    asserted by `wait_for_url`, which was always the real assertion here.
+    """
+    page.goto(BASE_URL + path, wait_until="commit")
+    page.wait_for_url("**/login", timeout=timeout)
+
+
 def logout(page):
     page.click("button.logout-button")
     page.wait_for_url("**/login", timeout=5000)
@@ -45,8 +63,7 @@ def test_smoke_journey(page):
     page.on("dialog", lambda dialog: dialog.accept())
 
     # -- T1. Authentication (as demo) --
-    page.goto(BASE_URL + "/")
-    page.wait_for_url("**/login", timeout=6000)
+    goto_expecting_login_redirect(page, "/", timeout=6000)
     login_ui(page, DEMO)
     assert "/login" not in page.url
 
@@ -66,8 +83,7 @@ def test_smoke_journey(page):
 
     ctx2 = page.context.browser.new_context()
     p2 = ctx2.new_page()
-    p2.goto(BASE_URL + "/advanced")
-    p2.wait_for_url("**/login", timeout=5000)
+    goto_expecting_login_redirect(p2, "/advanced")
     ctx2.close()
 
     # -- T2. Monitor page (as demo) --
@@ -226,8 +242,7 @@ def test_smoke_journey(page):
     # -- T5. Edge cases --
     page.goto(BASE_URL + "/")
     page.evaluate("localStorage.removeItem('bestteam_token')")
-    page.goto(BASE_URL + "/advanced")
-    page.wait_for_url("**/login", timeout=5000)
+    goto_expecting_login_redirect(page, "/advanced")
 
     login_ui(page, OP)
     page.goto(BASE_URL + "/advanced")
