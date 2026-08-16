@@ -16,12 +16,12 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, open_test_db
+from helpers import create_user_and_login, make_concurrent_safe_engine, open_test_db
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend import org_knowledge_bases as backend_org_kb
 from ui.backend.builder import _all_knowledge_base_tools, _with_knowledge_base_catalog
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
@@ -29,16 +29,30 @@ from ui.backend.db_session import get_db
 
 def _wait_for_job_status(job_id, deadline_seconds=10):
     """Poll `IngestionJob.status` to a terminal state (completed/failed),
-    opening a fresh session each time so we see the worker thread's commits."""
+    opening a fresh session each time so we see the worker thread's commits.
+
+    The deadline is a hang detector, not a timing assumption: these uploads
+    are a handful of bytes, so a healthy worker resolves the job in
+    milliseconds and the bound is never approached. Blowing it therefore
+    means the job never resolved at all, which is reported as its own
+    failure naming the job and its last-seen status -- returning that
+    non-terminal status instead would surface as a bare
+    `assert 'queued' == 'completed'` that says nothing about what was
+    being waited for.
+    """
     deadline = time.monotonic() + deadline_seconds
-    job = None
+    status = None
     while time.monotonic() < deadline:
         with open_test_db() as db:
             job = db.get(IngestionJob, job_id)
-            if job is not None and job.status in ("completed", "failed"):
-                return job.status
+            status = None if job is None else job.status
+            if status in ("completed", "failed"):
+                return status
         time.sleep(0.05)
-    return job.status if job is not None else None
+    raise AssertionError(
+        f"ingestion job {job_id} never reached a terminal status within "
+        f"{deadline_seconds}s (last seen: {status!r})"
+    )
 
 
 @pytest.fixture
@@ -47,7 +61,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_knowledge_bases, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # A file database, not `:memory:`: every upload here dispatches an
+    # ingestion job onto `ingestion.py`'s executor, and that worker thread
+    # opens its own `Session` on this same engine while the request that
+    # dispatched it -- and the job-status polling below -- are still using it.
+    # `make_engine(":memory:")` backs every Session with ONE `StaticPool`
+    # connection, so those Sessions share a single transaction and a single
+    # sqlite3 cursor; see `helpers.make_concurrent_safe_engine` for why that
+    # is a harness artefact rather than production behaviour.
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

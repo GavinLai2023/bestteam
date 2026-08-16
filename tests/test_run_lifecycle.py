@@ -78,7 +78,8 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
 
     from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
 
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -93,7 +94,7 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
             "needs_human": False, "human_reason": "",
         }],
     })
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
     spec = Specification(
@@ -133,7 +134,7 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_completed was published
 
 
-def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_not_flag_it():
+def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_not_flag_it(tmp_path):
     """The adapter reports a rejected/not_found email tool call as
     `success: True` (the call itself didn't raise) with an `outcome` that
     says otherwise -- runtime.py's failed_tool_message_ids collector
@@ -143,7 +144,8 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -170,7 +172,7 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
             )
             yield _TE(type="run_completed", workflow="wf", data=envelope)
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -199,12 +201,13 @@ def _triggered_run_context(uids):
     }
 
 
-def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch():
+def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_path):
     """Spec 10.1: a UID batch must never silently disappear from
     Needs-attention -- including when the run is cancelled, not just failed
     outright. _mark_cancelled previously never normalized the run at all
     (Codex review finding)."""
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -214,7 +217,7 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch():
         def stream(self, *args, **kwargs):
             raise AssertionError("must not stream once cancellation was requested up front")
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -235,12 +238,13 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch():
     assert all(r.status == "error" and r.needs_attention for r in rows)
 
 
-def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch():
+def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(tmp_path):
     """Same spec 10.1 guarantee as above, for a run that crashes (e.g. a
     compile failure) before workflow.stream() ever yields a single event --
     the outer except-Exception fallback previously never normalized either
     (Codex review finding)."""
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -250,7 +254,7 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
         def stream(self, *args, **kwargs):
             raise RuntimeError("internal compile detail")
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -270,7 +274,7 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
     assert rows[0].status == "error" and rows[0].needs_attention is True
 
 
-def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_trace(monkeypatch):
+def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_trace(tmp_path, monkeypatch):
     """A property-maintenance run's agent output is derived from customer
     email content (the envelope's free-text fields can quote it directly) --
     the same trust boundary that already redacts tool_completed data for
@@ -283,8 +287,9 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
     from ui.backend import runtime
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run, TraceEventRecord
     from ui.backend.runtime import registry, run_in_background
 
@@ -310,7 +315,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
             yield _TE(type="agent_completed", workflow="wf", agent="responder", data=envelope)
             yield _TE(type="run_completed", workflow="wf", data=envelope)
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -346,7 +351,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
         assert item.status == "processed" and item.needs_attention is False
 
 
-def test_pm_contract_run_redacts_hierarchical_delegate_events(monkeypatch):
+def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypatch):
     """If a declared maintenance workflow uses HIERARCHICAL mode, the
     manager/subordinate delegate exchange (delegation_started/subagent_started's
     `task_summary`, subagent_completed/delegation_completed's `summary`)
@@ -356,8 +361,9 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(monkeypatch):
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
     from ui.backend import runtime
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run, TraceEventRecord
     from ui.backend.runtime import registry, run_in_background
 
@@ -396,7 +402,7 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(monkeypatch):
             )
             yield _TE(type="run_completed", workflow="wf", data=envelope)
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -429,7 +435,7 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(monkeypatch):
             assert event["data"] == runtime._PM_TRACE_REDACTED
 
 
-def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(monkeypatch):
+def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(tmp_path, monkeypatch):
     """The manager's `delegate_to_<name>` call also produces its OWN
     `tool_completed` event (`adapters/langgraph_adapter.py`'s generic
     tool-calling loop, separate from the `on_event`-driven subagent_completed/
@@ -440,8 +446,9 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(m
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
     from ui.backend import runtime
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run, TraceEventRecord
     from ui.backend.runtime import registry, run_in_background
 
@@ -475,7 +482,7 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(m
             )
             yield _TE(type="run_completed", workflow="wf", data=envelope)
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -510,14 +517,15 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(m
     assert delegate_events[0]["data"] == runtime._PM_TRACE_REDACTED
 
 
-def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_event(monkeypatch):
+def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_event(tmp_path, monkeypatch):
     """Same ordering guarantee as the normal terminal path
     (test_normalize_run_result_commits_before_the_terminal_event_is_published
     above), for a cancelled run -- _mark_cancelled previously published
     run_cancelled BEFORE committing/normalizing, so a live subscriber's
     refetch could race ahead of the synthetic error rows (Codex review
     finding)."""
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -527,7 +535,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
         def stream(self, *args, **kwargs):
             raise AssertionError("must not stream once cancellation was requested up front")
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -558,11 +566,12 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_cancelled was published
 
 
-def test_worker_exception_before_any_event_normalizes_before_publishing_run_failed(monkeypatch):
+def test_worker_exception_before_any_event_normalizes_before_publishing_run_failed(tmp_path, monkeypatch):
     """Same ordering guarantee, for a pre-stream crash -- the outer
     except-Exception fallback previously published run_failed BEFORE
     committing/normalizing (Codex review finding)."""
-    from ui.backend.db import init_db, make_engine, session_factory
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -572,7 +581,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
         def stream(self, *args, **kwargs):
             raise RuntimeError("internal compile detail")
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -602,7 +611,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_failed was published
 
 
-def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(monkeypatch):
+def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(tmp_path, monkeypatch):
     """terminal_seen was previously set to True BEFORE the terminal status
     commit, so a DB error committing that status made the except-Exception
     fallback believe a terminal event had already been published and skip
@@ -611,7 +620,8 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(mo
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
 
-    from ui.backend.db import init_db, make_engine
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
     from ui.backend.db.models import Run
     from ui.backend.runtime import registry, run_in_background
 
@@ -622,7 +632,7 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(mo
             yield TraceEvent(type="run_started", workflow="wf", data=None)
             yield TraceEvent(type="run_completed", workflow="wf", data="done")
 
-    engine = make_engine(":memory:")
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     run = registry.create("wf", "in")
 

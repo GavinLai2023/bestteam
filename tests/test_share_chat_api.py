@@ -9,9 +9,9 @@ pytestmark = pytest.mark.integration
 
 from fastapi.testclient import TestClient
 
-from helpers import get_org_id, open_test_db
+from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Organization, WorkflowRecord
 from ui.backend.db.share_links import create_share_link, patch_share_link
 from ui.backend.db.users import create_user
@@ -30,7 +30,22 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # A file database, not `:memory:`: every accepted send here dispatches a
+    # real run onto `runtime.py`'s executor, and `run_in_background` opens its
+    # own `Session` on this same engine from a `bestteam-run_*` worker thread
+    # while the request that dispatched it -- and every later request in the
+    # test -- are still using it. `make_engine(":memory:")` backs every Session
+    # with ONE `StaticPool` connection, so those Sessions share a single
+    # transaction and a single sqlite3 cursor; see
+    # `helpers.make_concurrent_safe_engine` for why that is a harness artefact
+    # rather than production behaviour. The two symptoms it produced here were
+    # the worker's `Session.close()` ROLLBACK landing between a request's
+    # INSERT and its COMMIT (the just-created `share_sessions` row vanishes and
+    # `create_share_session`'s `db.refresh()` raises "Could not refresh
+    # instance" -- the CI failure this fixture change fixes) and the worker's
+    # own INSERT clobbering the shared cursor's `lastrowid` mid-flush
+    # ("Instance <ShareMessage ...> has a NULL identity key").
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -494,7 +509,7 @@ def test_sending_while_the_previous_turn_is_unanswered_is_409(client, monkeypatc
     assert second.json()["detail"] == share_chat_module._PENDING_TURN_MESSAGE
 
 
-def test_concurrent_sends_for_the_same_session_are_serialized(client):
+def test_concurrent_sends_for_the_same_session_are_serialized(client, monkeypatch):
     """Mirrors test_email_trigger.py's `_dispatch_lock` tests: manually hold
     the per-session lock and confirm a second send for that session blocks
     on it instead of racing `_has_pending_turn`/`next_turn_number`/
@@ -508,6 +523,19 @@ def test_concurrent_sends_for_the_same_session_are_serialized(client):
 
     import ui.backend.share_chat as share_chat_module
     from ui.backend.db.share_messages import append_message
+
+    # The recording executor keeps the first turn from ever completing on its
+    # own, which is what makes the simulated reply below the ONLY writer of
+    # turn 2. Under the real executor the dispatched run's own
+    # `_safe_record_share_reply` appends that same turn from a worker thread,
+    # racing this test's `append_message` for
+    # UniqueConstraint(share_session_id, turn_number) -- whichever loses raises
+    # IntegrityError. The test happened to win that race almost always while
+    # this fixture shared one serialised sqlite3 connection with the worker;
+    # it does not reliably win now that each `Session` has its own connection.
+    # Same reason every other test here that hand-writes transcript rows uses
+    # this executor.
+    monkeypatch.setattr(share_chat_module, "_executor", _RecordingExecutor())
 
     token, _ = _make_link()
     first = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
@@ -711,8 +739,19 @@ def test_safe_record_share_reply_retries_transient_failures(monkeypatch):
     import ui.backend.runtime as runtime_module
 
     calls = []
+    real_record_share_reply = runtime_module.record_share_reply
 
     def flaky(db, run_row, output):
+        # `record_share_reply` is a module global, and `_safe_record_share_reply`
+        # is its only caller -- so a `bestteam-run_*` worker still finishing a
+        # run dispatched by an EARLIER test in this process reaches this patch
+        # too, and its call would be miscounted as one of ours (seen under
+        # `-n auto`, where such a worker is much likelier to still be alive).
+        # Anything that isn't this test's own run row is passed straight
+        # through to the real implementation, exactly as if it had never been
+        # patched, so `calls` describes only the retry loop under test.
+        if run_row.id != "run-1":
+            return real_record_share_reply(db, run_row, output)
         calls.append(1)
         if len(calls) < 3:
             raise RuntimeError("transient DB error")
@@ -735,8 +774,13 @@ def test_safe_record_share_reply_gives_up_after_max_attempts_without_raising(mon
     import ui.backend.runtime as runtime_module
 
     calls = []
+    real_record_share_reply = runtime_module.record_share_reply
 
     def always_fails(db, run_row, output):
+        # Passes another test's still-running worker through untouched -- see
+        # test_safe_record_share_reply_retries_transient_failures above for why.
+        if run_row.id != "run-1":
+            return real_record_share_reply(db, run_row, output)
         calls.append(1)
         raise RuntimeError("permanent DB error")
 

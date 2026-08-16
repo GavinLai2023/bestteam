@@ -73,7 +73,8 @@ def test_hierarchical_usage_aggregates_manager_and_subordinate():
 
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_concurrent_safe_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db.models import Run
 from ui.backend.db.usage import list_usage_for_run, record_usage
@@ -81,8 +82,8 @@ from ui.backend.runtime import registry, run_in_background
 
 
 @pytest.fixture
-def db_session_factory():
-    engine = make_engine(":memory:")
+def db_session_factory(tmp_path):
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     return engine, session_factory(engine)
 

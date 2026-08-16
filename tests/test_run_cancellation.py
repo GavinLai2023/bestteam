@@ -11,16 +11,16 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bestteam.core.trace import TraceEvent
-from helpers import create_user_and_login, get_org_id, open_test_db
+from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run, TraceEventRecord
 from ui.backend.db_session import get_db
 from ui.backend.runtime import registry, run_in_background
 
 
-def _engine():
-    e = make_engine(":memory:")
+def _engine(tmp_path):
+    e = make_concurrent_safe_engine(tmp_path)
     init_db(e)
     return e
 
@@ -60,8 +60,8 @@ class _NeverStreamedWorkflow:
         raise AssertionError("workflow.stream() must not be called once cancellation was requested before dispatch")
 
 
-def test_cancel_before_dispatch_skips_streaming_entirely():
-    engine = _engine()
+def test_cancel_before_dispatch_skips_streaming_entirely(tmp_path):
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     registry.request_cancel(run.id)
@@ -95,8 +95,8 @@ class _MidStreamCancelWorkflow:
         yield self._events[2]
 
 
-def test_cancel_mid_stream_stops_before_the_next_unfetched_event():
-    engine = _engine()
+def test_cancel_mid_stream_stops_before_the_next_unfetched_event(tmp_path):
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
@@ -137,10 +137,10 @@ class _CancelBetweenBufferedEventAndAgentCompleted:
         yield self._events[3]  # next node's event -- must never be delivered
 
 
-def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(db_session_factory=None):
+def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(tmp_path, db_session_factory=None):
     from ui.backend.db.usage import list_usage_for_run
 
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
@@ -195,7 +195,7 @@ def test_cancel_right_after_run_started_preserves_memory_recalled_usage(monkeypa
     from ui.backend.db.usage import list_usage_for_run
 
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(tmp_path / "m.db"))
-    engine = _engine()
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
@@ -252,8 +252,8 @@ class _CancelDuringPreStreamSetup:
         yield self._events[2]  # agent_completed (node1) -- must never be reached (a paid call)
 
 
-def test_cancel_during_pre_stream_setup_stops_before_the_first_agent():
-    engine = _engine()
+def test_cancel_during_pre_stream_setup_stops_before_the_first_agent(tmp_path):
+    engine = _engine(tmp_path)
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
@@ -278,7 +278,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
 
-    engine = make_engine(":memory:")
+    # File-backed, not `:memory:` -- this fixture drives run_in_background,
+    # which opens its own Session on a worker thread (see
+    # make_concurrent_safe_engine's docstring in helpers.py).
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

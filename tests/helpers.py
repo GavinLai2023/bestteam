@@ -13,12 +13,74 @@ don't need to expose their session factory.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import event
+
 from ui.backend import main as backend_main
+from ui.backend.db import make_engine
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db.users import create_user, set_admin_status
 from ui.backend.db_session import get_db
+
+
+def make_concurrent_safe_engine(tmp_path: Path):
+    """A file-backed SQLite engine for any test where two Sessions can be live at once.
+
+    Use this instead of `make_engine(":memory:")` in every fixture whose tests
+    can have a request overlap another request, a run worker, an ingestion
+    worker, or any other background thread.
+
+    `make_engine(":memory:")` *has* to use a `StaticPool`, because a second
+    connection to `:memory:` would be a second, empty database. The
+    consequence is that ONE DBAPI connection backs every Session in the
+    process -- so two concurrent Sessions do not merely share a database, they
+    share a single transaction. Whoever commits or rolls back first does it
+    for both:
+
+        T1 (request A)                  T2 (request B / worker thread)
+        --------------------------      -------------------------------------
+        flush()  -> UPDATE/DELETE
+                                        close() / pool check-in -> ROLLBACK
+                                          ... discards A's flushed statements
+        commit() -> COMMIT (no-op)
+          -> endpoint answers 200/204 having written nothing
+
+    That failure is silent -- the endpoint still returns success -- so it
+    surfaces as an unrelated assertion failing much later, intermittently.
+    It is also purely an artefact of the harness: production runs on a file
+    database whose default `QueuePool` gives each Session its own connection
+    and therefore its own transaction, so one request's rollback can never
+    reach into another's.
+
+    The database lives in its own subdirectory because callers routinely reuse
+    `tmp_path` as `WORKFLOWS_DIR`, `_SESSIONS_DIR`, or a knowledge-base upload
+    root.
+
+    Do NOT reach for this reflexively. A test that only ever has one Session
+    live gains nothing, and a few tests depend on the shared-connection
+    behaviour on purpose: `test_email_trigger.py` simulates a concurrent
+    writer by committing through a second Session while the first still holds
+    an uncommitted write, which works only because both are the same
+    connection. On a file database that is a genuine single-thread deadlock
+    against SQLite's write lock (`database is locked`), so it deliberately
+    stays on `make_engine(":memory:")`.
+    """
+    db_dir = tmp_path / "_db"
+    db_dir.mkdir(exist_ok=True)
+    engine = make_engine(db_dir / "test.db")
+
+    @event.listens_for(engine, "connect")
+    def _no_fsync(dbapi_connection, _record):
+        # Pay for the isolation above, not for durability: this database dies
+        # with tmp_path, so fsync-per-commit buys nothing and costs roughly 5x
+        # on commit-heavy tests. `synchronous` governs only when writes reach
+        # the platter -- transaction visibility and locking, which are the
+        # entire point of using a file here, are untouched.
+        dbapi_connection.execute("PRAGMA synchronous=OFF")
+
+    return engine
 
 
 @contextmanager
