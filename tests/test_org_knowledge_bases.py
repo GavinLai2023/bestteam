@@ -329,3 +329,61 @@ def test_cross_org_upload_isolation(client, tmp_path):
         tools_b = _all_knowledge_base_tools(db, tmp_path, org_b_id)
         assert "30 days" in tools_a["policies"]("refund policy")
         assert "14 days" in tools_b["policies"]("refund policy")
+
+
+def test_completed_job_kb_serves_from_db_not_disk(client, tmp_path):
+    """After the ingestion job completes, deleting the on-disk files must
+    not affect retrieval -- proof the DB-backed read path never touches
+    disk for a job-based KB."""
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    job_id = resp.json()["job_id"]
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        from ui.backend.db.models import IngestionJob
+        import time
+
+        deadline = time.monotonic() + 10
+        job = None
+        while time.monotonic() < deadline:
+            db.expire_all()
+            job = db.get(IngestionJob, job_id)
+            if job is not None and job.status in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        assert job.status == "completed"
+
+    # Blow away the whole upload tree -- if the read path fell back to
+    # disk it would find nothing.
+    import shutil
+
+    shutil.rmtree(backend_knowledge_bases._KB_UPLOADS_DIR, ignore_errors=True)
+
+    with open_test_db() as db:
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "30 days" in tools["policies"]("refund policy")
+
+
+def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_path, monkeypatch):
+    """Simulates a pre-existing KB from before this feature: a
+    KnowledgeBaseRecord whose config points at a real on-disk folder, with
+    zero IngestionJob rows."""
+    legacy_dir = tmp_path / "legacy_kb"
+    legacy_dir.mkdir()
+    # BM25 keyword search requires literal term overlap with the query
+    # ("refund policy") -- no stemming, so this must share those exact words,
+    # not just paraphrase them ("Refunds" alone wouldn't match "refund").
+    (legacy_dir / "doc.txt").write_text("Refund policy: returns accepted within 14 days.", encoding="utf-8")
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        from ui.backend.db.models import KnowledgeBaseRecord
+
+        db.add(KnowledgeBaseRecord(
+            name="legacy_kb", org_id=org_id,
+            config={"name": "legacy_kb", "type": "local_folder", "path": str(legacy_dir)},
+        ))
+        db.commit()
+
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "14 days" in tools["legacy_kb"]("refund policy")

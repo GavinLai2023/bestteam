@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 from bestteam import Specification, generate_requirements, generate_specification, validate_specification
 from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.knowledge_base import make_knowledge_base_tool
-from bestteam.core.loader import _build_knowledge_base
 from bestteam.core.requirements import Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
@@ -36,12 +35,10 @@ from .component_lock import component_mutation_lock
 from .knowledge_bases import (
     check_path_traversal,
     checked_contained_cache_path,
-    contain_kb_config_for_load,
-    ensure_contained_cache_path_for_source,
     ensure_workflow_cache_paths_for_source,
     kb_name_collisions,
     load_knowledge_base_tools,
-    resolve_kb_upload_path,
+    resolve_knowledge_base,
 )
 from .db.email_credentials import get_email_credentials
 from .email_tools import load_email_tools, spec_uses_email
@@ -199,9 +196,7 @@ def _all_knowledge_base_tools(db: Session, source: Path, org_id: Optional[int] =
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
-        ensure_contained_cache_path_for_source(config, source)
-        kb = _build_knowledge_base(config, source)
+        kb = resolve_knowledge_base(db, record, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
 

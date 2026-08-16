@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -15,14 +16,21 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from bestteam import KnowledgeBaseSpec
-from bestteam.core.knowledge_base import _validate_chunk_params, make_knowledge_base_tool
+from bestteam.core.hybrid_knowledge_base import HybridKnowledgeBase
+from bestteam.core.knowledge_base import (
+    LocalFolderKnowledgeBase,
+    _Chunk,
+    _validate_chunk_params,
+    make_knowledge_base_tool,
+)
 from bestteam.core.loader import _build_knowledge_base, _KNOWLEDGE_BASE_TYPES
 from bestteam.core.specification import _validate_tool_name
+from bestteam.core.vector_knowledge_base import VectorKnowledgeBase
 from bestteam.exceptions import BestTeamError, ConfigurationError
 from bestteam.tools import REGISTRY
 
 from . import ingestion
-from .db.models import IngestionJob, KnowledgeBaseRecord
+from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 from .deploy_validation import find_kb_tool_collisions
 
 # --- KB path containment (CR-001) -------------------------------------------
@@ -474,11 +482,69 @@ def load_knowledge_base_tools(
                 f"Knowledge base '{record.name}' shadows a built-in tool of the "
                 "same name; rename the knowledge base."
             )
-        config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
-        ensure_contained_cache_path_for_source(config, source)
-        kb = _build_knowledge_base(config, source)
+        kb = resolve_knowledge_base(db, record, source)
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
+
+
+def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Path) -> Any:
+    """Build the `KnowledgeBase` for one `KnowledgeBaseRecord`: DB-backed
+    (from its most recent completed `IngestionJob`'s Document/Chunk rows) if
+    one exists, else the original file-based construction (a pre-existing KB
+    that predates this feature and was never re-uploaded). Shared by
+    `load_knowledge_base_tools` (above) and `builder.py::_all_knowledge_base_tools`
+    (the pre-Specification "every standalone KB" catalog builder), so both
+    resolve a KB's live content the same way."""
+    job = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id, status="completed")
+        .order_by(IngestionJob.completed_at.desc())
+        .first()
+    )
+    if job is not None:
+        return _build_knowledge_base_from_job(record, job, db)
+    # Pre-existing KB (predates this feature, never re-uploaded) -- fall back
+    # to the original file-based construction, unchanged.
+    config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
+    ensure_contained_cache_path_for_source(config, source)
+    return _build_knowledge_base(config, source)
+
+
+def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJob", db: Session) -> Any:
+    """Build the matching KnowledgeBase subclass from a completed job's
+    Document/Chunk rows -- the DB-backed read path (see
+    docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md).
+    Never reads from disk."""
+    rows = (
+        db.query(KnowledgeChunk, KnowledgeDocument.filename)
+        .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .filter(KnowledgeDocument.ingestion_job_id == job.id)
+        .order_by(KnowledgeDocument.filename, KnowledgeChunk.chunk_index)
+        .all()
+    )
+    chunks = [_Chunk(source=filename, text=chunk.text) for chunk, filename in rows]
+
+    config = record.config
+    kb_type = config.get("type", "local_folder")
+    common_kwargs: Dict[str, Any] = {
+        "top_k": config.get("top_k", 5),
+        "rerank_model": config.get("rerank_model"),
+        "candidate_k": config.get("candidate_k"),
+        "query_expansion_model": config.get("query_expansion_model"),
+        "query_expansion_count": config.get("query_expansion_count", 3),
+    }
+
+    if kb_type == "local_folder":
+        return LocalFolderKnowledgeBase.from_chunks(record.name, chunks, **common_kwargs)
+
+    vectors = [json.loads(chunk.embedding_json) for chunk, _filename in rows]
+    embedding_model = config.get("embedding_model")
+    vector_kwargs = {**common_kwargs, "score_threshold": config.get("score_threshold")}
+    if kb_type == "vector":
+        return VectorKnowledgeBase.from_chunks(record.name, chunks, vectors, embedding_model, **vector_kwargs)
+    if kb_type == "hybrid":
+        return HybridKnowledgeBase.from_chunks(record.name, chunks, vectors, embedding_model, **vector_kwargs)
+    raise ConfigurationError(f"Knowledge base '{record.name}' has unknown type '{kb_type}'")
 
 
 def kb_name_collisions(db: Session, org_id: Optional[int], raw_spec: Dict[str, Any]) -> List[str]:
