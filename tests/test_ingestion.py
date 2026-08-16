@@ -220,3 +220,44 @@ def test_job_status_payload_includes_config_only_when_completed(db, engine, tmp_
     assert payload["status"] == "completed"
     assert payload["chunk_count"] == 1
     assert payload["config"] == kb.config
+
+
+def test_prune_failure_does_not_revert_completed_job_status(db, engine, tmp_path, monkeypatch):
+    kb = _make_kb(db, name="prune_kb")
+
+    def _run(version):
+        job = _make_job(db, kb, version=version)
+        version_dir = tmp_path / version
+        version_dir.mkdir()
+        (version_dir / "doc.txt").write_text("hello world", encoding="utf-8")
+        ingestion.run_ingestion_job(
+            job.id, kb.id, kb.org_id, version_dir,
+            kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+            engine=engine,
+        )
+        db.expire_all()
+        return db.get(IngestionJob, job.id)
+
+    # Two completed generations first: with _KEEP_COMPLETED_GENERATIONS == 2,
+    # pruning only has real deletion work to do once a THIRD completed job
+    # exists (completed[2:] is non-empty).
+    job1 = _run("v1")
+    job2 = _run("v2")
+    assert job1.status == "completed"
+    assert job2.status == "completed"
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated pruning failure")
+
+    monkeypatch.setattr(ingestion, "_prune_old_ingestion_versions", _boom)
+
+    job3 = _run("v3")
+
+    # The just-completed job's status/rows must survive a pruning failure --
+    # pruning is best-effort cleanup, not part of what makes a job succeed.
+    assert job3.status == "completed"
+    docs = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job3.id).all()
+    assert len(docs) == 1
+    assert docs[0].status == "chunked"
+    chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
+    assert len(chunks) == 1

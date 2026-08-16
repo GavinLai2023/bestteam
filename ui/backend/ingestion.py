@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session
 
 from bestteam.core.embeddings import resolve_embedding_model
 from bestteam.core.knowledge_base import _SUPPORTED_SUFFIXES, _chunk_text
-from bestteam.exceptions import BestTeamError
 from bestteam.tools import parse_file
 
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
@@ -125,7 +124,7 @@ def run_ingestion_job(
                 if job is not None:
                     job.status = "failed"
                     job.error = _capped(str(exc))
-                    job.completed_at = _now(db)
+                    job.completed_at = _now()
                     db.commit()
                 return
             for chunk, vector in zip(all_chunks, vectors):
@@ -137,11 +136,24 @@ def run_ingestion_job(
         else:
             job.status = "failed"
             job.error = _capped("Knowledge base has no readable documents")
-        job.completed_at = _now(db)
+        job.completed_at = _now()
         db.commit()
 
         if job.status == "completed":
-            _prune_old_ingestion_versions(db, kb_id, version_dir.parent)
+            # Best-effort cleanup only: pruning must never be able to
+            # retroactively invalidate an already-committed successful
+            # ingestion. If this raised uncaught, the outer except below
+            # would mark the just-completed job "failed" even though its
+            # Document/Chunk rows are already durable and correct -- see
+            # the module docstring's "atomic swap" invariant.
+            try:
+                _prune_old_ingestion_versions(db, kb_id, version_dir.parent)
+            except Exception:  # noqa: BLE001
+                _logger.warning(
+                    "Pruning old ingestion versions failed for KB %s; "
+                    "the just-completed job is unaffected", kb_id, exc_info=True,
+                )
+                db.rollback()
     except Exception:  # noqa: BLE001 -- a worker-thread failure must never propagate silently
         _logger.exception("Ingestion job %s failed on the worker thread", job_id)
         try:
@@ -150,7 +162,7 @@ def run_ingestion_job(
             if job is not None:
                 job.status = "failed"
                 job.error = "The ingestion job failed due to an internal error."
-                job.completed_at = _now(db)
+                job.completed_at = _now()
                 db.commit()
         except Exception:  # noqa: BLE001
             _logger.warning("Could not persist failed status for ingestion job %s", job_id)
@@ -158,7 +170,7 @@ def run_ingestion_job(
         db.close()
 
 
-def _now(db: Session):
+def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
