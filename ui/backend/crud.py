@@ -61,6 +61,7 @@ from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
 from .db_session import get_db
+from .ingestion import delete_kb_ingestion_data
 from .knowledge_bases import (
     _KB_UPLOADS_DIR,
     _invalidate_workflow_cache,
@@ -297,6 +298,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 # the files for the still-present record; a failed rmtree is logged
                 # (the record is already gone), not silently swallowed (F3-prev).
                 with _kb_upload_lock(f"{org_id}/{item_name}"):
+                    delete_kb_ingestion_data(db, item.id)
                     db.delete(item)
                     db.commit()
                     upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name

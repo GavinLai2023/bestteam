@@ -799,6 +799,40 @@ def test_delete_knowledge_base_removes_uploaded_files(client):
     assert not upload_dir.exists()
 
 
+def test_deleting_kb_removes_ingestion_rows(client):
+    # Upload creates a KnowledgeBaseRecord + an IngestionJob.
+    resp = client.post(
+        "/api/config/knowledge_bases/policies/upload?org=default",
+        files=[("files", ("doc.txt", b"Refunds within 30 days.", "text/plain"))],
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    with open_test_db() as db:
+        from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord
+
+        import time
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            db.expire_all()
+            job = db.get(IngestionJob, job_id)
+            if job is not None and job.status in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        kb_id = db.query(KnowledgeBaseRecord).filter_by(name="policies").one().id
+
+    resp = client.delete("/api/config/knowledge_bases/policies?org=default")
+    assert resp.status_code == 204
+
+    with open_test_db() as db:
+        from ui.backend.db.models import IngestionJob, KnowledgeChunk, KnowledgeDocument
+
+        assert db.query(IngestionJob).filter_by(kb_id=kb_id).count() == 0
+        assert db.query(KnowledgeDocument).filter_by(kb_id=kb_id).count() == 0
+        assert db.query(KnowledgeChunk).filter_by(kb_id=kb_id).count() == 0
+
+
 _VALID_WORKFLOW_CONFIG = {
     "knowledge_bases": [],
     "agents": [
