@@ -687,6 +687,43 @@ def test_upload_creates_queryable_local_folder_kb(client):
     assert get_resp.status_code == 200
 
 
+def test_ingestion_job_status_endpoint(client):
+    files = [("files", ("doc.txt", b"The refund policy allows returns within 30 days.", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
+    job_id = resp.json()["job_id"]
+
+    resp = client.get(f"/api/config/knowledge_bases/support_docs/ingestion-jobs/{job_id}?org=default")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"] == job_id
+    assert body["status"] in ("queued", "running", "completed")
+    assert "errors" in body
+    assert "chunk_count" in body
+
+
+def test_ingestion_job_status_404_for_unknown_job(client):
+    files = [("files", ("doc.txt", b"The refund policy allows returns within 30 days.", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
+    assert resp.status_code == 200
+    resp = client.get("/api/config/knowledge_bases/support_docs/ingestion-jobs/999999?org=default")
+    assert resp.status_code == 404
+
+
+def test_ingestion_job_status_404_for_another_orgs_job(client):
+    from helpers import open_test_db
+    from ui.backend.db.orgs import get_or_create_org
+
+    with open_test_db() as db:
+        get_or_create_org(db, "other")
+
+    files = [("files", ("doc.txt", b"The refund policy allows returns within 30 days.", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
+    job_id = resp.json()["job_id"]
+
+    resp = client.get(f"/api/config/knowledge_bases/support_docs/ingestion-jobs/{job_id}?org=other")
+    assert resp.status_code == 404
+
+
 def test_upload_rejects_name_with_spaces_before_writing_files(client):
     from ui.backend.crud import _KB_UPLOADS_DIR
 

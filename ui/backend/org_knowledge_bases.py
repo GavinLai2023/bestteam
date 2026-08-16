@@ -38,8 +38,9 @@ from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
-from .db.models import KnowledgeBaseRecord, Organization, User
+from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User
 from .db_session import get_db
+from .ingestion import job_status_payload
 from .knowledge_bases import _kb_upload_lock, upload_knowledge_base
 
 router = APIRouter(prefix="/api/org", tags=["org-knowledge-bases"])
@@ -163,3 +164,19 @@ def upload_own_knowledge_base(
             max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
             created_by=user.username,
         )
+
+
+@router.get("/knowledge-bases/{item_name}/ingestion-jobs/{job_id}")
+def get_ingestion_job_status(
+    item_name: str,
+    job_id: int,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    kb = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org.id).one_or_none()
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+    job = db.query(IngestionJob).filter_by(id=job_id, kb_id=kb.id).one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown ingestion job")
+    return job_status_payload(db, job)

@@ -364,6 +364,38 @@ def test_completed_job_kb_serves_from_db_not_disk(client, tmp_path):
         assert "30 days" in tools["policies"]("refund policy")
 
 
+def test_ingestion_job_status_endpoint(client, tmp_path):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    job_id = resp.json()["job_id"]
+
+    resp = client.get(f"/api/org/knowledge-bases/policies/ingestion-jobs/{job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"] == job_id
+    assert body["status"] in ("queued", "running", "completed")
+    assert "errors" in body
+    assert "chunk_count" in body
+
+
+def test_ingestion_job_status_404_for_unknown_job(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    resp = client.get("/api/org/knowledge-bases/policies/ingestion-jobs/999999")
+    assert resp.status_code == 404
+
+
+def test_ingestion_job_status_404_for_another_orgs_job(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    job_id = resp.json()["job_id"]
+
+    other = create_user_and_login(client, username="bob", org="org_b")
+    resp = client.get(
+        f"/api/org/knowledge-bases/policies/ingestion-jobs/{job_id}",
+        headers={"Authorization": f"Bearer {other}"},
+    )
+    assert resp.status_code == 404
+
+
 def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_path, monkeypatch):
     """Simulates a pre-existing KB from before this feature: a
     KnowledgeBaseRecord whose config points at a real on-disk folder, with
