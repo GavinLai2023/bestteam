@@ -319,3 +319,38 @@ def test_failed_job_does_not_invalidate_the_workflow_cache(db, engine, tmp_path)
     assert db.get(IngestionJob, job.id).status == "failed"
     assert backend_main._workflow_cache == {(kb.org_id, "some_workflow"): ("still-fresh-workflow", "key")}
     assert backend_main._workflow_cache_generation == generation_before
+
+
+def test_cache_invalidation_failure_does_not_revert_completed_job_status(db, engine, tmp_path, monkeypatch):
+    # Mirrors test_prune_failure_does_not_revert_completed_job_status: cache
+    # invalidation is isolated in its own try/except, same as pruning, so a
+    # failure in it can never propagate to the outer handler and flip an
+    # already-durable, already-successful job to "failed" (it runs after
+    # job.status = "completed" is already committed).
+    from ui.backend import knowledge_bases
+
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("hello world", encoding="utf-8")
+
+    def _boom():
+        raise RuntimeError("simulated cache invalidation failure")
+
+    monkeypatch.setattr(knowledge_bases, "_invalidate_workflow_cache", _boom)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    docs = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id).all()
+    assert len(docs) == 1
+    assert docs[0].status == "chunked"
+    chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
+    assert len(chunks) == 1
