@@ -10,6 +10,12 @@ import './AdvancedPage.css'
 //   none     -- resource isn't org-scoped at all; hide the selector
 const PLATFORM_TIER = '__platform__'
 
+// Knowledge-base upload polling, capped at ~1 minute: nothing reconciles a
+// queued/running IngestionJob left behind by a backend restart, so an
+// uncapped loop would poll forever.
+const INGESTION_POLL_INTERVAL_MS = 500
+const INGESTION_POLL_MAX_ATTEMPTS = 120
+
 interface Kind {
   key: string
   label: string
@@ -64,6 +70,10 @@ export default function AdvancedPage() {
   const [createMode, setCreateMode] = useState<'manual' | 'upload'>('manual')
   const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
+  // "Uploaded, still processing" -- neither success nor failure, and it has
+  // to render next to the upload form itself, which is visible with no item
+  // selected (unlike `error`/`message`, which live in the editor pane).
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null)
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null)
 
@@ -195,13 +205,38 @@ export default function AdvancedPage() {
     setUploading(true)
     setError(null)
     setMessage(null)
+    setUploadNotice(null)
     try {
-      const result = await api.uploadKnowledgeBaseFiles(newId.trim(), uploadFiles, apiOrg)
-      setMessage(`Created '${result.name}' — ${result.file_count} file(s), ${result.chunk_count} chunk(s) indexed.`)
+      const uploadResult = await api.uploadKnowledgeBaseFiles(newId.trim(), uploadFiles, apiOrg)
+      let job = await api.knowledgeBaseUploadJob(uploadResult.name, uploadResult.job_id, apiOrg)
+      for (
+        let attempt = 0;
+        attempt < INGESTION_POLL_MAX_ATTEMPTS && job.status !== 'completed' && job.status !== 'failed';
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, INGESTION_POLL_INTERVAL_MS))
+        job = await api.knowledgeBaseUploadJob(uploadResult.name, uploadResult.job_id, apiOrg)
+      }
+      if (job.status !== 'completed' && job.status !== 'failed') {
+        // Bounded rather than spinning forever: nothing reconciles a
+        // queued/running job stranded by a backend restart. The upload itself
+        // succeeded, so report "still processing", not success or failure.
+        setUploadNotice(
+          `'${uploadResult.name}' was uploaded but is still being processed — this is taking longer ` +
+            'than expected. Reload this page in a moment to check on it.',
+        )
+        if (activeKeyRef.current === startedFor) loadItems()
+        return
+      }
+      if (job.status === 'failed') {
+        const detail = job.errors[0]?.error
+        throw new Error(detail ? `Processing failed: ${detail}` : 'Processing your documents failed.')
+      }
+      setMessage(`Created '${uploadResult.name}' — ${job.documents_succeeded} file(s), ${job.chunk_count} chunk(s) indexed.`)
       setNewId('')
       setUploadFiles([])
-      setSelectedId(result.name)
-      setJsonText(JSON.stringify(result.config, null, 2))
+      setSelectedId(uploadResult.name)
+      setJsonText(JSON.stringify(job.config, null, 2))
       if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
       setError((e as Error).message)
@@ -331,6 +366,7 @@ export default function AdvancedPage() {
                   >
                     {uploading ? 'Uploading…' : 'Create from files'}
                   </button>
+                  {uploadNotice && <p className="banner banner-info">{uploadNotice}</p>}
                 </>
               ) : (
                 <>

@@ -40,6 +40,7 @@ from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entr
 from .deploy_validation import validate_agent_models
 from .db.models import (
     BuilderSession,
+    IngestionJob,
     KnowledgeBaseRecord,
     Organization,
     Run,
@@ -61,6 +62,7 @@ from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools
 from .db_session import get_db
+from .ingestion import delete_kb_ingestion_data, job_status_payload
 from .knowledge_bases import (
     _KB_UPLOADS_DIR,
     _invalidate_workflow_cache,
@@ -297,6 +299,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 # the files for the still-present record; a failed rmtree is logged
                 # (the record is already gone), not silently swallowed (F3-prev).
                 with _kb_upload_lock(f"{org_id}/{item_name}"):
+                    delete_kb_ingestion_data(db, item.id)
                     db.delete(item)
                     db.commit()
                     upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
@@ -371,12 +374,31 @@ def upload_knowledge_base_files(
     top_k: int = 5,
     org: Optional[str] = Query(None),
     db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
 ) -> Dict[str, Any]:
     org_id = _resolve_org_id(db, org, allow_platform=False)
     return upload_knowledge_base(
         db, org_id, item_name, files,
         chunk_size=chunk_size, chunk_overlap=chunk_overlap, top_k=top_k,
+        created_by=admin.username,
     )
+
+
+@router.get("/knowledge_bases/{item_name}/ingestion-jobs/{job_id}")
+def get_ingestion_job_status(
+    item_name: str,
+    job_id: int,
+    org: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    org_id = _resolve_org_id(db, org, allow_platform=False)
+    kb = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge_base '{item_name}'")
+    job = db.query(IngestionJob).filter_by(id=job_id, kb_id=kb.id).one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown ingestion job")
+    return job_status_payload(db, job)
 
 
 _workflows = APIRouter(prefix="/workflows")

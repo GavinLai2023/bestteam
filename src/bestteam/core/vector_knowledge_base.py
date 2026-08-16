@@ -11,6 +11,7 @@ from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
 from .knowledge_base import (
     KnowledgeBase,
+    _Chunk,
     _load_document_chunks,
     _query_variants,
     _rerank_candidates,
@@ -19,6 +20,23 @@ from .knowledge_base import (
     _validate_chunk_params,
 )
 from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
+
+
+def _require_numpy():
+    """Check that numpy is available and return the np module.
+
+    Raises ConfigurationError if the package is not installed.
+    This check must run early to avoid expensive operations (like file parsing)
+    before discovering a missing dependency.
+    """
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise ConfigurationError(
+            "Vector knowledge bases require the 'numpy' package. "
+            "Install it with: pip install 'bestteam[tools-rag-vector]'"
+        ) from exc
+    return np
 
 
 def _chunk_cache_key(model_spec: str, text: str) -> str:
@@ -68,18 +86,58 @@ class VectorKnowledgeBase(KnowledgeBase):
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
     ) -> None:
-        try:
-            import numpy as np
-        except ImportError as exc:
-            raise ConfigurationError(
-                "Vector knowledge bases require the 'numpy' package. "
-                "Install it with: pip install 'bestteam[tools-rag-vector]'"
-            ) from exc
-
+        _require_numpy()
         _validate_chunk_params(name, chunk_size, chunk_overlap)
+        self.path = Path(path)
+        chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
+        if not chunks:
+            raise ConfigurationError(
+                f"Knowledge base '{name}' has no readable documents in {self.path}"
+            )
+        self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+                           query_expansion_model, query_expansion_count)
+        self._embeddings = resolve_embedding_model(embedding_model)
+        vectors = self._embed_chunks(embedding_model, cache_path)
+        self._set_vectors(name, vectors)
+
+    @classmethod
+    def from_chunks(
+        cls,
+        name: str,
+        chunks: List[_Chunk],
+        vectors: List[List[float]],
+        embedding_model: Any,
+        top_k: int = 5,
+        score_threshold: Optional[float] = None,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
+    ) -> "VectorKnowledgeBase":
+        """Build directly from pre-parsed chunks and pre-computed vectors,
+        skipping both the file-parsing pipeline and the embedding call for
+        those chunks. `embedding_model` is still required and resolved
+        (cheap, no API call) -- query() needs a live embeddings model to
+        embed the QUERY text at search time, even though the document
+        vectors themselves are supplied pre-computed. Used by the backend's
+        DB-backed ingestion path (see ui/backend/knowledge_bases.py)."""
+        self = cls.__new__(cls)
+        self.path = None
+        if not chunks:
+            raise ConfigurationError(f"Knowledge base '{name}' has no readable documents")
+        self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+                           query_expansion_model, query_expansion_count)
+        self._embeddings = resolve_embedding_model(embedding_model)
+        self._set_vectors(name, vectors)
+        return self
+
+    def _init_common(
+        self, name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+        query_expansion_model, query_expansion_count,
+    ) -> None:
+        _require_numpy()
 
         self.name = name
-        self.path = Path(path)
         self.default_top_k = top_k
         self.score_threshold = score_threshold
         self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
@@ -91,22 +149,19 @@ class VectorKnowledgeBase(KnowledgeBase):
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
+        # Defensive copy, matching LocalFolderKnowledgeBase._init_from_chunks:
+        # a caller mutating the list it handed in must not reshape this KB's
+        # index behind its (already-computed) vector matrix.
+        self._chunks = list(chunks)
 
-        self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
-        if not self._chunks:
-            raise ConfigurationError(
-                f"Knowledge base '{name}' has no readable documents in {self.path}"
-            )
+    def _set_vectors(self, name: str, vectors: List[List[float]]) -> None:
+        import numpy as np
 
-        self._embeddings = resolve_embedding_model(embedding_model)
-
-        vectors = self._embed_chunks(embedding_model, cache_path)
         if not vectors or len(vectors) != len(self._chunks):
             raise ConfigurationError(
                 f"Knowledge base '{name}': embedding model returned "
                 f"{len(vectors)} vectors for {len(self._chunks)} chunks"
             )
-
         matrix = np.array(vectors, dtype=np.float64)
         self._matrix = normalize_rows(matrix)
 

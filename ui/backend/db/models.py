@@ -127,6 +127,107 @@ class KnowledgeBaseRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class IngestionJob(Base):
+    """One async ingestion run for an upload-managed KnowledgeBaseRecord.
+
+    A KB's live document set is always its most recent `completed` job's
+    KnowledgeDocument/KnowledgeChunk rows -- the `status="completed"` flip
+    is the atomic swap (no CURRENT-pointer file needed for this path,
+    unlike the legacy file-based read path). A `queued`/`running`/`failed`
+    job is invisible to retrieval. See
+    docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md.
+    """
+
+    __tablename__ = "knowledge_ingestion_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed')",
+            name="ck_knowledge_ingestion_jobs_status",
+        ),
+        Index(
+            "ix_knowledge_ingestion_jobs_kb_id_status_completed_at",
+            "kb_id", "status", "completed_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kb_id: Mapped[int] = mapped_column(ForeignKey("knowledge_bases.id"), nullable=False)
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
+    # The same `v_<hex>` identifier used for the on-disk version directory
+    # (see ui/backend/knowledge_bases.py) -- traceable job <-> directory
+    # correspondence.
+    version: Mapped[str]
+    # The KB shape this job's chunks were actually ingested under. Retrieval
+    # reads these -- NOT the KnowledgeBaseRecord's `config` -- to decide which
+    # KnowledgeBase subclass to rebuild and with which query-time embedding
+    # model: `config` is advanced to the NEW spec the moment an upload is
+    # dispatched, while the live document set stays the previous completed
+    # job's chunks until the new job finishes (and forever, if it fails). Only
+    # the job knows whether its own chunks carry embeddings, and from which
+    # model.
+    kb_type: Mapped[str] = mapped_column(default="local_folder")
+    embedding_model: Mapped[Optional[str]] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(default="queued")
+    file_count: Mapped[int] = mapped_column(default=0)
+    documents_succeeded: Mapped[int] = mapped_column(default=0)
+    documents_failed: Mapped[int] = mapped_column(default=0)
+    error: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+
+class KnowledgeDocument(Base):
+    """One uploaded file's ingestion outcome within an IngestionJob.
+
+    Per-document status means one bad file in a batch doesn't fail the
+    whole job -- see IngestionJob's docstring.
+    """
+
+    __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'parsing', 'chunked', 'failed')",
+            name="ck_knowledge_documents_status",
+        ),
+        Index("ix_knowledge_documents_ingestion_job_id", "ingestion_job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kb_id: Mapped[int] = mapped_column(ForeignKey("knowledge_bases.id"), nullable=False)
+    ingestion_job_id: Mapped[int] = mapped_column(ForeignKey("knowledge_ingestion_jobs.id"), nullable=False)
+    filename: Mapped[str]
+    content_hash: Mapped[str]
+    size_bytes: Mapped[int]
+    status: Mapped[str] = mapped_column(default="pending")
+    error: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class KnowledgeChunk(Base):
+    """One chunk of a KnowledgeDocument's parsed text.
+
+    `embedding_json` is a JSON-encoded `List[float]` (same TEXT-column
+    shape as `memories.embedding_json` in core/memory.py), populated only
+    for `vector`/`hybrid` KBs.
+    """
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        Index("ix_knowledge_chunks_document_id_chunk_index", "document_id", "chunk_index"),
+        Index("ix_knowledge_chunks_kb_id", "kb_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("knowledge_documents.id"), nullable=False)
+    kb_id: Mapped[int] = mapped_column(ForeignKey("knowledge_bases.id"), nullable=False)
+    chunk_index: Mapped[int]
+    text: Mapped[str]
+    embedding_json: Mapped[Optional[str]] = mapped_column(nullable=True)
+    embedding_model: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class SkillRecord(Base):
     """Stable head for a versioned Skill.
 

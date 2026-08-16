@@ -30,17 +30,42 @@ then re-submits with `replace=true` once the customer confirms.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import os
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from .auth_api import get_current_org
-from .db.models import KnowledgeBaseRecord, Organization
+from .auth_api import get_current_org, get_current_user
+from .db import model_catalog
+from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User
 from .db_session import get_db
+from .ingestion import job_status_payload
 from .knowledge_bases import _kb_upload_lock, upload_knowledge_base
 
 router = APIRouter(prefix="/api/org", tags=["org-knowledge-bases"])
+
+# "Smart search" is the wizard's customer-facing name for `type: hybrid` +
+# query expansion + (if configured) reranking -- see DocumentsPage.tsx. It's
+# an operator opt-in, not a customer-facing model choice (the DocumentsPage
+# audience is explicitly non-technical): unset -> the toggle never appears in
+# the wizard at all. Same spec-string convention as the KB's own
+# `embedding_model`/`rerank_model` (`"fake:<dim>"`/`"fake:"` for $0 tests, or
+# a real provider/model string).
+_ENV_DEFAULT_EMBEDDING_MODEL = "BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"
+_ENV_DEFAULT_RERANK_MODEL = "BESTTEAM_KB_DEFAULT_RERANK_MODEL"
+
+
+def _default_chat_model(db: Session) -> Optional[str]:
+    """The same "first non-fake catalog spec, else first entry" default the
+    wizard's own `pickDefaultModel` (lib/models.ts) uses, resolved
+    server-side so smart search's query-expansion model is never trusted
+    from the client. `None` only if the catalog is empty."""
+    entries = model_catalog.list_entries(db)
+    if not entries:
+        return None
+    non_fake = [e for e in entries if not e.spec.startswith("fake:")]
+    return (non_fake[0] if non_fake else entries[0]).spec
 
 # Self-service is deliberately tighter than the admin upload path's 30
 # files / 30MB-per-file / 500MB-total: a member can retry a large upload
@@ -56,13 +81,26 @@ _MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 _MAX_SELF_SERVICE_KBS_PER_ORG = 20
 
 
+@router.get("/knowledge-bases/capabilities")
+def get_knowledge_base_capabilities(org: Organization = Depends(get_current_org)) -> Dict[str, bool]:
+    """Whether the wizard's "smart search" toggle has anything to turn on.
+
+    `org` is unused beyond the auth dependency -- capability is a deployment-
+    wide operator setting (an env var), not per-org, but the route still
+    requires a logged-in org member like every other route in this file.
+    """
+    return {"smart_search_available": bool(os.environ.get(_ENV_DEFAULT_EMBEDDING_MODEL))}
+
+
 @router.post("/knowledge-bases/{item_name}/upload")
 def upload_own_knowledge_base(
     item_name: str,
     files: list[UploadFile] = File(...),
     replace: bool = Form(False),
+    smart_search: bool = Form(False),
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     # Hold the same per-KB lock upload_knowledge_base() itself takes across
     # this existence/cap/replace-confirmation check too, not just inside it --
@@ -97,12 +135,72 @@ def upload_own_knowledge_base(
                     "Choose a different name, or confirm to replace its documents."
                 ),
             )
+        else:
+            # Refuse a `replace=true` upload while a previous one for this
+            # same KB is still queued/running. Without this, a member can
+            # repeatedly retry a large upload and pile up unbounded work on
+            # ingestion.py's fixed-size executor -- each request already
+            # staged up to _MAX_TOTAL_SIZE_BYTES to disk and queued an
+            # embedding call before this check would catch it otherwise
+            # (Codex review finding). Held inside the same per-KB lock as
+            # the existence/cap checks above, so a concurrent retry can't
+            # race past this the same way the first-upload race above was
+            # closed.
+            in_flight = (
+                db.query(IngestionJob)
+                .filter(IngestionJob.kb_id == existing.id, IngestionJob.status.in_(("queued", "running")))
+                .first()
+            )
+            if in_flight is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{item_name}' is still processing a previous upload. "
+                        "Wait for it to finish before uploading again."
+                    ),
+                )
+        kb_type = "local_folder"
+        embedding_model: Optional[str] = None
+        rerank_model: Optional[str] = None
+        query_expansion_model: Optional[str] = None
+        if smart_search:
+            # Fails soft to plain `local_folder` if the operator hasn't
+            # configured a default embedding model -- a stale/tampered
+            # client sending `smart_search=true` without the capability
+            # actually being available never errors, it just does nothing.
+            embedding_model = os.environ.get(_ENV_DEFAULT_EMBEDDING_MODEL) or None
+            if embedding_model:
+                kb_type = "hybrid"
+                rerank_model = os.environ.get(_ENV_DEFAULT_RERANK_MODEL) or None
+                query_expansion_model = _default_chat_model(db)
+
         return upload_knowledge_base(
             db,
             org.id,
             item_name,
             files,
+            kb_type=kb_type,
+            embedding_model=embedding_model,
+            rerank_model=rerank_model,
+            query_expansion_model=query_expansion_model,
             max_files=_MAX_FILES_PER_UPLOAD,
             max_file_size_bytes=_MAX_FILE_SIZE_BYTES,
             max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
+            created_by=user.username,
         )
+
+
+@router.get("/knowledge-bases/{item_name}/ingestion-jobs/{job_id}")
+def get_ingestion_job_status(
+    item_name: str,
+    job_id: int,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    kb = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org.id).one_or_none()
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+    job = db.query(IngestionJob).filter_by(id=job_id, kb_id=kb.id).one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown ingestion job")
+    return job_status_payload(db, job)

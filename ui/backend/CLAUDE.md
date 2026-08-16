@@ -718,6 +718,127 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   list alone would leave them runnable by name. Disabled ⇒ the same 404 as an
   unknown workflow.
 
+## Async knowledge-base document ingestion (`ingestion.py`)
+
+Both KB upload routes (`crud.py`'s admin
+`POST /knowledge_bases/{name}/upload` and `org_knowledge_bases.py`'s
+self-service `POST /knowledge-bases/{name}/upload`, both via the shared
+`knowledge_bases.py::upload_knowledge_base()`) validate synchronously (name,
+size limits, `kb_type`, chunk params), write the uploaded files to a fresh
+on-disk version directory, upsert the `KnowledgeBaseRecord`, create a
+`queued` `IngestionJob` row, and submit `ingestion.run_ingestion_job` to
+`ingestion.py`'s own `ThreadPoolExecutor` (4 workers, separate from the
+run-execution executor) — then return immediately with `{"name", "job_id",
+"status": "queued"}`. The actual parse → chunk → (embed, for `vector`/
+`hybrid`) work happens on that worker thread, opening its own `Session` on
+the passed-in `engine` (a `Session` isn't safe to share across threads).
+Every `KnowledgeDocument`/`KnowledgeChunk` is buffered in plain Python
+through the parse loop AND the embedding call, then written in **one short
+transaction** at the end — flushing per file would take SQLite's RESERVED
+write lock on the first file and hold it through everything after, blocking
+every other writer in the process (runs, trace events, usage records, share
+messages) for the whole duration of a large upload. The `_executor.submit`
+call sits *after* that commit and outside the handler that rmtree's the
+staged version directory: the rows are durable by then, so cleaning up the
+files on a submit failure would strand a permanently `queued` job pointing
+at a deleted directory — the job is resolved `failed` (and the caller gets a
+503) instead. Self-service uploads (`org_knowledge_bases.py`) additionally
+refuse a `replace=true` upload while a `queued`/`running` job already exists
+for that KB, inside the same per-KB lock as the existence/cap checks: without
+it, a member retrying a stalled or slow upload could pile up unbounded work
+on the 4-worker executor, each retry having already staged up to
+`_MAX_TOTAL_SIZE_BYTES` to disk and queued an embedding call before anything
+else would catch it (Codex review finding). The trusted admin upload path
+(`crud.py`) has no such per-caller-count limit and doesn't need this guard.
+
+**Atomicity model: the `IngestionJob.status` flip is the swap, not a
+CURRENT-pointer file.** Unlike the legacy file-based upload path (which
+atomically swaps a `CURRENT` pointer file so a concurrent reader never sees
+a half-written version), the DB-backed path writes nothing analogous —
+retrieval simply resolves a KB's most recent `IngestionJob` with
+`status="completed"` (`knowledge_bases.py::resolve_knowledge_base`), and a
+`queued`/`running`/`failed` job's rows are invisible to retrieval by
+construction (nothing queries them). "Most recent" is by **`id`, not
+`completed_at`**: overlapping uploads for the same KB (rapid `replace=true`
+retries, or two jobs racing on the executor) can finish out of submission
+order, and `id` — assigned inside the serialized `_kb_upload_lock` staging
+block — is the only field guaranteed monotonic with submission order; a
+`completed_at`-ordered query could let an older, slower upload's job "win"
+over a newer one that already completed (Codex review finding).
+`_prune_old_ingestion_versions` (below) orders the same way, for the same
+reason — it already matched `_prune_failed_ingestion_versions`'s `id`
+ordering, just not `resolve_knowledge_base`'s. A KB with `IngestionJob` rows
+but **no completed one yet** (still queued/running, or every attempt has
+failed) does NOT fall back to the legacy file-based construction either:
+`resolve_knowledge_base` only takes that fallback for a KB with **zero**
+`IngestionJob` rows ever (a true pre-feature legacy KB). Falling back
+whenever there's merely no completed job would scan
+`KnowledgeBaseRecord.config`'s `path` — the KB's upload root, which
+recursively contains every version subdirectory including the one currently
+staging — serving un-vetted, partial, or entirely un-embedded content
+instead of treating the KB as not yet servable; it raises `ConfigurationError`
+instead (Codex review finding). Which KB subclass that resolved job is
+rebuilt as, and which model embeds a query against it, come from the **job
+row's** own `kb_type`/`embedding_model` — not the `KnowledgeBaseRecord`'s
+`config`, which is already the *next* generation's spec during the whole
+ingestion window (and permanently, if the new job fails); `config` still
+supplies `top_k`/`rerank_model`/`candidate_k`/`query_expansion_*`, which
+apply uniformly to whichever generation is live. A successful job also invalidates the
+workflow cache (`_invalidate_workflow_cache()`, called at job completion,
+not at upload-dispatch time — that's the point the KB's live content
+actually changes) and best-effort prunes older completed generations,
+keeping the current one plus one grace-window generation, mirroring the
+legacy path's "prior version kept only until the new one is durable"
+precedent. A parallel step (`_prune_failed_ingestion_versions`, which runs on
+the **failed** path too — the only cleanup that does, since a customer
+retrying an unparseable upload never produces a completed job) reclaims every
+failed job's on-disk version directory except the most recent one's, kept as
+a diagnostic copy; failed jobs' *rows* are always kept, as the
+customer-visible error record. Cache invalidation and both pruning steps are
+isolated in their own `try/except`s so a failure in any of them can never
+retroactively mark an already-committed successful ingestion as failed.
+
+**Per-document partial-failure model.** One bad file (parse error, or zero
+chunks produced) doesn't fail the whole job — it's recorded as a `failed`
+`KnowledgeDocument` row with a capped error message, and the job continues
+processing the rest. The job itself only ends `failed` if every document
+failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
+itself raises — in which case the job's already-flushed-but-uncommitted
+document/chunk objects are discarded before anything is written (a
+vector/hybrid KB with no embeddings can't serve queries, so a total
+embedding failure must leave no partial rows behind). A document's error
+text is scrubbed of the server's absolute upload path before it's stored
+(`ingestion._scrubbed`) — third-party parsers embed the path they were
+handed, and `job_status_payload` returns that text verbatim to a
+self-service org member. Any unexpected exception on the worker thread is
+caught and recorded on the job row as a generic failure — the job never
+raises uncaught, mirroring `runtime.py::run_in_background`'s shape.
+
+**Two read-only endpoints** (`ingestion.job_status_payload`, shared by
+both): `GET /api/config/knowledge_bases/{name}/ingestion-jobs/{job_id}`
+(admin, `?org=`) and `GET /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}`
+(org self-service, org from the bearer token) — both org-scoped and 404 on
+an unknown KB or job. The response reports `status`, `file_count`,
+`documents_succeeded`/`documents_failed`, the live `chunk_count`, up to 10
+`{filename, error}` rows for failed documents, and — only once
+`status == "completed"` — the KB's `config`. A whole-job failure (the embed
+call raised, or the job died on the worker thread before any document was
+processed) sets `job.error` but writes no per-document `failed` rows, so
+`errors` falls back to a single `{filename: None, error: job.error}` entry
+in that case — otherwise a `failed` job with an empty `documents_failed`
+count returned `errors: []` and neither frontend had anything to show the
+customer beyond a bare "failed" status (Codex review finding; `job.error` is
+already scrubbed/capped at write time, so it's safe to return as-is). See
+`docs/KNOWLEDGE_BASES.md` for the response shape and
+`docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
+for the full design.
+
+Deleting a KB cascades to delete its `IngestionJob`/`KnowledgeDocument`/
+`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data` — participates in
+the caller's existing delete+commit+rmtree transaction rather than
+committing separately). See `ui/backend/db/CLAUDE.md` for the three tables'
+schema.
+
 ## Auth, model catalog, and usage metering (Phase 3)
 
 - **`ui/backend/auth.py`** — stdlib-only password hashing (PBKDF2-HMAC-SHA256,

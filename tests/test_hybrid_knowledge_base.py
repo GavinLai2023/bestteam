@@ -169,3 +169,62 @@ def test_hybrid_kb_query_expansion_recovers_chunk_literal_query_misses(tmp_path)
         expanded_dir, *docs, top_k=1, query_expansion_model='fake:{"queries": ["refund"]}'
     )
     assert "doc1.txt" in expanded.query("sprocket")
+
+
+# ---------------------------------------------------------------------------
+# from_chunks alternate constructor
+# ---------------------------------------------------------------------------
+
+def test_from_chunks_builds_queryable_kb():
+    from bestteam.core.knowledge_base import _Chunk
+
+    chunks = [
+        _Chunk(source="a.txt", text="Refunds are allowed within 30 days."),
+        _Chunk(source="b.txt", text="Office hours are 9am to 5pm."),
+    ]
+    embeddings = _ConceptEmbedding()
+    vectors = embeddings.embed_documents([c.text for c in chunks])
+
+    kb = HybridKnowledgeBase.from_chunks("policies", chunks, vectors, embeddings, top_k=1)
+    result = kb.query("refund policy")
+    assert "30 days" in result
+
+
+def test_from_chunks_vector_count_mismatch_raises_configuration_error():
+    from bestteam.core.knowledge_base import _Chunk
+
+    chunks = [_Chunk(source="a.txt", text="hello")]
+    with pytest.raises(ConfigurationError, match="embedding model returned"):
+        HybridKnowledgeBase.from_chunks("kb", chunks, vectors=[], embedding_model="fake:4")
+
+
+# ---------------------------------------------------------------------------
+# Ordering regression tests: dependency checks before param validation
+# ---------------------------------------------------------------------------
+
+def test_init_raises_numpy_missing_before_chunk_param_validation(tmp_path):
+    """Regression test: numpy check must run BEFORE param validation, not after."""
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with patch.dict("sys.modules", {"numpy": None}):
+        # Both numpy missing AND invalid chunk_overlap > chunk_size
+        with pytest.raises(ConfigurationError, match="numpy"):
+            HybridKnowledgeBase(
+                "kb", tmp_path, embedding_model="fake:8",
+                chunk_size=100, chunk_overlap=150
+            )
+
+
+def test_init_raises_rank_bm25_missing_before_chunk_param_validation(tmp_path):
+    """Regression test: rank_bm25 check must run BEFORE param validation.
+
+    When both rank_bm25 is missing AND chunk_size/overlap are invalid, the
+    rank_bm25 error must be raised first (fail fast), not the chunk param error.
+    """
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with patch.dict("sys.modules", {"rank_bm25": None}):
+        # Both rank_bm25 is missing AND chunk_size is invalid
+        with pytest.raises(ConfigurationError, match="rank-bm25"):
+            HybridKnowledgeBase(
+                "kb", tmp_path, embedding_model="fake:8",
+                chunk_size=0, chunk_overlap=0
+            )

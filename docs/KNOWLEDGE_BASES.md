@@ -276,16 +276,127 @@ with no server filesystem access needed:
 - Files land under `ui/backend/data/knowledge_base_uploads/{name}/`, a
   directory the backend owns (distinct from the manual-config `path`, which
   points at a folder the user manages themselves).
-- The upload is validated by actually instantiating a
-  `LocalFolderKnowledgeBase` against the saved files before committing the
-  database record — if chunking/parsing fails (e.g. zero readable
-  documents), the upload is rejected and the partial directory is cleaned up.
+- Validation is no longer synchronous: the `KnowledgeBaseRecord` is upserted
+  and a `queued` ingestion job created immediately, and parsing/chunking
+  (and rejecting e.g. zero readable documents as a `failed` job) happens on
+  the background job instead — see "Uploads are asynchronous (ingestion
+  jobs)" below.
+
+**Org self-service upload** (`POST /api/org/knowledge-bases/{name}/upload`,
+`ui/backend/org_knowledge_bases.py`) is the same shared `upload_knowledge_base()`
+machinery behind the Team Builder wizard's "Your documents" step, reachable
+by any org member (not just an admin), org-resolved from the caller's own
+bearer token. Tighter limits than the admin route (10 files / 10MB per file /
+50MB total) and a per-org cap on how many self-service knowledge bases can
+exist (20). By default it still creates a `local_folder` KB, exactly like the
+admin upload endpoint — but it also accepts a `smart_search` flag. The
+wizard exposes this as a **"Standard" / "Enhanced" toggle**, deliberately
+with no model names or KB-type jargon shown (the wizard's audience is
+non-technical): `GET /api/org/knowledge-bases/capabilities` tells the
+frontend whether the toggle should render at all (`smart_search_available`,
+true only when the operator has set `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`),
+and "Enhanced" sends `smart_search=true`, which upgrades the created KB to
+`type: hybrid` with query expansion (using the wizard's own default chat
+model from the model catalog, resolved server-side) and, if
+`BESTTEAM_KB_DEFAULT_RERANK_MODEL` is also set, reranking too. "Standard" (or
+smart search unavailable, or the env var unset despite a stale client sending
+`smart_search=true`) always falls back to plain `local_folder` — the exact
+same shape as before this toggle existed. See `.env.example`.
 
 **Wiring into a workflow**: a workflow's `_build_workflow()` validation only
 builds the standalone knowledge bases its agents actually reference by name
 (`ui/backend/knowledge_bases.py::load_knowledge_base_tools`) — not every
 knowledge base in the database — since building one means re-reading and
 re-chunking files (and, for `vector`, calling an embedding model).
+
+### Uploads are asynchronous (ingestion jobs)
+
+Both upload endpoints (admin `/api/config/knowledge_bases/{name}/upload` and
+org self-service `/api/org/knowledge-bases/{name}/upload`) dispatch a
+background ingestion job instead of parsing/chunking/embedding inline on the
+request thread. `ui/backend/ingestion.py`'s own `ThreadPoolExecutor` (4
+workers) does the actual parse/chunk/(embed) work; the upload endpoint
+returns immediately with `{"name", "job_id", "status": "queued"}` — no
+`config`/`chunk_count`, since those aren't known until the job finishes.
+
+Poll the job to completion via:
+
+`GET /api/config/knowledge_bases/{name}/ingestion-jobs/{job_id}` (admin,
+takes `?org=`) or `GET /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}`
+(org self-service, org resolved from the bearer token) — both org-scoped and
+404 on an unknown KB/job. Response shape:
+
+```json
+{
+  "job_id": 42,
+  "status": "queued | running | completed | failed",
+  "file_count": 12,
+  "documents_succeeded": 11,
+  "documents_failed": 1,
+  "chunk_count": 340,
+  "errors": [{"filename": "corrupt.pdf", "error": "..."}],
+  "config": { "...": "only present once status == \"completed\"" }
+}
+```
+
+A whole-job failure (e.g. the embedding call itself raised, with no
+per-document failures) has no `KnowledgeDocument` rows to report, so
+`errors` instead holds a single `{"filename": null, "error": "..."}` entry
+carrying the job-level error.
+
+**Per-document partial failure**: one bad file (fails to parse, or produces
+zero chunks) doesn't fail the whole job — it's recorded as a `failed`
+`KnowledgeDocument` row (capped error text) and the job continues with the
+rest. The job itself only fails outright if *every* document failed (so the
+KB would have zero chunks) or, for `vector`/`hybrid`, if the embedding call
+itself fails (in which case the job's buffered document/chunk rows are
+discarded before anything is written — a vector/hybrid KB with no embeddings
+can't serve queries, so a total embedding failure must leave no partial rows
+behind). All of a job's rows are buffered in memory and written in a single
+short transaction at the very end, so the parse loop and the embedding
+provider's network round-trip never hold SQLite's write lock against the
+rest of the process.
+
+**Retrieval: DB-backed vs. legacy file-based fallback.** A KB whose most
+recent `IngestionJob` reached `status="completed"` is served entirely from
+its `KnowledgeDocument`/`KnowledgeChunk` rows — built via the `from_chunks(...)`
+alternate constructor on the matching `KnowledgeBase` subclass (see
+`src/bestteam/core/CLAUDE.md`), never re-reading files from disk. A KB that
+predates this feature (or was never re-uploaded since) has no completed
+ingestion job, so it falls back to the original file-based construction
+(`_build_knowledge_base`, scanning its upload directory / `CURRENT` pointer
+as before). Note that a KB uploaded *after* this feature also has no
+`CURRENT` pointer file — nothing writes one any more — so if its very first
+job hasn't completed yet (a narrow window: the fallback only applies while
+*zero* completed jobs exist) that fallback would `rglob` the whole KB root,
+including any retained older version subdirectory, rather than one version
+directory. `ui/backend/knowledge_bases.py::resolve_knowledge_base()` is the
+one place this choice is made, shared by both `load_knowledge_base_tools`
+(above) and `builder.py::_all_knowledge_base_tools` (the wizard's
+pre-Specification "every standalone KB" catalog), so a workflow build and
+the wizard's KB catalog always agree on which content is live.
+
+The KB's *shape* — which subclass to build, and which embedding model embeds
+the query — comes from the serving `IngestionJob`'s own `kb_type`/
+`embedding_model` columns, not from the `knowledge_bases` row's `config`:
+`config` advances to the new spec the moment a re-upload is dispatched,
+while the live content stays the previous completed generation until the new
+job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
+`rerank_model`/`candidate_k`, `query_expansion_model`/
+`query_expansion_count`) still come from `config` — they apply uniformly
+whichever generation is live.
+
+Deleting a knowledge base cascades to delete its `IngestionJob`/
+`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`).
+Older completed ingestion generations are pruned automatically (keeping the
+current one plus one grace-window generation) once a new job completes. A
+`failed` job's on-disk version directory is reclaimed the same way — every
+failed job except the most recent one loses its directory (its rows stay, as
+the customer-visible error record), so repeatedly retrying an upload that
+can't be parsed doesn't accumulate storage.
+
+See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
+for the full design.
 
 ## Known limitations
 
@@ -311,11 +422,13 @@ re-chunking files (and, for `vector`, calling an embedding model).
   source filename, not a chunk id, page number, or heading/section — no
   precise click-through citation or "which version of which page" audit
   trail.
-- **Self-service upload is `local_folder`-only, with no advanced options.**
-  The upload endpoint (below) and the Team Builder wizard always create a
-  BM25 `local_folder` knowledge base with default chunking — choosing
-  `vector`/`hybrid`, an embedding model, reranking, or query expansion
-  currently requires the YAML/API config path, not the upload UI.
+- **The wizard's self-service "Enhanced" toggle is all-or-nothing and
+  operator-configured, not customer-tunable.** A customer can choose
+  Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,
+  `top_k`, or `candidate_k` — those stay fixed at the SDK's defaults plus
+  whichever models the operator set in `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`/
+  `BESTTEAM_KB_DEFAULT_RERANK_MODEL`. Fine-grained control over any of these
+  still requires the YAML/admin-API config path, not the wizard.
 - **`core/memory.py` implements a separate per-user memory system**
   (`Memory` ABC + `SqliteBM25Memory` + `MemoryManager`) — not a knowledge
   base type, but it shares the CJK-aware tokenizer (`core/text_tokenize.py`),
@@ -337,8 +450,10 @@ re-chunking files (and, for `vector`, calling an embedding model).
 | YAML loader (`_build_knowledge_base`) | `src/bestteam/core/loader.py` |
 | `KnowledgeBaseSpec` (pydantic model mirroring the YAML schema) | `src/bestteam/core/specification.py` |
 | Document parsing (PDF/Word/Excel/XML/text) | `src/bestteam/tools/file_parser.py` |
-| Backend CRUD + upload endpoint | `ui/backend/crud.py` |
-| Backend "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
+| Backend CRUD + admin upload endpoint | `ui/backend/crud.py` |
+| Shared upload/index/version logic + "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
+| Async ingestion jobs (parse/chunk/embed on a background thread) | `ui/backend/ingestion.py` |
+| Org self-service upload + "smart search" toggle | `ui/backend/org_knowledge_bases.py` |
 | Example: `local_folder` | `ui/backend/workflows/knowledge_base_demo.yaml` |
 | Example: `vector`, $0 fake embeddings | `ui/backend/workflows/vector_knowledge_base_demo.yaml` |
 | Example: `vector`, real OpenAI embeddings | `ui/backend/workflows/vector_knowledge_base_demo_live.yaml` |

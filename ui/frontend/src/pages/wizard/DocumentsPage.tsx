@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { pickDefaultModel } from '../../lib/models'
@@ -7,10 +7,33 @@ import type { WizardOutletContext } from '../../lib/types'
 
 const STAGE_LABELS: Record<string, string> = {
   uploading: 'Uploading your documents…',
+  ingesting: 'Processing your documents…',
   generating: 'Putting your team together…',
 }
 
-type Stage = null | 'uploading' | 'generating'
+type Stage = null | 'uploading' | 'ingesting' | 'generating'
+
+const POLL_INTERVAL_MS = 500
+// ~1 minute of polling. Nothing reconciles a queued/running ingestion job left
+// behind by a backend restart, so an uncapped loop leaves the customer staring
+// at "Processing your documents…" with no escape but a page reload.
+const POLL_MAX_ATTEMPTS = 120
+
+// Uploading now just queues ingestion; poll the job until it's done before
+// moving on to spec generation. Returns null if the job is still unresolved
+// when the cap is reached -- the upload itself succeeded and keeps processing
+// server-side, so that's neither success nor failure.
+async function pollIngestionJob(
+  slug: string,
+  jobId: number,
+): Promise<import('../../lib/types').IngestionJobStatus | null> {
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+    const job = await api.orgKnowledgeBaseUploadJob(slug, jobId)
+    if (job.status === 'completed' || job.status === 'failed') return job
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+  return null
+}
 
 // Turns a free-text label into the identifier the backend stores the
 // knowledge base under and an agent later references by name -- letters,
@@ -36,6 +59,22 @@ export default function DocumentsPage() {
   const [busy, setBusy] = useState(false)
   const [stage, setStage] = useState<Stage>(null)
   const [error, setError] = useState<string | null>(null)
+  // "Still processing" -- neither an error nor a success, so it gets its own
+  // informational banner rather than reusing the error one.
+  const [notice, setNotice] = useState<string | null>(null)
+  // Whether the operator has configured a default embedding model for the
+  // "smart search" upgrade -- unset means the toggle below never renders.
+  const [smartSearchAvailable, setSmartSearchAvailable] = useState(false)
+  // Defaults to Enhanced once available -- it's the better experience and
+  // the toggle only ever appears when the operator opted the deployment in.
+  const [smartSearch, setSmartSearch] = useState(true)
+
+  useEffect(() => {
+    api
+      .orgKnowledgeBaseCapabilities()
+      .then((caps) => setSmartSearchAvailable(caps.smart_search_available))
+      .catch(() => setSmartSearchAvailable(false))
+  }, [])
 
   if (loading) return <p className="hint">Loading…</p>
   if (!session) return null
@@ -61,12 +100,16 @@ export default function DocumentsPage() {
     }
 
     setError(null)
+    setNotice(null)
     setBusy(true)
+
+    const smartSearchEnabled = smartSearchAvailable && smartSearch
 
     if (useFiles) {
       setStage('uploading')
+      let uploadResult: { job_id: number }
       try {
-        await api.uploadOwnKnowledgeBaseFiles(slug, files)
+        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled)
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
@@ -76,7 +119,7 @@ export default function DocumentsPage() {
             return
           }
           try {
-            await api.uploadOwnKnowledgeBaseFiles(slug, files, true)
+            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled)
           } catch (e2) {
             setError((e2 as Error).message)
             setBusy(false)
@@ -89,6 +132,35 @@ export default function DocumentsPage() {
           setStage(null)
           return
         }
+      }
+
+      setStage('ingesting')
+      try {
+        const job = await pollIngestionJob(slug, uploadResult.job_id)
+        if (job === null) {
+          // Distinct from success and from failure: the documents are still
+          // being processed, so don't generate a spec against a knowledge
+          // base that isn't queryable yet -- and don't claim it failed either.
+          setNotice(
+            'Your documents are still being processed — this is taking longer than expected. ' +
+              'They’re safely uploaded; come back in a moment and continue from here.',
+          )
+          setBusy(false)
+          setStage(null)
+          return
+        }
+        if (job.status === 'failed') {
+          const detail = job.errors[0]?.error
+          setError(detail ? `Processing failed: ${detail}` : 'Processing your documents failed.')
+          setBusy(false)
+          setStage(null)
+          return
+        }
+      } catch (e) {
+        setError((e as Error).message)
+        setBusy(false)
+        setStage(null)
+        return
       }
     }
 
@@ -138,6 +210,8 @@ export default function DocumentsPage() {
         </div>
       )}
 
+      {notice && <div className="banner banner-info">{notice}</div>}
+
       {error && (
         <div className="banner banner-error">
           {error}
@@ -162,6 +236,33 @@ export default function DocumentsPage() {
           disabled={busy}
         />
       </div>
+
+      {smartSearchAvailable && (
+        <div className="field">
+          <label>Search quality</label>
+          <div className="wizard-actions" style={{ justifyContent: 'flex-start', gap: 8, marginBottom: 4 }}>
+            <button
+              type="button"
+              className={`btn ${smartSearch ? 'btn-secondary' : 'btn-primary'}`}
+              onClick={() => setSmartSearch(false)}
+              disabled={busy}
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              className={`btn ${smartSearch ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setSmartSearch(true)}
+              disabled={busy}
+            >
+              Enhanced
+            </button>
+          </div>
+          <p className="hint">
+            Enhanced finds more relevant answers in your documents. Takes a little longer to index.
+          </p>
+        </div>
+      )}
 
       <div className="upload-section">
         <label className="btn btn-secondary" style={{ display: 'inline-block' }}>

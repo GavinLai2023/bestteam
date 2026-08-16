@@ -521,3 +521,44 @@ def test_vector_kb_query_expansion_disabled_when_count_zero(tmp_path):
         query_expansion_model='fake:{"queries": ["widget"]}', query_expansion_count=0,
     )
     assert "No results found" in kb.query("sprocket")
+
+
+# ---------------------------------------------------------------------------
+# VectorKnowledgeBase.from_chunks
+# ---------------------------------------------------------------------------
+
+def test_from_chunks_builds_queryable_kb():
+    from bestteam.core.knowledge_base import _Chunk
+
+    chunks = [
+        _Chunk(source="fruit.txt", text="Apples are a popular fruit grown in orchards."),
+        _Chunk(source="cars.txt", text="Cars require maintenance of the engine and tires."),
+    ]
+    # Use _KeywordEmbedding for semantically meaningful results
+    embedding_model = _KeywordEmbedding()
+    vectors = embedding_model.embed_documents([c.text for c in chunks])
+
+    kb = VectorKnowledgeBase.from_chunks("docs", chunks, vectors, embedding_model, top_k=1)
+    result = kb.query("apple orchard fruit")
+    assert "fruit.txt" in result
+    assert "Apples" in result
+
+
+def test_from_chunks_vector_count_mismatch_raises_configuration_error():
+    from bestteam.core.knowledge_base import _Chunk
+
+    chunks = [_Chunk(source="a.txt", text="hello")]
+    with pytest.raises(ConfigurationError, match="embedding model returned"):
+        VectorKnowledgeBase.from_chunks("kb", chunks, vectors=[], embedding_model="fake:4")
+
+
+def test_init_raises_numpy_missing_before_chunk_param_validation(tmp_path):
+    """Regression test: numpy check must run BEFORE param validation, not after."""
+    (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")
+    with patch.dict("sys.modules", {"numpy": None}):
+        # Both numpy missing AND invalid chunk_overlap > chunk_size
+        with pytest.raises(ConfigurationError, match="numpy"):
+            VectorKnowledgeBase(
+                "kb", tmp_path, embedding_model="fake:8",
+                chunk_size=100, chunk_overlap=150
+            )
