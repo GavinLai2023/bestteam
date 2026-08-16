@@ -40,6 +40,15 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # The `*shared` aliases below nest one sequence inside another,
+          # which plain YAML does NOT splice. That is fine here and is not a
+          # bug to fix: paths-filter parses this string itself and flattens
+          # recursively (`parseFilterItemYaml`, src/filter.ts), and its README
+          # documents this anchor pattern. Confirmed in a real run --
+          # `backend` matched only `tests/**` files, a pattern that exists
+          # solely in `shared`. Flattening by hand would duplicate 12 patterns
+          # across two lists and make the "add a new top-level directory here"
+          # note above easier to get wrong.
           filters: |
             shared: &shared
               - 'src/**'
