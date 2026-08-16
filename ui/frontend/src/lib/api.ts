@@ -340,9 +340,16 @@ export const api = {
   deleteConfigItem: (kind: string, name: string, org?: string) =>
     request<void>(`/api/config/${kind}/${encodeURIComponent(name)}${orgQuery(org)}`, { method: 'DELETE' }),
   uploadKnowledgeBaseFiles: (name: string, files: File[], org?: string) =>
-    uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
+    uploadFiles<{ name: string; job_id: number; status: string }>(
       `/api/config/knowledge_bases/${encodeURIComponent(name)}/upload${orgQuery(org)}`,
       files,
+    ),
+  // Ingestion now runs in the background -- AdvancedPage polls this after
+  // uploadKnowledgeBaseFiles until status is 'completed'/'failed' (the
+  // admin/`?org=` counterpart to orgKnowledgeBaseUploadJob below).
+  knowledgeBaseUploadJob: (name: string, jobId: number, org?: string) =>
+    request<IngestionJobStatus>(
+      `/api/config/knowledge_bases/${encodeURIComponent(name)}/ingestion-jobs/${jobId}${orgQuery(org)}`,
     ),
 
   // Org self-service: build your own knowledge base by uploading documents

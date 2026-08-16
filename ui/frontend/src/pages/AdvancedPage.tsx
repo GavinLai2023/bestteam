@@ -196,12 +196,21 @@ export default function AdvancedPage() {
     setError(null)
     setMessage(null)
     try {
-      const result = await api.uploadKnowledgeBaseFiles(newId.trim(), uploadFiles, apiOrg)
-      setMessage(`Created '${result.name}' — ${result.file_count} file(s), ${result.chunk_count} chunk(s) indexed.`)
+      const uploadResult = await api.uploadKnowledgeBaseFiles(newId.trim(), uploadFiles, apiOrg)
+      let job = await api.knowledgeBaseUploadJob(uploadResult.name, uploadResult.job_id, apiOrg)
+      while (job.status !== 'completed' && job.status !== 'failed') {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        job = await api.knowledgeBaseUploadJob(uploadResult.name, uploadResult.job_id, apiOrg)
+      }
+      if (job.status === 'failed') {
+        const detail = job.errors[0]?.error
+        throw new Error(detail ? `Processing failed: ${detail}` : 'Processing your documents failed.')
+      }
+      setMessage(`Created '${uploadResult.name}' — ${job.documents_succeeded} file(s), ${job.chunk_count} chunk(s) indexed.`)
       setNewId('')
       setUploadFiles([])
-      setSelectedId(result.name)
-      setJsonText(JSON.stringify(result.config, null, 2))
+      setSelectedId(uploadResult.name)
+      setJsonText(JSON.stringify(job.config, null, 2))
       if (activeKeyRef.current === startedFor) loadItems()
     } catch (e) {
       setError((e as Error).message)
