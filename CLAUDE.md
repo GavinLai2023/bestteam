@@ -57,7 +57,8 @@ relevant file below the first time it reads a file in that directory:
 - `src/bestteam/core/CLAUDE.md` — `Specification`/`Requirements` structured
   outputs for the Team Builder, and the `local_folder`/`vector` knowledge
   base implementations.
-- `src/bestteam/tools/CLAUDE.md` — built-in tools (`web_search`, `parse_file`,
+- `src/bestteam/tools/CLAUDE.md` — built-in tools (`web_search`,
+  `local_business_search`, `parse_file`,
   `http_get`, `calculator`, and the draft-only `email_find`/`email_read`/
   `email_draft_reply` toolkit) and their trust boundaries.
 - `ui/backend/CLAUDE.md` — FastAPI backend: builder/config APIs, auth, model

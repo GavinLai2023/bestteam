@@ -196,8 +196,10 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/login \
 ## 9. Run the workflow (browser — the primary path)
 
 1. Open `http://localhost:5173` and log in as **`demo`** with the password you
-   set in step 5.
-2. In the monitoring dashboard, select the **`email_triage_demo_live`**
+   set in step 5. Logging in lands you on the Dashboard (or the wizard, if the
+   org has nothing deployed) — click **Run a team** in the nav to reach the
+   run page at `/run`.
+2. On the run page, select the **`email_triage_demo_live`**
    workflow. It's a bundled YAML demo (`ui/backend/workflows/`), so it only
    appears when `BESTTEAM_DEMO_WORKFLOWS="1"` is set — which you did in step 7.
    If it's missing from the list, that flag isn't set on the running backend.

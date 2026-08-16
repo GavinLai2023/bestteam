@@ -167,6 +167,21 @@ deletion-lifecycle sub-project (below) carries the remaining cross-process items
   record) and any effectiveness measurement of whether reconciliation
   actually improves recall quality (M-13).
 
+- **2026-08-11 → 08-12** — Implemented: the retrieval-quality half of SP-4's
+  deferred list, all **opt-in** and all without a vector store or a new
+  service, so the "SQLite + BM25 in-house" decision (`docs/DECISIONS.md`)
+  stands. Recall is BM25-only by default; `BESTTEAM_MEMORY_EMBEDDING_MODEL`
+  switches it to hybrid BM25 + vector fused with weighted RRF and type-aware
+  recency decay, `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` (+ `_COUNT`, default
+  3) adds MultiQueryRetriever-style expansion, and
+  `BESTTEAM_MEMORY_RERANK_MODEL` (+ `_CANDIDATE_K`, default `top_k * 4`)
+  reranks the fused pool. The expansion and rerank models resolve lazily and
+  fail soft — a bad spec degrades recall to the un-expanded/un-reranked path
+  rather than breaking a run. Episodic and procedural recall/writes are also
+  workflow-scoped now. **Still deferred:** age-based TTL, per-org quotas,
+  background cleanup, procedural dedup/consolidation, and M-13 (no
+  measurement yet that any of this improves recall quality in practice).
+
 ## Follow-up review (2026-07-30)
 
 A second read of the shipped memory subsystem raised five points. Four map onto

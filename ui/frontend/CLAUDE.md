@@ -16,9 +16,14 @@ commands; see `ui/backend/CLAUDE.md` for the API this frontend talks to.
 
 `react-router-dom` (`main.tsx` wraps `<App/>` in `<BrowserRouter>`) drives
 several areas, all under a shared `<Layout/>` nav shell (`components/Layout.tsx`;
-customer nav is Build a team / My teams / Run a team / Activity):
+customer nav is Dashboard / Build a team / My teams / Run a team):
 
-- **`/`** — `pages/MonitorPage.tsx`, "Run a team" (renamed from "Talk to
+- **`/`** — `pages/LandingPage.tsx`: not a page but a router. It forwards an
+  org member to `/activity` (the Dashboard), or to `/wizard` if the org has no
+  deployed workflow yet; `RequireOrgMember` sends an admin to `/advanced`
+  before it renders. "Run a team" is a deliberate destination (`/run`), not
+  the daily home.
+- **`/run`** — `pages/MonitorPage.tsx`, "Run a team" (renamed from "Talk to
   your team"): reads an optional `?workflow=` query param via
   `useSearchParams` to pre-select a workflow, shows a running timer/WS
   connection status/"waiting for the agent" hint/stale-run banner while a
@@ -158,17 +163,17 @@ an org member see disjoint UIs, partitioned by two symmetric `App.tsx` guards
 that both read `lib/useMe.ts` (one `GET /api/auth/me` → `{username, is_admin,
 org}`) and render `null` while it loads:
 
-- `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory`; non-admins are sent to `/`.
-- `RequireOrgMember` wraps the customer routes (`/`, `/teams`, `/wizard/*`);
+- `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory` + `/trace`; non-admins are sent to `/`.
+- `RequireOrgMember` wraps the customer routes (`/`, `/run`, `/teams`, `/activity`, `/wizard/*`);
   operators are sent to `/advanced`, since every org-scoped surface 403s an
   org-less operator. The `*` catch-all stays **outside** both guards so an
   unknown path routes to `/`, where `RequireOrgMember` picks the destination.
 
 Because `is_admin` and org membership are mutually exclusive (CR-030), the two
 guards can't bounce a user between them — each redirect terminates in one hop.
-`Layout.tsx` mirrors this: the **Accounts**/**Advanced**/**Memory** links show
-only when `isAdmin`, the **Build a team**/**My teams**/**Run a team**/
-**Activity** links only when `!isAdmin`. `pages/AccountsPage.tsx` is the admin org/user
+`Layout.tsx` mirrors this: the **Accounts**/**Advanced**/**Memory**/**Trace**
+links show only when `isAdmin`, the **Dashboard**/**Build a team**/
+**My teams**/**Run a team** links only when `!isAdmin`. `pages/AccountsPage.tsx` is the admin org/user
 manager (create orgs, deactivate/reactivate them, and create/reset-password/
 move/delete each org's member; platform accounts are shown read-only — the
 `/api/admin` surface keeps promote/demote and platform-account lifecycle in the

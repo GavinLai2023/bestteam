@@ -153,3 +153,18 @@ customers uploading documents at volume, so there is no active
 correctness/security/cost incident forcing this now. Revisit as its own
 brainstorm → spec → plan sub-project once real multi-org document-upload
 volume or a compliance/retention requirement makes it concrete.
+
+**P2-12 largely resolved (2026-08-16, PR #59 — KB document/chunk ingestion).**
+The persistence half of this finding shipped: `IngestionJob`
+(`knowledge_ingestion_jobs`), `KnowledgeDocument` (`knowledge_documents`) and
+`KnowledgeChunk` (`knowledge_chunks`) are now real tables, uploads run as
+asynchronous ingestion jobs, a KB with a completed job is served from the
+database rather than re-read from disk, and deleting a KB cascades to its
+job/document/chunk rows with older generations pruned automatically. See
+`docs/KNOWLEDGE_BASES.md` ("Uploads are asynchronous (ingestion jobs)") and
+`docs/superpowers/plans/2026-08-16-kb-document-chunk-ingestion.md`.
+
+**Still open from P2-12** — and still deferred on the same reasoning above: no
+`KnowledgeIndex` entity (the index is still built in memory per process), no
+document-level ACL or retention status, and no per-org **storage** quota — the
+self-service cap remains a KB *count* cap, not a bytes-or-documents budget.
