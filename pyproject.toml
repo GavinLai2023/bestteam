@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev          = ["pytest>=8.0"]
+dev          = ["pytest>=8.0", "pytest-xdist>=3.5"]
 test         = ["pytest-playwright>=0.5"]
 ui           = ["fastapi>=0.110", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0", "alembic>=1.13", "python-multipart>=0.0.9", "cryptography>=42.0"]
 tools-search = ["tavily-python>=0.3"]
