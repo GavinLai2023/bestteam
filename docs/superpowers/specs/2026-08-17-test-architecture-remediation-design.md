@@ -195,10 +195,27 @@ returning a file-backed engine under `tmp_path` with `PRAGMA synchronous=OFF`
 visibility and locking, the entire point, are untouched). Every test file that
 can have two Sessions live at once migrates to it.
 
-This is deliberately applied to all thirteen concurrency-exercising files, not
-only the five with observed failures. The failure mode is silent, so "no
-observed flake" is not evidence of safety, and a file that is single-threaded
-today acquires the hazard the moment someone adds a run to it.
+It is applied well beyond the files with observed failures, because the failure
+mode is silent and "no observed flake" is not evidence of safety. But it is not
+applied indiscriminately either — a file DB costs fixture churn and a little
+time, and some tests depend on the shared connection deliberately.
+
+The first attempt at drawing that line screened files by keyword
+(`threading`, `ThreadPoolExecutor`, `run_in_background`, `Thread(`) and missed
+`test_share_chat_ws.py`, which CI then failed with `cannot commit - no
+transaction is active`. The reliable criterion is a call-graph audit instead:
+the backend opens a second `Session` in exactly four places —
+`runtime.py:340` (run worker), `ingestion.py:95` (ingestion worker),
+`main.py:958` (per-event re-auth in the WS stream loop) and
+`share_chat.py:401` — and spawns threads from one, `runtime._executor`, reached
+via `POST /api/runs`, the builder's test-runs, `email_trigger` and
+`share_chat`. Each test file is then checked against the routes it actually
+exercises.
+
+That yields sixteen migrated files and ten deliberately left on `:memory:`,
+each with a recorded reason (read-only aggregation, link CRUD, a sync
+transcription endpoint, and `test_email_trigger.py`'s intentional dependence
+on the shared connection) rather than an absence of observed failures.
 
 The rule for any residual race is unchanged: find the actual window and close
 it, never add a sleep, a retry, or a loosened assertion. If one turns out to

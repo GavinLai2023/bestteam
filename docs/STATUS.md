@@ -967,21 +967,31 @@
   request's flushed-but-uncommitted writes; the request's `commit()` then
   commits nothing and the endpoint answers 200/204 having written nothing. The
   loss is silent, so it surfaced as unrelated assertions failing intermittently
-  much later — this one defect explains every flaky test we had. Twelve
-  concurrency-exercising files moved to a shared
+  much later — this one defect explains every flaky test we had. Sixteen
+  exposed files moved to a shared
   `tests/helpers.py::make_concurrent_safe_engine(tmp_path)` (file-backed,
-  `PRAGMA synchronous=OFF`), which matches production's `QueuePool` semantics.
-  `test_email_trigger.py` deliberately stays on `:memory:` — it simulates a
-  concurrent writer by committing through a second Session while the first
-  holds an uncommitted write, which is a real deadlock on a file database.
-  (3) **Ten flaky tests fixed at their actual race**, no sleeps, retries, or
+  `PRAGMA synchronous=OFF`), which matches production's `QueuePool` semantics;
+  ten stay on `:memory:` with a recorded per-file reason. Which is which was
+  settled by a call-graph audit, not by keyword screening — the first pass
+  screened for `threading`/`run_in_background` and missed
+  `test_share_chat_ws.py`, which CI then failed. The backend opens a second
+  Session in exactly four places (`runtime.py:340`, `ingestion.py:95`,
+  `main.py:958`, `share_chat.py:401`) and spawns threads from one
+  (`runtime._executor`); every file is checked against the routes it actually
+  exercises. `test_email_trigger.py` deliberately stays on `:memory:` — it
+  simulates a concurrent writer by committing through a second Session while
+  the first holds an uncommitted write, which is a real deadlock on a file
+  database.
+  (3) **Eleven flaky tests fixed at their actual race**, no sleeps, retries, or
   loosened assertions: two in `test_builder_api`, three in `test_share_chat_api`
   (fixing the engine made the harness genuinely parallel, which exposed two
-  more), two in `test_crud_api`, one in `test_org_knowledge_bases`,
-  `test_marker_completeness` (its `--collect-only` subprocess now stays off the
-  parent's `.pytest_cache`), and `tests/e2e/test_smoke.py` (`page.goto` waited
-  for a `load` the auth guard's redirect would never let arrive — fixed at all
-  three sites, not just the one that failed).
+  more), two in `test_crud_api`, one each in `test_org_knowledge_bases` and
+  `test_share_chat_ws`, `test_marker_completeness` (its `--collect-only`
+  subprocess now stays off the parent's `.pytest_cache`), and
+  `tests/e2e/test_smoke.py`, where `page.goto` waited for a `load` the auth
+  guard's redirect would never let arrive — fixed at all three sites, not just
+  the one that failed, and tolerating the aborted navigation outright after
+  `wait_until="commit"` proved to only narrow the window.
   Also: `test_marker_completeness` ran two full collect-only subprocesses to
   learn two numbers pytest already reports in one, making a single test 54s;
   CI now path-filters every job so a docs-only commit runs nothing, the PR
