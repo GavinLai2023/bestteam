@@ -67,6 +67,54 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
     ) -> None:
+        _validate_chunk_params(name, chunk_size, chunk_overlap)
+        self.path = Path(path)
+        chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
+        self._init_from_chunks(
+            name, chunks, top_k,
+            rerank_model=rerank_model,
+            candidate_k=candidate_k,
+            query_expansion_model=query_expansion_model,
+            query_expansion_count=query_expansion_count,
+        )
+
+    @classmethod
+    def from_chunks(
+        cls,
+        name: str,
+        chunks: List["_Chunk"],
+        top_k: int = 5,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
+    ) -> "LocalFolderKnowledgeBase":
+        """Build directly from pre-parsed chunks, skipping the file-parsing
+        pipeline. Used by the backend's DB-backed ingestion path (see
+        ui/backend/knowledge_bases.py) -- the SDK itself never touches a
+        database; chunks are handed in as plain data."""
+        self = cls.__new__(cls)
+        self.path = None
+        self._init_from_chunks(
+            name, chunks, top_k,
+            rerank_model=rerank_model,
+            candidate_k=candidate_k,
+            query_expansion_model=query_expansion_model,
+            query_expansion_count=query_expansion_count,
+        )
+        return self
+
+    def _init_from_chunks(
+        self,
+        name: str,
+        chunks: List["_Chunk"],
+        top_k: int,
+        *,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
+    ) -> None:
         try:
             from rank_bm25 import BM25Okapi
         except ImportError as exc:
@@ -75,10 +123,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
 
-        _validate_chunk_params(name, chunk_size, chunk_overlap)
-
         self.name = name
-        self.path = Path(path)
         self.default_top_k = top_k
         self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
         if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
@@ -90,10 +135,11 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
 
-        self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
+        self._chunks = chunks
         if not self._chunks:
             raise ConfigurationError(
-                f"Knowledge base '{name}' has no readable documents in {self.path}"
+                f"Knowledge base '{name}' has no readable documents"
+                + (f" in {self.path}" if self.path is not None else "")
             )
 
         self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]

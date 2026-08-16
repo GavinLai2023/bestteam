@@ -217,6 +217,41 @@ def test_rejects_non_positive_chunk_size(tmp_path, chunk_size):
 
 
 # ---------------------------------------------------------------------------
+# LocalFolderKnowledgeBase.from_chunks
+# ---------------------------------------------------------------------------
+
+def test_from_chunks_builds_queryable_kb():
+    from bestteam.core.knowledge_base import _Chunk
+
+    chunks = [
+        _Chunk(source="a.txt", text="Refunds are allowed within 30 days of purchase."),
+        _Chunk(source="b.txt", text="Our office hours are 9am to 5pm on weekdays."),
+    ]
+    kb = LocalFolderKnowledgeBase.from_chunks("policies", chunks, top_k=1)
+    result = kb.query("refunds allowed")
+    assert "30 days" in result
+    assert "[source: a.txt]" in result
+
+
+def test_from_chunks_empty_list_raises_configuration_error():
+    with pytest.raises(ConfigurationError, match="no readable documents"):
+        LocalFolderKnowledgeBase.from_chunks("empty_kb", [])
+
+
+def test_from_chunks_and_init_produce_identical_query_results(tmp_path):
+    (tmp_path / "doc.txt").write_text(
+        "Refunds are allowed within 30 days of purchase.", encoding="utf-8"
+    )
+    from_path = LocalFolderKnowledgeBase("kb", tmp_path, top_k=1)
+
+    from bestteam.core.knowledge_base import _Chunk
+    chunks = [_Chunk(source="doc.txt", text="Refunds are allowed within 30 days of purchase.")]
+    from_chunks = LocalFolderKnowledgeBase.from_chunks("kb", chunks, top_k=1)
+
+    assert from_path.query("refund") == from_chunks.query("refund")
+
+
+# ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase.query
 # ---------------------------------------------------------------------------
 
