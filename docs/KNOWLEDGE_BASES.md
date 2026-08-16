@@ -276,11 +276,11 @@ with no server filesystem access needed:
 - Files land under `ui/backend/data/knowledge_base_uploads/{name}/`, a
   directory the backend owns (distinct from the manual-config `path`, which
   points at a folder the user manages themselves).
-- The upload is validated by actually building the knowledge base (via the
-  same type-dispatching `_build_knowledge_base()` the YAML loader uses)
-  against the saved files before committing the database record — if
-  chunking/parsing fails (e.g. zero readable documents), the upload is
-  rejected and the partial directory is cleaned up.
+- Validation is no longer synchronous: the `KnowledgeBaseRecord` is upserted
+  and a `queued` ingestion job created immediately, and parsing/chunking
+  (and rejecting e.g. zero readable documents as a `failed` job) happens on
+  the background job instead — see "Uploads are asynchronous (ingestion
+  jobs)" below.
 
 **Org self-service upload** (`POST /api/org/knowledge-bases/{name}/upload`,
 `ui/backend/org_knowledge_bases.py`) is the same shared `upload_knowledge_base()`
