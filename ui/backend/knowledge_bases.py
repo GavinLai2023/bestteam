@@ -15,13 +15,14 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from bestteam import KnowledgeBaseSpec
-from bestteam.core.knowledge_base import make_knowledge_base_tool
-from bestteam.core.loader import _build_knowledge_base
+from bestteam.core.knowledge_base import _validate_chunk_params, make_knowledge_base_tool
+from bestteam.core.loader import _build_knowledge_base, _KNOWLEDGE_BASE_TYPES
 from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError, ConfigurationError
 from bestteam.tools import REGISTRY
 
-from .db.models import KnowledgeBaseRecord
+from . import ingestion
+from .db.models import IngestionJob, KnowledgeBaseRecord
 from .deploy_validation import find_kb_tool_collisions
 
 # --- KB path containment (CR-001) -------------------------------------------
@@ -157,8 +158,9 @@ def upload_knowledge_base(
     max_files: int = _MAX_FILES_PER_UPLOAD,
     max_file_size_bytes: int = _MAX_FILE_SIZE_BYTES,
     max_total_size_bytes: int = _MAX_TOTAL_SIZE_BYTES,
+    created_by: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Validate, chunk, and index uploaded documents as a knowledge base.
+    """Validate uploaded documents and dispatch an async ingestion job.
 
     Shared by the admin `/api/config/knowledge_bases/{name}/upload` route
     (always `local_folder`, the historical default) and the org self-service
@@ -169,6 +171,16 @@ def upload_knowledge_base(
     search" toggle described there, `kb_type`/`embedding_model`/
     `rerank_model`/`query_expansion_model`. `embedding_model` is required
     when `kb_type` is `vector` or `hybrid` and ignored otherwise.
+
+    This validates synchronously (name/size limits, `kb_type`, chunk params),
+    writes the uploaded files to a fresh version directory, upserts the
+    `KnowledgeBaseRecord` with its final config, and creates a `queued`
+    `IngestionJob` row -- then submits `ingestion.run_ingestion_job` to
+    `ingestion._executor` and returns immediately. The actual parsing/
+    chunking/embedding happens on a background thread; callers poll
+    `GET .../ingestion-jobs/{job_id}` (Task 9) for completion. The returned
+    dict is `{"name", "job_id", "status"}` -- no `config`/`chunk_count`
+    (those are only known once the job finishes).
     """
     try:
         _validate_tool_name(item_name)
@@ -209,62 +221,38 @@ def upload_knowledge_base(
             )
         contents[filename] = data
 
-    # Write the new files into a fresh version subdirectory, validate them
-    # there, then flip the CURRENT pointer atomically. The pointer always names
-    # a complete version, so a concurrent reader never sees the KB directory
-    # without a live version (no rename-swap gap), and the prior version is kept
-    # until the new one commits -- so any failure leaves the previous KB and its
-    # DB record intact (CR-008).
+    if kb_type not in _KNOWLEDGE_BASE_TYPES:
+        valid = ", ".join(sorted(_KNOWLEDGE_BASE_TYPES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Knowledge base has unknown type '{kb_type}'. Valid types: {valid}",
+        )
+    try:
+        _validate_chunk_params(item_name, chunk_size, chunk_overlap)
+    except BestTeamError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Write the new files into a fresh version subdirectory, then dispatch an
+    # async ingestion job to parse/chunk/(embed) them. No CURRENT pointer is
+    # written for this path -- nothing reads it; retrieval resolves the live
+    # version via the ingestion job's own `status` (see ui/backend/ingestion.py).
     # Uploads are org-scoped on disk so two orgs' same-named KBs can't share
     # (or clobber) a directory. Legacy pre-multi-tenancy uploads at
     # `_KB_UPLOADS_DIR/<name>` keep working: KB configs embed the absolute
     # root, so existing records still resolve their old directory.
     kb_root = _KB_UPLOADS_DIR / str(org_id) / item_name
-    pointer = kb_root / _KB_CURRENT_POINTER
     version = f"v_{uuid.uuid4().hex[:12]}"
     version_dir = kb_root / version
-    # Hold the per-KB lock across staging + validation + promotion + commit, not
-    # just the pointer flip. A concurrent delete takes the same lock and rmtree's
-    # the whole KB root; if staging ran outside the lock, the delete could remove
-    # a version staged here and this upload would then commit a record whose
-    # CURRENT points at a deleted directory (F1). Same-KB uploads also serialize
-    # now (each still owns a unique version dir; the extra contention is fine).
+    # Hold the per-KB lock across staging + commit + dispatch. A concurrent
+    # delete takes the same lock and rmtree's the whole KB root; if staging ran
+    # outside the lock, the delete could remove a version staged here (F1).
+    # Same-KB uploads also serialize now (each still owns a unique version
+    # dir; the extra contention is fine).
     with _kb_upload_lock(f"{org_id}/{item_name}"):
         version_dir.mkdir(parents=True, exist_ok=True)
         try:
             for filename, data in contents.items():
                 (version_dir / filename).write_bytes(data)
-
-            # Build via the same type-dispatching constructor `load_knowledge_base_tools`
-            # uses, so `kb_type` can be any of the three supported types. This
-            # build is validation-only (and gives the response its chunk
-            # count) -- it deliberately never sets `cache_path`, so a
-            # vector/hybrid KB's embeddings aren't persisted from here. The
-            # stored config below sets its own `cache_path` (an org+name
-            # basename, since `contain_kb_config_for_load` collapses any
-            # cache_path to its basename under the app-owned `_kb_cache/` dir
-            # at read time -- CR-001), which real workflow loads pick up.
-            build_spec: Dict[str, Any] = {
-                "name": item_name,
-                "path": str(version_dir),
-                "type": kb_type,
-                "chunk_size": chunk_size,
-                "chunk_overlap": chunk_overlap,
-                "top_k": top_k,
-            }
-            if kb_type in ("vector", "hybrid"):
-                build_spec["embedding_model"] = embedding_model
-            if rerank_model is not None:
-                build_spec["rerank_model"] = rerank_model
-            if query_expansion_model is not None:
-                build_spec["query_expansion_model"] = query_expansion_model
-            try:
-                kb = _build_knowledge_base(build_spec, source=version_dir)
-            except BestTeamError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-            previous_version = _read_pointer(pointer)
-            _write_pointer(pointer, version)  # atomic promotion
 
             spec = KnowledgeBaseSpec(
                 name=item_name,
@@ -285,34 +273,39 @@ def upload_knowledge_base(
                 db.add(item)
             else:
                 item.config = raw
-            try:
-                db.commit()
-            except Exception:
-                # Point CURRENT back at the prior version (still on disk); the
-                # failed new version is removed by the outer handler. Keeps FS
-                # and DB consistent, with no destructive delete of the prior KB.
-                db.rollback()
-                if previous_version is not None:
-                    _write_pointer(pointer, previous_version)
-                else:
-                    pointer.unlink(missing_ok=True)
-                raise
+            db.flush()  # need item.id below, before the outer commit
 
-            _invalidate_workflow_cache()
-            # Durable now: drop older versions but keep the immediately-previous
-            # one as a grace window for readers that just resolved to it.
-            _cleanup_kb_versions(kb_root, {version, previous_version} - {None})
+            job = IngestionJob(
+                kb_id=item.id,
+                org_id=org_id,
+                version=version,
+                status="queued",
+                file_count=len(contents),
+                created_by=created_by,
+            )
+            db.add(job)
+            db.commit()
 
-            return {
-                "name": item_name,
-                "config": raw,
-                "file_count": len(contents),
-                "chunk_count": len(kb._chunks),
-            }
+            ingestion._executor.submit(
+                ingestion.run_ingestion_job,
+                job.id,
+                item.id,
+                org_id,
+                version_dir,
+                kb_type=kb_type,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                embedding_model=embedding_model,
+                engine=db.get_bind(),
+            )
+
+            return {"name": item_name, "job_id": job.id, "status": "queued"}
         except Exception:
-            # CURRENT still names the prior version (or is absent on a first
-            # upload), so removing only the uncommitted new version preserves the
-            # prior KB.
+            # No CURRENT pointer is written for the DB-backed path (nothing
+            # reads it -- retrieval resolves the live version via the
+            # ingestion job's own status), so on a pre-dispatch failure the
+            # only cleanup needed is the just-written version directory.
+            db.rollback()
             shutil.rmtree(version_dir, ignore_errors=True)
             raise
 

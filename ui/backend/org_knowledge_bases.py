@@ -36,9 +36,9 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from .auth_api import get_current_org
+from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
-from .db.models import KnowledgeBaseRecord, Organization
+from .db.models import KnowledgeBaseRecord, Organization, User
 from .db_session import get_db
 from .knowledge_bases import _kb_upload_lock, upload_knowledge_base
 
@@ -99,6 +99,7 @@ def upload_own_knowledge_base(
     smart_search: bool = Form(False),
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     # Hold the same per-KB lock upload_knowledge_base() itself takes across
     # this existence/cap/replace-confirmation check too, not just inside it --
@@ -160,4 +161,5 @@ def upload_own_knowledge_base(
             max_files=_MAX_FILES_PER_UPLOAD,
             max_file_size_bytes=_MAX_FILE_SIZE_BYTES,
             max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
+            created_by=user.username,
         )

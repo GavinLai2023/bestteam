@@ -4,6 +4,7 @@ step. Mirrors `test_org_settings.py`'s auth/org-scoping patterns and reuses
 `test_crud_api.py`'s upload-endpoint assertions for the shared
 `knowledge_bases.upload_knowledge_base()` implementation."""
 
+import time
 from pathlib import Path
 
 import pytest
@@ -21,9 +22,23 @@ from ui.backend import main as backend_main
 from ui.backend import org_knowledge_bases as backend_org_kb
 from ui.backend.builder import _all_knowledge_base_tools, _with_knowledge_base_catalog
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import KnowledgeBaseRecord
+from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
+
+
+def _wait_for_job_status(job_id, deadline_seconds=10):
+    """Poll `IngestionJob.status` to a terminal state (completed/failed),
+    opening a fresh session each time so we see the worker thread's commits."""
+    deadline = time.monotonic() + deadline_seconds
+    job = None
+    while time.monotonic() < deadline:
+        with open_test_db() as db:
+            job = db.get(IngestionJob, job_id)
+            if job is not None and job.status in ("completed", "failed"):
+                return job.status
+        time.sleep(0.05)
+    return job.status if job is not None else None
 
 
 @pytest.fixture
@@ -81,9 +96,21 @@ def test_org_member_can_upload_own_kb(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "policies"
-    assert body["file_count"] == 1
-    assert body["chunk_count"] >= 1
-    assert body["config"]["type"] == "local_folder"
+    assert body["status"] == "queued"
+    assert isinstance(body["job_id"], int)
+
+
+def test_uploaded_kb_ingestion_job_completes_and_becomes_queryable(client, tmp_path):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "30 days" in tools["policies"]("refund policy")
 
 
 def test_upload_rejects_builtin_tool_name(client):
@@ -222,16 +249,22 @@ def test_smart_search_upload_builds_hybrid_kb_with_expansion_and_rerank(client, 
         files=_files(),
     )
     assert resp.status_code == 200
-    config = resp.json()["config"]
-    assert config["type"] == "hybrid"
-    assert config["embedding_model"] == "fake:16"
-    assert config["rerank_model"] == "fake:"
-    # The wizard's own default chat model (seeded catalog's first non-fake
-    # entry, alphabetically by spec -- list_entries orders by `spec`).
-    assert config["query_expansion_model"] == "openai:gpt-4o"
+    body = resp.json()
+    assert body["status"] == "queued"
+    job_id = body["job_id"]
+
+    assert _wait_for_job_status(job_id) == "completed"
 
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "hybrid"
+        assert config["embedding_model"] == "fake:16"
+        assert config["rerank_model"] == "fake:"
+        # The wizard's own default chat model (seeded catalog's first non-fake
+        # entry, alphabetically by spec -- list_entries orders by `spec`).
+        assert config["query_expansion_model"] == "openai:gpt-4o"
+
         tools = _all_knowledge_base_tools(db, tmp_path, org_id)
         assert "30 days" in tools["policies"]("refund policy")
 
@@ -244,14 +277,26 @@ def test_smart_search_without_default_embedding_model_falls_back_to_local_folder
         files=_files(),
     )
     assert resp.status_code == 200
-    assert resp.json()["config"]["type"] == "local_folder"
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "local_folder"
 
 
 def test_smart_search_off_by_default_stays_local_folder(client, monkeypatch):
     monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
     resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
     assert resp.status_code == 200
-    assert resp.json()["config"]["type"] == "local_folder"
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "local_folder"
 
 
 def test_cross_org_upload_isolation(client, tmp_path):

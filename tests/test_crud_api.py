@@ -1,6 +1,7 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,20 +19,39 @@ from ui.backend import crud as backend_crud
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, WorkflowRecord
+from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, SkillRecord, WorkflowRecord
 from ui.backend.db_session import get_db
 
 
 def _active_kb_dir(uploads: Path, name: str) -> Path:
-    """Resolve an uploaded KB's active version dir via its CURRENT pointer.
+    """Resolve an uploaded KB's most-recently-written version directory.
+
+    Job-based uploads (Task 6) no longer maintain a CURRENT pointer: each
+    upload's files land in a fresh, immutable version subdirectory (no old
+    files carried over), and nothing promotes one to "active". For these
+    tests' sequential, single-threaded uploads, the most-recently-modified
+    version directory is unambiguously "this upload's own files".
 
     Uploads are org-scoped on disk (`<uploads>/<org_id>/<name>`); the fixture
     user's 'default' org is the first org created in each test DB, so id 1.
     """
-    from ui.backend.knowledge_bases import resolve_kb_upload_path
+    kb_root = uploads / "1" / name
+    versions = [p for p in kb_root.iterdir() if p.is_dir()]
+    return max(versions, key=lambda p: p.stat().st_mtime)
 
-    resolved = resolve_kb_upload_path({"path": str(uploads / "1" / name)})
-    return Path(resolved["path"])
+
+def _wait_for_job_status(job_id, deadline_seconds=10):
+    """Poll `IngestionJob.status` to a terminal state (completed/failed),
+    opening a fresh session each time so we see the worker thread's commits."""
+    deadline = time.monotonic() + deadline_seconds
+    job = None
+    while time.monotonic() < deadline:
+        with open_test_db() as db:
+            job = db.get(IngestionJob, job_id)
+            if job is not None and job.status in ("completed", "failed"):
+                return job.status
+        time.sleep(0.05)
+    return job.status if job is not None else None
 
 
 @pytest.fixture
@@ -420,7 +440,7 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
 
     from bestteam.exceptions import ConfigurationError
 
-    with patch.object(backend_knowledge_bases, "_build_knowledge_base", side_effect=ConfigurationError("bad upload")):
+    with patch.object(backend_knowledge_bases, "_validate_chunk_params", side_effect=ConfigurationError("bad upload")):
         resp = client.post(
             "/api/config/knowledge_bases/kb/upload?org=default",
             files=[("files", ("doc2.txt", b"new content that fails validation", "text/plain"))],
@@ -531,30 +551,38 @@ def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
 
 
 def test_reupload_never_leaves_kb_without_a_live_version(client, tmp_path):
-    # CR-008 (pointer layout): CURRENT always resolves to a complete version --
-    # there is no rename-swap window where the KB dir has no live version. The
-    # immediately-previous version is retained as a grace window for readers
-    # that just resolved to it; older versions are cleaned up.
+    # No CURRENT pointer exists for job-based uploads any more; each upload's
+    # files land in their own fresh version directory, and pruning of old
+    # generations now happens asynchronously as part of a completed ingestion
+    # job (ui/backend/ingestion.py::_prune_old_ingestion_versions), keeping
+    # the current generation plus one grace-window generation -- the same
+    # "immediately-previous version survives, older ones are cleaned up"
+    # invariant as the old CR-008 synchronous pointer swap, just driven by
+    # job completion instead.
     uploads = tmp_path / "knowledge_base_uploads"
-    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v1.txt", b"one", "text/plain"))])
+    resp1 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v1.txt", b"one", "text/plain"))])
+    assert _wait_for_job_status(resp1.json()["job_id"]) == "completed"
     v1 = _active_kb_dir(uploads, "kb")
-    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v2.txt", b"two", "text/plain"))])
+
+    resp2 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v2.txt", b"two", "text/plain"))])
+    assert _wait_for_job_status(resp2.json()["job_id"]) == "completed"
     v2 = _active_kb_dir(uploads, "kb")
 
     assert v1 != v2
     assert sorted(p.name for p in v2.iterdir()) == ["v2.txt"]  # active version
     assert v1.is_dir()  # previous version kept as a grace window
 
-    # A third upload cleans the now-two-generations-old version.
-    client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v3.txt", b"three", "text/plain"))])
+    # A third upload's completed job prunes the now-two-generations-old version.
+    resp3 = client.post("/api/config/knowledge_bases/kb/upload?org=default", files=[("files", ("v3.txt", b"three", "text/plain"))])
+    assert _wait_for_job_status(resp3.json()["job_id"]) == "completed"
     assert not v1.is_dir()
 
 
 def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
-    # CR-008: concurrent uploads of the same KB must not interleave the CURRENT
-    # pointer flip + version cleanup. The promotion critical section is guarded
-    # by a per-KB lock; holding it must block a second upload's promotion until
-    # released, after which the KB ends in a consistent state.
+    # CR-008 (F1): concurrent uploads of the same KB must not interleave file
+    # staging + the DB commit/job dispatch. The critical section is guarded
+    # by a per-KB lock; holding it must block a second upload until released,
+    # after which the KB ends in a consistent state.
     import threading
     import time
 
@@ -585,7 +613,7 @@ def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
 
     worker.join(timeout=5)
     assert done == [200]
-    # CURRENT resolves to a real version dir holding the last writer's file.
+    # The most recent version dir holds the last writer's file.
     active = _active_kb_dir(uploads, "kb")
     assert active.is_dir()
     assert sorted(p.name for p in active.iterdir()) == ["second.txt"]
@@ -640,10 +668,20 @@ def test_upload_creates_queryable_local_folder_kb(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "support_docs"
-    assert body["file_count"] == 2
-    assert body["chunk_count"] >= 2
-    assert body["config"]["type"] == "local_folder"
-    assert "knowledge_base_uploads" in body["config"]["path"]
+    assert body["status"] == "queued"
+    job_id = body["job_id"]
+
+    assert _wait_for_job_status(job_id) == "completed"
+
+    from ui.backend import ingestion as backend_ingestion
+
+    with open_test_db() as db:
+        job = db.get(IngestionJob, job_id)
+        payload = backend_ingestion.job_status_payload(db, job)
+        assert payload["file_count"] == 2
+        assert payload["chunk_count"] >= 2
+        assert payload["config"]["type"] == "local_folder"
+        assert "knowledge_base_uploads" in payload["config"]["path"]
 
     get_resp = client.get("/api/config/knowledge_bases/support_docs?org=default")
     assert get_resp.status_code == 200
@@ -690,19 +728,33 @@ def test_upload_rejects_filename_with_no_basename(client):
     assert resp.status_code == 400
 
 
-def test_upload_rejects_unparseable_file_and_cleans_up(client):
+def test_upload_of_unparseable_file_fails_the_ingestion_job(client):
+    # Content validation is no longer synchronous (upload_knowledge_base()
+    # only validates kb_type/chunk params before dispatching) -- an
+    # unparseable/unsupported file fails asynchronously inside the ingestion
+    # job instead of the upload request itself, and the KB record it created
+    # is NOT rolled back (the job's failure is its own diagnostic record).
     files = [("files", ("bad.exe", b"\x00\x01\x02", "application/octet-stream"))]
     resp = client.post("/api/config/knowledge_bases/bad_kb/upload?org=default", files=files)
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    assert _wait_for_job_status(job_id) == "failed"
+
     get_resp = client.get("/api/config/knowledge_bases/bad_kb?org=default")
-    assert get_resp.status_code == 404
+    assert get_resp.status_code == 200
 
 
 def test_uploaded_kb_is_queryable_by_a_workflow(client):
     files = [("files", ("policy.txt", b"Refunds are processed within 5 business days of approval.", "text/plain"))]
     upload_resp = client.post("/api/config/knowledge_bases/policy_kb/upload?org=default", files=files)
     assert upload_resp.status_code == 200
-    uploaded_path = upload_resp.json()["config"]["path"]
+    job_id = upload_resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    get_kb_resp = client.get("/api/config/knowledge_bases/policy_kb?org=default")
+    assert get_kb_resp.status_code == 200
+    uploaded_path = get_kb_resp.json()["config"]["path"]
 
     # Standalone knowledge_bases created via /api/config aren't auto-wired into a
     # workflow's tools (see module docstring) -- a workflow only sees knowledge_bases

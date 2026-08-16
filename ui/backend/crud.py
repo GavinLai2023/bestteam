@@ -371,11 +371,13 @@ def upload_knowledge_base_files(
     top_k: int = 5,
     org: Optional[str] = Query(None),
     db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
 ) -> Dict[str, Any]:
     org_id = _resolve_org_id(db, org, allow_platform=False)
     return upload_knowledge_base(
         db, org_id, item_name, files,
         chunk_size=chunk_size, chunk_overlap=chunk_overlap, top_k=top_k,
+        created_by=admin.username,
     )
 
 
