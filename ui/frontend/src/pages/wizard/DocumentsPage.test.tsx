@@ -281,6 +281,42 @@ describe('DocumentsPage', () => {
     expect(mockedApi.submitSpecification).toHaveBeenCalled()
   })
 
+  it('stops polling after the cap and shows a distinct still-processing notice', async () => {
+    // Nothing reconciles a queued/running IngestionJob left behind by a
+    // backend restart, so an uncapped poll left the wizard stuck on
+    // "Processing your documents…" with no escape but a page reload.
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({
+      job_id: 1, status: 'running', file_count: 1, documents_succeeded: 0, documents_failed: 0,
+      chunk_count: 0, errors: [], config: null,
+    })
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    vi.useFakeTimers()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Continue'))
+      // Well past the cap (120 attempts x 500ms) -- the loop must have given
+      // up rather than kept issuing requests.
+      await vi.advanceTimersByTimeAsync(120 * 500 + 5000)
+    })
+    vi.useRealTimers()
+
+    expect(mockedApi.orgKnowledgeBaseUploadJob).toHaveBeenCalledTimes(120)
+    // Neither "succeeded" (no spec generated) nor "failed" (no error banner).
+    expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
+    expect(mockedApi.submitSolution).not.toHaveBeenCalled()
+    expect(screen.getByText(/still being processed/i)).toBeInTheDocument()
+    // Back to an interactive state rather than a permanent busy spinner.
+    expect(screen.getByText('Continue')).toBeInTheDocument()
+  })
+
   it('shows an error and does not generate a spec when the ingestion job fails', async () => {
     mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({

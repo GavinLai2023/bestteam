@@ -160,7 +160,10 @@ class HybridKnowledgeBase(KnowledgeBase):
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
 
-        self._chunks = chunks
+        # Defensive copy, matching LocalFolderKnowledgeBase._init_from_chunks:
+        # a caller mutating the list it handed in must not reshape this KB's
+        # index behind its (already-built) BM25 index and vector matrix.
+        self._chunks = list(chunks)
         self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)

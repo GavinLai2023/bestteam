@@ -81,6 +81,8 @@ Three new tables in `ui/backend/db/models.py`, scoped to upload-managed KBs.
 | `kb_id` | FK → `knowledge_bases.id`, NOT NULL | |
 | `org_id` | FK → `organizations.id`, nullable | denormalized, matches every other org-owned table |
 | `version` | str | the same `v_<hex>` identifier used for the on-disk version directory — traceable job ↔ directory correspondence |
+| `kb_type` | str | the KB type this job's chunks were ingested under (added in the final-review fix wave) — the read path resolves the KB's shape from the job, not from `knowledge_bases.config`, which advances to the next spec at dispatch time |
+| `embedding_model` | str, nullable | ditto for the embedding model, so a query embeds in the same vector space its chunks were embedded in |
 | `status` | str, CHECK IN (`queued`,`running`,`completed`,`failed`) | |
 | `file_count` | int | files in this upload |
 | `documents_succeeded` | int, default 0 | |

@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import AdvancedPage from './AdvancedPage'
 import { api } from '../lib/api'
 
@@ -42,6 +42,10 @@ describe('AdvancedPage upload flow', () => {
     mockedApi.listConfig.mockResolvedValue([])
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('polls the ingestion job and shows a success message with the polled file/chunk counts, then populates the JSON editor from the job config', async () => {
     mockedApi.uploadKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.knowledgeBaseUploadJob.mockResolvedValue({
@@ -69,6 +73,35 @@ describe('AdvancedPage upload flow', () => {
 
     // The newly created item is selected.
     expect(screen.getByRole('heading', { name: 'policies' })).toBeInTheDocument()
+  })
+
+  it('stops polling after the cap and reports "still processing" rather than success or failure', async () => {
+    mockedApi.uploadKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.knowledgeBaseUploadJob.mockResolvedValue({
+      job_id: 1,
+      status: 'running',
+      file_count: 1,
+      documents_succeeded: 0,
+      documents_failed: 0,
+      chunk_count: 0,
+      errors: [],
+      config: null,
+    })
+
+    await setUpUploadForm()
+
+    vi.useFakeTimers()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Create from files'))
+      // Well past the cap (1 immediate check + 120 x 500ms).
+      await vi.advanceTimersByTimeAsync(120 * 500 + 5000)
+    })
+    vi.useRealTimers()
+
+    expect(mockedApi.knowledgeBaseUploadJob).toHaveBeenCalledTimes(121)
+    expect(screen.queryByText(/Created 'policies'/)).not.toBeInTheDocument()
+    expect(screen.getByText(/still being processed/i)).toBeInTheDocument()
+    expect(screen.getByText('Create from files')).toBeInTheDocument()
   })
 
   it('does not crash and does not report success when the ingestion job fails', async () => {

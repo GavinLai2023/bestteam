@@ -344,9 +344,13 @@ zero chunks) doesn't fail the whole job — it's recorded as a `failed`
 `KnowledgeDocument` row (capped error text) and the job continues with the
 rest. The job itself only fails outright if *every* document failed (so the
 KB would have zero chunks) or, for `vector`/`hybrid`, if the embedding call
-itself fails (in which case the job's already-flushed document/chunk rows
-are rolled back — a vector/hybrid KB with no embeddings can't serve
-queries, so a total embedding failure must leave no partial rows behind).
+itself fails (in which case the job's buffered document/chunk rows are
+discarded before anything is written — a vector/hybrid KB with no embeddings
+can't serve queries, so a total embedding failure must leave no partial rows
+behind). All of a job's rows are buffered in memory and written in a single
+short transaction at the very end, so the parse loop and the embedding
+provider's network round-trip never hold SQLite's write lock against the
+rest of the process.
 
 **Retrieval: DB-backed vs. legacy file-based fallback.** A KB whose most
 recent `IngestionJob` reached `status="completed"` is served entirely from
@@ -356,16 +360,35 @@ alternate constructor on the matching `KnowledgeBase` subclass (see
 predates this feature (or was never re-uploaded since) has no completed
 ingestion job, so it falls back to the original file-based construction
 (`_build_knowledge_base`, scanning its upload directory / `CURRENT` pointer
-as before). `ui/backend/knowledge_bases.py::resolve_knowledge_base()` is the
+as before). Note that a KB uploaded *after* this feature also has no
+`CURRENT` pointer file — nothing writes one any more — so if its very first
+job hasn't completed yet (a narrow window: the fallback only applies while
+*zero* completed jobs exist) that fallback would `rglob` the whole KB root,
+including any retained older version subdirectory, rather than one version
+directory. `ui/backend/knowledge_bases.py::resolve_knowledge_base()` is the
 one place this choice is made, shared by both `load_knowledge_base_tools`
 (above) and `builder.py::_all_knowledge_base_tools` (the wizard's
 pre-Specification "every standalone KB" catalog), so a workflow build and
 the wizard's KB catalog always agree on which content is live.
 
+The KB's *shape* — which subclass to build, and which embedding model embeds
+the query — comes from the serving `IngestionJob`'s own `kb_type`/
+`embedding_model` columns, not from the `knowledge_bases` row's `config`:
+`config` advances to the new spec the moment a re-upload is dispatched,
+while the live content stays the previous completed generation until the new
+job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
+`rerank_model`/`candidate_k`, `query_expansion_model`/
+`query_expansion_count`) still come from `config` — they apply uniformly
+whichever generation is live.
+
 Deleting a knowledge base cascades to delete its `IngestionJob`/
 `KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`).
 Older completed ingestion generations are pruned automatically (keeping the
-current one plus one grace-window generation) once a new job completes.
+current one plus one grace-window generation) once a new job completes. A
+`failed` job's on-disk version directory is reclaimed the same way — every
+failed job except the most recent one loses its directory (its rows stay, as
+the customer-visible error record), so repeatedly retrying an upload that
+can't be parsed doesn't accumulate storage.
 
 See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.

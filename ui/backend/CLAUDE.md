@@ -732,6 +732,17 @@ run-execution executor) — then return immediately with `{"name", "job_id",
 "status": "queued"}`. The actual parse → chunk → (embed, for `vector`/
 `hybrid`) work happens on that worker thread, opening its own `Session` on
 the passed-in `engine` (a `Session` isn't safe to share across threads).
+Every `KnowledgeDocument`/`KnowledgeChunk` is buffered in plain Python
+through the parse loop AND the embedding call, then written in **one short
+transaction** at the end — flushing per file would take SQLite's RESERVED
+write lock on the first file and hold it through everything after, blocking
+every other writer in the process (runs, trace events, usage records, share
+messages) for the whole duration of a large upload. The `_executor.submit`
+call sits *after* that commit and outside the handler that rmtree's the
+staged version directory: the rows are durable by then, so cleaning up the
+files on a submit failure would strand a permanently `queued` job pointing
+at a deleted directory — the job is resolved `failed` (and the caller gets a
+503) instead.
 
 **Atomicity model: the `IngestionJob.status` flip is the swap, not a
 CURRENT-pointer file.** Unlike the legacy file-based upload path (which
@@ -740,15 +751,26 @@ a half-written version), the DB-backed path writes nothing analogous —
 retrieval simply resolves a KB's most recent `IngestionJob` with
 `status="completed"` (`knowledge_bases.py::resolve_knowledge_base`), and a
 `queued`/`running`/`failed` job's rows are invisible to retrieval by
-construction (nothing queries them). A successful job also invalidates the
+construction (nothing queries them). Which KB subclass that resolved job is
+rebuilt as, and which model embeds a query against it, come from the **job
+row's** own `kb_type`/`embedding_model` — not the `KnowledgeBaseRecord`'s
+`config`, which is already the *next* generation's spec during the whole
+ingestion window (and permanently, if the new job fails); `config` still
+supplies `top_k`/`rerank_model`/`candidate_k`/`query_expansion_*`, which
+apply uniformly to whichever generation is live. A successful job also invalidates the
 workflow cache (`_invalidate_workflow_cache()`, called at job completion,
 not at upload-dispatch time — that's the point the KB's live content
 actually changes) and best-effort prunes older completed generations,
 keeping the current one plus one grace-window generation, mirroring the
 legacy path's "prior version kept only until the new one is durable"
-precedent. Both the cache invalidation and the pruning are isolated in their
-own `try/except`s so a failure in either can never retroactively mark an
-already-committed successful ingestion as failed.
+precedent. A parallel step (`_prune_failed_ingestion_versions`, which runs on
+the **failed** path too — the only cleanup that does, since a customer
+retrying an unparseable upload never produces a completed job) reclaims every
+failed job's on-disk version directory except the most recent one's, kept as
+a diagnostic copy; failed jobs' *rows* are always kept, as the
+customer-visible error record. Cache invalidation and both pruning steps are
+isolated in their own `try/except`s so a failure in any of them can never
+retroactively mark an already-committed successful ingestion as failed.
 
 **Per-document partial-failure model.** One bad file (parse error, or zero
 chunks produced) doesn't fail the whole job — it's recorded as a `failed`
@@ -756,9 +778,13 @@ chunks produced) doesn't fail the whole job — it's recorded as a `failed`
 processing the rest. The job itself only ends `failed` if every document
 failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
 itself raises — in which case the job's already-flushed-but-uncommitted
-document/chunk inserts are rolled back too (a vector/hybrid KB with no
-embeddings can't serve queries, so a total embedding failure must leave no
-partial rows behind). Any unexpected exception on the worker thread is
+document/chunk objects are discarded before anything is written (a
+vector/hybrid KB with no embeddings can't serve queries, so a total
+embedding failure must leave no partial rows behind). A document's error
+text is scrubbed of the server's absolute upload path before it's stored
+(`ingestion._scrubbed`) — third-party parsers embed the path they were
+handed, and `job_status_payload` returns that text verbatim to a
+self-service org member. Any unexpected exception on the worker thread is
 caught and recorded on the job row as a generic failure — the job never
 raises uncaught, mirroring `runtime.py::run_in_background`'s shape.
 

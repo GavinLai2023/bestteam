@@ -149,7 +149,10 @@ class VectorKnowledgeBase(KnowledgeBase):
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
-        self._chunks = chunks
+        # Defensive copy, matching LocalFolderKnowledgeBase._init_from_chunks:
+        # a caller mutating the list it handed in must not reshape this KB's
+        # index behind its (already-computed) vector matrix.
+        self._chunks = list(chunks)
 
     def _set_vectors(self, name: str, vectors: List[List[float]]) -> None:
         import numpy as np
