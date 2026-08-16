@@ -1,8 +1,8 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
-  KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry,
-  OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary, UsageRecord,
-  WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
+  IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
+  ModelCatalogEntry, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
 // `localhost`, NOT `127.0.0.1` -- do not "simplify" this back. The anonymous
@@ -351,12 +351,18 @@ export const api = {
   // is the "Standard"/"Enhanced" toggle -- only meaningful when
   // orgKnowledgeBaseCapabilities().smart_search_available is true.
   uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false, smartSearch = false) =>
-    uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
+    uploadFiles<{ name: string; job_id: number; status: string }>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
       files,
       { replace, smart_search: smartSearch },
     ),
   orgKnowledgeBaseCapabilities: () => request<KnowledgeBaseCapabilities>('/api/org/knowledge-bases/capabilities'),
+  // Ingestion now runs in the background -- DocumentsPage polls this after
+  // uploadOwnKnowledgeBaseFiles until status is 'completed'/'failed'.
+  orgKnowledgeBaseUploadJob: (name: string, jobId: number) =>
+    request<IngestionJobStatus>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/ingestion-jobs/${jobId}`,
+    ),
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),

@@ -7,10 +7,21 @@ import type { WizardOutletContext } from '../../lib/types'
 
 const STAGE_LABELS: Record<string, string> = {
   uploading: 'Uploading your documents…',
+  ingesting: 'Processing your documents…',
   generating: 'Putting your team together…',
 }
 
-type Stage = null | 'uploading' | 'generating'
+type Stage = null | 'uploading' | 'ingesting' | 'generating'
+
+// Uploading now just queues ingestion; poll the job until it's done before
+// moving on to spec generation.
+async function pollIngestionJob(slug: string, jobId: number): Promise<import('../../lib/types').IngestionJobStatus> {
+  for (;;) {
+    const job = await api.orgKnowledgeBaseUploadJob(slug, jobId)
+    if (job.status === 'completed' || job.status === 'failed') return job
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+}
 
 // Turns a free-text label into the identifier the backend stores the
 // knowledge base under and an agent later references by name -- letters,
@@ -80,8 +91,9 @@ export default function DocumentsPage() {
 
     if (useFiles) {
       setStage('uploading')
+      let uploadResult: { job_id: number }
       try {
-        await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled)
+        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled)
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
@@ -91,7 +103,7 @@ export default function DocumentsPage() {
             return
           }
           try {
-            await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled)
+            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled)
           } catch (e2) {
             setError((e2 as Error).message)
             setBusy(false)
@@ -104,6 +116,23 @@ export default function DocumentsPage() {
           setStage(null)
           return
         }
+      }
+
+      setStage('ingesting')
+      try {
+        const job = await pollIngestionJob(slug, uploadResult.job_id)
+        if (job.status === 'failed') {
+          const detail = job.errors[0]?.error
+          setError(detail ? `Processing failed: ${detail}` : 'Processing your documents failed.')
+          setBusy(false)
+          setStage(null)
+          return
+        }
+      } catch (e) {
+        setError((e as Error).message)
+        setBusy(false)
+        setStage(null)
+        return
       }
     }
 

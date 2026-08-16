@@ -230,6 +230,21 @@ export interface MemoryRecord {
 // accepts, not a form with known fields.
 export type ConfigItem = Record<string, unknown>
 
+// The wizard's DocumentsPage polls this after uploadOwnKnowledgeBaseFiles --
+// the upload endpoint now queues ingestion asynchronously and returns
+// immediately with a job id. `config` is only populated once `status ==
+// 'completed'`.
+export interface IngestionJobStatus {
+  job_id: number
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  file_count: number
+  documents_succeeded: number
+  documents_failed: number
+  chunk_count: number
+  errors: { filename: string; error: string }[]
+  config: ConfigItem | null
+}
+
 export interface ShareLink {
   id: number
   workflow_id: number

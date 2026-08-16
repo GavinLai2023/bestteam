@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import DocumentsPage from './DocumentsPage'
 import { api } from '../../lib/api'
@@ -10,6 +10,7 @@ vi.mock('../../lib/api', () => ({
     modelCatalog: vi.fn(),
     orgKnowledgeBaseCapabilities: vi.fn(),
     uploadOwnKnowledgeBaseFiles: vi.fn(),
+    orgKnowledgeBaseUploadJob: vi.fn(),
     submitSpecification: vi.fn(),
     submitSolution: vi.fn(),
   },
@@ -59,6 +60,20 @@ describe('DocumentsPage', () => {
     mockContext = { session: freshSession(), setSession: vi.fn(), loading: false, sessionId: 's1' }
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'openai:gpt-4o-mini', display_name: 'GPT-4o mini' }])
     mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: false })
+    mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({
+      job_id: 1,
+      status: 'completed',
+      file_count: 1,
+      documents_succeeded: 1,
+      documents_failed: 0,
+      chunk_count: 1,
+      errors: [],
+      config: {},
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('proceeds straight to spec generation when the user skips upload', async () => {
@@ -76,7 +91,7 @@ describe('DocumentsPage', () => {
   })
 
   it('uploads the chosen files under the slugified label, then generates the spec with a KB hint', async () => {
-    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'product_policies', file_count: 1, chunk_count: 2, config: {} })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'product_policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
@@ -108,7 +123,7 @@ describe('DocumentsPage', () => {
 
   it('shows an error with a retry option when the upload fails, and does not generate a spec', async () => {
     mockedApi.uploadOwnKnowledgeBaseFiles.mockRejectedValueOnce(new Error('Total upload size exceeds the limit'))
-    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
@@ -130,7 +145,7 @@ describe('DocumentsPage', () => {
 
   it('refines the existing design instead of regenerating it when documents are added after a specification already exists', async () => {
     mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1' }
-    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
 
     renderPage()
@@ -181,7 +196,7 @@ describe('DocumentsPage', () => {
 
   it('defaults to Enhanced and uploads with smart search on when available', async () => {
     mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
-    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
@@ -201,7 +216,7 @@ describe('DocumentsPage', () => {
 
   it('uploads with smart search off when the customer switches to Standard', async () => {
     mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
-    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
@@ -218,5 +233,72 @@ describe('DocumentsPage', () => {
     await waitFor(() =>
       expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, false),
     )
+  })
+
+  it('polls the ingestion job to completion before generating the spec', async () => {
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.orgKnowledgeBaseUploadJob
+      .mockResolvedValueOnce({
+        job_id: 1, status: 'running', file_count: 1, documents_succeeded: 0, documents_failed: 0,
+        chunk_count: 0, errors: [], config: null,
+      })
+      .mockResolvedValueOnce({
+        job_id: 1, status: 'completed', file_count: 1, documents_succeeded: 1, documents_failed: 0,
+        chunk_count: 2, errors: [], config: {},
+      })
+    mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    // Fake timers only from here on -- the poll loop's 500ms delay between
+    // ingestion-job checks would otherwise hang this test on a real timer.
+    vi.useFakeTimers()
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Continue'))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mockedApi.orgKnowledgeBaseUploadJob).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(mockedApi.orgKnowledgeBaseUploadJob).toHaveBeenCalledTimes(2)
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mockedApi.submitSpecification).toHaveBeenCalled()
+  })
+
+  it('shows an error and does not generate a spec when the ingestion job fails', async () => {
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({
+      job_id: 1, status: 'failed', file_count: 1, documents_succeeded: 0, documents_failed: 1,
+      chunk_count: 0, errors: [{ filename: 'doc.txt', error: 'could not parse' }], config: null,
+    })
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+
+    await screen.findByText(/could not parse|processing failed/i)
+    expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
   })
 })
