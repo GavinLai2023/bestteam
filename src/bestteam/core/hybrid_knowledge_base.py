@@ -13,6 +13,7 @@ from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
 from .knowledge_base import (
     KnowledgeBase,
+    _Chunk,
     _load_document_chunks,
     _query_variants,
     _rerank_candidates,
@@ -23,6 +24,40 @@ from .knowledge_base import (
 from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
 from .text_tokenize import significant_terms, tokenize
 from .vector_knowledge_base import _chunk_cache_key, _load_embedding_cache, _save_embedding_cache
+
+
+def _require_numpy():
+    """Check that numpy is available and return the np module.
+
+    Raises ConfigurationError if the package is not installed.
+    This check must run early to avoid expensive operations (like file parsing)
+    before discovering a missing dependency.
+    """
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise ConfigurationError(
+            "Hybrid knowledge bases require the 'numpy' package. "
+            "Install it with: pip install 'bestteam[tools-rag-vector]'"
+        ) from exc
+    return np
+
+
+def _require_bm25():
+    """Check that rank_bm25 is available and return the BM25Okapi class.
+
+    Raises ConfigurationError if the package is not installed.
+    This check must run early to avoid expensive operations (like file parsing)
+    before discovering a missing dependency.
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError as exc:
+        raise ConfigurationError(
+            "Hybrid knowledge bases require the 'rank-bm25' package. "
+            "Install it with: pip install 'bestteam[tools-rag]'"
+        ) from exc
+    return BM25Okapi
 
 
 class HybridKnowledgeBase(KnowledgeBase):
@@ -57,25 +92,62 @@ class HybridKnowledgeBase(KnowledgeBase):
         # process and numpy is unavailable, `import rank_bm25` fails too --
         # checking numpy first ensures a numpy-only failure is reported as
         # "numpy", not misattributed to "rank-bm25".
-        try:
-            import numpy as np
-        except ImportError as exc:
-            raise ConfigurationError(
-                "Hybrid knowledge bases require the 'numpy' package. "
-                "Install it with: pip install 'bestteam[tools-rag-vector]'"
-            ) from exc
-        try:
-            from rank_bm25 import BM25Okapi
-        except ImportError as exc:
-            raise ConfigurationError(
-                "Hybrid knowledge bases require the 'rank-bm25' package. "
-                "Install it with: pip install 'bestteam[tools-rag]'"
-            ) from exc
-
+        _require_numpy()
+        _require_bm25()
         _validate_chunk_params(name, chunk_size, chunk_overlap)
+        self.path = Path(path)
+        chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
+        if not chunks:
+            raise ConfigurationError(
+                f"Knowledge base '{name}' has no readable documents in {self.path}"
+            )
+        self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+                           query_expansion_model, query_expansion_count)
+        self._embeddings = resolve_embedding_model(embedding_model)
+        vectors = self._embed_chunks(embedding_model, cache_path)
+        self._set_vectors(name, vectors)
+
+    @classmethod
+    def from_chunks(
+        cls,
+        name: str,
+        chunks: List[_Chunk],
+        vectors: List[List[float]],
+        embedding_model: Any,
+        top_k: int = 5,
+        score_threshold: Optional[float] = None,
+        rerank_model: Any = None,
+        candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
+    ) -> "HybridKnowledgeBase":
+        """Build directly from pre-parsed chunks and pre-computed vectors --
+        see VectorKnowledgeBase.from_chunks for the embedding_model
+        rationale (query-time embedding still needs a live model). Used by
+        the backend's DB-backed ingestion path."""
+        self = cls.__new__(cls)
+        self.path = None
+        if not chunks:
+            raise ConfigurationError(f"Knowledge base '{name}' has no readable documents")
+        self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+                           query_expansion_model, query_expansion_count)
+        self._embeddings = resolve_embedding_model(embedding_model)
+        self._set_vectors(name, vectors)
+        return self
+
+    def _init_common(
+        self, name, chunks, top_k, score_threshold, rerank_model, candidate_k,
+        query_expansion_model, query_expansion_count,
+    ) -> None:
+        # numpy is checked before rank_bm25: rank_bm25 imports numpy
+        # internally, so if rank_bm25 hasn't been imported yet in this
+        # process and numpy is unavailable, `import rank_bm25` fails too --
+        # checking numpy first ensures a numpy-only failure is reported as
+        # "numpy", not misattributed to "rank-bm25".
+        _require_numpy()
+        BM25Okapi = _require_bm25()
 
         self.name = name
-        self.path = Path(path)
         self.default_top_k = top_k
         self.score_threshold = score_threshold
         self.query_expansion_model = query_expansion_model
@@ -88,18 +160,14 @@ class HybridKnowledgeBase(KnowledgeBase):
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
 
-        self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
-        if not self._chunks:
-            raise ConfigurationError(
-                f"Knowledge base '{name}' has no readable documents in {self.path}"
-            )
-
+        self._chunks = chunks
         self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
 
-        self._embeddings = resolve_embedding_model(embedding_model)
-        vectors = self._embed_chunks(embedding_model, cache_path)
+    def _set_vectors(self, name: str, vectors: List[List[float]]) -> None:
+        import numpy as np
+
         if not vectors or len(vectors) != len(self._chunks):
             raise ConfigurationError(
                 f"Knowledge base '{name}': embedding model returned "
