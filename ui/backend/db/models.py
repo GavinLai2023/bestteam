@@ -157,6 +157,16 @@ class IngestionJob(Base):
     # (see ui/backend/knowledge_bases.py) -- traceable job <-> directory
     # correspondence.
     version: Mapped[str]
+    # The KB shape this job's chunks were actually ingested under. Retrieval
+    # reads these -- NOT the KnowledgeBaseRecord's `config` -- to decide which
+    # KnowledgeBase subclass to rebuild and with which query-time embedding
+    # model: `config` is advanced to the NEW spec the moment an upload is
+    # dispatched, while the live document set stays the previous completed
+    # job's chunks until the new job finishes (and forever, if it fails). Only
+    # the job knows whether its own chunks carry embeddings, and from which
+    # model.
+    kb_type: Mapped[str] = mapped_column(default="local_folder")
+    embedding_model: Mapped[Optional[str]] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(default="queued")
     file_count: Mapped[int] = mapped_column(default=0)
     documents_succeeded: Mapped[int] = mapped_column(default=0)

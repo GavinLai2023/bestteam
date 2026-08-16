@@ -95,7 +95,14 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   the `status="completed"` flip **is** the atomic swap for this path, unlike
   the legacy file-based upload's `CURRENT`-pointer-file swap. `version`
   matches the on-disk version-directory name the uploaded files were staged
-  into, for traceable job↔directory correspondence. `file_count`/
+  into, for traceable job↔directory correspondence. `kb_type`/
+  `embedding_model` record the shape this job's chunks were actually ingested
+  under — the read path resolves the KB's subclass and query-time embedding
+  model from **these**, never from `knowledge_bases.config`, which advances to
+  the new spec at upload-dispatch time while the previous generation is still
+  the live one (a re-upload that changes type would otherwise `json.loads`
+  a NULL `embedding_json`, and one that changes only the embedding model would
+  silently query a mismatched vector space). `file_count`/
   `documents_succeeded`/`documents_failed` and a capped `error` summarize the
   outcome; indexed on `(kb_id, status, completed_at)` for the "most recent
   completed job" resolution query. See `ui/backend/CLAUDE.md`.

@@ -404,6 +404,96 @@ def test_ingestion_job_status_404_for_another_orgs_job(client):
     assert resp.status_code == 404
 
 
+def test_dispatch_failure_resolves_the_job_instead_of_stranding_it_queued(client, monkeypatch):
+    """`_executor.submit` runs after the commit, outside the handler that
+    rmtree's the staged version directory: the job/KB rows are already
+    durable by then, so wiping the files would leave a permanently `queued`
+    job pointing at a deleted directory (and a client polling it forever).
+    A submit failure resolves the job to `failed` instead."""
+    from ui.backend import ingestion as backend_ingestion
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("executor is shut down")
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", _boom)
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 503
+
+    with open_test_db() as db:
+        job = db.query(IngestionJob).one()
+        assert job.status == "failed"
+        assert job.error
+        assert job.completed_at is not None
+
+
+def test_replace_keeps_previous_generation_live_until_the_new_job_completes(client, tmp_path, monkeypatch):
+    """Spec's Testing section: "the previous version's chunks stay queryable
+    until the new job completes", and "a queued/running/failed job is
+    invisible to queries".
+
+    Re-uploading also *changes the KB's type* here (Standard -> Enhanced),
+    which is where this used to break: `upload_knowledge_base` advances
+    `KnowledgeBaseRecord.config` to `hybrid` at dispatch time, while the
+    live content is still the first job's `local_folder` chunks (whose
+    `embedding_json` is NULL). Reading the type from `config` sent the read
+    path down the vector branch and raised a raw `TypeError` from
+    `json.loads(None)` -- transient during any re-upload, and permanent if
+    the new job then failed. The shape now comes from the serving job's own
+    `kb_type`/`embedding_model`."""
+    from ui.backend import ingestion as backend_ingestion
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+
+    # Hold the second job at "queued" by intercepting the dispatch, so the
+    # window this test is about stays open for as long as we need it.
+    submitted = []
+    monkeypatch.setattr(
+        backend_ingestion._executor, "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true", "smart_search": "true"},
+        files=_files(name="v2.txt", content=b"The refund policy allows returns within 90 days."),
+    )
+    assert resp.status_code == 200
+    new_job_id = resp.json()["job_id"]
+    assert len(submitted) == 1
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one()
+        assert record.config["type"] == "hybrid"  # config has already advanced
+        assert db.get(IngestionJob, new_job_id).status == "queued"
+
+        # ...but the KB still serves the first (local_folder) generation.
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        answer = tools["policies"]("refund policy")
+        assert "30 days" in answer
+        assert "90 days" not in answer
+
+    # Let the queued job actually run, then the new generation takes over.
+    args, kwargs = submitted[0]
+    args[0](*args[1:], **kwargs)
+    assert _wait_for_job_status(new_job_id) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        answer = tools["policies"]("refund policy")
+        assert "90 days" in answer
+        assert "30 days" not in answer
+
+
 def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_path, monkeypatch):
     """Simulates a pre-existing KB from before this feature: a
     KnowledgeBaseRecord whose config points at a real on-disk folder, with

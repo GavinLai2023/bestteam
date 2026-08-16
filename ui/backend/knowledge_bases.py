@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import threading
@@ -44,9 +43,14 @@ from .deploy_validation import find_kb_tool_collisions
 
 _KB_CACHE_DIRNAME = "_kb_cache"
 
-# Uploaded KBs are stored as versioned subdirectories with an atomically-swapped
-# `CURRENT` pointer file naming the active version, so a replacement never leaves
-# the KB directory without a live version for a concurrent reader (CR-008).
+# Legacy only. A KB uploaded before the async-ingestion feature was stored as
+# versioned subdirectories with an atomically-swapped `CURRENT` pointer file
+# naming the active version, so a replacement never left the KB directory
+# without a live version for a concurrent reader (CR-008). Nothing writes this
+# file any more -- an upload-managed KB's live version is now its most recent
+# `completed` IngestionJob (see ui/backend/ingestion.py) -- but
+# `resolve_kb_upload_path` still *reads* it, so those older, never-re-uploaded
+# KBs keep resolving their active version on the legacy file-based read path.
 _KB_CURRENT_POINTER = "CURRENT"
 
 # Files uploaded via a knowledge-base upload endpoint (admin `/api/config/...`
@@ -78,39 +82,6 @@ def _kb_upload_lock(name: str) -> threading.RLock:
             lock = threading.RLock()
             _kb_upload_locks[name] = lock
         return lock
-
-
-def _read_pointer(pointer: Path) -> Optional[str]:
-    try:
-        return pointer.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-
-
-def _write_pointer(pointer: Path, version: str) -> None:
-    """Atomically point CURRENT at `version` (os.replace of a file is atomic on
-    Windows + POSIX), so a concurrent reader always sees a complete version. The
-    temp file is uniquely named so a leftover from a crashed write can't collide
-    with a later one."""
-    tmp = pointer.with_name(f"{pointer.name}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(version, encoding="utf-8")
-    os.replace(tmp, pointer)
-
-
-def _cleanup_kb_versions(kb_root: Path, keep_versions: set) -> None:
-    """Remove every version dir / stray file in `kb_root` except CURRENT and the
-    kept versions. The immediately-previous version is kept as a grace window so
-    a reader that just resolved to it still finds it (CR-008)."""
-    for child in kb_root.iterdir():
-        if child.name == _KB_CURRENT_POINTER or child.name in keep_versions:
-            continue
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            try:
-                child.unlink()
-            except OSError:
-                pass
 
 
 def _reject_builtin_kb_name(name: str) -> None:
@@ -287,13 +258,36 @@ def upload_knowledge_base(
                 kb_id=item.id,
                 org_id=org_id,
                 version=version,
+                # The shape this job's chunks will actually be ingested
+                # under. `item.config` above has already advanced to the new
+                # spec, but the KB's live content stays the *previous*
+                # completed job's chunks until this one finishes -- so the
+                # read path resolves the shape from the serving job, not from
+                # the record (see `_build_knowledge_base_from_job`).
+                kb_type=kb_type,
+                embedding_model=spec.embedding_model,
                 status="queued",
                 file_count=len(contents),
                 created_by=created_by,
             )
             db.add(job)
             db.commit()
+        except Exception:
+            # No CURRENT pointer is written for the DB-backed path (nothing
+            # reads it -- retrieval resolves the live version via the
+            # ingestion job's own status), so on a pre-dispatch failure the
+            # only cleanup needed is the just-written version directory.
+            db.rollback()
+            shutil.rmtree(version_dir, ignore_errors=True)
+            raise
 
+        # Dispatch strictly AFTER the commit and outside the handler above:
+        # the job and record rows are durable by now, so rmtree-ing the
+        # staged files on a submit failure would strand a permanently
+        # `queued` job pointing at a deleted directory. Resolve the job to
+        # `failed` instead, so the customer's poll terminates with a real
+        # error rather than spinning (F6).
+        try:
             ingestion._executor.submit(
                 ingestion.run_ingestion_job,
                 job.id,
@@ -303,19 +297,20 @@ def upload_knowledge_base(
                 kb_type=kb_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
-                embedding_model=embedding_model,
+                embedding_model=spec.embedding_model,
                 engine=db.get_bind(),
             )
+        except Exception as exc:  # noqa: BLE001
+            job.status = "failed"
+            job.error = "Could not start processing these documents. Please try uploading again."
+            job.completed_at = ingestion._now()
+            db.commit()
+            raise HTTPException(
+                status_code=503,
+                detail="Could not start processing these documents. Please try uploading again.",
+            ) from exc
 
-            return {"name": item_name, "job_id": job.id, "status": "queued"}
-        except Exception:
-            # No CURRENT pointer is written for the DB-backed path (nothing
-            # reads it -- retrieval resolves the live version via the
-            # ingestion job's own status), so on a pre-dispatch failure the
-            # only cleanup needed is the just-written version directory.
-            db.rollback()
-            shutil.rmtree(version_dir, ignore_errors=True)
-            raise
+        return {"name": item_name, "job_id": job.id, "status": "queued"}
 
 
 def resolve_kb_upload_path(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -445,10 +440,14 @@ def load_knowledge_base_tools(
     """Return a name -> tool mapping for only the standalone knowledge bases
     `raw`'s agents actually reference by name in their `tools:` lists.
 
-    Building a knowledge base means re-reading and re-chunking every file
-    (and, for type: vector, calling an embedding model) -- this only pays
-    that cost for knowledge bases the workflow being loaded actually uses,
-    not every standalone knowledge base in the database.
+    Building a knowledge base costs real work either way: an upload-managed
+    KB with a completed ingestion job is rebuilt from its persisted
+    Document/Chunk rows (`resolve_knowledge_base`), and one without a job --
+    a manual-path KB, or an upload predating this feature -- falls back to
+    re-reading and re-chunking every file from disk (and, for type: vector,
+    calling an embedding model). This only pays either cost for knowledge
+    bases the workflow being loaded actually uses, not every standalone
+    knowledge base in the database.
 
     Name resolution is org-scoped: only `org_id`'s knowledge bases resolve
     (KBs have no platform tier), so one org can never reference another
@@ -514,7 +513,20 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
     """Build the matching KnowledgeBase subclass from a completed job's
     Document/Chunk rows -- the DB-backed read path (see
     docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md).
-    Never reads from disk."""
+    Never reads from disk.
+
+    Every *shape* decision (which subclass, whether the rows carry vectors,
+    which model embeds the query) comes from the **job**, not from
+    `record.config`: `upload_knowledge_base` advances `config` to the new
+    spec the moment an upload is dispatched, while this job -- the newest
+    *completed* one -- may still be a previous generation ingested under a
+    different type or embedding model. That window is a normal re-upload's
+    ingestion time, and permanent if the new job fails. Reading `config`'s
+    type here meant `json.loads(None)` on local_folder chunks whenever the
+    new spec said vector/hybrid, and silently mismatched vector spaces
+    whenever only `embedding_model` changed. `config` remains the source for
+    the retrieval knobs below, which apply uniformly to whichever generation
+    is live."""
     rows = (
         db.query(KnowledgeChunk, KnowledgeDocument.filename)
         .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
@@ -525,7 +537,7 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
     chunks = [_Chunk(source=filename, text=chunk.text) for chunk, filename in rows]
 
     config = record.config
-    kb_type = config.get("type", "local_folder")
+    kb_type = job.kb_type or "local_folder"
     common_kwargs: Dict[str, Any] = {
         "top_k": config.get("top_k", 5),
         "rerank_model": config.get("rerank_model"),
@@ -538,7 +550,7 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
         return LocalFolderKnowledgeBase.from_chunks(record.name, chunks, **common_kwargs)
 
     vectors = [json.loads(chunk.embedding_json) for chunk, _filename in rows]
-    embedding_model = config.get("embedding_model")
+    embedding_model = job.embedding_model
     vector_kwargs = {**common_kwargs, "score_threshold": config.get("score_threshold")}
     if kb_type == "vector":
         return VectorKnowledgeBase.from_chunks(record.name, chunks, vectors, embedding_model, **vector_kwargs)

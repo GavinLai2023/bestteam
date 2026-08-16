@@ -32,6 +32,14 @@ def upgrade() -> None:
             sa.Column("kb_id", sa.Integer(), sa.ForeignKey("knowledge_bases.id"), nullable=False),
             sa.Column("org_id", sa.Integer(), sa.ForeignKey("organizations.id"), nullable=True),
             sa.Column("version", sa.String(), nullable=False),
+            # The KB shape this job's chunks were ingested under -- retrieval
+            # reads these instead of knowledge_bases.config, which is already
+            # advanced to the new spec while the previous generation is still
+            # the live one. See ui/backend/db/models.py::IngestionJob.
+            sa.Column(
+                "kb_type", sa.String(), nullable=False, server_default="local_folder",
+            ),
+            sa.Column("embedding_model", sa.String(), nullable=True),
             sa.Column("status", sa.String(), nullable=False, server_default="queued"),
             sa.Column("file_count", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("documents_succeeded", sa.Integer(), nullable=False, server_default="0"),
@@ -49,6 +57,21 @@ def upgrade() -> None:
             "ix_knowledge_ingestion_jobs_kb_id_status_completed_at",
             "knowledge_ingestion_jobs", ["kb_id", "status", "completed_at"],
         )
+    else:
+        # kb_type/embedding_model were added to this same (never-released)
+        # revision after it had already created the table on some developer
+        # databases -- add them if that's the shape we find.
+        columns = {c["name"] for c in sa.inspect(bind).get_columns("knowledge_ingestion_jobs")}
+        if "kb_type" not in columns:
+            op.add_column(
+                "knowledge_ingestion_jobs",
+                sa.Column("kb_type", sa.String(), nullable=False, server_default="local_folder"),
+            )
+        if "embedding_model" not in columns:
+            op.add_column(
+                "knowledge_ingestion_jobs",
+                sa.Column("embedding_model", sa.String(), nullable=True),
+            )
 
     if "knowledge_documents" not in tables:
         op.create_table(
