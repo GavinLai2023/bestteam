@@ -121,12 +121,28 @@ implemented** — don't assume they exist:
   `uvicorn`/`vite` dev-server subprocesses. It needs ports 8000 and 5173
   free; it now fails loudly (naming the conflicting port) rather than
   silently attaching to a developer's own running dev stack if they're not.
-- CI is split into 6 jobs: 4 fast PR-gate jobs
-  (`backend-unit-integration`, `backend-optional-deps`, `frontend`,
-  `e2e-smoke`) run on every PR/push; 2 full-regression jobs
-  (`backend-full`, `e2e-full`) are gated to `main` only, and are also
-  manually dispatchable (`workflow_dispatch`) for a pre-merge run from a
-  feature branch.
+- **Password hashing is deliberately cheap in-process.** `tests/conftest.py`
+  lowers `ui.backend.auth._PBKDF2_ITERATIONS` to 1,000 for the test process:
+  at the production 260,000 it was 543 of the suite's 789 seconds (69%).
+  Production code is untouched — there is no env var or config key, so the
+  real iteration count cannot be misconfigured in a deployment, and
+  `test_auth.py::test_production_pbkdf2_iterations_are_unchanged` reads the
+  literal out of `auth.py`'s source so a weakened default still fails.
+  `tests/e2e/` drives a real uvicorn subprocess that never imports conftest,
+  so that tier still exercises genuine 260k hashing.
+- **`-n auto` for a fast local run** (`pytest-xdist`, in the `dev` extra):
+  ~2m45s vs ~4m serial. Not in `addopts` on purpose — it breaks `-x`,
+  `--pdb` and readable tracebacks, so plain `pytest` stays serial and
+  debuggable. Never use it on `tests/e2e/` (fixed ports 8000/5173).
+- CI is 6 jobs plus a `changes` job that path-filters them, so a docs-only
+  commit runs nothing: 4 PR-gate jobs (`backend-unit-integration` — under
+  `-n auto`, `backend-optional-deps`, `frontend`, `e2e-smoke`) on every
+  PR/push; 2 gated to `main` (`backend-full`, `e2e-full`), also manually
+  dispatchable (`workflow_dispatch`) for a pre-merge run from a feature
+  branch. `backend-full` runs **serially and in one process on purpose** —
+  with the PR gate distributed and out of order, it is what still catches
+  ordering and cross-test isolation bugs. The path filters are allowlists;
+  adding a new top-level directory means adding it there too.
 - `fake-architect:` is a deterministic drop-in model for E2E coverage of
   the Team Builder wizard's AI-generation steps, and is deliberately never
   present in `DEFAULT_MODEL_CATALOG`.

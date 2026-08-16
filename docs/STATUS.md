@@ -944,12 +944,77 @@
   `docs/KNOWLEDGE_BASES.md`, `src/bestteam/core/CLAUDE.md`,
   `ui/backend/CLAUDE.md`, `ui/backend/db/CLAUDE.md`.
 
+- Test architecture remediation (branch `fix/test-architecture-remediation`;
+  spec `docs/superpowers/specs/2026-08-17-test-architecture-remediation-design.md`).
+  Started from "the tests feel slow" and found that the felt slowness was
+  barely about tiering at all. **The backend suite went from 13m09s to 3m14s
+  serial and 2m05s under `-n auto`, and CI went from red on `main` for most of
+  a month to green.** Nothing in `ui/`, `src/` or `alembic/` changed — the
+  entire diff is tests, docs and CI config.
+  Three findings, in order of what they cost us:
+  (1) **69% of the suite was PBKDF2.** `auth.py` hashes at the production
+  260,000 iterations (~0.76s each) and function-scoped fixtures register and
+  log in several users per test — 543 of 789 seconds. `tests/conftest.py` now
+  lowers the module attribute for the test process only; deliberately NOT an
+  env var or config key, which would make a security parameter misconfigurable
+  in production forever. `tests/e2e/` drives a real uvicorn subprocess that
+  never imports conftest, so that tier still exercises genuine 260k hashing,
+  and `test_auth.py::test_production_pbkdf2_iterations_are_unchanged` reads the
+  literal out of `auth.py`'s source so a weakened shipped default still fails.
+  (2) **`make_engine(":memory:")` gives every Session in the process one shared
+  transaction**, because an in-memory SQLite engine must use a `StaticPool`. A
+  worker thread's `Session.close()` issues a `ROLLBACK` that discards a
+  request's flushed-but-uncommitted writes; the request's `commit()` then
+  commits nothing and the endpoint answers 200/204 having written nothing. The
+  loss is silent, so it surfaced as unrelated assertions failing intermittently
+  much later — this one defect explains every flaky test we had. Twelve
+  concurrency-exercising files moved to a shared
+  `tests/helpers.py::make_concurrent_safe_engine(tmp_path)` (file-backed,
+  `PRAGMA synchronous=OFF`), which matches production's `QueuePool` semantics.
+  `test_email_trigger.py` deliberately stays on `:memory:` — it simulates a
+  concurrent writer by committing through a second Session while the first
+  holds an uncommitted write, which is a real deadlock on a file database.
+  (3) **Ten flaky tests fixed at their actual race**, no sleeps, retries, or
+  loosened assertions: two in `test_builder_api`, three in `test_share_chat_api`
+  (fixing the engine made the harness genuinely parallel, which exposed two
+  more), two in `test_crud_api`, one in `test_org_knowledge_bases`,
+  `test_marker_completeness` (its `--collect-only` subprocess now stays off the
+  parent's `.pytest_cache`), and `tests/e2e/test_smoke.py` (`page.goto` waited
+  for a `load` the auth guard's redirect would never let arrive — fixed at all
+  three sites, not just the one that failed).
+  Also: `test_marker_completeness` ran two full collect-only subprocesses to
+  learn two numbers pytest already reports in one, making a single test 54s;
+  CI now path-filters every job so a docs-only commit runs nothing, the PR
+  backend gate runs under `-n auto`, and `backend-full` stays serial on purpose
+  as the job that still asserts the suite is order-independent.
+  Two product findings were escalated rather than fixed, both in Known issues
+  below: KB deletion has no interlock with an in-flight ingestion job, and
+  `_active_kb_dir`'s `max(st_mtime)` version resolution is theoretically
+  ambiguous on Windows.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
 
+- **Deleting a knowledge base has no interlock with an in-flight ingestion
+  job.** `crud.py`'s delete calls `delete_kb_ingestion_data` + `rmtree`, but
+  the ingestion worker thread keeps running and afterwards commits
+  `KnowledgeDocument`/`KnowledgeChunk` rows against a `kb_id` /
+  `ingestion_job_id` that no longer exist — orphan rows, silently, since FK
+  enforcement is off. On Windows the same race also leaks the upload directory
+  (`WinError 32`: `rmtree` against the worker's still-open read handle; the
+  route logs and continues by design). Found while fixing the flaky tests
+  (17 Aug 2026) and deliberately left alone there — it is a product
+  concurrency gap, not a test bug.
+- **`_active_kb_dir` (tests/test_crud_api.py) resolves the active KB version
+  by `max(st_mtime)`**, which is theoretically ambiguous: Windows file
+  timestamps come from a ~15.6 ms-granularity clock, so two version
+  directories written close together can tie and `max` then picks arbitrarily.
+  Never observed failing (uploads are separated by a full ingestion job) and
+  shared by five tests. `IngestionJob.version` records the directory name and
+  would make it exact.
 - **Vector knowledge base retrieval is single-stage** — no query
   rewriting/expansion or reranking, no external vector store, no DMS
   connectors. See `src/bestteam/core/CLAUDE.md`.

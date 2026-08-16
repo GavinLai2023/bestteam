@@ -131,6 +131,8 @@ race in the test itself or in a test fixture.
 | `test_share_chat_api::test_second_visitor_gets_an_isolated_session` | `InvalidRequestError: Could not refresh instance '<ShareSession>'` | CI `backend-full` |
 | `test_marker_completeness::test_every_item_has_a_ci_marker` | subprocess collection fails | local `-n auto` |
 | `tests/e2e/test_smoke.py::test_smoke_journey` | `Page.goto: Navigation ... interrupted by another navigation to "/login"` | CI `e2e-smoke` |
+| `test_crud_api::test_reupload_never_leaves_kb_without_a_live_version` | intermittent | local `-n auto` |
+| `test_org_knowledge_bases::test_ingestion_job_status_404_for_another_orgs_job` | intermittent | local `-n auto` |
 
 The e2e one is fully diagnosed. `test_smoke.py:229-230` reads:
 
@@ -148,12 +150,60 @@ in the same CI run that `e2e-smoke` failed it. The fix is to stop waiting for
 a `load` that will never arrive, and let the already-present
 `wait_for_url` be the real assertion.
 
-The four backend ones all involve background threads, in-flight sandbox runs,
-or shared lock snapshots, and need individual diagnosis rather than a common
-fix. They are treated as four independent debugging tasks; the rule for each
-is to find the actual race and close it, never to add a sleep, a retry, or a
-loosened assertion. If any turns out to be a genuine product bug rather than
-a test bug, that is a finding to escalate, not to paper over.
+Two more surfaced while verifying D4, and only under `-n auto` —
+`test_crud_api::test_reupload_never_leaves_kb_without_a_live_version` and
+`test_org_knowledge_bases::test_ingestion_job_status_404_for_another_orgs_job`
+— which is the clearest possible argument for running the gate in parallel:
+nothing else was going to find them before a customer did.
+
+### D3a. The common root cause: `make_engine(":memory:")` shares one transaction
+
+Diagnosis of the two `test_builder_api` failures found a single defect that
+explains the whole class, and it is in the harness, not the product.
+
+`make_engine(":memory:")` *has* to use a `StaticPool` — a second SQLite
+connection to `:memory:` would be a second, empty database. The consequence is
+that one DBAPI connection backs **every** `Session` in the process, so two
+concurrent Sessions do not merely share a database, they share a single
+transaction:
+
+```
+T1 (request A)                  T2 (request B / worker thread)
+--------------------------      -------------------------------------
+flush()  -> UPDATE/DELETE
+                                close() / pool check-in -> ROLLBACK
+                                  ... discards A's flushed statements
+commit() -> COMMIT (no-op)
+  -> endpoint answers 200/204 having written nothing
+```
+
+The write is lost **silently** — the endpoint still returns success — so it
+never fails where it happened. It surfaces as an unrelated assertion failing
+much later, intermittently, which is exactly the shape of all five flakes.
+`ui/backend/runtime.py:340` and `ui/backend/ingestion.py:95` both open a
+`Session(engine)` on a worker thread, so any test driving a run or an
+ingestion while making requests is exposed. Production is not: a file
+database's default `QueuePool` gives each Session its own connection and
+therefore its own transaction.
+
+D1 made this worse before it made it better — compressing request latency
+widened the overlap between request and worker phases.
+
+The fix is one shared helper, `tests/helpers.py::make_concurrent_safe_engine`,
+returning a file-backed engine under `tmp_path` with `PRAGMA synchronous=OFF`
+(durability buys nothing for a database that dies with the test; transaction
+visibility and locking, the entire point, are untouched). Every test file that
+can have two Sessions live at once migrates to it.
+
+This is deliberately applied to all thirteen concurrency-exercising files, not
+only the five with observed failures. The failure mode is silent, so "no
+observed flake" is not evidence of safety, and a file that is single-threaded
+today acquires the hazard the moment someone adds a run to it.
+
+The rule for any residual race is unchanged: find the actual window and close
+it, never add a sleep, a retry, or a loosened assertion. If one turns out to
+be a genuine product bug rather than a test bug, that is a finding to
+escalate, not to paper over.
 
 ### D4. Run the backend suite in parallel in CI
 
