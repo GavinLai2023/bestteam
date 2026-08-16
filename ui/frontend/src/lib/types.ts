@@ -241,7 +241,7 @@ export interface IngestionJobStatus {
   documents_succeeded: number
   documents_failed: number
   chunk_count: number
-  errors: { filename: string; error: string }[]
+  errors: { filename: string | null; error: string }[]
   config: ConfigItem | null
 }
 

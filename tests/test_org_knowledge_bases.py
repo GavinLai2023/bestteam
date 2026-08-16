@@ -125,7 +125,9 @@ def test_upload_rejects_invalid_name(client):
 
 
 def test_uploaded_kb_is_visible_to_spec_generation(client, tmp_path):
-    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
@@ -138,7 +140,9 @@ def test_uploaded_kb_is_visible_to_spec_generation(client, tmp_path):
 
 
 def test_reupload_existing_name_requires_confirmation(client):
-    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     # Same name again, no confirmation -- refused, not silently replaced.
     resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(name="other.txt"))
@@ -161,7 +165,9 @@ def test_reupload_existing_name_requires_confirmation(client):
 
 def test_self_service_kb_count_capped_per_org(client, monkeypatch):
     monkeypatch.setattr(backend_org_kb, "_MAX_SELF_SERVICE_KBS_PER_ORG", 1)
-    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     resp = client.post("/api/org/knowledge-bases/other_docs/upload", files=_files())
     assert resp.status_code == 403
@@ -171,6 +177,58 @@ def test_self_service_kb_count_capped_per_org(client, monkeypatch):
         "/api/org/knowledge-bases/policies/upload",
         data={"replace": "true"},
         files=_files(),
+    )
+    assert resp.status_code == 200
+
+
+def test_replace_upload_refused_while_a_previous_job_is_still_in_flight(client, monkeypatch):
+    """Without this guard, a member retrying a stalled upload can pile up
+    unbounded queued work on ingestion.py's fixed-size executor -- each
+    retry stages up to _MAX_TOTAL_SIZE_BYTES to disk and queues an embedding
+    call before anything would catch it (Codex review finding)."""
+    from ui.backend import ingestion as backend_ingestion
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    # Hold the next job at "queued" by intercepting dispatch, mirroring
+    # test_reupload_advances_config_but_serves_prior_generation_until_ready
+    # below.
+    submitted = []
+    monkeypatch.setattr(
+        backend_ingestion._executor, "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true"},
+        files=_files(name="v2.txt", content=b"Second generation content."),
+    )
+    assert resp.status_code == 200
+    in_flight_job_id = resp.json()["job_id"]
+
+    # A third upload while the second is still queued must be refused, not
+    # queue a third round of work on top of it.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true"},
+        files=_files(name="v3.txt", content=b"Third generation content."),
+    )
+    assert resp.status_code == 409
+    assert "still processing" in resp.json()["detail"]
+
+    # Let the held job actually run and reach a terminal state.
+    args, kwargs = submitted[0]
+    args[0](*args[1:], **kwargs)
+    assert _wait_for_job_status(in_flight_job_id) == "completed"
+
+    # Once it's terminal, a new replace upload is allowed again.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true"},
+        files=_files(name="v3.txt", content=b"Third generation content."),
     )
     assert resp.status_code == 200
 
@@ -300,9 +358,11 @@ def test_smart_search_off_by_default_stays_local_folder(client, monkeypatch):
 
 
 def test_cross_org_upload_isolation(client, tmp_path):
-    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files(
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(
         content=b"Org A's refund policy: 30 days.",
-    )).status_code == 200
+    ))
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     other = create_user_and_login(client, username="bob", org="org_b")
     bob = {"Authorization": f"Bearer {other}"}
@@ -312,6 +372,7 @@ def test_cross_org_upload_isolation(client, tmp_path):
         headers=bob,
     )
     assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     with open_test_db() as db:
         org_a_id = get_or_create_org(db, "default").id

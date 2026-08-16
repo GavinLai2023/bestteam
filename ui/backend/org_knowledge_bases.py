@@ -135,6 +135,30 @@ def upload_own_knowledge_base(
                     "Choose a different name, or confirm to replace its documents."
                 ),
             )
+        else:
+            # Refuse a `replace=true` upload while a previous one for this
+            # same KB is still queued/running. Without this, a member can
+            # repeatedly retry a large upload and pile up unbounded work on
+            # ingestion.py's fixed-size executor -- each request already
+            # staged up to _MAX_TOTAL_SIZE_BYTES to disk and queued an
+            # embedding call before this check would catch it otherwise
+            # (Codex review finding). Held inside the same per-KB lock as
+            # the existence/cap checks above, so a concurrent retry can't
+            # race past this the same way the first-upload race above was
+            # closed.
+            in_flight = (
+                db.query(IngestionJob)
+                .filter(IngestionJob.kb_id == existing.id, IngestionJob.status.in_(("queued", "running")))
+                .first()
+            )
+            if in_flight is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{item_name}' is still processing a previous upload. "
+                        "Wait for it to finish before uploading again."
+                    ),
+                )
         kb_type = "local_folder"
         embedding_model: Optional[str] = None
         rerank_model: Optional[str] = None

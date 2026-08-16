@@ -687,6 +687,86 @@ def test_upload_creates_queryable_local_folder_kb(client):
     assert get_resp.status_code == 200
 
 
+def test_resolve_knowledge_base_refuses_when_no_job_has_completed(client, tmp_path):
+    """A KB with an IngestionJob that isn't `completed` (still queued/running,
+    or every attempt has failed) must not fall back to scanning the raw
+    upload directory -- that directory recursively contains every version
+    subdirectory, including the currently-staging one, so the fallback would
+    serve un-vetted or unembedded content instead of treating the KB as not
+    yet servable (Codex review finding)."""
+    files = [("files", ("doc.txt", b"The refund policy allows returns within 30 days.", "text/plain"))]
+    resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    # Simulate a read landing mid-ingestion (or after a total failure) by
+    # forcing the only job back to a non-completed state.
+    with open_test_db() as db:
+        job = db.get(IngestionJob, job_id)
+        job.status = "running"
+        db.commit()
+
+    from bestteam.exceptions import ConfigurationError
+
+    from ui.backend.knowledge_bases import resolve_knowledge_base
+
+    with open_test_db() as db:
+        record = db.query(KnowledgeBaseRecord).filter_by(name="support_docs").one()
+        with pytest.raises(ConfigurationError):
+            resolve_knowledge_base(db, record, tmp_path)
+
+
+def test_resolve_knowledge_base_prefers_latest_submitted_job_over_latest_completed(client, tmp_path):
+    """Overlapping uploads for the same KB can finish out of submission
+    order. `resolve_knowledge_base` must pick the most recently *submitted*
+    completed job (highest id), not the one with the latest `completed_at`
+    -- ordering by `completed_at` could let an older, slower upload's job
+    "win" over a newer one that already completed (Codex review finding)."""
+    from datetime import datetime, timedelta, timezone
+
+    from ui.backend.db.models import KnowledgeChunk, KnowledgeDocument
+    from ui.backend.knowledge_bases import resolve_knowledge_base
+
+    with open_test_db() as db:
+        kb = KnowledgeBaseRecord(
+            name="racey_kb", org_id=1,
+            config={"type": "local_folder", "path": "unused", "top_k": 5},
+        )
+        db.add(kb)
+        db.commit()
+
+        base = datetime.now(timezone.utc)
+
+        def _completed_job(version, completed_at, text):
+            job = IngestionJob(
+                kb_id=kb.id, org_id=1, version=version, status="completed",
+                kb_type="local_folder", file_count=1, completed_at=completed_at,
+            )
+            db.add(job)
+            db.commit()
+            doc = KnowledgeDocument(
+                kb_id=kb.id, ingestion_job_id=job.id, filename="doc.txt",
+                content_hash="x", size_bytes=len(text), status="chunked",
+            )
+            db.add(doc)
+            db.flush()
+            db.add(KnowledgeChunk(kb_id=kb.id, document_id=doc.id, chunk_index=0, text=text))
+            db.commit()
+            return job
+
+        # job1 is submitted first (lowest id) but -- simulating an
+        # overlapping upload that took longer -- finishes LAST (latest
+        # completed_at).
+        _completed_job("v1", base + timedelta(seconds=100), "first generation content")
+        _completed_job("v2", base + timedelta(seconds=1), "second generation content")
+
+        resolved = resolve_knowledge_base(db, kb, tmp_path)
+        # Picks job2 (the more recently *submitted* generation), not job1
+        # (which merely has the latest completed_at).
+        assert "second generation" in resolved.query("content")
+
+
 def test_ingestion_job_status_endpoint(client):
     files = [("files", ("doc.txt", b"The refund policy allows returns within 30 days.", "text/plain"))]
     resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)

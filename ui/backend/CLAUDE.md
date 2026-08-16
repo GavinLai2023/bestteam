@@ -742,7 +742,14 @@ call sits *after* that commit and outside the handler that rmtree's the
 staged version directory: the rows are durable by then, so cleaning up the
 files on a submit failure would strand a permanently `queued` job pointing
 at a deleted directory — the job is resolved `failed` (and the caller gets a
-503) instead.
+503) instead. Self-service uploads (`org_knowledge_bases.py`) additionally
+refuse a `replace=true` upload while a `queued`/`running` job already exists
+for that KB, inside the same per-KB lock as the existence/cap checks: without
+it, a member retrying a stalled or slow upload could pile up unbounded work
+on the 4-worker executor, each retry having already staged up to
+`_MAX_TOTAL_SIZE_BYTES` to disk and queued an embedding call before anything
+else would catch it (Codex review finding). The trusted admin upload path
+(`crud.py`) has no such per-caller-count limit and doesn't need this guard.
 
 **Atomicity model: the `IngestionJob.status` flip is the swap, not a
 CURRENT-pointer file.** Unlike the legacy file-based upload path (which
@@ -751,7 +758,26 @@ a half-written version), the DB-backed path writes nothing analogous —
 retrieval simply resolves a KB's most recent `IngestionJob` with
 `status="completed"` (`knowledge_bases.py::resolve_knowledge_base`), and a
 `queued`/`running`/`failed` job's rows are invisible to retrieval by
-construction (nothing queries them). Which KB subclass that resolved job is
+construction (nothing queries them). "Most recent" is by **`id`, not
+`completed_at`**: overlapping uploads for the same KB (rapid `replace=true`
+retries, or two jobs racing on the executor) can finish out of submission
+order, and `id` — assigned inside the serialized `_kb_upload_lock` staging
+block — is the only field guaranteed monotonic with submission order; a
+`completed_at`-ordered query could let an older, slower upload's job "win"
+over a newer one that already completed (Codex review finding).
+`_prune_old_ingestion_versions` (below) orders the same way, for the same
+reason — it already matched `_prune_failed_ingestion_versions`'s `id`
+ordering, just not `resolve_knowledge_base`'s. A KB with `IngestionJob` rows
+but **no completed one yet** (still queued/running, or every attempt has
+failed) does NOT fall back to the legacy file-based construction either:
+`resolve_knowledge_base` only takes that fallback for a KB with **zero**
+`IngestionJob` rows ever (a true pre-feature legacy KB). Falling back
+whenever there's merely no completed job would scan
+`KnowledgeBaseRecord.config`'s `path` — the KB's upload root, which
+recursively contains every version subdirectory including the one currently
+staging — serving un-vetted, partial, or entirely un-embedded content
+instead of treating the KB as not yet servable; it raises `ConfigurationError`
+instead (Codex review finding). Which KB subclass that resolved job is
 rebuilt as, and which model embeds a query against it, come from the **job
 row's** own `kb_type`/`embedding_model` — not the `KnowledgeBaseRecord`'s
 `config`, which is already the *next* generation's spec during the whole
@@ -795,8 +821,16 @@ both): `GET /api/config/knowledge_bases/{name}/ingestion-jobs/{job_id}`
 an unknown KB or job. The response reports `status`, `file_count`,
 `documents_succeeded`/`documents_failed`, the live `chunk_count`, up to 10
 `{filename, error}` rows for failed documents, and — only once
-`status == "completed"` — the KB's `config`. See `docs/KNOWLEDGE_BASES.md`
-for the response shape and `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
+`status == "completed"` — the KB's `config`. A whole-job failure (the embed
+call raised, or the job died on the worker thread before any document was
+processed) sets `job.error` but writes no per-document `failed` rows, so
+`errors` falls back to a single `{filename: None, error: job.error}` entry
+in that case — otherwise a `failed` job with an empty `documents_failed`
+count returned `errors: []` and neither frontend had anything to show the
+customer beyond a bare "failed" status (Codex review finding; `job.error` is
+already scrubbed/capped at write time, so it's safe to return as-is). See
+`docs/KNOWLEDGE_BASES.md` for the response shape and
+`docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.
 
 Deleting a KB cascades to delete its `IngestionJob`/`KnowledgeDocument`/

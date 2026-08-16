@@ -272,7 +272,13 @@ def _prune_old_ingestion_versions(db: Session, kb_id: int, kb_root: Path) -> Non
     completed = (
         db.query(IngestionJob)
         .filter_by(kb_id=kb_id, status="completed")
-        .order_by(IngestionJob.completed_at.desc())
+        # `id`, not `completed_at`: see resolve_knowledge_base()'s matching
+        # comment in knowledge_bases.py -- completion order isn't guaranteed
+        # to match submission order, so ordering by `completed_at` here could
+        # prune the newest upload's rows instead of an older one's (Codex
+        # review finding). Matches _prune_failed_ingestion_versions below,
+        # which already orders by `id`.
+        .order_by(IngestionJob.id.desc())
         .all()
     )
     for old_job in completed[_KEEP_COMPLETED_GENERATIONS:]:
@@ -365,6 +371,15 @@ def job_status_payload(db: Session, job: IngestionJob) -> Dict[str, Any]:
         kb = db.get(KnowledgeBaseRecord, job.kb_id)
         if kb is not None:
             config = kb.config
+    errors = [{"filename": d.filename, "error": d.error} for d in failed_docs]
+    # A whole-job failure (the embed call raised, or every document failed
+    # to parse) sets `job.error` but writes no per-document `failed` rows,
+    # so `errors` above stays empty and a poller sees only a bare "failed"
+    # status with nothing to show the customer (Codex review finding).
+    # `job.error` is already scrubbed/capped at write time, so it's safe to
+    # return as-is.
+    if job.status == "failed" and job.error and not errors:
+        errors = [{"filename": None, "error": job.error}]
     return {
         "job_id": job.id,
         "status": job.status,
@@ -372,6 +387,6 @@ def job_status_payload(db: Session, job: IngestionJob) -> Dict[str, Any]:
         "documents_succeeded": job.documents_succeeded,
         "documents_failed": job.documents_failed,
         "chunk_count": chunk_count,
-        "errors": [{"filename": d.filename, "error": d.error} for d in failed_docs],
+        "errors": errors,
         "config": config,
     }

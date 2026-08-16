@@ -501,13 +501,33 @@ def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Pat
     job = (
         db.query(IngestionJob)
         .filter_by(kb_id=record.id, status="completed")
-        .order_by(IngestionJob.completed_at.desc())
+        # Order by `id`, not `completed_at`: overlapping uploads for the
+        # same KB (e.g. rapid `replace=true` retries) can finish out of
+        # submission order on the 4-worker executor. `id` is assigned inside
+        # the serialized `_kb_upload_lock` staging block, so it's monotonic
+        # with submission order even when completion isn't -- ordering by
+        # `completed_at` could let an older, slower upload's job "win" over
+        # a newer one that already completed (Codex review finding).
+        .order_by(IngestionJob.id.desc())
         .first()
     )
     if job is not None:
         return _build_knowledge_base_from_job(record, job, db)
-    # Pre-existing KB (predates this feature, never re-uploaded) -- fall back
-    # to the original file-based construction, unchanged.
+    # No completed job. Distinguish two cases: a true legacy KB (predates
+    # this feature, never had any IngestionJob row -- fall back to the
+    # original file-based construction) from an upload-managed KB whose
+    # ingestion is still queued/running, or has only ever failed. The latter
+    # must NOT take the legacy fallback: `record.config["path"]` is the KB's
+    # upload root, which recursively contains every version subdirectory
+    # (including the currently-staging one), so scanning it directly would
+    # serve un-vetted, possibly-partial, or entirely un-embedded content
+    # instead of treating the KB as not yet servable (Codex review finding).
+    has_any_job = db.query(IngestionJob.id).filter_by(kb_id=record.id).first() is not None
+    if has_any_job:
+        raise ConfigurationError(
+            f"Knowledge base '{record.name}' has no completed ingestion yet. "
+            "Wait for the current upload to finish processing and try again."
+        )
     config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
     ensure_contained_cache_path_for_source(config, source)
     return _build_knowledge_base(config, source)

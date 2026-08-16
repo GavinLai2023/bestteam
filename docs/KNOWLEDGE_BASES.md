@@ -339,6 +339,11 @@ takes `?org=`) or `GET /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}`
 }
 ```
 
+A whole-job failure (e.g. the embedding call itself raised, with no
+per-document failures) has no `KnowledgeDocument` rows to report, so
+`errors` instead holds a single `{"filename": null, "error": "..."}` entry
+carrying the job-level error.
+
 **Per-document partial failure**: one bad file (fails to parse, or produces
 zero chunks) doesn't fail the whole job — it's recorded as a `failed`
 `KnowledgeDocument` row (capped error text) and the job continues with the

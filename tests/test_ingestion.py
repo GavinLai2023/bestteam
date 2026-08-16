@@ -297,6 +297,63 @@ def test_failed_jobs_version_directories_are_pruned_except_the_most_recent(db, e
     assert db.query(IngestionJob).filter_by(kb_id=kb.id, status="failed").count() == 3
 
 
+def test_prune_old_ingestion_versions_orders_by_submission_not_completion(db, tmp_path):
+    # Overlapping uploads for the same KB can finish out of submission
+    # order. Pruning must key off `id` (assigned in submission order), not
+    # `completed_at`, or an older, slower job that finishes last could evict
+    # a newer job's rows instead of an actually-older one's (Codex review
+    # finding).
+    from datetime import datetime, timedelta, timezone
+
+    kb = _make_kb(db, name="racey_kb")
+    base = datetime.now(timezone.utc)
+
+    def _completed_job(version, completed_at):
+        job = IngestionJob(
+            kb_id=kb.id, org_id=1, version=version, status="completed",
+            file_count=1, completed_at=completed_at,
+        )
+        db.add(job)
+        db.commit()
+        (tmp_path / version).mkdir()
+        return job
+
+    # job1 is submitted first (lowest id) but finishes LAST (latest
+    # completed_at) -- e.g. a slow overlapping upload.
+    job1 = _completed_job("v1", base + timedelta(seconds=100))
+    job2 = _completed_job("v2", base + timedelta(seconds=1))
+    job3 = _completed_job("v3", base + timedelta(seconds=2))
+
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+
+    remaining = {j.id for j in db.query(IngestionJob).filter_by(kb_id=kb.id, status="completed").all()}
+    # Keeps the 2 most recently *submitted* generations (job2, job3), not the
+    # 2 with the latest completed_at (job1, job3) -- job1 was submitted
+    # first and must be the one pruned despite finishing last.
+    assert remaining == {job2.id, job3.id}
+    assert (tmp_path / "v2").is_dir()
+    assert (tmp_path / "v3").is_dir()
+    assert not (tmp_path / "v1").exists()
+    assert job1.id not in remaining
+
+
+def test_job_status_payload_surfaces_job_level_error_with_no_document_rows(db):
+    # A whole-job failure (the embed call raised, or every document failed
+    # to parse) sets `job.error` but writes no per-document `failed` rows,
+    # so a poller used to see a bare "failed" status with nothing to show
+    # the customer (Codex review finding).
+    kb = _make_kb(db, name="embed_fail_kb")
+    job = IngestionJob(
+        kb_id=kb.id, org_id=1, version="v1", status="failed",
+        file_count=1, error="The embedding model is unavailable.",
+    )
+    db.add(job)
+    db.commit()
+
+    payload = ingestion.job_status_payload(db, job)
+    assert payload["errors"] == [{"filename": None, "error": "The embedding model is unavailable."}]
+
+
 def test_document_error_does_not_leak_the_server_upload_path(db, engine, tmp_path, monkeypatch):
     # `job_status_payload` hands a document's error text straight back to a
     # self-service org member, and third-party parsers routinely embed the
