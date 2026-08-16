@@ -10,7 +10,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, make_concurrent_safe_engine
 from ui.backend import auth
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -125,8 +125,11 @@ def workflows_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(workflows_dir, monkeypatch):
-    engine = make_engine(":memory:")
+def client(workflows_dir, tmp_path, monkeypatch):
+    # The WS-stream tests dispatch a run and then write to the DB from the test
+    # thread while the run worker's own Session is still live -- see the
+    # helper's docstring. (workflows_dir is this same tmp_path.)
+    engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
