@@ -10,6 +10,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
 from ui.backend import ingestion
+from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 
@@ -261,3 +262,60 @@ def test_prune_failure_does_not_revert_completed_job_status(db, engine, tmp_path
     assert docs[0].status == "chunked"
     chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
     assert len(chunks) == 1
+
+
+def test_completed_job_invalidates_the_workflow_cache(db, engine, tmp_path):
+    # CR-005 recurring through the async path: a workflow using this KB may
+    # have been cached against its prior (or, on a first upload, not-yet-
+    # servable) document set. The upload-dispatch request commits the KB
+    # record's own `updated_at` (correctly busting the freshness key for the
+    # transition), but the KB's live content only actually changes here, when
+    # the job resolves "completed" -- so cache invalidation has to happen at
+    # THIS point, not (only) at dispatch time, or a cache rebuilt during the
+    # queued/running window keeps serving stale content forever after.
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds are allowed within 30 days.", encoding="utf-8")
+
+    backend_main._workflow_cache.clear()
+    backend_main._workflow_cache[(kb.org_id, "some_workflow")] = ("stale-workflow", "key")
+    generation_before = backend_main._workflow_cache_generation
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "completed"
+    assert backend_main._workflow_cache == {}
+    assert backend_main._workflow_cache_generation != generation_before
+
+
+def test_failed_job_does_not_invalidate_the_workflow_cache(db, engine, tmp_path):
+    # A failed job never changes what's servable (the prior completed
+    # generation, if any, is still the live one) -- no cache invalidation is
+    # needed or expected on this path.
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "bad.pdf").write_bytes(b"not a real pdf")
+
+    backend_main._workflow_cache.clear()
+    backend_main._workflow_cache[(kb.org_id, "some_workflow")] = ("still-fresh-workflow", "key")
+    generation_before = backend_main._workflow_cache_generation
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "failed"
+    assert backend_main._workflow_cache == {(kb.org_id, "some_workflow"): ("still-fresh-workflow", "key")}
+    assert backend_main._workflow_cache_generation == generation_before

@@ -140,12 +140,29 @@ def run_ingestion_job(
         db.commit()
 
         if job.status == "completed":
+            # A cached workflow may have been compiled against this KB's
+            # prior document set (or, for a first upload, may not know the
+            # KB is servable yet). This is the point the KB's live content
+            # actually changes -- earlier, at upload-dispatch time, it
+            # doesn't yet (CR-005: the freshness key alone doesn't catch a
+            # KB's underlying documents changing without its own row's
+            # `updated_at` changing). Imported lazily -- `knowledge_bases.py`
+            # imports this module, so a module-level import here would be
+            # circular; same workaround `_invalidate_workflow_cache()` itself
+            # already uses for its own `main` circularity.
+            from .knowledge_bases import _invalidate_workflow_cache
+
+            _invalidate_workflow_cache()
+
             # Best-effort cleanup only: pruning must never be able to
             # retroactively invalidate an already-committed successful
             # ingestion. If this raised uncaught, the outer except below
             # would mark the just-completed job "failed" even though its
             # Document/Chunk rows are already durable and correct -- see
-            # the module docstring's "atomic swap" invariant.
+            # the module docstring's "atomic swap" invariant. Kept in its
+            # own try/except, independent of cache invalidation above, so a
+            # pruning failure can never suppress (or be blamed for) the
+            # cache having already been correctly invalidated.
             try:
                 _prune_old_ingestion_versions(db, kb_id, version_dir.parent)
             except Exception:  # noqa: BLE001
