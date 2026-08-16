@@ -991,7 +991,15 @@
   `tests/e2e/test_smoke.py`, where `page.goto` waited for a `load` the auth
   guard's redirect would never let arrive — fixed at all three sites, not just
   the one that failed, and tolerating the aborted navigation outright after
-  `wait_until="commit"` proved to only narrow the window.
+  `wait_until="commit"` proved to only narrow the window. A twelfth, in the
+  frontend, surfaced on CI after the backend work was done:
+  `AdvancedPage.test.tsx` waited for `listOrgs` to have been *called* and then
+  clicked a tab, when what it needed was the orgs having *landed* — different
+  moments, and clicking in between defers the awaited call to the load
+  effect's next re-run. The suite-wide `asyncUtilTimeout` also went 1s → 5s,
+  since testing-library's default is tuned for an idle laptop rather than 24
+  files sharing two CI cores; unlike a sleep it costs nothing when tests pass,
+  as `waitFor` returns the moment its condition holds.
   Also: `test_marker_completeness` ran two full collect-only subprocesses to
   learn two numbers pytest already reports in one, making a single test 54s;
   CI now path-filters every job so a docs-only commit runs nothing, the PR
