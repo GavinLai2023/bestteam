@@ -131,11 +131,15 @@ implemented** — don't assume they exist:
   `tests/e2e/` drives a real uvicorn subprocess that never imports conftest,
   so that tier still exercises genuine 260k hashing.
 - **`-n auto` for a fast local run** (`pytest-xdist`, in the `dev` extra):
-  ~2m45s vs ~4m serial. Not in `addopts` on purpose — it breaks `-x`,
+  ~2m11s vs ~3m17s serial. Not in `addopts` on purpose — it breaks `-x`,
   `--pdb` and readable tracebacks, so plain `pytest` stays serial and
   debuggable. Never use it on `tests/e2e/` (fixed ports 8000/5173).
-- CI is 6 jobs plus a `changes` job that path-filters them, so a docs-only
-  commit runs nothing: 4 PR-gate jobs (`backend-unit-integration` — under
+- CI is 6 jobs plus a `changes` job that path-filters them. Note what it
+  filters against: on a **push** it compares with the previous commit, so a
+  docs-only commit to `main` runs nothing; on a **pull request** it compares
+  with the base branch, so the whole PR's diff decides — a docs-only commit
+  on top of a PR that touches backend still runs the backend jobs, which is
+  the point. The jobs: 4 PR-gate (`backend-unit-integration` — under
   `-n auto`, `backend-optional-deps`, `frontend`, `e2e-smoke`) on every
   PR/push; 2 gated to `main` (`backend-full`, `e2e-full`), also manually
   dispatchable (`workflow_dispatch`) for a pre-merge run from a feature
