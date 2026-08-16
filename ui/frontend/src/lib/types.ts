@@ -9,6 +9,13 @@ export interface ModelCatalogEntry {
   display_name: string
 }
 
+// Whether the wizard's "smart search" toggle (DocumentsPage) has anything to
+// turn on -- an operator opt-in (env-configured default embedding model),
+// not a customer-facing choice.
+export interface KnowledgeBaseCapabilities {
+  smart_search_available: boolean
+}
+
 export type TeamMode = 'sequential' | 'parallel' | 'hierarchical'
 
 export interface AgentSpec {

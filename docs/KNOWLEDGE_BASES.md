@@ -276,10 +276,32 @@ with no server filesystem access needed:
 - Files land under `ui/backend/data/knowledge_base_uploads/{name}/`, a
   directory the backend owns (distinct from the manual-config `path`, which
   points at a folder the user manages themselves).
-- The upload is validated by actually instantiating a
-  `LocalFolderKnowledgeBase` against the saved files before committing the
-  database record — if chunking/parsing fails (e.g. zero readable
-  documents), the upload is rejected and the partial directory is cleaned up.
+- The upload is validated by actually building the knowledge base (via the
+  same type-dispatching `_build_knowledge_base()` the YAML loader uses)
+  against the saved files before committing the database record — if
+  chunking/parsing fails (e.g. zero readable documents), the upload is
+  rejected and the partial directory is cleaned up.
+
+**Org self-service upload** (`POST /api/org/knowledge-bases/{name}/upload`,
+`ui/backend/org_knowledge_bases.py`) is the same shared `upload_knowledge_base()`
+machinery behind the Team Builder wizard's "Your documents" step, reachable
+by any org member (not just an admin), org-resolved from the caller's own
+bearer token. Tighter limits than the admin route (10 files / 10MB per file /
+50MB total) and a per-org cap on how many self-service knowledge bases can
+exist (20). By default it still creates a `local_folder` KB, exactly like the
+admin upload endpoint — but it also accepts a `smart_search` flag. The
+wizard exposes this as a **"Standard" / "Enhanced" toggle**, deliberately
+with no model names or KB-type jargon shown (the wizard's audience is
+non-technical): `GET /api/org/knowledge-bases/capabilities` tells the
+frontend whether the toggle should render at all (`smart_search_available`,
+true only when the operator has set `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`),
+and "Enhanced" sends `smart_search=true`, which upgrades the created KB to
+`type: hybrid` with query expansion (using the wizard's own default chat
+model from the model catalog, resolved server-side) and, if
+`BESTTEAM_KB_DEFAULT_RERANK_MODEL` is also set, reranking too. "Standard" (or
+smart search unavailable, or the env var unset despite a stale client sending
+`smart_search=true`) always falls back to plain `local_folder` — the exact
+same shape as before this toggle existed. See `.env.example`.
 
 **Wiring into a workflow**: a workflow's `_build_workflow()` validation only
 builds the standalone knowledge bases its agents actually reference by name
@@ -311,11 +333,13 @@ re-chunking files (and, for `vector`, calling an embedding model).
   source filename, not a chunk id, page number, or heading/section — no
   precise click-through citation or "which version of which page" audit
   trail.
-- **Self-service upload is `local_folder`-only, with no advanced options.**
-  The upload endpoint (below) and the Team Builder wizard always create a
-  BM25 `local_folder` knowledge base with default chunking — choosing
-  `vector`/`hybrid`, an embedding model, reranking, or query expansion
-  currently requires the YAML/API config path, not the upload UI.
+- **The wizard's self-service "Enhanced" toggle is all-or-nothing and
+  operator-configured, not customer-tunable.** A customer can choose
+  Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,
+  `top_k`, or `candidate_k` — those stay fixed at the SDK's defaults plus
+  whichever models the operator set in `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`/
+  `BESTTEAM_KB_DEFAULT_RERANK_MODEL`. Fine-grained control over any of these
+  still requires the YAML/admin-API config path, not the wizard.
 - **`core/memory.py` implements a separate per-user memory system**
   (`Memory` ABC + `SqliteBM25Memory` + `MemoryManager`) — not a knowledge
   base type, but it shares the CJK-aware tokenizer (`core/text_tokenize.py`),
@@ -337,8 +361,9 @@ re-chunking files (and, for `vector`, calling an embedding model).
 | YAML loader (`_build_knowledge_base`) | `src/bestteam/core/loader.py` |
 | `KnowledgeBaseSpec` (pydantic model mirroring the YAML schema) | `src/bestteam/core/specification.py` |
 | Document parsing (PDF/Word/Excel/XML/text) | `src/bestteam/tools/file_parser.py` |
-| Backend CRUD + upload endpoint | `ui/backend/crud.py` |
-| Backend "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
+| Backend CRUD + admin upload endpoint | `ui/backend/crud.py` |
+| Shared upload/index/version logic + "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
+| Org self-service upload + "smart search" toggle | `ui/backend/org_knowledge_bases.py` |
 | Example: `local_folder` | `ui/backend/workflows/knowledge_base_demo.yaml` |
 | Example: `vector`, $0 fake embeddings | `ui/backend/workflows/vector_knowledge_base_demo.yaml` |
 | Example: `vector`, real OpenAI embeddings | `ui/backend/workflows/vector_knowledge_base_demo_live.yaml` |

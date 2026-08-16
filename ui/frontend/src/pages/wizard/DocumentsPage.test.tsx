@@ -8,6 +8,7 @@ import type { BuilderSession } from '../../lib/types'
 vi.mock('../../lib/api', () => ({
   api: {
     modelCatalog: vi.fn(),
+    orgKnowledgeBaseCapabilities: vi.fn(),
     uploadOwnKnowledgeBaseFiles: vi.fn(),
     submitSpecification: vi.fn(),
     submitSolution: vi.fn(),
@@ -57,6 +58,7 @@ describe('DocumentsPage', () => {
     vi.clearAllMocks()
     mockContext = { session: freshSession(), setSession: vi.fn(), loading: false, sessionId: 's1' }
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'openai:gpt-4o-mini', display_name: 'GPT-4o mini' }])
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: false })
   })
 
   it('proceeds straight to spec generation when the user skips upload', async () => {
@@ -91,7 +93,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file]),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file], false, false),
     )
     // The architect only sees the org's whole KB catalog otherwise, which can
     // leave a fresh upload unattached if the org already has other
@@ -167,5 +169,54 @@ describe('DocumentsPage', () => {
       expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', { model: 'openai:gpt-4o-mini', feedback: '' }),
     )
     expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
+  })
+
+  it('hides the search-quality toggle when smart search is not available', async () => {
+    renderPage()
+    await screen.findByText('Add your documents')
+    await waitFor(() => expect(mockedApi.orgKnowledgeBaseCapabilities).toHaveBeenCalled())
+
+    expect(screen.queryByText('Search quality')).not.toBeInTheDocument()
+  })
+
+  it('defaults to Enhanced and uploads with smart search on when available', async () => {
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+
+    renderPage()
+    await screen.findByText('Search quality')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, true),
+    )
+  })
+
+  it('uploads with smart search off when the customer switches to Standard', async () => {
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', file_count: 1, chunk_count: 1, config: {} })
+    mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+
+    renderPage()
+    await screen.findByText('Search quality')
+    fireEvent.click(screen.getByText('Standard'))
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, false),
+    )
   })
 })

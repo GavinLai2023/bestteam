@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { pickDefaultModel } from '../../lib/models'
@@ -36,6 +36,19 @@ export default function DocumentsPage() {
   const [busy, setBusy] = useState(false)
   const [stage, setStage] = useState<Stage>(null)
   const [error, setError] = useState<string | null>(null)
+  // Whether the operator has configured a default embedding model for the
+  // "smart search" upgrade -- unset means the toggle below never renders.
+  const [smartSearchAvailable, setSmartSearchAvailable] = useState(false)
+  // Defaults to Enhanced once available -- it's the better experience and
+  // the toggle only ever appears when the operator opted the deployment in.
+  const [smartSearch, setSmartSearch] = useState(true)
+
+  useEffect(() => {
+    api
+      .orgKnowledgeBaseCapabilities()
+      .then((caps) => setSmartSearchAvailable(caps.smart_search_available))
+      .catch(() => setSmartSearchAvailable(false))
+  }, [])
 
   if (loading) return <p className="hint">Loading…</p>
   if (!session) return null
@@ -63,10 +76,12 @@ export default function DocumentsPage() {
     setError(null)
     setBusy(true)
 
+    const smartSearchEnabled = smartSearchAvailable && smartSearch
+
     if (useFiles) {
       setStage('uploading')
       try {
-        await api.uploadOwnKnowledgeBaseFiles(slug, files)
+        await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled)
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
@@ -76,7 +91,7 @@ export default function DocumentsPage() {
             return
           }
           try {
-            await api.uploadOwnKnowledgeBaseFiles(slug, files, true)
+            await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled)
           } catch (e2) {
             setError((e2 as Error).message)
             setBusy(false)
@@ -162,6 +177,33 @@ export default function DocumentsPage() {
           disabled={busy}
         />
       </div>
+
+      {smartSearchAvailable && (
+        <div className="field">
+          <label>Search quality</label>
+          <div className="wizard-actions" style={{ justifyContent: 'flex-start', gap: 8, marginBottom: 4 }}>
+            <button
+              type="button"
+              className={`btn ${smartSearch ? 'btn-secondary' : 'btn-primary'}`}
+              onClick={() => setSmartSearch(false)}
+              disabled={busy}
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              className={`btn ${smartSearch ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setSmartSearch(true)}
+              disabled={busy}
+            >
+              Enhanced
+            </button>
+          </div>
+          <p className="hint">
+            Enhanced finds more relevant answers in your documents. Takes a little longer to index.
+          </p>
+        </div>
+      )}
 
       <div className="upload-section">
         <label className="btn btn-secondary" style={{ display: 'inline-block' }}>

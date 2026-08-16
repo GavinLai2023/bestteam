@@ -15,7 +15,7 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from bestteam import KnowledgeBaseSpec
-from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, make_knowledge_base_tool
+from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.loader import _build_knowledge_base
 from bestteam.core.specification import _validate_tool_name
 from bestteam.exceptions import BestTeamError, ConfigurationError
@@ -150,18 +150,25 @@ def upload_knowledge_base(
     chunk_size: int = 1000,
     chunk_overlap: int = 100,
     top_k: int = 5,
+    kb_type: str = "local_folder",
+    embedding_model: Optional[str] = None,
+    rerank_model: Optional[str] = None,
+    query_expansion_model: Optional[str] = None,
     max_files: int = _MAX_FILES_PER_UPLOAD,
     max_file_size_bytes: int = _MAX_FILE_SIZE_BYTES,
     max_total_size_bytes: int = _MAX_TOTAL_SIZE_BYTES,
 ) -> Dict[str, Any]:
-    """Validate, chunk, and index uploaded documents as a `local_folder` KB.
+    """Validate, chunk, and index uploaded documents as a knowledge base.
 
-    Shared by the admin `/api/config/knowledge_bases/{name}/upload` route and
-    the org self-service `/api/org/knowledge-bases/{name}/upload` route -- the
-    only difference between them is how `org_id` gets resolved (an explicit
-    `?org=` for the admin surface, the bearer token's own org for self-service)
-    and, since the self-service caller is any org member rather than a trusted
-    operator, the tighter `max_*` limits `org_knowledge_bases.py` passes in.
+    Shared by the admin `/api/config/knowledge_bases/{name}/upload` route
+    (always `local_folder`, the historical default) and the org self-service
+    `/api/org/knowledge-bases/{name}/upload` route -- the differences between
+    them are how `org_id` gets resolved (an explicit `?org=` for the admin
+    surface, the bearer token's own org for self-service), the tighter
+    `max_*` limits `org_knowledge_bases.py` passes in, and, for the "smarter
+    search" toggle described there, `kb_type`/`embedding_model`/
+    `rerank_model`/`query_expansion_model`. `embedding_model` is required
+    when `kb_type` is `vector` or `hybrid` and ignored otherwise.
     """
     try:
         _validate_tool_name(item_name)
@@ -228,14 +235,31 @@ def upload_knowledge_base(
             for filename, data in contents.items():
                 (version_dir / filename).write_bytes(data)
 
+            # Build via the same type-dispatching constructor `load_knowledge_base_tools`
+            # uses, so `kb_type` can be any of the three supported types. This
+            # build is validation-only (and gives the response its chunk
+            # count) -- it deliberately never sets `cache_path`, so a
+            # vector/hybrid KB's embeddings aren't persisted from here. The
+            # stored config below sets its own `cache_path` (an org+name
+            # basename, since `contain_kb_config_for_load` collapses any
+            # cache_path to its basename under the app-owned `_kb_cache/` dir
+            # at read time -- CR-001), which real workflow loads pick up.
+            build_spec: Dict[str, Any] = {
+                "name": item_name,
+                "path": str(version_dir),
+                "type": kb_type,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "top_k": top_k,
+            }
+            if kb_type in ("vector", "hybrid"):
+                build_spec["embedding_model"] = embedding_model
+            if rerank_model is not None:
+                build_spec["rerank_model"] = rerank_model
+            if query_expansion_model is not None:
+                build_spec["query_expansion_model"] = query_expansion_model
             try:
-                kb = LocalFolderKnowledgeBase(
-                    name=item_name,
-                    path=version_dir,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    top_k=top_k,
-                )
+                kb = _build_knowledge_base(build_spec, source=version_dir)
             except BestTeamError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -245,10 +269,14 @@ def upload_knowledge_base(
             spec = KnowledgeBaseSpec(
                 name=item_name,
                 path=str(kb_root),
-                type="local_folder",
+                type=kb_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 top_k=top_k,
+                embedding_model=embedding_model if kb_type in ("vector", "hybrid") else None,
+                cache_path=(f"kb_{org_id}_{item_name}.json" if kb_type in ("vector", "hybrid") else None),
+                rerank_model=rerank_model,
+                query_expansion_model=query_expansion_model,
             )
             raw = spec.to_raw()
             item = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()

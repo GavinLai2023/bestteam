@@ -1,8 +1,8 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
-  Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry, OrgEmailStatus, RunListItem,
-  Requirements, ShareLink, ShareMessage, ShareSessionSummary, UsageRecord, WorkflowAnalyticsDetail,
-  WorkflowAnalyticsSummary,
+  KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary, ModelCatalogEntry,
+  OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary, UsageRecord,
+  WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
 // `localhost`, NOT `127.0.0.1` -- do not "simplify" this back. The anonymous
@@ -347,13 +347,16 @@ export const api = {
 
   // Org self-service: build your own knowledge base by uploading documents
   // (the wizard's "Your documents" step). Org resolves server-side from the
-  // token, unlike the admin uploadKnowledgeBaseFiles above.
-  uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false) =>
+  // token, unlike the admin uploadKnowledgeBaseFiles above. `smartSearch`
+  // is the "Standard"/"Enhanced" toggle -- only meaningful when
+  // orgKnowledgeBaseCapabilities().smart_search_available is true.
+  uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false, smartSearch = false) =>
     uploadFiles<{ name: string; file_count: number; chunk_count: number; config: ConfigItem }>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
       files,
-      { replace },
+      { replace, smart_search: smartSearch },
     ),
+  orgKnowledgeBaseCapabilities: () => request<KnowledgeBaseCapabilities>('/api/org/knowledge-bases/capabilities'),
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),

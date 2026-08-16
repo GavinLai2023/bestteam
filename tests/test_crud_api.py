@@ -420,7 +420,7 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
 
     from bestteam.exceptions import ConfigurationError
 
-    with patch.object(backend_knowledge_bases, "LocalFolderKnowledgeBase", side_effect=ConfigurationError("bad upload")):
+    with patch.object(backend_knowledge_bases, "_build_knowledge_base", side_effect=ConfigurationError("bad upload")):
         resp = client.post(
             "/api/config/knowledge_bases/kb/upload?org=default",
             files=[("files", ("doc2.txt", b"new content that fails validation", "text/plain"))],

@@ -197,6 +197,63 @@ def test_self_service_upload_rejects_oversized_file(client):
     assert resp.status_code == 413
 
 
+def test_smart_search_capability_reflects_env_var(client, monkeypatch):
+    monkeypatch.delenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", raising=False)
+    resp = client.get("/api/org/knowledge-bases/capabilities")
+    assert resp.status_code == 200
+    assert resp.json() == {"smart_search_available": False}
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    resp = client.get("/api/org/knowledge-bases/capabilities")
+    assert resp.json() == {"smart_search_available": True}
+
+
+def test_smart_search_upload_builds_hybrid_kb_with_expansion_and_rerank(client, monkeypatch, tmp_path):
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_RERANK_MODEL", "fake:")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"smart_search": "true"},
+        files=_files(),
+    )
+    assert resp.status_code == 200
+    config = resp.json()["config"]
+    assert config["type"] == "hybrid"
+    assert config["embedding_model"] == "fake:16"
+    assert config["rerank_model"] == "fake:"
+    # The wizard's own default chat model (seeded catalog's first non-fake
+    # entry, alphabetically by spec -- list_entries orders by `spec`).
+    assert config["query_expansion_model"] == "openai:gpt-4o"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "30 days" in tools["policies"]("refund policy")
+
+
+def test_smart_search_without_default_embedding_model_falls_back_to_local_folder(client, monkeypatch):
+    monkeypatch.delenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", raising=False)
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"smart_search": "true"},
+        files=_files(),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["config"]["type"] == "local_folder"
+
+
+def test_smart_search_off_by_default_stays_local_folder(client, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert resp.json()["config"]["type"] == "local_folder"
+
+
 def test_cross_org_upload_isolation(client, tmp_path):
     assert client.post("/api/org/knowledge-bases/policies/upload", files=_files(
         content=b"Org A's refund policy: 30 days.",
