@@ -389,9 +389,17 @@ def test_ingestion_job_status_404_for_another_orgs_job(client):
     job_id = resp.json()["job_id"]
 
     other = create_user_and_login(client, username="bob", org="org_b")
+    bob = {"Authorization": f"Bearer {other}"}
+    # org_b has its own same-named "policies" KB (with its own job_id/kb_id),
+    # so the request below genuinely exercises the kb_id mismatch -> 404 path
+    # rather than "no KB named 'policies' exists for this org at all" -> 404.
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_files(), headers=bob
+    ).status_code == 200
+
     resp = client.get(
         f"/api/org/knowledge-bases/policies/ingestion-jobs/{job_id}",
-        headers={"Authorization": f"Bearer {other}"},
+        headers=bob,
     )
     assert resp.status_code == 404
 

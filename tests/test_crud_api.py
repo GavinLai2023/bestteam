@@ -720,6 +720,14 @@ def test_ingestion_job_status_404_for_another_orgs_job(client):
     resp = client.post("/api/config/knowledge_bases/support_docs/upload?org=default", files=files)
     job_id = resp.json()["job_id"]
 
+    # "other" has its own same-named "support_docs" KB (with its own
+    # job_id/kb_id), so the request below genuinely exercises the kb_id
+    # mismatch -> 404 path rather than "no KB named 'support_docs' exists
+    # for this org at all" -> 404.
+    assert client.post(
+        "/api/config/knowledge_bases/support_docs/upload?org=other", files=files
+    ).status_code == 200
+
     resp = client.get(f"/api/config/knowledge_bases/support_docs/ingestion-jobs/{job_id}?org=other")
     assert resp.status_code == 404
 
