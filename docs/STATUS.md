@@ -914,6 +914,36 @@
   retries a bounded number of times before giving up. 1290 backend + 169
   frontend tests, `tsc`/eslint clean.
 
+- **Knowledge-base document/chunk ingestion** (spec:
+  `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`):
+  KB uploads (both the admin and org self-service routes) now dispatch an
+  async ingestion job instead of parsing/chunking/embedding on the request
+  thread — `ui/backend/ingestion.py`'s own `ThreadPoolExecutor` does the
+  work, persisting parsed chunks (and, for `vector`/`hybrid`, embeddings)
+  into three new tables (`knowledge_ingestion_jobs`/`knowledge_documents`/
+  `knowledge_chunks`) instead of only ever living on disk. All three SDK
+  `KnowledgeBase` classes gained a `from_chunks(...)` alternate constructor
+  so the backend can rebuild a KB straight from those rows
+  (`knowledge_bases.py::resolve_knowledge_base`) rather than re-reading files
+  on every load; a KB with no completed ingestion job (pre-existing,
+  never re-uploaded) falls back to the original file-based construction
+  unchanged. Per-document partial failure means one bad file doesn't fail
+  the whole batch. Two new read-only endpoints
+  (`GET .../knowledge_bases/{name}/ingestion-jobs/{job_id}` admin,
+  `GET .../knowledge-bases/{name}/ingestion-jobs/{job_id}` org self-service)
+  let the frontend poll a job to completion; both `DocumentsPage.tsx` (the
+  wizard) and `AdvancedPage.tsx` (admin) now do so before proceeding, showing
+  an "ingesting" busy stage. KB deletion cascades to delete all three new
+  tables' rows. Along the way this also picked up a prerequisite
+  Standard/Enhanced smart-search toggle (`kb_type`/`embedding_model`/
+  `rerank_model`/`query_expansion_model` on the org self-service upload) that
+  had been implemented and tested earlier but never committed, and fixed a
+  CR-005-shaped workflow-cache staleness recurrence (the cache is now also
+  invalidated when an ingestion job completes, not just on KB
+  create/update/delete). 1376 backend + 176 frontend tests, `tsc` clean. See
+  `docs/KNOWLEDGE_BASES.md`, `src/bestteam/core/CLAUDE.md`,
+  `ui/backend/CLAUDE.md`, `ui/backend/db/CLAUDE.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

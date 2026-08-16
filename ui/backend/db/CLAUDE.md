@@ -88,6 +88,36 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's current
   version; `c4d5e6f7a8b9` adds and backfills skill-version pins. Model/tool deps
   and standalone-KB content pinning remain deferred.
+- `knowledge_ingestion_jobs` (`IngestionJob`) — one async ingestion run for an
+  upload-managed `knowledge_bases` row (`ui/backend/ingestion.py`). `status`
+  (CHECK-constrained `queued`/`running`/`completed`/`failed`) tracks the job;
+  a KB's live document set is always its most recent `completed` job's rows —
+  the `status="completed"` flip **is** the atomic swap for this path, unlike
+  the legacy file-based upload's `CURRENT`-pointer-file swap. `version`
+  matches the on-disk version-directory name the uploaded files were staged
+  into, for traceable job↔directory correspondence. `file_count`/
+  `documents_succeeded`/`documents_failed` and a capped `error` summarize the
+  outcome; indexed on `(kb_id, status, completed_at)` for the "most recent
+  completed job" resolution query. See `ui/backend/CLAUDE.md`.
+- `knowledge_documents` (`KnowledgeDocument`) — one uploaded file's ingestion
+  outcome within an `IngestionJob` (`kb_id`/`ingestion_job_id` FKs, `filename`,
+  `content_hash`, `size_bytes`, CHECK-constrained `status`
+  `pending`/`parsing`/`chunked`/`failed`, capped `error`). Per-document status
+  is the partial-failure unit: one bad file (parse error, or zero chunks
+  produced) is recorded here as `failed` without aborting the rest of the
+  job. Indexed on `ingestion_job_id`.
+- `knowledge_chunks` (`KnowledgeChunk`) — one chunk of a `KnowledgeDocument`'s
+  parsed text (`document_id`/`kb_id` FKs, `chunk_index`, `text`, optional
+  `embedding_json`/`embedding_model`). `embedding_json` is a JSON-encoded
+  `List[float]` — same TEXT-column shape as `memories.embedding_json` —
+  populated only for `vector`/`hybrid` KBs. Reconstructed into the matching
+  `KnowledgeBase` subclass via its `from_chunks(...)` alternate constructor
+  at read time (`ui/backend/knowledge_bases.py::resolve_knowledge_base`, see
+  `src/bestteam/core/CLAUDE.md`) rather than re-parsing files on every load.
+  Indexed on `(document_id, chunk_index)` and `kb_id`. Deleting a KB cascades
+  to delete all three of these tables' rows for it
+  (`ingestion.delete_kb_ingestion_data`). See
+  `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   workflow carries its agents/teams inline in its own `config`, and

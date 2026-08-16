@@ -718,6 +718,67 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   list alone would leave them runnable by name. Disabled ⇒ the same 404 as an
   unknown workflow.
 
+## Async knowledge-base document ingestion (`ingestion.py`)
+
+Both KB upload routes (`crud.py`'s admin
+`POST /knowledge_bases/{name}/upload` and `org_knowledge_bases.py`'s
+self-service `POST /knowledge-bases/{name}/upload`, both via the shared
+`knowledge_bases.py::upload_knowledge_base()`) validate synchronously (name,
+size limits, `kb_type`, chunk params), write the uploaded files to a fresh
+on-disk version directory, upsert the `KnowledgeBaseRecord`, create a
+`queued` `IngestionJob` row, and submit `ingestion.run_ingestion_job` to
+`ingestion.py`'s own `ThreadPoolExecutor` (4 workers, separate from the
+run-execution executor) — then return immediately with `{"name", "job_id",
+"status": "queued"}`. The actual parse → chunk → (embed, for `vector`/
+`hybrid`) work happens on that worker thread, opening its own `Session` on
+the passed-in `engine` (a `Session` isn't safe to share across threads).
+
+**Atomicity model: the `IngestionJob.status` flip is the swap, not a
+CURRENT-pointer file.** Unlike the legacy file-based upload path (which
+atomically swaps a `CURRENT` pointer file so a concurrent reader never sees
+a half-written version), the DB-backed path writes nothing analogous —
+retrieval simply resolves a KB's most recent `IngestionJob` with
+`status="completed"` (`knowledge_bases.py::resolve_knowledge_base`), and a
+`queued`/`running`/`failed` job's rows are invisible to retrieval by
+construction (nothing queries them). A successful job also invalidates the
+workflow cache (`_invalidate_workflow_cache()`, called at job completion,
+not at upload-dispatch time — that's the point the KB's live content
+actually changes) and best-effort prunes older completed generations,
+keeping the current one plus one grace-window generation, mirroring the
+legacy path's "prior version kept only until the new one is durable"
+precedent. Both the cache invalidation and the pruning are isolated in their
+own `try/except`s so a failure in either can never retroactively mark an
+already-committed successful ingestion as failed.
+
+**Per-document partial-failure model.** One bad file (parse error, or zero
+chunks produced) doesn't fail the whole job — it's recorded as a `failed`
+`KnowledgeDocument` row with a capped error message, and the job continues
+processing the rest. The job itself only ends `failed` if every document
+failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
+itself raises — in which case the job's already-flushed-but-uncommitted
+document/chunk inserts are rolled back too (a vector/hybrid KB with no
+embeddings can't serve queries, so a total embedding failure must leave no
+partial rows behind). Any unexpected exception on the worker thread is
+caught and recorded on the job row as a generic failure — the job never
+raises uncaught, mirroring `runtime.py::run_in_background`'s shape.
+
+**Two read-only endpoints** (`ingestion.job_status_payload`, shared by
+both): `GET /api/config/knowledge_bases/{name}/ingestion-jobs/{job_id}`
+(admin, `?org=`) and `GET /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}`
+(org self-service, org from the bearer token) — both org-scoped and 404 on
+an unknown KB or job. The response reports `status`, `file_count`,
+`documents_succeeded`/`documents_failed`, the live `chunk_count`, up to 10
+`{filename, error}` rows for failed documents, and — only once
+`status == "completed"` — the KB's `config`. See `docs/KNOWLEDGE_BASES.md`
+for the response shape and `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
+for the full design.
+
+Deleting a KB cascades to delete its `IngestionJob`/`KnowledgeDocument`/
+`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data` — participates in
+the caller's existing delete+commit+rmtree transaction rather than
+committing separately). See `ui/backend/db/CLAUDE.md` for the three tables'
+schema.
+
 ## Auth, model catalog, and usage metering (Phase 3)
 
 - **`ui/backend/auth.py`** — stdlib-only password hashing (PBKDF2-HMAC-SHA256,

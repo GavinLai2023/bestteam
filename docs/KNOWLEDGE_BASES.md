@@ -309,6 +309,67 @@ builds the standalone knowledge bases its agents actually reference by name
 knowledge base in the database — since building one means re-reading and
 re-chunking files (and, for `vector`, calling an embedding model).
 
+### Uploads are asynchronous (ingestion jobs)
+
+Both upload endpoints (admin `/api/config/knowledge_bases/{name}/upload` and
+org self-service `/api/org/knowledge-bases/{name}/upload`) dispatch a
+background ingestion job instead of parsing/chunking/embedding inline on the
+request thread. `ui/backend/ingestion.py`'s own `ThreadPoolExecutor` (4
+workers) does the actual parse/chunk/(embed) work; the upload endpoint
+returns immediately with `{"name", "job_id", "status": "queued"}` — no
+`config`/`chunk_count`, since those aren't known until the job finishes.
+
+Poll the job to completion via:
+
+`GET /api/config/knowledge_bases/{name}/ingestion-jobs/{job_id}` (admin,
+takes `?org=`) or `GET /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}`
+(org self-service, org resolved from the bearer token) — both org-scoped and
+404 on an unknown KB/job. Response shape:
+
+```json
+{
+  "job_id": 42,
+  "status": "queued | running | completed | failed",
+  "file_count": 12,
+  "documents_succeeded": 11,
+  "documents_failed": 1,
+  "chunk_count": 340,
+  "errors": [{"filename": "corrupt.pdf", "error": "..."}],
+  "config": { "...": "only present once status == \"completed\"" }
+}
+```
+
+**Per-document partial failure**: one bad file (fails to parse, or produces
+zero chunks) doesn't fail the whole job — it's recorded as a `failed`
+`KnowledgeDocument` row (capped error text) and the job continues with the
+rest. The job itself only fails outright if *every* document failed (so the
+KB would have zero chunks) or, for `vector`/`hybrid`, if the embedding call
+itself fails (in which case the job's already-flushed document/chunk rows
+are rolled back — a vector/hybrid KB with no embeddings can't serve
+queries, so a total embedding failure must leave no partial rows behind).
+
+**Retrieval: DB-backed vs. legacy file-based fallback.** A KB whose most
+recent `IngestionJob` reached `status="completed"` is served entirely from
+its `KnowledgeDocument`/`KnowledgeChunk` rows — built via the `from_chunks(...)`
+alternate constructor on the matching `KnowledgeBase` subclass (see
+`src/bestteam/core/CLAUDE.md`), never re-reading files from disk. A KB that
+predates this feature (or was never re-uploaded since) has no completed
+ingestion job, so it falls back to the original file-based construction
+(`_build_knowledge_base`, scanning its upload directory / `CURRENT` pointer
+as before). `ui/backend/knowledge_bases.py::resolve_knowledge_base()` is the
+one place this choice is made, shared by both `load_knowledge_base_tools`
+(above) and `builder.py::_all_knowledge_base_tools` (the wizard's
+pre-Specification "every standalone KB" catalog), so a workflow build and
+the wizard's KB catalog always agree on which content is live.
+
+Deleting a knowledge base cascades to delete its `IngestionJob`/
+`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`).
+Older completed ingestion generations are pruned automatically (keeping the
+current one plus one grace-window generation) once a new job completes.
+
+See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
+for the full design.
+
 ## Known limitations
 
 - **Chunking is format-aware, not hierarchical.** Related content tends to
@@ -363,6 +424,7 @@ re-chunking files (and, for `vector`, calling an embedding model).
 | Document parsing (PDF/Word/Excel/XML/text) | `src/bestteam/tools/file_parser.py` |
 | Backend CRUD + admin upload endpoint | `ui/backend/crud.py` |
 | Shared upload/index/version logic + "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
+| Async ingestion jobs (parse/chunk/embed on a background thread) | `ui/backend/ingestion.py` |
 | Org self-service upload + "smart search" toggle | `ui/backend/org_knowledge_bases.py` |
 | Example: `local_folder` | `ui/backend/workflows/knowledge_base_demo.yaml` |
 | Example: `vector`, $0 fake embeddings | `ui/backend/workflows/vector_knowledge_base_demo.yaml` |

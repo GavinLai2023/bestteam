@@ -219,6 +219,25 @@ falls back to the pre-rerank `candidate_k`-ordered slice — rerank is a
 quality layer, never a reason a query itself fails. See
 `docs/superpowers/specs/2026-08-12-pluggable-rerank-design.md`.
 
+**Backend consumption: `from_chunks(...)` alternate constructors.** All
+three `KnowledgeBase` classes (`LocalFolderKnowledgeBase`,
+`VectorKnowledgeBase`, `HybridKnowledgeBase`) now also expose a `from_chunks`
+classmethod that builds directly from a list of pre-parsed `_Chunk`s (and,
+for `vector`/`hybrid`, pre-computed embedding vectors), skipping the
+file-parsing/chunking pipeline entirely. This is purely a backend
+consumption pattern — an upload-managed KB served by `ui/backend/` persists
+its chunks (and embeddings) once, in the database
+(`knowledge_ingestion_jobs`/`knowledge_documents`/`knowledge_chunks`, see
+`ui/backend/db/CLAUDE.md`), and reconstructs the in-memory KB from those rows
+on every subsequent load instead of re-parsing files each time
+(`ui/backend/knowledge_bases.py::resolve_knowledge_base`). The SDK core
+itself remains entirely file-based and DB-free: `from_chunks` takes plain
+Python data (chunks/vectors), never a database session or any backend
+concept, and the ordinary `__init__` path (parse files from `path` on every
+load) is unchanged and still the only path the CLI/SDK-direct/YAML-loader
+callers use. See
+`docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`.
+
 ## Per-user memory (`core/memory.py`, `core/text_tokenize.py`)
 
 `core/memory.py` implements a per-user memory system so the platform remembers
