@@ -26,6 +26,23 @@ _SUPPORTED_SUFFIXES = {
 }
 
 
+def _require_bm25():
+    """Check that rank_bm25 is available and return the BM25Okapi class.
+
+    Raises ConfigurationError if the package is not installed.
+    This check must run early to avoid expensive operations (like file parsing)
+    before discovering a missing dependency.
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError as exc:
+        raise ConfigurationError(
+            "Knowledge bases require the 'rank-bm25' package. "
+            "Install it with: pip install 'bestteam[tools-rag]'"
+        ) from exc
+    return BM25Okapi
+
+
 class KnowledgeBase(ABC):
     """A queryable source of client documents that agents can search.
 
@@ -67,6 +84,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
     ) -> None:
+        _require_bm25()
         _validate_chunk_params(name, chunk_size, chunk_overlap)
         self.path = Path(path)
         chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
@@ -115,13 +133,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
     ) -> None:
-        try:
-            from rank_bm25 import BM25Okapi
-        except ImportError as exc:
-            raise ConfigurationError(
-                "Knowledge bases require the 'rank-bm25' package. "
-                "Install it with: pip install 'bestteam[tools-rag]'"
-            ) from exc
+        BM25Okapi = _require_bm25()
 
         self.name = name
         self.default_top_k = top_k
@@ -135,7 +147,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self.query_expansion_model = query_expansion_model
         self.query_expansion_count = query_expansion_count
 
-        self._chunks = chunks
+        self._chunks = list(chunks)
         if not self._chunks:
             raise ConfigurationError(
                 f"Knowledge base '{name}' has no readable documents"
