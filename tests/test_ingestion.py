@@ -264,6 +264,69 @@ def test_prune_failure_does_not_revert_completed_job_status(db, engine, tmp_path
     assert len(chunks) == 1
 
 
+def test_failed_jobs_version_directories_are_pruned_except_the_most_recent(db, engine, tmp_path):
+    # _prune_old_ingestion_versions only ever looks at completed jobs, so a
+    # customer repeatedly retrying an unparseable upload used to accumulate
+    # one staged version directory per attempt with nothing cleaning them up
+    # (the legacy file-based path's cleanup-on-failure is gone).
+    kb = _make_kb(db, name="failing_kb")
+
+    def _run_failing(version):
+        job = _make_job(db, kb, version=version)
+        version_dir = tmp_path / version
+        version_dir.mkdir()
+        (version_dir / "bad.pdf").write_bytes(b"not a real pdf")
+        ingestion.run_ingestion_job(
+            job.id, kb.id, kb.org_id, version_dir,
+            kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+            engine=engine,
+        )
+        db.expire_all()
+        return db.get(IngestionJob, job.id)
+
+    assert _run_failing("v1").status == "failed"
+    assert _run_failing("v2").status == "failed"
+    assert _run_failing("v3").status == "failed"
+
+    assert not (tmp_path / "v1").exists()
+    assert not (tmp_path / "v2").exists()
+    # The most recent failure keeps its files as the operator's diagnostic
+    # copy of exactly what the customer sent.
+    assert (tmp_path / "v3").is_dir()
+    # The rows themselves are the customer-visible error record and stay.
+    assert db.query(IngestionJob).filter_by(kb_id=kb.id, status="failed").count() == 3
+
+
+def test_document_error_does_not_leak_the_server_upload_path(db, engine, tmp_path, monkeypatch):
+    # `job_status_payload` hands a document's error text straight back to a
+    # self-service org member, and third-party parsers routinely embed the
+    # absolute path they were given -- which would expose the deployment's
+    # on-disk layout.
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("hello world", encoding="utf-8")
+
+    def _boom(path):
+        raise ValueError(f"Failed to parse {path}: unsupported encoding")
+
+    monkeypatch.setattr(ingestion, "parse_file", _boom)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    failed_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, status="failed").one()
+    assert str(version_dir) not in failed_doc.error
+    assert str(tmp_path) not in failed_doc.error
+    # The customer's own filename -- the useful part -- still survives.
+    assert "doc.txt" in failed_doc.error
+
+
 def test_completed_job_invalidates_the_workflow_cache(db, engine, tmp_path):
     # CR-005 recurring through the async path: a workflow using this KB may
     # have been cached against its prior (or, on a first upload, not-yet-

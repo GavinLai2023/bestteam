@@ -14,9 +14,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
@@ -43,6 +44,26 @@ def _capped(text: str) -> str:
     return text[:_MAX_ERROR_CHARS]
 
 
+def _scrubbed(text: str, version_dir: Path) -> str:
+    """Strip the server's absolute upload path out of an error message.
+
+    `parse_file` and the third-party parsers under it routinely embed the
+    full path they were handed in their exception text, and
+    `job_status_payload` hands that text straight back to a self-service org
+    member -- which would leak the deployment's on-disk layout
+    (`.../data/knowledge_base_uploads/<org_id>/<name>/v_<hex>/...`). Removing
+    the version directory prefix leaves only the customer's own filename,
+    which is the part that's actually useful to them. Both separator flavors
+    are stripped so the guard behaves the same on a Linux server and a
+    Windows dev box.
+    """
+    raw = str(version_dir)
+    for prefix in {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}:
+        for sep in ("\\", "/", ""):
+            text = text.replace(prefix + sep, "")
+    return text
+
+
 def run_ingestion_job(
     job_id: int,
     kb_id: int,
@@ -61,6 +82,15 @@ def run_ingestion_job(
     `engine` since a Session isn't thread-safe to share with the dispatching
     request. Never raises -- any unexpected failure is caught and recorded
     on the job row, mirroring runtime.py::run_in_background's shape.
+
+    Every Document/Chunk row is buffered in plain Python until the parse loop
+    AND the embedding call are both done, then written in one short
+    transaction at the end. Flushing per file instead would take SQLite's
+    RESERVED write lock on the first file and hold it -- through every
+    remaining file's parse/chunk work and through the embedding provider's
+    network round-trip -- until the final commit, blocking every other writer
+    in the process (run rows, trace events, usage records, share messages)
+    for the whole duration of a large upload.
     """
     db = Session(engine)
     try:
@@ -70,6 +100,11 @@ def run_ingestion_job(
         job.status = "running"
         db.commit()
 
+        # (document, its chunks) pairs, none of them added to the session yet.
+        # A chunk's `document_id` can't be set until its document has a real
+        # id, so the pairing is what carries that association until the single
+        # flush below assigns them.
+        pending: List[Tuple[KnowledgeDocument, List[KnowledgeChunk]]] = []
         all_chunks: List[KnowledgeChunk] = []
         files = sorted(
             p for p in version_dir.rglob("*")
@@ -85,8 +120,8 @@ def run_ingestion_job(
                 size_bytes=len(data),
                 status="parsing",
             )
-            db.add(doc)
-            db.flush()
+            doc_chunks: List[KnowledgeChunk] = []
+            pending.append((doc, doc_chunks))
 
             try:
                 text = parse_file(str(file_path))
@@ -95,13 +130,13 @@ def run_ingestion_job(
                     raise ValueError("document produced no chunks (empty or whitespace-only content)")
             except Exception as exc:  # noqa: BLE001 -- one bad file must not abort the batch
                 doc.status = "failed"
-                doc.error = _capped(str(exc))
+                doc.error = _capped(_scrubbed(str(exc), version_dir))
                 job.documents_failed += 1
                 continue
 
             for i, piece in enumerate(pieces):
-                chunk = KnowledgeChunk(document_id=doc.id, kb_id=kb_id, chunk_index=i, text=piece)
-                db.add(chunk)
+                chunk = KnowledgeChunk(kb_id=kb_id, chunk_index=i, text=piece)
+                doc_chunks.append(chunk)
                 all_chunks.append(chunk)
             doc.status = "chunked"
             job.documents_succeeded += 1
@@ -115,21 +150,34 @@ def run_ingestion_job(
                         f"embedding model returned {len(vectors)} vectors for {len(all_chunks)} chunks"
                     )
             except Exception as exc:  # noqa: BLE001 -- a vector/hybrid KB can't function unembedded
-                # Discard this run's already-flushed-but-uncommitted document/
-                # chunk inserts too: a vector/hybrid KB with no embeddings is
+                # Discard this run's buffered document/chunk objects (never
+                # added to the session) along with the job's own pending
+                # counter increments: a vector/hybrid KB with no embeddings is
                 # unservable, so a total embedding failure must leave no
                 # partial rows behind, not just a "failed" job status.
                 db.rollback()
                 job = db.get(IngestionJob, job_id)
                 if job is not None:
                     job.status = "failed"
-                    job.error = _capped(str(exc))
+                    job.error = _capped(_scrubbed(str(exc), version_dir))
                     job.completed_at = _now()
                     db.commit()
+                _safe_prune_failed_versions(db, kb_id, version_dir.parent, job_id)
                 return
             for chunk, vector in zip(all_chunks, vectors):
                 chunk.embedding_json = json.dumps(vector)
                 chunk.embedding_model = embedding_model
+
+        # The one write transaction: insert the documents, flush to get their
+        # ids, point each buffered chunk at its document, and commit the whole
+        # batch together with the job's terminal status.
+        for doc, _doc_chunks in pending:
+            db.add(doc)
+        db.flush()
+        for doc, doc_chunks in pending:
+            for chunk in doc_chunks:
+                chunk.document_id = doc.id
+                db.add(chunk)
 
         if all_chunks:
             job.status = "completed"
@@ -184,6 +232,12 @@ def run_ingestion_job(
                     "the just-completed job is unaffected", kb_id, exc_info=True,
                 )
                 db.rollback()
+
+        # Runs on the failed path too (and it's the only cleanup that does):
+        # a customer retrying an unparseable upload never produces a completed
+        # job, so nothing above would ever reclaim those attempts' staged
+        # files.
+        _safe_prune_failed_versions(db, kb_id, version_dir.parent, job_id)
     except Exception:  # noqa: BLE001 -- a worker-thread failure must never propagate silently
         _logger.exception("Ingestion job %s failed on the worker thread", job_id)
         try:
@@ -212,6 +266,8 @@ def _prune_old_ingestion_versions(db: Session, kb_id: int, kb_root: Path) -> Non
     version directory. A failed/queued/running job is never pruned here --
     only completed jobs count as "old versions" (a still-failed job's rows
     are its own diagnostic record, left for the operator/customer to see).
+    Reclaiming a failed job's on-disk directory is
+    `_prune_failed_ingestion_versions`' job, below.
     """
     completed = (
         db.query(IngestionJob)
@@ -228,12 +284,57 @@ def _prune_old_ingestion_versions(db: Session, kb_id: int, kb_root: Path) -> Non
         db.query(KnowledgeDocument).filter_by(ingestion_job_id=old_job.id).delete(synchronize_session=False)
         version_dir = kb_root / old_job.version
         if version_dir.is_dir():
-            import shutil
-
             shutil.rmtree(version_dir, ignore_errors=True)
         db.delete(old_job)
     if completed[_KEEP_COMPLETED_GENERATIONS:]:
         db.commit()
+
+
+def _prune_failed_ingestion_versions(db: Session, kb_id: int, kb_root: Path, current_job_id: int) -> None:
+    """Delete the on-disk version directory of every `failed` job for this KB
+    except the most recent one.
+
+    `_prune_old_ingestion_versions` above only ever looks at `completed`
+    jobs, so without this a customer repeatedly retrying an upload that can't
+    be parsed accumulates one staged version directory per attempt with
+    nothing ever reclaiming them (the legacy file-based path's
+    cleanup-on-failure no longer exists). The most recent failed job keeps
+    its directory as a diagnostic copy of exactly what the customer sent --
+    the same one-grace-generation shape `_KEEP_COMPLETED_GENERATIONS` gives
+    completed jobs, which bounds the leak at a single extra version.
+
+    Failed jobs' *rows* are deliberately kept either way: they're the
+    customer-visible error record behind the job-status API, and they cost
+    bytes rather than the megabytes this reclaims. `current_job_id` is never
+    pruned -- a job resolving right now is the caller's own, and on the
+    queued/running paths its directory may still be in use.
+    """
+    failed = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=kb_id, status="failed")
+        .order_by(IngestionJob.id.desc())
+        .all()
+    )
+    for old_job in failed[1:]:
+        if old_job.id == current_job_id:
+            continue
+        version_dir = kb_root / old_job.version
+        if version_dir.is_dir():
+            shutil.rmtree(version_dir, ignore_errors=True)
+
+
+def _safe_prune_failed_versions(db: Session, kb_id: int, kb_root: Path, current_job_id: int) -> None:
+    """Best-effort wrapper: cleanup must never be able to flip an
+    already-resolved job's status (same reasoning as the completed-generation
+    pruning call above)."""
+    try:
+        _prune_failed_ingestion_versions(db, kb_id, kb_root, current_job_id)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "Pruning failed ingestion versions for KB %s did not complete; "
+            "the resolved job is unaffected", kb_id, exc_info=True,
+        )
+        db.rollback()
 
 
 def delete_kb_ingestion_data(db: Session, kb_id: int) -> None:
