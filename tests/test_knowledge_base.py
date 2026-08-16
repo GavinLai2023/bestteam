@@ -483,6 +483,60 @@ def test_rerank_candidates_does_not_mutate_input():
 
 
 # ---------------------------------------------------------------------------
+# _rrf_retrieve / _query_variants
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import _query_variants, _rrf_retrieve
+
+
+def test_rrf_retrieve_single_variant_single_leg_preserves_leg_order():
+    def leg(query_text, fetch_k):
+        return [3, 1, 2][:fetch_k]
+
+    result = _rrf_retrieve(["q"], [leg], fetch_k=3)
+    assert result == [3, 1, 2]
+
+
+def test_rrf_retrieve_fuses_across_legs():
+    def leg_a(query_text, fetch_k):
+        return [1, 2][:fetch_k]
+
+    def leg_b(query_text, fetch_k):
+        return [2, 1][:fetch_k]
+
+    result = _rrf_retrieve(["q"], [leg_a, leg_b], fetch_k=2)
+    # Both indices appear at rank 1 once and rank 2 once -- tied, both present.
+    assert set(result) == {1, 2}
+
+
+def test_rrf_retrieve_fuses_across_variants():
+    calls = []
+
+    def leg(query_text, fetch_k):
+        calls.append(query_text)
+        return {"q": [1], "alt": [2]}.get(query_text, [])
+
+    result = _rrf_retrieve(["q", "alt"], [leg], fetch_k=1)
+    assert calls == ["q", "alt"]
+    assert set(result) == {1, 2}
+
+
+def test_rrf_retrieve_empty_legs_returns_empty():
+    assert _rrf_retrieve(["q"], [lambda q, k: []], fetch_k=5) == []
+
+
+def test_query_variants_no_expansion_model_returns_just_the_query():
+    assert _query_variants("refund", None, 3) == ["refund"]
+
+
+def test_query_variants_expansion_adds_alternatives():
+    variants = _query_variants(
+        "refund", 'fake:{"queries": ["money back"]}', 3
+    )
+    assert variants == ["refund", "money back"]
+
+
+# ---------------------------------------------------------------------------
 # LocalFolderKnowledgeBase rerank wiring
 # ---------------------------------------------------------------------------
 
@@ -568,3 +622,54 @@ def test_local_folder_kb_rerank_inference_failure_falls_back(tmp_path, monkeypat
     monkeypatch.setattr(kb._reranker.__class__, "_score", boom)
     result = kb.query("apples")
     assert "doc0.txt" in result  # still returns the retrieval-order result
+
+
+# ---------------------------------------------------------------------------
+# LocalFolderKnowledgeBase query expansion
+# ---------------------------------------------------------------------------
+
+def test_local_folder_kb_query_expansion_unset_is_byte_identical(tmp_path):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", top_k=2)
+    assert kb.query("apples") == kb.query("apples")
+
+
+def test_local_folder_kb_query_expansion_recovers_chunk_literal_query_misses(tmp_path):
+    # "sprocket" shares zero significant terms with either doc, so plain BM25
+    # (query_expansion unset) returns nothing. The expansion variant "widget"
+    # matches doc0 -- proving fusion recovers a chunk the literal query alone
+    # could never surface.
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _kb_with_docs(plain_dir, "widget assembly instructions", "gadget repair guide")
+    plain_result = plain.query("sprocket")
+    assert "No results found" in plain_result
+
+    expanded_dir = tmp_path / "expanded"
+    expanded_dir.mkdir()
+    expanded = _kb_with_docs(
+        expanded_dir,
+        "widget assembly instructions",
+        "gadget repair guide",
+        query_expansion_model='fake:{"queries": ["widget"]}',
+    )
+    expanded_result = expanded.query("sprocket")
+    assert "doc0.txt" in expanded_result
+
+
+def test_local_folder_kb_query_expansion_disabled_when_count_zero(tmp_path):
+    kb = _kb_with_docs(
+        tmp_path,
+        "widget assembly instructions",
+        query_expansion_model='fake:{"queries": ["widget"]}',
+        query_expansion_count=0,
+    )
+    assert "No results found" in kb.query("sprocket")
+
+
+def test_local_folder_kb_bad_query_expansion_spec_degrades_gracefully(tmp_path):
+    kb = _kb_with_docs(
+        tmp_path, "apples and oranges", query_expansion_model="not-a-real-spec"
+    )
+    # Never raises; falls back to the literal query.
+    result = kb.query("apples")
+    assert "doc0.txt" in result

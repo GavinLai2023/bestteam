@@ -8,6 +8,7 @@ import yaml
 from ..exceptions import ConfigurationError
 from ..tools import REGISTRY as _TOOL_REGISTRY
 from .agent import Agent
+from .hybrid_knowledge_base import HybridKnowledgeBase
 from .knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase, make_knowledge_base_tool
 from .team import CollaborationMode, Team
 from .vector_knowledge_base import VectorKnowledgeBase
@@ -16,6 +17,7 @@ from .workflow import Workflow
 _KNOWLEDGE_BASE_TYPES = {
     "local_folder": LocalFolderKnowledgeBase,
     "vector": VectorKnowledgeBase,
+    "hybrid": HybridKnowledgeBase,
 }
 
 

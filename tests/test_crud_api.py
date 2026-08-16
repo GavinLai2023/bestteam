@@ -204,6 +204,15 @@ def test_knowledge_base_put_omits_vector_only_fields_for_local_folder(client):
     assert "embedding_model" not in resp.json()["config"]
 
 
+def test_knowledge_base_put_allows_hybrid_type_with_vector_fields(client):
+    config = {"path": "./docs", "type": "hybrid", "embedding_model": "fake:8"}
+
+    resp = client.put("/api/config/knowledge_bases/docs?org=default", json=config)
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["embedding_model"] == "fake:8"
+
+
 def test_knowledge_base_put_rejects_name_with_spaces(client):
     config = {"path": "./docs", "type": "local_folder"}
 

@@ -9,6 +9,7 @@ from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
+from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
     _MAX_RERANK_CANDIDATE_K,
     _resolve_candidate_k,
@@ -63,6 +64,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         top_k: int = 5,
         rerank_model: Any = None,
         candidate_k: Optional[int] = None,
+        query_expansion_model: Any = None,
+        query_expansion_count: int = 3,
     ) -> None:
         try:
             from rank_bm25 import BM25Okapi
@@ -84,6 +87,8 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -95,20 +100,30 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
-        top_k = top_k or self.default_top_k
-        query_tokens = tokenize(query)
+    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[int]:
+        """Identical scoring logic to the pre-refactor `query()` body,
+        returning chunk indices instead of `(score, chunk)` tuples."""
+        query_tokens = tokenize(query_text)
         query_terms = significant_terms(query_tokens)
         scores = self._bm25.get_scores(query_tokens)
 
         matches = [
-            (len(query_terms & chunk_terms), score, chunk)
-            for score, chunk, chunk_terms in zip(scores, self._chunks, self._chunk_terms)
+            (len(query_terms & chunk_terms), score, idx)
+            for idx, (score, chunk_terms) in enumerate(zip(scores, self._chunk_terms))
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        return [idx for _overlap, _score, idx in matches[:fetch_k]]
+
+    def query(self, query: str, top_k: Optional[int] = None) -> str:
+        top_k = top_k or self.default_top_k
+        variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        results = [(score, chunk) for _overlap, score, chunk in matches[:fetch_k]]
+        ranked_indices = _rrf_retrieve(variants, [self._bm25_leg], fetch_k)
+        # The score half of each tuple is a synthetic rank-derived placeholder,
+        # not a real retrieval score -- RRF has already re-ordered by fused
+        # rank, and _rerank_candidates only reads candidate order/chunk.text.
+        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
 
         if not results:
@@ -268,6 +283,34 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
     return chunks
 
 
+def _rrf_retrieve(
+    query_variants: List[str],
+    legs: List[Callable[[str, int], List[int]]],
+    fetch_k: int,
+) -> List[int]:
+    """Run every (query_variant, leg) pair -- each leg returns a ranked list
+    of chunk indices capped at fetch_k -- and fuse ALL resulting lists
+    (variants x legs) with one unweighted `reciprocal_rank_fusion` call.
+    Returns chunk indices ordered by fused score, descending. A leg is a
+    closure over one KB's own chunks/index (BM25 scoring, or cosine
+    scoring); parameterizing on `(query_text, fetch_k) -> List[int]` lets
+    one function serve local_folder (1 leg), vector (1 leg), and hybrid (2
+    legs) identically. With exactly one variant and one leg this reproduces
+    that leg's own order exactly (RRF over a single ranked list is
+    order-preserving -- see the design spec's "Key facts")."""
+    ranked_lists = [leg(variant, fetch_k) for variant in query_variants for leg in legs]
+    fused = reciprocal_rank_fusion(*ranked_lists)
+    return [idx for idx, _score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)]
+
+
+def _query_variants(query: str, query_expansion_model: Any, query_expansion_count: int) -> List[str]:
+    """`[query]` plus up to `query_expansion_count` LLM-generated alternative
+    phrasings. Expansion failures/unset already degrade to `[]` inside
+    `expand_query`, so this never raises and never returns an empty list."""
+    expansions, _response = expand_query(query_expansion_model, query, query_expansion_count)
+    return [query] + expansions
+
+
 def _rerank_fetch_k(top_k: int, candidate_k: int, reranker: Optional[Reranker]) -> int:
     """How many pre-rerank candidates to fetch for this call. `candidate_k`
     is fixed at construction time from the constructor's default `top_k`, but
@@ -289,12 +332,14 @@ def _rerank_candidates(
     top_k: int,
 ) -> List["tuple[float, _Chunk]"]:
     """Never mutates `candidates`. `candidates` is already sorted by
-    retrieval score and sliced to `candidate_k` by the caller. Empty input
-    or no reranker configured is a pure slice -- no model call, no logging.
-    Any exception during scoring (including a `_RerankScoringError` contract
-    violation) falls back to the pre-rerank `candidates[:top_k]` slice,
-    logged as a warning: rerank is a quality layer, never a reason the
-    knowledge base query itself fails."""
+    retrieval rank (the score half of each tuple may be a synthetic
+    placeholder, not a real score -- this function never reads it) and
+    sliced to `candidate_k` by the caller. Empty input or no reranker
+    configured is a pure slice -- no model call, no logging. Any exception
+    during scoring (including a `_RerankScoringError` contract violation)
+    falls back to the pre-rerank `candidates[:top_k]` slice, logged as a
+    warning: rerank is a quality layer, never a reason the knowledge base
+    query itself fails."""
     if reranker is None or not candidates:
         return candidates[:top_k]
     try:

@@ -1,0 +1,31 @@
+# Single-agent support workflow backed by a hybrid (BM25 + vector) knowledge
+# base. "support_agent" can call the "company_docs" tool, which fuses BM25
+# keyword search with cosine-similarity search via Reciprocal Rank Fusion --
+# so it can find a document via a shared keyword OR a semantically related
+# phrase with no shared keywords, whichever method's index has it.
+# Uses "fake:" specs for both the model and the embeddings so the dashboard
+# demo runs with zero cost / no API key.
+
+name: hybrid_knowledge_base_demo
+
+knowledge_bases:
+  - name: company_docs
+    type: hybrid
+    path: ./kb_docs
+    embedding_model: "fake:8"
+
+agents:
+  - name: support_agent
+    role: Customer Support Specialist
+    goal: Answer customer questions using the company's policy documents
+    backstory: Always checks the knowledge base before answering
+    model: "fake:Based on our policy documents, here is the answer to your question."
+    tools: [company_docs]
+
+teams:
+  - name: support_team
+    agents: [support_agent]
+    mode: sequential
+
+workflow:
+  steps: [support_team]

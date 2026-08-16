@@ -1,11 +1,13 @@
+"""Hybrid BM25 + vector knowledge base: fuses both retrieval methods via
+Reciprocal Rank Fusion so results neither method alone would surface (e.g. a
+semantically relevant chunk with zero keyword overlap) can still appear. See
+`docs/superpowers/specs/2026-08-15-kb-hybrid-retrieval-design.md`.
+"""
+
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from ..exceptions import ConfigurationError
 from .embeddings import normalize_rows, resolve_embedding_model
@@ -19,38 +21,20 @@ from .knowledge_base import (
     _validate_chunk_params,
 )
 from .reranking import _MAX_RERANK_CANDIDATE_K, _resolve_candidate_k, resolve_reranker
+from .text_tokenize import significant_terms, tokenize
+from .vector_knowledge_base import _chunk_cache_key, _load_embedding_cache, _save_embedding_cache
 
 
-def _chunk_cache_key(model_spec: str, text: str) -> str:
-    return hashlib.sha256(f"{model_spec}\x00{text}".encode("utf-8")).hexdigest()
+class HybridKnowledgeBase(KnowledgeBase):
+    """A knowledge base backed by a folder of documents, indexed with BOTH
+    BM25 keyword search and embeddings, fused via Reciprocal Rank Fusion.
 
-
-def _load_embedding_cache(cache_path: Path, model_spec: str) -> Dict[str, List[float]]:
-    """Return {chunk_hash: vector}, or {} if missing/corrupt/model mismatch."""
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    if data.get("model") != model_spec:
-        return {}  # different embedding model -> incompatible vector space
-    return data.get("entries", {})
-
-
-def _save_embedding_cache(cache_path: Path, model_spec: str, entries: Dict[str, List[float]]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"model": model_spec, "entries": entries}), encoding="utf-8")
-    os.replace(tmp, cache_path)  # atomic on Windows and POSIX
-
-
-class VectorKnowledgeBase(KnowledgeBase):
-    """A knowledge base backed by a folder of documents, indexed with embeddings.
-
-    Documents are parsed and chunked via the same pipeline as
-    LocalFolderKnowledgeBase, embedded with a configurable embedding model,
-    and searched with in-memory cosine similarity. No external vector store —
-    suited to small/medium corpora where semantic (not just keyword) search
-    is needed.
+    Recovers chunks a single retrieval method would miss (e.g. a
+    semantically relevant chunk with zero keyword overlap with the query, or
+    a keyword match an embedding model scores as only weakly similar) --
+    reranking (opt-in) can only re-order what a retrieval pass already
+    surfaced, so widening that pass matters more here than for either
+    single-method type.
     """
 
     def __init__(
@@ -68,12 +52,24 @@ class VectorKnowledgeBase(KnowledgeBase):
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
     ) -> None:
+        # numpy is checked before rank_bm25: rank_bm25 imports numpy
+        # internally, so if rank_bm25 hasn't been imported yet in this
+        # process and numpy is unavailable, `import rank_bm25` fails too --
+        # checking numpy first ensures a numpy-only failure is reported as
+        # "numpy", not misattributed to "rank-bm25".
         try:
             import numpy as np
         except ImportError as exc:
             raise ConfigurationError(
-                "Vector knowledge bases require the 'numpy' package. "
+                "Hybrid knowledge bases require the 'numpy' package. "
                 "Install it with: pip install 'bestteam[tools-rag-vector]'"
+            ) from exc
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError as exc:
+            raise ConfigurationError(
+                "Hybrid knowledge bases require the 'rank-bm25' package. "
+                "Install it with: pip install 'bestteam[tools-rag]'"
             ) from exc
 
         _validate_chunk_params(name, chunk_size, chunk_overlap)
@@ -82,6 +78,8 @@ class VectorKnowledgeBase(KnowledgeBase):
         self.path = Path(path)
         self.default_top_k = top_k
         self.score_threshold = score_threshold
+        self.query_expansion_model = query_expansion_model
+        self.query_expansion_count = query_expansion_count
         self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
         if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
             raise ConfigurationError(
@@ -89,8 +87,6 @@ class VectorKnowledgeBase(KnowledgeBase):
                 f"between top_k ({top_k}) and {_MAX_RERANK_CANDIDATE_K}"
             )
         self._candidate_k = _resolve_candidate_k(candidate_k, top_k)
-        self.query_expansion_model = query_expansion_model
-        self.query_expansion_count = query_expansion_count
 
         self._chunks = _load_document_chunks(self.path, chunk_size, chunk_overlap)
         if not self._chunks:
@@ -98,19 +94,25 @@ class VectorKnowledgeBase(KnowledgeBase):
                 f"Knowledge base '{name}' has no readable documents in {self.path}"
             )
 
-        self._embeddings = resolve_embedding_model(embedding_model)
+        self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]
+        self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
+        self._bm25 = BM25Okapi(self._chunk_tokens)
 
+        self._embeddings = resolve_embedding_model(embedding_model)
         vectors = self._embed_chunks(embedding_model, cache_path)
         if not vectors or len(vectors) != len(self._chunks):
             raise ConfigurationError(
                 f"Knowledge base '{name}': embedding model returned "
                 f"{len(vectors)} vectors for {len(self._chunks)} chunks"
             )
-
         matrix = np.array(vectors, dtype=np.float64)
         self._matrix = normalize_rows(matrix)
 
     def _embed_chunks(self, embedding_model: Any, cache_path: Optional[str | Path]) -> List[List[float]]:
+        # Identical to VectorKnowledgeBase._embed_chunks -- same cache
+        # helpers, same behavior, so hybrid gets the same cache_path support.
+        import warnings
+
         texts = [c.text for c in self._chunks]
 
         if cache_path is None:
@@ -142,6 +144,19 @@ class VectorKnowledgeBase(KnowledgeBase):
 
         return [cache[key] for key in keys]
 
+    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[int]:
+        query_tokens = tokenize(query_text)
+        query_terms = significant_terms(query_tokens)
+        scores = self._bm25.get_scores(query_tokens)
+
+        matches = [
+            (len(query_terms & chunk_terms), score, idx)
+            for idx, (score, chunk_terms) in enumerate(zip(scores, self._chunk_terms))
+            if query_terms & chunk_terms
+        ]
+        matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+        return [idx for _overlap, _score, idx in matches[:fetch_k]]
+
     def _vector_leg(self, query_text: str, fetch_k: int) -> List[int]:
         import numpy as np
 
@@ -160,13 +175,10 @@ class VectorKnowledgeBase(KnowledgeBase):
         return indices
 
     def query(self, query: str, top_k: Optional[int] = None) -> str:
-        # Mirrors LocalFolderKnowledgeBase.query()'s `top_k or self.default_top_k`:
-        # a caller-supplied top_k=0 falls back to default_top_k (intentional parity).
         top_k = top_k or self.default_top_k
-
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        ranked_indices = _rrf_retrieve(variants, [self._vector_leg], fetch_k)
+        ranked_indices = _rrf_retrieve(variants, [self._bm25_leg, self._vector_leg], fetch_k)
         # The score half of each tuple is a synthetic rank-derived placeholder,
         # not a real retrieval score -- RRF has already re-ordered by fused
         # rank, and _rerank_candidates only reads candidate order/chunk.text.
