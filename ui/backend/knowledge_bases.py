@@ -62,10 +62,14 @@ _MAX_FILES_PER_UPLOAD = 30
 _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
-# Per-KB locks serialising the upload promotion/commit/cleanup critical section
-# (and delete, in crud.py). Concurrent uploads of the same KB would otherwise
-# interleave the shared CURRENT pointer + version cleanup and could leave
-# CURRENT naming a version the losing uploader then deletes (CR-008). Keyed by
+# Per-KB locks serialising the upload staging/commit/dispatch critical section
+# (and delete, in crud.py). Originally so concurrent uploads of the same KB
+# couldn't interleave the shared CURRENT pointer + version cleanup and leave
+# CURRENT naming a version the losing uploader then deletes (CR-008); the
+# DB-backed path writes no pointer, but the lock is still load-bearing -- a
+# concurrent delete rmtree's the whole KB root, and org_knowledge_bases.py's
+# existence/cap/replace-confirmation check has to hold it across this call to
+# stay atomic (F1). Keyed by
 # "<org_id>/<name>"; a small guard lock protects the registry itself.
 # Reentrant (RLock): org_knowledge_bases.py's self-service route also holds
 # this same per-KB lock across its own existence/cap/replace-confirmation
