@@ -7,6 +7,7 @@ import json
 import time
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import expect as pw_expect
 
 from ._env import BASE_URL, DEMO, OP, ORG_LABEL
@@ -36,11 +37,21 @@ def goto_expecting_login_redirect(page, path, timeout=5000):
     the load event, which is why the same assertion failed in `e2e-smoke` and
     passed in `e2e-full` within a single CI run.
 
-    `wait_until="commit"` returns as soon as the response for `path` is
-    committed, so there is no `load` left to interrupt; the redirect is then
-    asserted by `wait_for_url`, which was always the real assertion here.
+    `wait_until="commit"` narrows that window but does not close it: on a fast
+    runner the guard can abort the navigation before it even commits, which
+    surfaces as `net::ERR_ABORTED` instead. There is no `wait_until` value that
+    reliably survives a navigation the app is deliberately cancelling, so the
+    navigation error is tolerated outright.
+
+    That is not a weakened assertion. `wait_for_url` below is the assertion,
+    and it still fails if the redirect does not happen -- including if the page
+    failed to load for some unrelated reason, since then no /login URL ever
+    arrives either.
     """
-    page.goto(BASE_URL + path, wait_until="commit")
+    try:
+        page.goto(BASE_URL + path, wait_until="commit")
+    except PlaywrightError:
+        pass
     page.wait_for_url("**/login", timeout=timeout)
 
 
