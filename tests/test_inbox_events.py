@@ -144,3 +144,104 @@ def test_claim_is_scoped_to_one_org(db):
                         external_ids=["9"])
     db.commit()
     assert store.claim_events(db, org_id=1, run_id="run-a", limit=3) == []
+
+
+# ---------------------------------------------------------------------------
+# The store: terminal outcomes, release, and the dead-letter budget.
+# ---------------------------------------------------------------------------
+
+
+def _claimed(db, ids, run_id="run-a"):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="99",
+                        external_ids=ids)
+    db.commit()
+    claimed = store.claim_events(db, org_id=1, run_id=run_id, limit=len(ids))
+    db.commit()
+    return claimed
+
+
+def test_dispatch_charges_exactly_one_attempt(db):
+    from ui.backend.db import inbox_events as store
+
+    _claimed(db, ["1", "2"])
+    store.mark_dispatched(db, "run-a")
+    db.commit()
+    assert [e.attempts for e in db.query(InboxEvent).order_by(InboxEvent.id)] == [1, 1]
+
+
+def test_completion_splits_drafted_from_undrafted(db):
+    from ui.backend.db import inbox_events as store
+
+    _claimed(db, ["1", "2", "3"])
+    # A run failed after drafting for 1 and 3 -- those must never be
+    # reprocessed (email_draft_reply has no dedup), only 2 is retryable.
+    store.complete_events(db, "run-a", done_external_ids={"1", "3"}, error="boom")
+    db.commit()
+    rows = {e.external_id: e for e in db.query(InboxEvent).all()}
+    assert rows["1"].status == "done" and rows["3"].status == "done"
+    assert rows["2"].status == "failed" and rows["2"].last_error == "boom"
+    assert rows["1"].completed_at is not None
+
+
+def test_completion_with_everything_done_marks_all_done(db):
+    from ui.backend.db import inbox_events as store
+
+    _claimed(db, ["1", "2"])
+    store.complete_events(db, "run-a", done_external_ids={"1", "2"}, error=None)
+    db.commit()
+    assert {e.status for e in db.query(InboxEvent)} == {"done"}
+
+
+def test_release_returns_rows_to_pending_below_the_attempt_limit(db):
+    from ui.backend.db import inbox_events as store
+
+    _claimed(db, ["1", "2"])
+    store.mark_dispatched(db, "run-a")
+    db.commit()
+    assert store.release_events(db, "run-a", max_attempts=3, error="crashed") == 0
+    db.commit()
+    rows = db.query(InboxEvent).all()
+    assert {e.status for e in rows} == {"pending"}
+    assert all(e.run_id is None for e in rows)
+    assert all(e.attempts == 1 for e in rows)  # the attempt stays charged
+
+
+def test_release_dead_letters_at_the_attempt_limit(db):
+    from ui.backend.db import inbox_events as store
+
+    claimed = _claimed(db, ["1"])
+    claimed[0].attempts = 3
+    db.commit()
+    assert store.release_events(db, "run-a", max_attempts=3, error="crashed") == 1
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert row.status == "failed" and row.last_error == "crashed"
+
+
+def test_release_without_an_attempt_charged_is_penalty_free(db):
+    from ui.backend.db import inbox_events as store
+
+    # A workflow that fails to BUILD never charged an attempt, so it returns to
+    # pending and retries forever -- today's behaviour, and correct: a broken
+    # team config must not dead-letter a whole day of an org's mail.
+    _claimed(db, ["1"])
+    assert store.release_events(db, "run-a", max_attempts=3, error=None) == 0
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert (row.status, row.attempts) == ("pending", 0)
+
+
+def test_reopen_returns_only_failed_events_and_resets_the_budget(db):
+    from ui.backend.db import inbox_events as store
+
+    _claimed(db, ["1", "2"])
+    store.mark_dispatched(db, "run-a")
+    store.complete_events(db, "run-a", done_external_ids={"1"}, error="boom")
+    db.commit()
+    assert store.reopen_events(db, "run-a") == 1
+    db.commit()
+    rows = {e.external_id: e for e in db.query(InboxEvent)}
+    assert rows["1"].status == "done"  # already drafted: never reopened
+    assert (rows["2"].status, rows["2"].attempts, rows["2"].run_id) == ("pending", 0, None)

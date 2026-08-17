@@ -268,6 +268,7 @@ DAILY_CAP_ENV = "BESTTEAM_TRIGGER_DAILY_CAP"
 DISABLED_ENV = "BESTTEAM_TRIGGERS_DISABLED"
 BATCH_SIZE_ENV = "BESTTEAM_TRIGGER_BATCH_SIZE"
 RUN_TIMEOUT_ENV = "BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS"
+MAX_EVENT_ATTEMPTS_ENV = "BESTTEAM_TRIGGER_MAX_EVENT_ATTEMPTS"
 
 
 def poll_seconds() -> float:
@@ -294,6 +295,14 @@ def run_timeout_seconds() -> float:
     return float(os.environ.get(RUN_TIMEOUT_ENV, "").strip() or 1800)
 
 
+def max_event_attempts() -> int:
+    """How many times one detected message may be handed to a run before it is
+    dead-lettered. Only infrastructure-class failures (crash, dispatch failure,
+    watchdog timeout) consume an attempt -- a message that reaches the model and
+    fails is terminal immediately and waits for a human retry."""
+    return int(os.environ.get(MAX_EVENT_ATTEMPTS_ENV, "").strip() or 3)
+
+
 _MIN_POLL_SECONDS = 5
 _MIN_RUN_TIMEOUT_SECONDS = 60
 
@@ -317,6 +326,7 @@ def validate_trigger_env() -> None:
         (DAILY_CAP_ENV, daily_cap, 1),
         (BATCH_SIZE_ENV, batch_size, 1),
         (RUN_TIMEOUT_ENV, run_timeout_seconds, _MIN_RUN_TIMEOUT_SECONDS),
+        (MAX_EVENT_ATTEMPTS_ENV, max_event_attempts, 1),
     ):
         raw = os.environ.get(env_name, "").strip()
         if not raw:

@@ -1712,3 +1712,17 @@ def test_run_timeout_env_is_validated_at_startup(monkeypatch):
     monkeypatch.setenv("BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS", "5")
     with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS"):
         email_trigger.validate_trigger_env()
+
+
+# --- inbox event dead-letter budget -------------------------------------------
+
+
+def test_max_event_attempts_defaults_to_three(monkeypatch):
+    monkeypatch.delenv(email_trigger.MAX_EVENT_ATTEMPTS_ENV, raising=False)
+    assert email_trigger.max_event_attempts() == 3
+
+
+def test_validate_trigger_env_rejects_zero_max_event_attempts(monkeypatch):
+    monkeypatch.setenv(email_trigger.MAX_EVENT_ATTEMPTS_ENV, "0")
+    with pytest.raises(RuntimeError, match="MAX_EVENT_ATTEMPTS"):
+        email_trigger.validate_trigger_env()
