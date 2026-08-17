@@ -134,6 +134,13 @@ class _OfflineBackend:
         return []
 
 
+# Bound before the autouse fixture below can replace it: that fixture makes the
+# patched `_make_backend` the only one any test would otherwise see, which would
+# leave `restrict_to_public=True` -- the flag enabling SSRF validation against a
+# customer-supplied hostname -- guarded by nothing but its docstring.
+_REAL_MAKE_BACKEND = email_trigger._make_backend
+
+
 @pytest.fixture(autouse=True)
 def offline_backend(monkeypatch):
     monkeypatch.setattr(email_trigger, "_make_backend",
@@ -2248,9 +2255,6 @@ class _SummaryBackend:
         self.raises = raises
         self.calls = []
 
-    def _connect(self):
-        raise AssertionError("check_mailbox is monkeypatched in these tests")
-
     def summaries_for(self, uids):
         self.calls.append(list(uids))
         if self.raises:
@@ -2289,13 +2293,17 @@ def test_bulk_mail_is_recorded_filtered_and_never_reaches_a_run(db, monkeypatch)
     ])
     org, trigger = _filtering_org(db, monkeypatch, backend)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
 
     rows = _events_by_id(db, org.id)
     assert rows["43"].status == "filtered"
     assert rows["43"].decision == "bulk:list-id"
     assert rows["42"].status in ("pending", "claimed")
     assert rows["42"].decision is None
+    # The second half of this test's name: the filtered UID is not merely
+    # labelled, it never reaches the batch the model is given.
+    assert calls == [("triage", org.id, {42})]
 
 
 def test_filtering_still_advances_the_cursor_over_every_detected_uid(db, monkeypatch):
@@ -2326,6 +2334,7 @@ def test_a_header_fetch_failure_fails_open(db, monkeypatch):
     rows = _events_by_id(db, org.id)
     assert {e.status for e in rows.values()} <= {"pending", "claimed"}
     assert all(e.decision is None for e in rows.values())
+    assert backend.calls == [["42", "43"]]  # attempted once, then gave up open
 
 
 def test_a_uid_with_no_summary_returned_is_processed(db, monkeypatch):
@@ -2357,3 +2366,44 @@ def test_an_org_that_turned_the_bulk_rule_off_keeps_its_bulk_mail(db, monkeypatc
     poll_org(db, trigger, _fake_workflow_getter([]))
 
     assert all(e.status != "filtered" for e in _events_by_id(db, org.id).values())
+def test_a_backend_without_summaries_for_at_all_fails_open(db, monkeypatch):
+    # `_filter_decisions` catches Exception, not OSError: a backend that has no
+    # header-fetch verb at all raises AttributeError, and narrowing that handler
+    # would turn a backend quirk into silently discarded customer mail. Nothing
+    # else in this file pins that, so a later `except OSError` would go green.
+    class _NoSummaries:
+        pass
+
+    org, trigger = _filtering_org(db, monkeypatch, _NoSummaries())
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert set(rows) == {"42", "43"}
+    assert {e.status for e in rows.values()} <= {"pending", "claimed"}
+    assert all(e.decision is None for e in rows.values())
+
+
+def test_make_backend_keeps_ssrf_validation_on(db, monkeypatch):
+    # The autouse `offline_backend` fixture replaces `_make_backend` everywhere,
+    # so without this nothing could catch `restrict_to_public` being dropped --
+    # and that flag is what validates and pins a customer-supplied hostname.
+    # `_REAL_MAKE_BACKEND` is the unpatched function, captured at import.
+    built = []
+    monkeypatch.setattr(email_trigger, "_ImapBackend",
+                        lambda **kw: built.append(kw))  # never opens a socket
+
+    org, _trigger = _org_with_trigger(db)
+    from ui.backend.db.email_credentials import get_email_credentials
+    cred = get_email_credentials(db, org.id)
+
+    _REAL_MAKE_BACKEND(cred, "pw")
+
+    assert built == [{
+        "host": cred.host,
+        "user": cred.username,
+        "password": "pw",
+        "port": cred.port,
+        "drafts": cred.drafts_folder,
+        "restrict_to_public": True,
+    }]
