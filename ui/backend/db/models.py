@@ -436,6 +436,10 @@ class EmailTrigger(Base):
     # Daily cap state; runs_date is an ISO date string (UTC).
     runs_today: Mapped[int] = mapped_column(default=0)
     runs_date: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Messages (not runs) handed to a model today, for the per-org message cap.
+    # Shares `runs_date` on purpose: one rollover check resets both, so the two
+    # counters can never disagree about which day it is.
+    messages_today: Mapped[int] = mapped_column(default=0)
     # Overlap guard: skip a cycle while this run is still `running`.
     last_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
@@ -831,3 +835,51 @@ class OrgRetentionSetting(Base):
     run_retention_days: Mapped[Optional[int]] = mapped_column(nullable=True)
     last_swept_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     last_purged_count: Mapped[int] = mapped_column(default=0)
+
+
+class OrgEmailFilterSetting(Base):
+    """One org's pre-LLM mail filter rules (Phase 4a).
+
+    An org with no row behaves as `skip_bulk=True` and three empty lists --
+    bulk mail is filtered by default. That default is deliberate: the phase
+    exists because customers are billed model rates for mail no human wrote,
+    and a safety feature nobody switches on protects nobody. It is recoverable:
+    one checkbox turns it off, and every filtered message stays visible and
+    releasable.
+    """
+
+    __tablename__ = "org_email_filter_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, index=True, nullable=False
+    )
+    skip_bulk: Mapped[bool] = mapped_column(default=True)
+    # Lists of patterns; each entry is a full address or `*@domain`. Never a
+    # regular expression -- see ui/backend/email_filter.py.
+    sender_blocklist: Mapped[list] = mapped_column(JSON, default=list)
+    sender_allowlist: Mapped[list] = mapped_column(JSON, default=list)
+    subject_blocklist: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class OrgEmailBudgetSetting(Base):
+    """One org's customer-facing automation budget (Phase 4a).
+
+    Both caps are NULL by default -- an upgrade must never start refusing to
+    process a customer's mail because of a limit they never set. The
+    deployment-wide `BESTTEAM_EMAIL_DAILY_CAP` (runs/day) is a separate,
+    operator-owned safety rail and is unaffected by these.
+    """
+
+    __tablename__ = "org_email_budget_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, index=True, nullable=False
+    )
+    daily_message_cap: Mapped[Optional[int]] = mapped_column(nullable=True)
+    monthly_cost_cap: Mapped[Optional[float]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
