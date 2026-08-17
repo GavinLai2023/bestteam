@@ -117,7 +117,7 @@ def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[I
         update(InboxEvent)
         .where(InboxEvent.id.in_(oldest_pending))
         .values(status=EVENT_CLAIMED, run_id=run_id, claimed_at=_utcnow())
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
     return list(
         db.execute(
@@ -153,7 +153,7 @@ def mark_dispatched(db: Session, run_id: str) -> None:
         update(InboxEvent)
         .where(InboxEvent.run_id == run_id, InboxEvent.status == EVENT_CLAIMED)
         .values(attempts=InboxEvent.attempts + 1)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
 
 
@@ -223,6 +223,6 @@ def reopen_events(db: Session, run_id: str) -> int:
             status=EVENT_PENDING, run_id=None, claimed_at=None,
             completed_at=None, attempts=0, last_error=None,
         )
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
     return result.rowcount or 0

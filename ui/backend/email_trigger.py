@@ -39,6 +39,14 @@ from . import secret_store
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger
+from .db.inbox_events import (
+    claim_events,
+    mailbox_identity,
+    mark_dispatched,
+    record_events,
+    release_events,
+    reopen_events,
+)
 from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
 from .email_tools import spec_uses_email
 from .knowledge_bases import (
@@ -57,6 +65,14 @@ TRIGGER_USERNAME = "email-trigger"
 
 _ERROR_KIND_MAILBOX = "mailbox"
 _ERROR_KIND_WORKFLOW = "workflow"
+
+# Shown when a detected message has exhausted its automatic retries. Without
+# it a dead-lettered message would be invisible: it is no longer pending, so
+# no future poll picks it up, and nothing else reports it.
+_DEAD_LETTER_MESSAGE = (
+    "Some new mail couldn't be processed after several attempts and has been "
+    "set aside -- open the run list for details."
+)
 
 _UIDVALIDITY_RE = re.compile(rb"UIDVALIDITY (\d+)")
 _UIDNEXT_RE = re.compile(rb"UIDNEXT (\d+)")
@@ -302,6 +318,12 @@ def max_event_attempts() -> int:
     fails is terminal immediately and waits for a human retry."""
     return int(os.environ.get(MAX_EVENT_ATTEMPTS_ENV, "").strip() or 3)
 
+
+# How much of a backlog one detection cycle may record. Bounds the transaction
+# after a long outage without changing steady-state behaviour: `new_uids` is
+# sorted ascending, so slicing keeps the oldest and the rest are picked up on
+# the next cycle.
+_DETECT_MULTIPLIER = 10
 
 _MIN_POLL_SECONDS = 5
 _MIN_RUN_TIMEOUT_SECONDS = 60
@@ -607,11 +629,27 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             db.commit()
             return
 
+        # THE durability point. Recording the work and advancing the cursor in
+        # ONE commit is what stops a process kill from consuming mail that
+        # nothing ran: before this, `_start_triggered_run` advanced `last_uid`
+        # and only then handed the workflow to a thread pool, and a kill in
+        # between lost the batch for good.
+        detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
+        record_events(
+            db,
+            org_id=trigger.org_id,
+            mailbox_identity=mailbox_identity(cred.host, cred.username),
+            mailbox_generation=str(trigger.uidvalidity),
+            external_ids=[str(u) for u in detected],
+        )
+        trigger.last_uid = max(detected)
+        db.commit()
+
         if _at_daily_cap(db, trigger, today):
             db.commit()  # persist last_checked_at / error-clearing above; no dispatch
             return
 
-        _start_triggered_run(db, trigger, new_uids, get_workflow, backend, cred)
+        _start_triggered_run(db, trigger, get_workflow, backend, cred)
 
 
 def _trigger_input(uids) -> str:
@@ -623,12 +661,17 @@ def _trigger_input(uids) -> str:
 
 
 def _start_triggered_run(
-    db: Session, trigger: EmailTrigger, new_uids, get_workflow, backend, cred
+    db: Session, trigger: EmailTrigger, get_workflow, backend, cred
 ) -> None:
-    """Start ONE run over a bounded batch of the detected UIDs.
+    """Start ONE run over a bounded batch of this org's pending inbox events.
 
-    Build the workflow FIRST (a build failure must consume no message and no
-    cap), then persist a durable run row and advance state in one commit, then
+    The batch is whatever this run CLAIMS from the durable ledger, not whatever
+    the poller happened to detect this cycle -- batching is a claim policy now,
+    not a coupling. The claim is committed before any workflow build is
+    attempted, so a build failure releases the messages (penalty-free: a broken
+    team config is not the message's fault) rather than consuming them.
+
+    Then persist a durable run row and advance state in one commit, then
     dispatch. `get_workflow` is `build_trigger_workflow(name, db, org_id,
     allowed_uids, backend) -> (Workflow, Optional[int] version_id)`; the version
     is captured from the same record read that built the config so the run
@@ -645,8 +688,22 @@ def _start_triggered_run(
     changes even when the customer replaces the mailbox entirely -- host/
     username are what `retry_triggered_run` actually needs to detect that.
     """
-    batch = sorted(new_uids)[:batch_size()]
+    # The run id has to exist before the claim can stamp it, so the registry
+    # entry is created first and discarded on any path that doesn't dispatch
+    # (the same create-then-discard shape the disabled-mid-build branch below
+    # already used).
+    run = registry.create(
+        trigger.workflow_name, "", org_id=trigger.org_id, username=TRIGGER_USERNAME,
+    )
+    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=batch_size())
+    if not claimed:
+        registry.discard(run.id)
+        db.commit()
+        return
+    db.commit()  # the claim is durable before any workflow build is attempted
+    batch = [int(e.external_id) for e in claimed]
     input_text = _trigger_input(batch)
+    run.input = input_text
     trigger_context = {
         "trigger_type": "email",
         "mailbox_credential_id": cred.id,
@@ -669,12 +726,14 @@ def _start_triggered_run(
             "been changed or removed. Re-enable automatic runs from its page."
         )
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
-        db.commit()  # NB: last_uid / runs_today deliberately NOT advanced
+        # Penalty-free release: the workflow is broken, not the messages. No
+        # attempt was charged (that happens at dispatch), so these retry until
+        # the customer fixes the team -- which is today's behaviour, and the
+        # reason attempts are not charged at claim time.
+        release_events(db, run.id, max_attempts=max_event_attempts(), error=None)
+        registry.discard(run.id)
+        db.commit()  # NB: runs_today deliberately NOT advanced
         return
-    run = registry.create(
-        trigger.workflow_name, input_text, org_id=trigger.org_id,
-        username=TRIGGER_USERNAME,
-    )
     # Durable activity record before dispatch (worker updates its terminal
     # status; run_in_background reuses this row rather than re-inserting).
     run_row = Run(
@@ -703,7 +762,10 @@ def _start_triggered_run(
             EmailTrigger.org_id.in_(select(Organization.id).where(Organization.active.is_(True))),
         )
         .values(
-            last_uid=max(batch),
+            # NB: last_uid is NOT written here any more. Detection already
+            # advanced it, past everything it recorded -- which is a superset of
+            # this run's claimed batch, so writing max(batch) would regress the
+            # cursor and re-detect (harmlessly, but pointlessly) the remainder.
             runs_today=EmailTrigger.runs_today + 1,
             last_run_id=run.id,
             last_error=None,  # a run is going out: clear any prior fault
@@ -711,8 +773,13 @@ def _start_triggered_run(
         )
     ).rowcount
     if not advanced:
+        # Penalty-free release, same reasoning as the build-failure branch: the
+        # customer disconnected the mailbox or the org was suspended, which says
+        # nothing about these messages. They stay queued for whenever the
+        # trigger is re-enabled.
+        release_events(db, run.id, max_attempts=max_event_attempts(), error=None)
         registry.discard(run.id)
-        db.commit()  # persist last_checked_at; batch/cap deliberately NOT advanced
+        db.commit()  # persist last_checked_at; cap deliberately NOT advanced
         db.refresh(trigger)
         _logger.info(
             "email trigger: org %s disabled while this cycle's run was building -- discarding",
@@ -720,6 +787,7 @@ def _start_triggered_run(
         )
         return
     db.add(run_row)
+    mark_dispatched(db, run.id)
     db.commit()
     db.refresh(trigger)  # resync the ORM object with the values the CAS wrote
     try:
@@ -728,24 +796,25 @@ def _start_triggered_run(
             engine=db.get_bind(), org_id=trigger.org_id, username=TRIGGER_USERNAME,
         )
     except Exception:  # noqa: BLE001 -- submission itself must never wedge the trigger
-        # The batch/cap were already consumed by the commit above (the same
-        # accepted commit-then-crash window already disclosed for a process
-        # kill at this point). Without this, both the registry entry and the
-        # Run row would stay "running" forever and the overlap guard would
-        # block every later poll for this org.
+        # The cap was already consumed by the commit above. Without this, both
+        # the registry entry and the Run row would stay "running" forever and
+        # the overlap guard would block every later poll for this org.
         _logger.exception("email trigger: failed to dispatch run %s for org %s",
                           run.id, trigger.org_id)
-        # This batch's UIDs were already advanced past (above, before this
-        # try block) -- they will NOT be retried. Say so plainly rather than
-        # implying a retry that won't happen.
         message = (
-            "Couldn't start the automatic run. It won't be retried, but "
-            "automatic runs will resume when new mail arrives."
+            "Couldn't start the automatic run. The affected mail will be "
+            "picked up again on a later check."
         )
         run_row.status = "failed"
         run_row.output = message
         trigger.last_error = message
         trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+        # Infrastructure-class: nothing reached the model, so the messages go
+        # back for reprocessing. An attempt WAS charged above, so a mailbox that
+        # can never be dispatched dead-letters rather than looping forever --
+        # and the customer is told, since nothing else would surface it.
+        if release_events(db, run.id, max_attempts=max_event_attempts(), error=message):
+            trigger.last_error = _DEAD_LETTER_MESSAGE
         db.commit()
         # The worker never started, so run_in_background's own normalization
         # never runs either -- without this, a declared property-maintenance

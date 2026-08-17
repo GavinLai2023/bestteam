@@ -245,3 +245,20 @@ def test_reopen_returns_only_failed_events_and_resets_the_budget(db):
     rows = {e.external_id: e for e in db.query(InboxEvent)}
     assert rows["1"].status == "done"  # already drafted: never reopened
     assert (rows["2"].status, rows["2"].attempts, rows["2"].run_id) == ("pending", 0, None)
+
+
+def test_the_attempt_count_release_reads_is_not_stale(db):
+    from ui.backend.db import inbox_events as store
+
+    # `session_factory` sets expire_on_commit=False, so a Core UPDATE that does
+    # not synchronise the session leaves the ORM object holding the OLD attempt
+    # count. release_events reads that value to decide on dead-lettering, so a
+    # stale read silently disables the budget entirely and a poison message
+    # loops forever.
+    _claimed(db, ["1"])
+    store.mark_dispatched(db, "run-a")
+    db.commit()
+    assert db.query(InboxEvent).one().attempts == 1
+    assert store.release_events(db, "run-a", max_attempts=1, error="crashed") == 1
+    db.commit()
+    assert db.query(InboxEvent).one().status == "failed"

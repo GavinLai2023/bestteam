@@ -523,9 +523,12 @@ def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     poll_org(db, trigger, build)
 
     assert recorder.calls == []      # never dispatched against the old mailbox
-    assert trigger.last_uid == 41    # NOT advanced
     assert trigger.runs_today == 0   # NO cap burned
     assert trigger.last_run_id is None
+    # Released, not consumed -- the cursor advances at detection now, so the
+    # ledger is what carries the "nothing was lost" guarantee.
+    from ui.backend.db.models import InboxEvent
+    assert all(e.status == "pending" and e.attempts == 0 for e in db.query(InboxEvent))
 
 
 def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkeypatch):
@@ -561,10 +564,14 @@ def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkey
     poll_org(db, trigger, _fake_workflow_getter([]))
 
     assert recorder.calls == []       # never dispatched
-    assert trigger.last_uid == 41     # batch NOT advanced
     assert trigger.runs_today == 0    # cap NOT burned
     assert trigger.last_run_id is None
     assert email_trigger.registry.get(created_ids[0]) is None  # no leaked run
+    # The messages are released rather than consumed: they stay queued for
+    # whenever the trigger is re-enabled, with no attempt charged.
+    from ui.backend.db.models import InboxEvent
+    rows = db.query(InboxEvent).all()
+    assert all(e.status == "pending" and e.attempts == 0 for e in rows)
 
 
 def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
@@ -616,8 +623,16 @@ def test_poll_org_bounded_batch_carries_remainder(db, monkeypatch):
     calls = []
     poll_org(db, trigger, _fake_workflow_getter(calls))
     assert calls[0][2] == {41, 42}          # oldest 2 only
-    assert trigger.last_uid == 42           # baseline advanced only past the batch
     assert trigger.runs_today == 1
+    # The remainder is now carried by the durable ledger rather than by leaving
+    # the cursor behind: detection records every message it saw and advances
+    # past all of them, and the un-claimed ones stay pending for the next cycle.
+    from ui.backend.db.models import InboxEvent
+    pending = {
+        e.external_id for e in db.query(InboxEvent).filter(InboxEvent.status == "pending")
+    }
+    assert pending == {"43", "44", "45"}
+    assert trigger.last_uid == 45
 
 
 def test_poll_org_build_failure_advances_nothing(db, monkeypatch):
@@ -631,9 +646,15 @@ def test_poll_org_build_failure_advances_nothing(db, monkeypatch):
 
     poll_org(db, trigger, _boom)
     assert recorder.calls == []
-    assert trigger.last_uid == 41          # NOT advanced -- no message consumed
     assert trigger.runs_today == 0         # NO cap burned
     assert trigger.last_error is not None and "triage" in trigger.last_error
+    # "No message consumed" is now enforced by the ledger, not by holding the
+    # cursor back: both messages are released to pending with no attempt
+    # charged, so a broken team retries them until it is fixed.
+    from ui.backend.db.models import InboxEvent
+    rows = db.query(InboxEvent).all()
+    assert {e.external_id for e in rows} == {"42", "45"}
+    assert all(e.status == "pending" and e.attempts == 0 for e in rows)
 
 
 def test_poll_org_workflow_error_survives_empty_poll(db, monkeypatch):
@@ -862,8 +883,11 @@ def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypa
     poll_org(db, trigger, _fake_workflow_getter([]))
 
     assert recorder.calls == []          # no run dispatched
-    assert trigger.last_uid == 41        # UID baseline NOT advanced
     assert trigger.runs_today == 0
+    # A deactivated org's mail is released, not consumed: full suspend must be
+    # reversible, so re-activating picks these up rather than losing them.
+    from ui.backend.db.models import InboxEvent
+    assert all(e.status == "pending" and e.attempts == 0 for e in db.query(InboxEvent))
 
 
 # --- retry_triggered_run: safe manual retry of a triggered run (spec 11.2) --
@@ -1726,3 +1750,117 @@ def test_validate_trigger_env_rejects_zero_max_event_attempts(monkeypatch):
     monkeypatch.setenv(email_trigger.MAX_EVENT_ATTEMPTS_ENV, "0")
     with pytest.raises(RuntimeError, match="MAX_EVENT_ATTEMPTS"):
         email_trigger.validate_trigger_env()
+
+
+# --- durable inbox events: detection, claim, release --------------------------
+
+
+def _events(db):
+    from ui.backend.db.models import InboxEvent
+
+    return db.query(InboxEvent).order_by(InboxEvent.id).all()
+
+
+def test_detection_records_events_and_advances_the_cursor_together(db, monkeypatch):
+    # A poll that detects mail must leave a durable row per message in the same
+    # commit that moves last_uid past it. Before this, the cursor advanced and
+    # the work only existed inside a thread-pool submission, so a process kill
+    # in that window consumed mail nothing ever ran.
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events(db)
+    assert [r.external_id for r in rows] == ["42", "43", "45"]
+    assert all(r.mailbox_generation == "3" for r in rows)
+    assert all(r.mailbox_identity == "imap.acme.com:u@acme.com" for r in rows)
+    assert trigger.last_uid == 45
+
+
+def test_detection_is_idempotent_across_polls(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    # The same message seen again (e.g. the cursor write was lost): the unique
+    # key must make this a no-op rather than a second event.
+    trigger.last_uid = 41
+    db.commit()
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert len(_events(db)) == 1
+
+
+def test_detection_is_bounded_per_cycle(db, monkeypatch):
+    # A long outage can leave a large backlog; one cycle must not open an
+    # unbounded transaction. The cursor advances only as far as it recorded.
+    monkeypatch.setenv(email_trigger.BATCH_SIZE_ENV, "2")
+    org, trigger = _org_with_trigger(db, last_uid=0, uidvalidity=3)
+    monkeypatch.setattr(
+        email_trigger, "check_mailbox", lambda b, u: (3, 100, list(range(1, 101)))
+    )
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events(db)
+    assert len(rows) == 2 * email_trigger._DETECT_MULTIPLIER
+    assert trigger.last_uid == 2 * email_trigger._DETECT_MULTIPLIER
+
+
+def test_dispatch_claims_events_and_charges_one_attempt(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 43, [42, 43]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events(db)
+    assert {r.status for r in rows} == {"claimed"}
+    assert all(r.attempts == 1 for r in rows)
+    assert all(r.run_id == trigger.last_run_id for r in rows)
+
+
+def test_a_workflow_build_failure_releases_the_events_without_penalty(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    def _broken(name, db_, org_id, allowed_uids, backend):
+        raise RuntimeError("team deleted")
+
+    poll_org(db, trigger, _broken)
+
+    row = _events(db)[0]
+    # Back to pending with no attempt charged: a broken team config must not
+    # dead-letter the org's mail, and today such mail is never consumed.
+    assert (row.status, row.attempts, row.run_id) == ("pending", 0, None)
+    assert trigger.last_error_kind == "workflow"
+
+
+class _DispatchBoom:
+    def submit(self, *a, **kw):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+
+def test_a_dispatch_failure_releases_the_events(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+    monkeypatch.setattr(email_trigger, "_executor", _DispatchBoom())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    row = _events(db)[0]
+    # An attempt WAS charged (the run really was dispatched), but the message
+    # returns for reprocessing rather than being silently consumed.
+    assert (row.status, row.attempts) == ("pending", 1)
+
+
+def test_a_dispatch_failure_dead_letters_at_the_attempt_limit(db, monkeypatch):
+    monkeypatch.setenv(email_trigger.MAX_EVENT_ATTEMPTS_ENV, "1")
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+    monkeypatch.setattr(email_trigger, "_executor", _DispatchBoom())
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert _events(db)[0].status == "failed"
+    # A dead-lettered message must not be invisible to the customer.
+    assert trigger.last_error is not None
