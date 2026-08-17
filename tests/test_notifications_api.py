@@ -208,3 +208,13 @@ def test_settings_are_org_scoped(ctx):
 
         other_id = get_or_create_org(db, "someone-else").id
         assert get_notification_settings(db, other_id) is None
+
+
+def test_the_alert_timestamp_carries_its_utc_offset(ctx):
+    # SQLite hands the column back tzinfo-naive; a bare isoformat() is parsed
+    # by the frontend's `formatDateTime` as browser-local, shifting every
+    # alert time for anyone not on UTC.
+    client, SessionLocal = ctx
+    _seed(SessionLocal)
+    created_at = client.get("/api/notifications").json()["notifications"][0]["created_at"]
+    assert created_at.endswith("+00:00")

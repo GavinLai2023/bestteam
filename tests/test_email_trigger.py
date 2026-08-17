@@ -2131,7 +2131,7 @@ def _m365_credential(db, org_id, *, expires_in_days=None, today=None):
     (-3, "secret_expired"),
 ])
 def test_each_secret_expiry_band_warns_once(db, days, fingerprint):
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _timedelta
 
     org, _ = _org_with_trigger(db)
     today = _date(2026, 8, 17)
@@ -2140,7 +2140,12 @@ def test_each_secret_expiry_band_warns_once(db, days, fingerprint):
     assert email_trigger.sweep_secret_expiry(db, today) == 1
     # Running again must not warn again: the notification itself is the record.
     assert email_trigger.sweep_secret_expiry(db, today) == 0
-    assert [n.fingerprint for n in _notifications(db, org.id)] == [fingerprint]
+    # The band is scoped to the secret's own expiry date, so the record is of
+    # "this secret was warned about", not "this org was warned about".
+    expiry = (today + _timedelta(days=days)).isoformat()
+    assert [n.fingerprint for n in _notifications(db, org.id)] == [
+        f"{fingerprint}:{expiry}"
+    ]
 
 
 def test_a_secret_expiring_far_out_is_not_warned_about(db):
@@ -2182,7 +2187,29 @@ def test_crossing_from_the_thirty_day_band_into_seven_warns_again(db):
     # urgent in a way the first was not.
     later = _date(2026, 9, 8)
     email_trigger.sweep_secret_expiry(db, later)
+    expiry = _date(2026, 9, 11).isoformat()
     assert {n.fingerprint for n in _notifications(db, org.id)} == {
-        "secret_expiry_30", "secret_expiry_7",
+        f"secret_expiry_30:{expiry}", f"secret_expiry_7:{expiry}",
     }
     assert cred.oauth_secret_expires_at is not None
+
+
+def test_a_replacement_secret_is_warned_about_in_its_own_right(db):
+    # `has_fingerprint` searches an org's whole history, so an unscoped band
+    # name warned each org exactly once ever: renew the secret and its 30-day
+    # warning was suppressed by the previous secret's record.
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    cred = _m365_credential(db, org.id, expires_in_days=25, today=today)
+    assert email_trigger.sweep_secret_expiry(db, today) == 1
+
+    # The admin creates a new client secret expiring two years out, and two
+    # years later it too approaches its deadline.
+    cred.oauth_secret_expires_at = datetime(2028, 8, 17)
+    db.commit()
+    assert email_trigger.sweep_secret_expiry(db, _date(2028, 7, 25)) == 1
+    assert {n.fingerprint for n in _notifications(db, org.id)} == {
+        "secret_expiry_30:2026-09-11", "secret_expiry_30:2028-08-17",
+    }

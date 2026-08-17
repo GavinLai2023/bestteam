@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org
-from .db.models import Organization
+from .db.models import Organization, iso_utc
 from .db.notifications import list_notifications, mark_read, unread_count
 from .db_session import get_db
 
@@ -32,7 +32,10 @@ def _serialise(row) -> Dict[str, Any]:
         "title": row.title,
         "body": row.body,
         "fingerprint": row.fingerprint,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        # `iso_utc`, not bare `isoformat()`: SQLite hands the column back
+        # tzinfo-naive, and the frontend's `formatDateTime` then reads a bare
+        # timestamp as browser-local, shifting every alert time.
+        "created_at": iso_utc(row.created_at) if row.created_at else None,
         "read": row.read_at is not None,
         # Exposed so an admin can tell "nobody was paged" from "nothing
         # happened" -- a webhook that has quietly been failing looks exactly

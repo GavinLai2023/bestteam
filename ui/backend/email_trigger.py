@@ -1161,6 +1161,19 @@ _SECRET_EXPIRY_BANDS = ((7, "secret_expiry_7"), (30, "secret_expiry_30"))
 _SECRET_EXPIRED_FINGERPRINT = "secret_expired"
 
 
+def _expiry_fingerprint(band: str, expiry_date: date) -> str:
+    """Scope a band to the secret it is warning about.
+
+    `has_fingerprint` searches an org's whole notification history, so a bare
+    band name warns each org exactly once ever: replace the expiring secret
+    and the new one's 30-day warning is suppressed by the old one's record
+    (Codex review finding). The expiry date distinguishes secrets -- a
+    replacement has a new one, and a replacement that somehow expires on the
+    same day genuinely is the same deadline.
+    """
+    return f"{band}:{expiry_date.isoformat()}"
+
+
 def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
     """Warn each org whose stored M365 client secret is close to expiring.
 
@@ -1189,7 +1202,7 @@ def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
         days_left = (expiry_date - reference).days
 
         if days_left <= 0:
-            fingerprint = _SECRET_EXPIRED_FINGERPRINT
+            fingerprint = _expiry_fingerprint(_SECRET_EXPIRED_FINGERPRINT, expiry_date)
             severity, title = "error", "Your Microsoft 365 app password has expired"
             body = (
                 "The client secret for this mailbox has expired, so no new mail "
@@ -1200,7 +1213,7 @@ def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
             band = next((f for d, f in _SECRET_EXPIRY_BANDS if days_left <= d), None)
             if band is None:
                 continue
-            fingerprint = band
+            fingerprint = _expiry_fingerprint(band, expiry_date)
             severity, title = "warning", "Your Microsoft 365 app password expires soon"
             body = (
                 f"The client secret for this mailbox expires in {days_left} day(s). "
