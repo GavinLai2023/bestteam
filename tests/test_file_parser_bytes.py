@@ -46,6 +46,14 @@ def test_undecodable_text_does_not_raise(tmp_path):
     assert isinstance(result, str)
 
 
+def test_windows_and_classic_mac_line_endings_are_normalised():
+    # `Path.read_text` translates newlines by default, so a bare decode would
+    # change parse_file's output for any CRLF file. This asserts on literal
+    # bytes rather than write_text, which emits \r\n only on Windows -- CI runs
+    # on Linux, where a platform-dependent version of this test proves nothing.
+    assert parse_bytes(b"a\r\nb\rc\nd", "notes.txt") == "a\nb\nc\nd"
+
+
 def test_bytes_and_path_agree_for_text(tmp_path):
     target = tmp_path / "notes.md"
     target.write_text("# Title\n\nbody", encoding="utf-8")
