@@ -1049,6 +1049,22 @@
   those were dropped during design as not reachable** — see the sharpened
   Known-issues entry below. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`.
+- **Email automation Phase 2 — Microsoft 365 mailbox connections.** An org on
+  Exchange Online could not connect a mailbox at all: `build_org_imap_backend`
+  only ever built a basic-auth login, which Microsoft removed. Mailboxes now
+  record an `auth_type`; `microsoft_oauth` authenticates with app-only client
+  credentials over SASL `XOAUTH2` (`bestteam/tools/_oauth.py`, stdlib `urllib`
+  — no new dependency), configurable in the wizard, the org settings API and
+  `admin set-email --auth microsoft-oauth`. The connect flow fetches the token
+  as a separate step so a credential problem and a mailbox-access problem get
+  different, actionable messages. **`email_trigger.py` and `runtime.py` are
+  untouched** — after `AUTHENTICATE` the session is an ordinary IMAP session,
+  so the UID cursor, Phase 0's draft markers and Phase 1's ledger all keep
+  working. **The roadmap's "MailboxConnector abstraction + Graph/Gmail OAuth"
+  was deliberately not built** — see `docs/DECISIONS.md` for why an abstraction
+  over one and a half implementations was the wrong trade, and why Graph-native
+  would have regressed Phase 0. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-2-microsoft-oauth-design.md`.
 
 ## In Progress
 
@@ -1056,6 +1072,25 @@
 
 ## Known issues / tech debt
 
+- **Microsoft 365 mailbox support has never touched a live tenant.** Every test
+  for it runs against fakes: they pin the SASL byte string, the token
+  lifecycle, the storage round-trip and the four error mappings, but nothing in
+  CI can prove that Exchange Online accepts the resulting
+  `AUTHENTICATE XOAUTH2` — that depends on Microsoft's current policy for
+  OAuth-over-IMAP, which they have been changing in stages.
+  `docs/email-smoke-test.md` §9 is the only verification and **must be run
+  against a real tenant before this is sold to an M365 customer**. The risk is
+  cheap to carry: if Exchange ever refuses the flow, only `_connect()` and the
+  credential shape are affected.
+- **`_GraphBackend._token()` caches its access token forever.**
+  `if self._access_token is None:` never refetches, but Microsoft's tokens
+  expire in about an hour, so a long-lived process using
+  `BESTTEAM_EMAIL_BACKEND=graph` starts failing after that until it restarts.
+  Pre-existing and unrelated to the per-org path Phase 2 changed — the poller
+  never constructs a `_GraphBackend` — so it was deliberately left alone rather
+  than editing code that phase otherwise did not touch. The per-org OAuth
+  provider (`tools/_oauth.py`) does *not* have this bug; it refreshes 60
+  seconds before expiry.
 - **Horizontal scale-out of the email poller is blocked on a Postgres
   migration, not on the poller.** `make_engine` hardcodes SQLite and takes a
   *file path*, not a URL (`ui/backend/db/database.py:41`), and there is no
