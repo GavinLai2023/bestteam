@@ -24,11 +24,13 @@ class _FakeBackend:
 
     made = []
 
-    def __init__(self, *, host, user, password, port=993, drafts=None, restrict_to_public=False):
+    def __init__(self, *, host, user, password=None, port=993, drafts=None,
+                 restrict_to_public=False, token_provider=None):
         self.host, self.user, self.password, self.port, self.drafts = (
             host, user, password, port, drafts,
         )
         self.restrict_to_public = restrict_to_public
+        self.token_provider = token_provider
         _FakeBackend.made.append(self)
 
     def find(self, query):
@@ -184,3 +186,43 @@ def test_connecting_mailbox_invalidates_workflow_cache_key(db_session):
     before = backend_main._dependency_freshness(db_session)
     set_email_credentials(db_session, org_id, host="h", username="u", password="p")
     assert backend_main._dependency_freshness(db_session) != before
+
+
+# ---------------------------------------------------------------------------
+# Microsoft 365 (OAuth) mailboxes
+# ---------------------------------------------------------------------------
+
+def test_an_oauth_mailbox_builds_a_backend_with_a_token_provider(db_session):
+    from bestteam.tools._oauth import MicrosoftClientCredentialsToken
+    from ui.backend.db.email_credentials import AUTH_MICROSOFT_OAUTH, MICROSOFT_IMAP_HOST
+
+    org_id = _org(db_session, "acme")
+    set_email_credentials(
+        db_session, org_id, host=MICROSOFT_IMAP_HOST, username="support@acme.com",
+        password="the-client-secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="tenant-1", oauth_client_id="client-1",
+    )
+
+    backend = email_tools.build_org_imap_backend(db_session, org_id)
+
+    assert backend.password is None
+    provider = backend.token_provider
+    assert isinstance(provider, MicrosoftClientCredentialsToken)
+    # The provider must carry the *decrypted* secret and address the right
+    # tenant -- getting either wrong would fail only at first use, in production.
+    assert provider.url.endswith("/tenant-1/oauth2/v2.0/token")
+    assert provider._client_id == "client-1"
+    assert provider._client_secret == "the-client-secret"
+    assert backend.restrict_to_public is True
+
+
+def test_a_password_mailbox_still_builds_a_password_backend(db_session):
+    org_id = _org(db_session, "acme")
+    set_email_credentials(
+        db_session, org_id, host="imap.example.com", username="u", password="p"
+    )
+
+    backend = email_tools.build_org_imap_backend(db_session, org_id)
+
+    assert backend.password == "p"
+    assert backend.token_provider is None
