@@ -210,19 +210,48 @@ def release_events(
     return dead_lettered
 
 
-def reopen_events(db: Session, run_id: str) -> int:
-    """Return a failed run's terminal events to the queue for a human retry.
+def resolve_retry_events(
+    db: Session, *, from_run_id: str, to_run_id: str, retry_external_ids, done_external_ids
+) -> int:
+    """Hand a failed run's events to the retry that will redo them.
 
-    Attempts reset to 0: the customer has looked at the failure and asked for
-    it again, so the automatic dead-letter budget starts over.
+    The retry path decides what is actually redone -- it re-derives the batch
+    from `trigger_context` and subtracts everything Phase 0's evidence (result
+    rows, trace events, and the mailbox scan) shows a draft for. This mirrors
+    that decision onto the ledger rather than second-guessing it:
+
+    - `done_external_ids` become `done` on the ORIGINAL run. These are messages
+      the retry refuses to touch because a draft already exists; the mailbox
+      scan can discover some of them only now, at retry time.
+    - `retry_external_ids` move to the new run as `claimed`, which makes that
+      run responsible for completing them.
+
+    Attempts reset to 0: a human has looked at the failure and asked for it
+    again, so the automatic dead-letter budget starts over.
+
+    Returns how many events moved. Zero is normal and expected for a run that
+    predates the ledger -- the retry path falls back to `trigger_context` alone.
     """
-    result = db.execute(
-        update(InboxEvent)
-        .where(InboxEvent.run_id == run_id, InboxEvent.status == EVENT_FAILED)
-        .values(
-            status=EVENT_PENDING, run_id=None, claimed_at=None,
-            completed_at=None, attempts=0, last_error=None,
+    now = _utcnow()
+    retry = {str(x) for x in retry_external_ids}
+    done = {str(x) for x in done_external_ids}
+    moved = 0
+    rows = db.execute(
+        select(InboxEvent).where(
+            InboxEvent.run_id == from_run_id, InboxEvent.status == EVENT_FAILED
         )
-        .execution_options(synchronize_session="fetch")
-    )
-    return result.rowcount or 0
+    ).scalars()
+    for event in rows:
+        if event.external_id in done:
+            event.status = EVENT_DONE
+            event.last_error = None
+            event.completed_at = now
+        elif event.external_id in retry:
+            event.run_id = to_run_id
+            event.status = EVENT_CLAIMED
+            event.claimed_at = now
+            event.completed_at = None
+            event.attempts = 0
+            event.last_error = None
+            moved += 1
+    return moved

@@ -45,7 +45,7 @@ from .db.inbox_events import (
     mark_dispatched,
     record_events,
     release_events,
-    reopen_events,
+    resolve_retry_events,
 )
 from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
 from .email_tools import spec_uses_email
@@ -1027,6 +1027,18 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
             retry_of_run_id=run_row.id,
         )
         db.add(new_row)
+        # Mirror the decision just made onto the durable ledger: the messages
+        # this retry will redo become the NEW run's responsibility, and the ones
+        # it refuses to touch (a draft already exists -- possibly discovered
+        # only now, by the mailbox scan above) go terminal on the original.
+        # A run that predates the ledger has no events and this is a no-op.
+        resolve_retry_events(
+            db,
+            from_run_id=run_row.id,
+            to_run_id=new_run.id,
+            retry_external_ids=retry_uids,
+            done_external_ids=already_drafted,
+        )
         # Atomic SQL-level advance (mirrors _start_triggered_run's CAS), not a
         # Python-level `trigger.runs_today += 1` -- the latter reads whatever
         # value this call's own `trigger` object was loaded with (before the

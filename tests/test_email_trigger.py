@@ -1908,3 +1908,48 @@ def test_the_watchdog_dead_letters_at_the_attempt_limit(db, monkeypatch):
     assert _events(db)[0].status == "failed"
     # A dead-lettered message must not be invisible to the customer.
     assert trigger.last_error is not None
+
+
+def test_retry_hands_the_original_runs_failed_events_to_the_new_run(db, monkeypatch):
+    from ui.backend.db import inbox_events as store
+    from ui.backend.db.models import InboxEvent
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    store.record_events(db, org_id=org.id, mailbox_identity="m",
+                        mailbox_generation="3", external_ids=["42", "43"])
+    db.commit()
+    store.claim_events(db, org_id=org.id, run_id=run_row.id, limit=2)
+    # The original run drafted for 42 before failing on 43.
+    store.complete_events(db, run_row.id, done_external_ids={"42"}, error="boom")
+    db.commit()
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    new_run_id = retry_triggered_run(db, run_row)
+
+    rows = {e.external_id: e for e in db.query(InboxEvent)}
+    # 42 already has a draft: terminal, never redone, still owned by the original.
+    assert rows["42"].status == "done" and rows["42"].run_id == run_row.id
+    # 43 moves to the retry, which is now responsible for completing it.
+    assert rows["43"].status == "claimed" and rows["43"].run_id == new_run_id
+
+
+def test_a_run_predating_the_ledger_still_retries_via_trigger_context(db, monkeypatch):
+    # Runs in flight at upgrade time have no events at all; the pre-ledger path
+    # must still work rather than raising "nothing left to retry".
+    from ui.backend.db.models import InboxEvent
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+    assert db.query(InboxEvent).count() == 0
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    assert retry_triggered_run(db, run_row)

@@ -233,18 +233,50 @@ def test_release_without_an_attempt_charged_is_penalty_free(db):
     assert (row.status, row.attempts) == ("pending", 0)
 
 
-def test_reopen_returns_only_failed_events_and_resets_the_budget(db):
+def test_retry_moves_only_the_redone_events_and_resets_the_budget(db):
     from ui.backend.db import inbox_events as store
 
     _claimed(db, ["1", "2"])
     store.mark_dispatched(db, "run-a")
     store.complete_events(db, "run-a", done_external_ids={"1"}, error="boom")
     db.commit()
-    assert store.reopen_events(db, "run-a") == 1
+    moved = store.resolve_retry_events(
+        db, from_run_id="run-a", to_run_id="run-b",
+        retry_external_ids=["2"], done_external_ids=[],
+    )
     db.commit()
+    assert moved == 1
     rows = {e.external_id: e for e in db.query(InboxEvent)}
-    assert rows["1"].status == "done"  # already drafted: never reopened
-    assert (rows["2"].status, rows["2"].attempts, rows["2"].run_id) == ("pending", 0, None)
+    assert rows["1"].status == "done"  # already drafted: never redone
+    assert (rows["2"].status, rows["2"].attempts, rows["2"].run_id) == ("claimed", 0, "run-b")
+
+
+def test_retry_marks_late_discovered_drafts_done_instead_of_redoing_them(db):
+    from ui.backend.db import inbox_events as store
+
+    # The mailbox scan can only discover an APPENDed-but-unrecorded draft at
+    # retry time. Such a message must go terminal, not move to the new run.
+    _claimed(db, ["1", "2"])
+    store.complete_events(db, "run-a", done_external_ids=set(), error="boom")
+    db.commit()
+    moved = store.resolve_retry_events(
+        db, from_run_id="run-a", to_run_id="run-b",
+        retry_external_ids=["2"], done_external_ids=["1"],
+    )
+    db.commit()
+    assert moved == 1
+    rows = {e.external_id: e for e in db.query(InboxEvent)}
+    assert (rows["1"].status, rows["1"].run_id) == ("done", "run-a")
+    assert (rows["2"].status, rows["2"].run_id) == ("claimed", "run-b")
+
+
+def test_retry_of_a_run_with_no_events_moves_nothing(db):
+    from ui.backend.db import inbox_events as store
+
+    assert store.resolve_retry_events(
+        db, from_run_id="pre-ledger", to_run_id="run-b",
+        retry_external_ids=["1"], done_external_ids=[],
+    ) == 0
 
 
 def test_the_attempt_count_release_reads_is_not_stale(db):
