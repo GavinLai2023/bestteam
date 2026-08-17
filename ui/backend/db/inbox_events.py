@@ -143,6 +143,30 @@ def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[I
     )
 
 
+def has_pending_events(db: Session, *, org_id: int) -> bool:
+    """Whether this org has anything `claim_events` could claim right now.
+
+    A `pending` row can exist for reasons other than "mail just arrived": an
+    admin released a filtered false positive, or a budget cap left a backlog
+    behind. `poll_org` uses this to decide whether a cycle that found no new
+    UIDs should still go on to dispatch -- without it, both of those wait for
+    unrelated mail to land before anything claims them, on a quiet mailbox
+    possibly for days.
+
+    Deliberately an existence check (`LIMIT 1`) scoped exactly as
+    `claim_events` scopes its own selection, rather than a speculative claim:
+    an idle mailbox is the common case and the empty poll must stay cheap.
+    """
+    return (
+        db.execute(
+            select(InboxEvent.id)
+            .where(InboxEvent.org_id == org_id, InboxEvent.status == EVENT_PENDING)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def claimed_events(db: Session, run_id: str) -> List[InboxEvent]:
     """This run's currently-claimed events, oldest first."""
     return list(

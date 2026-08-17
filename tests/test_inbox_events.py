@@ -67,7 +67,9 @@ def test_defaults_are_pending_with_no_run_and_no_attempts(db):
     row = db.query(InboxEvent).one()
     assert (row.status, row.run_id, row.attempts) == ("pending", None, 0)
     assert row.detected_at is not None
-    # Phase 4's filter hook: reserved, never written today.
+    # The filter's `decision` is opt-in, not implicit: a row nobody filtered
+    # carries no reason. Phase 4a writes it (via `record_events(decisions=)`)
+    # only for a UID the pre-LLM filter actually rejected.
     assert row.decision is None
 
 

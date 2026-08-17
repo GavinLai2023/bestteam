@@ -1,6 +1,6 @@
 """Pure per-org budget arithmetic (email automation Phase 4a).
 
-The existing `BESTTEAM_EMAIL_DAILY_CAP` counts *runs*, and a run processes up
+The existing `BESTTEAM_TRIGGER_DAILY_CAP` counts *runs*, and a run processes up
 to `batch_size()` messages at an unknown price -- so it is a platform safety
 rail, not a customer budget. These two caps are the customer's: how many
 messages a day, and how much money a month.

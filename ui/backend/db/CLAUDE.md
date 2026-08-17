@@ -152,7 +152,10 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   fields behind.
 - `email_triggers` — one org's autonomous new-mail trigger: opt-in flag +
   target `workflow_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
-  daily-cap counters (`runs_today`/`runs_date`), overlap guard
+  the two date-scoped counters (`runs_today`, the operator's runs/day rail,
+  and `messages_today`, the customer's daily message cap — both reset off the
+  one shared `runs_date`, on purpose, so a rollover can never leave them
+  disagreeing about which day it is), overlap guard
   (`last_run_id`), and health (`last_checked_at`/`last_error`). Unique
   `org_id` — at most one auto-running team per org. CRUD in
   `db/email_triggers.py`; poll-state mutations in `ui/backend/email_trigger.py`.
@@ -173,16 +176,31 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   any connector with no generation concept. Because the key makes re-insertion
   a no-op, the cursor degrades from a correctness requirement to a performance
   optimisation: losing it re-examines messages, never reprocesses them.
-  `status` is `pending | claimed | done | failed | filtered`; `attempts` is
+  `status` is `pending | claimed | done | failed | filtered`, and `filtered` is
+  written today (Phase 4a): it is a message the pre-LLM filter skipped before
+  any model saw it, recorded by the *same* `record_events` call in the *same*
+  commit as everything else detected that cycle — filtering chooses a row's
+  status, never whether the row exists. `attempts` is
   charged at **dispatch**, never at claim, so a workflow that fails to *build*
   releases its messages penalty-free and retries forever (a broken team config
   must not dead-letter a day of an org's mail). `connector_type`/
   `mailbox_generation`/`external_id` are deliberately connector-neutral for
-  Phase 2 (Graph/Gmail); `decision` and the `filtered` status are reserved for
-  Phase 4's pre-LLM filter and are never written today. CRUD in
+  Phase 2 (Graph/Gmail). `decision` is written today too, alongside that
+  status: the short reason the filter gave (`bulk:list-id`,
+  `blocked_sender:*@news.example.com`, `not_allowlisted`, ...), which the
+  activity UI renders as a sentence. `release_filtered_event` is the whole
+  release path — one `filtered` → `pending` flip that also clears `decision`,
+  scoped by `org_id`, so a false positive rejoins the ordinary claim queue with
+  no second dispatch path to keep correct. Because a row can therefore become
+  claimable with **no new mail having arrived**, `has_pending_events` exists
+  next to `claim_events`: a scoped `LIMIT 1` existence check that lets
+  `poll_org` go on to dispatch on an otherwise-empty cycle instead of returning
+  early and leaving a released message (or a capped backlog) sitting until
+  unrelated mail happens to land. CRUD in
   `db/inbox_events.py` (nothing there commits — callers own the transaction
   boundary, since the durability guarantee is the single commit).
-  See `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`.
+  See `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`
+  and `docs/superpowers/specs/2026-08-17-email-phase-4a-filtering-budgets-design.md`.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/
@@ -354,3 +372,39 @@ already-drafted UIDs from a retry -- see `ui/backend/CLAUDE.md`).
 `inbox_events` is deliberately never purged: a UID plus the customer's own
 mailbox address is not data-subject content, and deleting it would break
 `resolve_retry_events`.
+
+## `org_email_filter_settings` + `org_email_budget_settings` (email Phase 4a)
+
+Two more one-row-per-org settings tables, following `org_retention_settings`
+and `org_notification_settings` exactly: unique `org_id` FK, no row = the
+default policy, and the row is kept when a value is cleared. CRUD in
+`db/email_filter_settings.py` / `db/email_budget_settings.py`; neither commits.
+
+`org_email_filter_settings` is the pre-LLM filter's policy: `skip_bulk` (the
+built-in `Auto-Submitted`/`Precedence`/`List-Id`/`List-Unsubscribe` header
+rules) plus three JSON lists, `sender_blocklist`, `sender_allowlist` and
+`subject_blocklist`. **`skip_bulk` defaults to `True` for an org with no row**
+-- the one deliberate behaviour change on upgrade, because a safety feature
+nobody switches on protects nobody, and it is recoverable: one checkbox turns
+it off and every filtered message stays visible and releasable in
+`inbox_events`. Sender entries are a full address or `*@domain` and **never a
+regular expression** (customer regexes would put catastrophic backtracking in
+the poll loop, and no admin could be told why a pattern did not match); the
+evaluation order that turns these columns into a decision lives in the pure
+`ui/backend/email_filter.py`, not here.
+
+`org_email_budget_settings` is the customer's two caps: `daily_message_cap`
+(int) and `monthly_cost_cap` (float). **Both are NULL by default** -- the
+opposite default to `skip_bulk`, and for the opposite reason: an upgrade must
+never start *refusing* to process a customer's mail because of a limit they
+never set. Neither is a stored counter. The day's messages are counted on
+`email_triggers.messages_today` (above), and the month's spend is **queried,
+never stored** -- `spent_this_month` sums `usage_records.cost_estimate` from
+the first instant of the UTC month, which is what `usage_records.org_id` is
+denormalised for; a spend column would need its own reset, its own backfill
+and its own drift bug. A `SUM` of NULL prices means "nothing priced", not
+"nothing spent", which is why `unpriced_models_for_org` and
+`unpriced_run_count` exist beside it: the cap is a floor on reality, and the
+blind spot is reported rather than hidden. The deployment-wide
+`BESTTEAM_TRIGGER_DAILY_CAP` (runs/day) is a separate, operator-owned rail and
+is unaffected by either column.

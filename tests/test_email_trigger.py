@@ -2585,3 +2585,103 @@ def test_an_org_with_no_caps_behaves_exactly_as_before(db, monkeypatch):
     assert len(recorder.calls) == 1
     assert trigger.messages_today == 3
     assert trigger.runs_today == 1
+
+
+# --- Phase 4a: a quiet mailbox must still drain the ledger --------------------
+#
+# Both of this phase's new customer-facing features produce `pending` rows for
+# a reason other than "mail just arrived" -- an admin releasing a filtered
+# false positive, and a backlog a cap declined to dispatch -- and both promise,
+# in the UI and in the alert body, that the next check picks the work up.
+# `poll_org` used to return the moment detection found no new UIDs, so neither
+# promise held on a mailbox that then went quiet.
+
+
+def _finish_registered_run(run_id):
+    """Mark the previous cycle's run terminal in the registry.
+
+    `_SubmitRecorder` never actually runs the worker, so nothing else ever
+    moves the entry off `running` -- and the overlap guard honours a `running`
+    entry, which would stop the *next* cycle for a reason that has nothing to
+    do with what these tests are about.
+    """
+    from ui.backend.runtime import registry
+
+    registry.get(run_id).status = "completed"
+
+
+def test_a_released_message_is_processed_on_the_next_quiet_cycle(db, monkeypatch):
+    from ui.backend.db.inbox_events import release_filtered_event
+
+    backend = _SummaryBackend([
+        {"id": "42", "from": "supplier@client.test", "subject": "Quote",
+         "list-id": "<newsletter.client.test>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend, new_uids=(42,))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert _events_by_id(db, org.id)["42"].status == "filtered"
+    assert recorder.calls == []
+
+    # An admin decides the rule was wrong -- and no further mail ever arrives.
+    event_id = _events_by_id(db, org.id)["42"].id
+    assert release_filtered_event(db, org_id=org.id, event_id=event_id) is True
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, []))
+
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    assert calls == [("triage", org.id, {42})]
+    assert len(recorder.calls) == 1
+    assert _events_by_id(db, org.id)["42"].status == "claimed"
+
+
+def test_a_capped_backlog_drains_on_a_quiet_cycle_once_the_cap_allows(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44))
+    set_budget_caps(db, org.id, daily_message_cap=1, monthly_cost_cap=None)
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert trigger.messages_today == 1
+    assert sorted(e.status for e in _events_by_id(db, org.id).values()) == [
+        "claimed", "pending", "pending",
+    ]
+    _finish_registered_run(trigger.last_run_id)
+
+    # The cap is raised (a rollover would do just as well) and the mailbox
+    # stays silent from here on.
+    set_budget_caps(db, org.id, daily_message_cap=3, monthly_cost_cap=None)
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 44, []))
+
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    assert calls == [("triage", org.id, {43, 44})]
+    assert trigger.messages_today == 3
+    assert all(e.status == "claimed" for e in _events_by_id(db, org.id).values())
+
+
+def test_a_quiet_cycle_with_nothing_pending_still_dispatches_nothing(db, monkeypatch):
+    # The other half of the change: proceeding past an empty detection is
+    # conditional on there being something claimable. Without the condition an
+    # idle mailbox -- the overwhelmingly common case -- would build a workflow
+    # and create-then-discard a registry entry on every single cycle.
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+
+    poll_org(db, trigger, _no_workflow)  # _no_workflow raises if it is reached
+
+    from ui.backend.db.models import Run
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 0
+    assert trigger.last_run_id is None
+    assert trigger.last_checked_at is not None  # the health write is unchanged

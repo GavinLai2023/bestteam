@@ -92,10 +92,17 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     pricing the model, or by knowing the cap does not cover it.
 
     Resolved from the org's trigger: its `workflow_name` against the same
-    deployed `WorkflowRecord` the poller itself builds from, then each agent's
-    `model` exactly as `deploy_validation.validate_agent_models` reads it. Only
-    a deployed record can run automatically, so only its models can cost
-    anything.
+    deployed `WorkflowRecord` the poller itself builds from, then every agent's
+    non-empty string `model` that has no `model_catalog` entry. Only a deployed
+    record can run automatically, so only its models can cost anything.
+
+    That last step is a **narrower** rule than
+    `deploy_validation.validate_agent_models` applies to the same field: that
+    function exempts `fake:`/`fake-architect:` specs, and this one does not.
+    So a demo team on a `fake:` model is reported here as unpriced. It is: it
+    has no catalogue row and so contributes nothing to `spent_this_month`,
+    which is exactly what this list is for. Pinned by
+    `tests/test_email_filter_api.py::test_saving_a_spend_cap_names_the_models_it_cannot_cover`.
 
     Deliberately total: no trigger, no deployed team, no models, or any failure
     at all yields `[]`. This is advisory copy on a settings page and must never

@@ -403,6 +403,19 @@ not need a human on Monday, and a trigger that disables itself is
 indistinguishable in the UI from one the customer turned off. Unprocessed
 messages stay `pending`, so the backlog drains rather than being lost.
 
+**"The next check picks it up" is only true because `poll_org` no longer
+returns on an empty detection.** Both of this phase's new features create
+`pending` rows for a reason other than mail arriving -- an admin releasing a
+filtered false positive, and a backlog a cap declined to dispatch -- and
+`_start_triggered_run` used to be reachable only from a cycle that found *new*
+UIDs, so on a quiet mailbox neither drained until unrelated mail happened to
+land. The empty-detection branch now consults
+`db/inbox_events.py::has_pending_events` (a scoped `SELECT ... LIMIT 1`, so an
+idle poll stays as cheap as it was) and falls through to the ordinary
+cap-check-then-dispatch tail when this org has claimable work. The durability
+sequence is untouched: `record_events` -> `last_uid` -> `commit` still happens
+only on the detection branch, and still as one unit.
+
 **Budget alerts bypass `trigger_health.evaluate` deliberately.**
 `_raise_budget_alert` calls `has_fingerprint` + `create_notification` directly
 (`kind="budget"`), the way `sweep_secret_expiry` already does. Two reasons: a

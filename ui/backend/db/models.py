@@ -871,7 +871,7 @@ class OrgEmailBudgetSetting(Base):
 
     Both caps are NULL by default -- an upgrade must never start refusing to
     process a customer's mail because of a limit they never set. The
-    deployment-wide `BESTTEAM_EMAIL_DAILY_CAP` (runs/day) is a separate,
+    deployment-wide `BESTTEAM_TRIGGER_DAILY_CAP` (runs/day) is a separate,
     operator-owned safety rail and is unaffected by these.
     """
 

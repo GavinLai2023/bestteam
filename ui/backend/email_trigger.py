@@ -44,6 +44,7 @@ from .db.email_triggers import get_email_trigger
 from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
     claim_events,
+    has_pending_events,
     mailbox_identity,
     mark_dispatched,
     record_events,
@@ -726,33 +727,46 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             db.commit()
             return
 
-        if not new_uids:
+        if new_uids:
+            # THE durability point. Recording the work and advancing the cursor
+            # in ONE commit is what stops a process kill from consuming mail
+            # that nothing ran: before this, `_start_triggered_run` advanced
+            # `last_uid` and only then handed the workflow to a thread pool, and
+            # a kill in between lost the batch for good.
+            detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
+            # The pre-LLM filter chooses each row's STATUS, never whether the row
+            # is inserted, so it belongs here, before the durability point: every
+            # detected UID still gets a row, and the record_events / last_uid /
+            # commit trio below stays one unit.
+            decisions = _filter_decisions(
+                backend, get_filter_settings(db, trigger.org_id), detected
+            )
+            record_events(
+                db,
+                org_id=trigger.org_id,
+                mailbox_identity=mailbox_identity(cred.host, cred.username),
+                mailbox_generation=str(trigger.uidvalidity),
+                external_ids=[str(u) for u in detected],
+                decisions=decisions,
+            )
+            trigger.last_uid = max(detected)
+            db.commit()
+        elif has_pending_events(db, org_id=trigger.org_id):
+            # No new mail, but this org already has claimable work in the
+            # ledger. A `pending` row does not only come from mail arriving:
+            # an admin releasing a filtered false positive makes one, and so
+            # does a backlog a budget cap declined to dispatch. Both are
+            # promised to be picked up "on the next check" -- by the release
+            # UI, by the budget alert's own wording, and by the design spec --
+            # and returning here made that promise false on a quiet mailbox,
+            # because only a cycle that detected NEW mail ever reached the
+            # claim. Nothing about the durability sequence above moves: this
+            # branch records nothing and advances no cursor, it only declines
+            # to stop early.
+            db.commit()  # persist last_checked_at / the error clearing above
+        else:
             db.commit()
             return
-
-        # THE durability point. Recording the work and advancing the cursor in
-        # ONE commit is what stops a process kill from consuming mail that
-        # nothing ran: before this, `_start_triggered_run` advanced `last_uid`
-        # and only then handed the workflow to a thread pool, and a kill in
-        # between lost the batch for good.
-        detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
-        # The pre-LLM filter chooses each row's STATUS, never whether the row is
-        # inserted, so it belongs here, before the durability point: every
-        # detected UID still gets a row, and the record_events / last_uid /
-        # commit trio below stays one unit.
-        decisions = _filter_decisions(
-            backend, get_filter_settings(db, trigger.org_id), detected
-        )
-        record_events(
-            db,
-            org_id=trigger.org_id,
-            mailbox_identity=mailbox_identity(cred.host, cred.username),
-            mailbox_generation=str(trigger.uidvalidity),
-            external_ids=[str(u) for u in detected],
-            decisions=decisions,
-        )
-        trigger.last_uid = max(detected)
-        db.commit()
 
         if _at_daily_cap(db, trigger, today):
             db.commit()  # persist last_checked_at / error-clearing above; no dispatch
@@ -822,6 +836,13 @@ def _start_triggered_run(
         db.commit()
         return
 
+    # Read off the ORM object, deliberately unlike `_at_daily_cap`'s fresh
+    # column SELECT: `runs_today` needs one because a pre-lock fast-path check
+    # can already have passed on a stale value and because `retry_triggered_run`
+    # advances it from another session, whereas `messages_today` is checked here
+    # and nowhere else and is written only by this function's own CAS below,
+    # under the caller's `_dispatch_lock`. It also already carries the caller's
+    # date rollover, which a raw column read would have to re-derive.
     remaining = email_budget.remaining_messages(caps, trigger.messages_today)
     if remaining == 0:
         registry.discard(run.id)

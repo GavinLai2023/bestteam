@@ -572,7 +572,7 @@ Create `ui/backend/email_budget.py`:
 ```python
 """Pure per-org budget arithmetic (email automation Phase 4a).
 
-The existing `BESTTEAM_EMAIL_DAILY_CAP` counts *runs*, and a run processes up
+The existing `BESTTEAM_TRIGGER_DAILY_CAP` counts *runs*, and a run processes up
 to `batch_size()` messages at an unknown price -- so it is a platform safety
 rail, not a customer budget. These two caps are the customer's: how many
 messages a day, and how much money a month.
@@ -876,7 +876,7 @@ class OrgEmailBudgetSetting(Base):
 
     Both caps are NULL by default -- an upgrade must never start refusing to
     process a customer's mail because of a limit they never set. The
-    deployment-wide `BESTTEAM_EMAIL_DAILY_CAP` (runs/day) is a separate,
+    deployment-wide `BESTTEAM_TRIGGER_DAILY_CAP` (runs/day) is a separate,
     operator-owned safety rail and is unaffected by these.
     """
 

@@ -14,7 +14,7 @@ one. Nothing looks at a message before it is billed at model rates. A
 newsletter, a delivery receipt and a "do not reply" notification each cost the
 same as a real customer enquiry.
 
-**The only ceiling counts the wrong thing.** `BESTTEAM_EMAIL_DAILY_CAP`
+**The only ceiling counts the wrong thing.** `BESTTEAM_TRIGGER_DAILY_CAP`
 (default 50) caps *runs per day*, and a run processes up to `batch_size()` (20)
 messages. The customer-visible promise is therefore "at most 1,000 messages a
 day, at an unknown price" — which is not a budget. One message with a long
@@ -185,7 +185,7 @@ failing open is that one junk message is processed.
 
 | Limit | Scope | Set by | Purpose |
 |---|---|---|---|
-| `BESTTEAM_EMAIL_DAILY_CAP` (runs/day, default 50) | deployment | operator, env | existing platform safety rail — **unchanged** |
+| `BESTTEAM_TRIGGER_DAILY_CAP` (runs/day, default 50) | deployment | operator, env | existing platform safety rail — **unchanged** |
 | `daily_message_cap` | org | admin, UI | "we process at most N emails a day" |
 | `monthly_cost_cap` | org | admin, UI | "we spend at most $X a month" |
 
