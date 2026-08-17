@@ -9,6 +9,7 @@ token. Reading a credential does NOT decrypt the password; call
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -41,6 +42,7 @@ def set_email_credentials(
     auth_type: str = AUTH_PASSWORD,
     oauth_tenant_id: Optional[str] = None,
     oauth_client_id: Optional[str] = None,
+    oauth_secret_expires_at: Optional[date] = None,
 ) -> OrgEmailCredential:
     """Create or replace an org's mailbox credentials (upsert on `org_id`).
 
@@ -68,6 +70,12 @@ def set_email_credentials(
     row.auth_type = auth_type
     row.oauth_tenant_id = oauth_tenant_id
     row.oauth_client_id = oauth_client_id
+    # Assigned unconditionally like the other OAuth fields, so switching a
+    # mailbox back to password auth can't leave a stale expiry behind.
+    row.oauth_secret_expires_at = (
+        datetime.combine(oauth_secret_expires_at, datetime.min.time())
+        if oauth_secret_expires_at is not None else None
+    )
     db.commit()
     db.refresh(row)
     return row

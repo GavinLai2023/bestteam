@@ -2052,3 +2052,90 @@ def test_a_failing_health_evaluation_never_breaks_the_poll(db, monkeypatch):
     )
     poll_org(db, trigger, _fake_workflow_getter([]))  # must not raise
     assert trigger.last_checked_at is not None
+
+
+def _m365_credential(db, org_id, *, expires_in_days=None, today=None):
+    from datetime import timedelta
+
+    from ui.backend.db.email_credentials import (
+        AUTH_MICROSOFT_OAUTH,
+        MICROSOFT_IMAP_HOST,
+        set_email_credentials,
+    )
+
+    cred = set_email_credentials(
+        db, org_id, host=MICROSOFT_IMAP_HOST, username="u@acme.com",
+        password="client-secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="t", oauth_client_id="c",
+    )
+    if expires_in_days is not None:
+        base = today or datetime.now(timezone.utc).date()
+        cred.oauth_secret_expires_at = datetime.combine(
+            base + timedelta(days=expires_in_days), datetime.min.time()
+        )
+    db.commit()
+    return cred
+
+
+@pytest.mark.parametrize("days,fingerprint", [
+    (25, "secret_expiry_30"),
+    (5, "secret_expiry_7"),
+    (0, "secret_expired"),
+    (-3, "secret_expired"),
+])
+def test_each_secret_expiry_band_warns_once(db, days, fingerprint):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    _m365_credential(db, org.id, expires_in_days=days, today=today)
+
+    assert email_trigger.sweep_secret_expiry(db, today) == 1
+    # Running again must not warn again: the notification itself is the record.
+    assert email_trigger.sweep_secret_expiry(db, today) == 0
+    assert [n.fingerprint for n in _notifications(db, org.id)] == [fingerprint]
+
+
+def test_a_secret_expiring_far_out_is_not_warned_about(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    _m365_credential(db, org.id, expires_in_days=200, today=today)
+    assert email_trigger.sweep_secret_expiry(db, today) == 0
+    assert _notifications(db, org.id) == []
+
+
+def test_a_credential_with_no_recorded_expiry_is_skipped(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    _m365_credential(db, org.id, expires_in_days=None)
+    assert email_trigger.sweep_secret_expiry(db, _date(2026, 8, 17)) == 0
+
+
+def test_password_mailboxes_are_never_swept(db):
+    from datetime import date as _date
+
+    # `_org_with_trigger` stores an ordinary IMAP password credential.
+    org, _ = _org_with_trigger(db)
+    assert email_trigger.sweep_secret_expiry(db, _date(2026, 8, 17)) == 0
+
+
+def test_crossing_from_the_thirty_day_band_into_seven_warns_again(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    cred = _m365_credential(db, org.id, expires_in_days=25, today=today)
+    email_trigger.sweep_secret_expiry(db, today)
+
+    # Three weeks later the same secret is inside the seven-day band: a
+    # different fingerprint, so the customer is told again -- this one is
+    # urgent in a way the first was not.
+    later = _date(2026, 9, 8)
+    email_trigger.sweep_secret_expiry(db, later)
+    assert {n.fingerprint for n in _notifications(db, org.id)} == {
+        "secret_expiry_30", "secret_expiry_7",
+    }
+    assert cred.oauth_secret_expires_at is not None

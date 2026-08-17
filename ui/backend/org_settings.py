@@ -16,6 +16,7 @@ from __future__ import annotations
 import errno
 import logging
 import socket
+from datetime import date
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -61,6 +62,10 @@ class EmailConnectRequest(BaseModel):
     client_secret: Optional[str] = None
     oauth_tenant_id: Optional[str] = None
     oauth_client_id: Optional[str] = None
+    # Optional, Microsoft 365 only. Read off the Azure portal page the admin
+    # is already looking at when they copy the client secret; it powers the
+    # advance warning before the secret expires.
+    oauth_secret_expires_at: Optional[date] = None
     port: int = Field(default=993, ge=1, le=65535)
     drafts: Optional[str] = None
 
@@ -90,7 +95,12 @@ class EmailConnectRequest(BaseModel):
                 raise ValueError("A password is required.")
             if not self.host.strip():
                 raise ValueError("A mail server address is required.")
-            if self.client_secret or self.oauth_tenant_id or self.oauth_client_id:
+            if (
+                self.client_secret
+                or self.oauth_tenant_id
+                or self.oauth_client_id
+                or self.oauth_secret_expires_at
+            ):
                 raise ValueError(
                     "Microsoft 365 details only apply when connecting a Microsoft 365 mailbox."
                 )
@@ -273,6 +283,10 @@ def get_email(
         # `password_encrypted` and is never returned.
         "oauth_tenant_id": cred.oauth_tenant_id,
         "oauth_client_id": cred.oauth_client_id,
+        "oauth_secret_expires_at": (
+            cred.oauth_secret_expires_at.date().isoformat()
+            if cred.oauth_secret_expires_at is not None else None
+        ),
     }
 
 
@@ -298,6 +312,7 @@ def set_email(
             port=req.port, drafts_folder=req.drafts, auth_type=req.auth_type,
             oauth_tenant_id=(req.oauth_tenant_id or "").strip() or None,
             oauth_client_id=(req.oauth_client_id or "").strip() or None,
+            oauth_secret_expires_at=req.oauth_secret_expires_at,
         )
     except SecretsKeyError as exc:
         # The encryption key (BESTTEAM_SECRETS_KEY) is missing/invalid -- a server

@@ -22,9 +22,9 @@ import math
 import os
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select, update
@@ -37,9 +37,9 @@ from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
 from . import secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
-from .db.email_credentials import get_email_credentials
-from .db.notifications import create_notification
+from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 from .db.email_triggers import get_email_trigger
+from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
     claim_events,
     mailbox_identity,
@@ -48,13 +48,21 @@ from .db.inbox_events import (
     release_events,
     resolve_retry_events,
 )
-from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
+from .db.models import (
+    EmailTrigger,
+    Organization,
+    OrgEmailCredential,
+    Run,
+    SkillRecord,
+    WorkflowRecord,
+)
 from .email_tools import spec_uses_email
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
     load_knowledge_base_tools,
 )
+from .notifications import dispatch_pending
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -1142,6 +1150,76 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         return new_run.id
 
 
+# Warn this far ahead of a Microsoft 365 client secret expiring. Entra secrets
+# last at most two years and always expire; when one does, IMAP starts refusing
+# the app and the error reads exactly like a wrong password, so an unwarned
+# customer looks in the wrong place.
+# Tightest band FIRST: the lookup takes the first match, and a secret with five
+# days left belongs in the seven-day band, not the thirty-day one.
+_SECRET_EXPIRY_BANDS = ((7, "secret_expiry_7"), (30, "secret_expiry_30"))
+_SECRET_EXPIRED_FINGERPRINT = "secret_expired"
+
+
+def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
+    """Warn each org whose stored M365 client secret is close to expiring.
+
+    `today` is injected so the test never depends on the wall clock. Returns
+    how many notifications were raised.
+
+    Credentials with no recorded expiry are skipped entirely: the date is
+    optional and admin-entered, and inventing one would warn about a deadline
+    nobody stated. The already-warned check reads the notifications themselves
+    because this state belongs to the credential, which has no fingerprint
+    column of its own.
+    """
+    reference = today or datetime.now(timezone.utc).date()
+    raised = 0
+    credentials = (
+        db.query(OrgEmailCredential)
+        .filter(OrgEmailCredential.auth_type == AUTH_MICROSOFT_OAUTH)
+        .filter(OrgEmailCredential.oauth_secret_expires_at.isnot(None))
+        .all()
+    )
+    for cred in credentials:
+        expires = cred.oauth_secret_expires_at
+        if expires is None:
+            continue
+        expiry_date = expires.date() if isinstance(expires, datetime) else expires
+        days_left = (expiry_date - reference).days
+
+        if days_left <= 0:
+            fingerprint = _SECRET_EXPIRED_FINGERPRINT
+            severity, title = "error", "Your Microsoft 365 app password has expired"
+            body = (
+                "The client secret for this mailbox has expired, so no new mail "
+                "can be collected. Create a new client secret in Azure and "
+                "reconnect the mailbox in your organisation's settings."
+            )
+        else:
+            band = next((f for d, f in _SECRET_EXPIRY_BANDS if days_left <= d), None)
+            if band is None:
+                continue
+            fingerprint = band
+            severity, title = "warning", "Your Microsoft 365 app password expires soon"
+            body = (
+                f"The client secret for this mailbox expires in {days_left} day(s). "
+                "Create a new client secret in Azure and reconnect the mailbox "
+                "before then, or automatic email runs will stop."
+            )
+
+        if has_fingerprint(db, cred.org_id, fingerprint):
+            continue
+        create_notification(
+            db, org_id=cred.org_id, kind="secret_expiry", severity=severity,
+            title=title, body=body, fingerprint=fingerprint,
+        )
+        raised += 1
+
+    if raised:
+        db.commit()
+    return raised
+
+
 def poll_once(get_workflow: Callable, session_factory=None) -> None:
     """One pass over every enabled org. Runs on a worker thread (imaplib and
     SQLAlchemy here are synchronous); a failure in one org never stops the rest."""
@@ -1161,6 +1239,17 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
                 db.rollback()
                 _logger.exception("email trigger: unexpected failure for org %s",
                                   trigger.org_id)
+
+        # Deliver whatever this cycle (or an earlier one) raised. Piggy-backing
+        # on the poller rather than running a thread of its own: it already
+        # runs on a timer, and a notification that waits one cycle has still
+        # arrived far sooner than the customer noticing by themselves.
+        try:
+            sweep_secret_expiry(db)
+            dispatch_pending(db)
+        except Exception:  # noqa: BLE001 -- delivery must never break polling
+            db.rollback()
+            _logger.exception("email trigger: notification dispatch failed")
 
 
 async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:

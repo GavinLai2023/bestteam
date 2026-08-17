@@ -660,3 +660,44 @@ def test_a_microsoft_mailbox_is_not_stored_when_its_drafts_folder_is_unusable(
 
     assert client.put("/api/org/email", json=_OAUTH_BODY).status_code == 400
     assert client.get("/api/org/email").json() == {"connected": False}
+
+
+def test_a_microsoft_mailbox_accepts_and_returns_a_secret_expiry(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+
+    resp = client.put("/api/org/email", json={
+        **_OAUTH_BODY, "oauth_secret_expires_at": "2027-01-31",
+    })
+    assert resp.status_code == 200, resp.text
+    body = client.get("/api/org/email").json()
+    assert body["oauth_secret_expires_at"] == "2027-01-31"
+    # The secret itself is never echoed back, expiry or not.
+    assert "client_secret" not in body and "password" not in body
+
+
+def test_a_password_mailbox_rejects_a_secret_expiry(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    resp = client.put("/api/org/email", json={
+        **_creds(), "oauth_secret_expires_at": "2027-01-31",
+    })
+    assert resp.status_code == 422, resp.text
+
+
+def test_the_secret_expiry_is_optional_for_microsoft(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+    resp = client.put("/api/org/email", json=_OAUTH_BODY)
+    assert resp.status_code == 200, resp.text
+    assert client.get("/api/org/email").json()["oauth_secret_expires_at"] is None
+
+
+def test_switching_back_to_a_password_mailbox_clears_the_stored_expiry(client, monkeypatch):
+    # Otherwise a stale expiry would keep the sweep warning about a secret the
+    # mailbox no longer uses.
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+    client.put("/api/org/email", json={**_OAUTH_BODY, "oauth_secret_expires_at": "2027-01-31"})
+    resp = client.put("/api/org/email", json=_creds())
+    assert resp.status_code == 200, resp.text
+    assert client.get("/api/org/email").json().get("oauth_secret_expires_at") is None
