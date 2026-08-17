@@ -10,6 +10,7 @@ vi.mock('../lib/api', () => ({
     getRunTrace: vi.fn(),
     listAutomationResults: vi.fn(),
     retryRun: vi.fn(),
+    purgeRun: vi.fn(),
   },
 }))
 
@@ -249,5 +250,108 @@ describe('RunDetail', () => {
     expect(await screen.findByText('maintenance_request · plumbing')).toBeInTheDocument()
     expect(screen.getByText('Missing: callback_number, access_availability')).toBeInTheDocument()
     expect(screen.getByText('Risk: active_water_leak')).toBeInTheDocument()
+  })
+
+  it('says the content was removed rather than showing an empty timeline', async () => {
+    // A purged run has no trace events left, which looks exactly like a bug
+    // unless the panel says who removed them and what survived.
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [],
+      usage: [],
+      content_purged_at: '2026-08-17T00:00:00Z',
+    })
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+
+    expect(await screen.findByText(/content of this run was removed/i)).toBeInTheDocument()
+    expect(screen.getByText(/what it cost and when it ran are still on record/i)).toBeInTheDocument()
+    expect(screen.queryByText('No trace recorded for this run.')).not.toBeInTheDocument()
+  })
+
+  it("offers to delete this run's content", async () => {
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.purgeRun.mockResolvedValue({ purged: true })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+
+    const button = await screen.findByRole('button', { name: /delete this run's content/i })
+    await act(async () => {
+      fireEvent.click(button)
+    })
+
+    expect(mockedApi.purgeRun).toHaveBeenCalledWith('r1')
+  })
+
+  it('hides the content it just deleted, without needing a reload', async () => {
+    // The events and results were fetched before the purge and are still in
+    // state -- leaving them on screen contradicts the confirmation the user
+    // just gave (Codex review finding).
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [{ type: 'run_completed', agent: undefined, data: 'Drafted a reply to alice@example.com' }],
+    })
+    mockedApi.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'r1', status: 'processed', created_at: '2026-01-01T00:00:00Z',
+        payload: { summary: 'Tenant reports a leak.', action: { draft_created: true } },
+      }],
+    })
+    mockedApi.purgeRun.mockResolvedValue({ purged: true })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+    // Twice: once in the event timeline, once as the final output.
+    expect(await screen.findByText('Final output')).toBeInTheDocument()
+    expect(screen.getAllByText('Drafted a reply to alice@example.com')).toHaveLength(2)
+    expect(await screen.findByText('Tenant reports a leak.')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+
+    expect(screen.queryAllByText('Drafted a reply to alice@example.com')).toHaveLength(0)
+    expect(screen.queryByText('Final output')).not.toBeInTheDocument()
+    expect(screen.queryByText('Tenant reports a leak.')).not.toBeInTheDocument()
+    // The result row itself stays: its status is what stops a retry
+    // re-drafting the same message.
+    expect(screen.getByText('Content removed.')).toBeInTheDocument()
+  })
+
+  it('does not delete the run when the confirmation is dismissed', async () => {
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+
+    expect(mockedApi.purgeRun).not.toHaveBeenCalled()
+  })
+
+  it('does not offer to delete a run whose content is already gone', async () => {
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [],
+      content_purged_at: '2026-08-17T00:00:00Z',
+    })
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+
+    await screen.findByText(/content of this run was removed/i)
+    expect(screen.queryByRole('button', { name: /delete this run's content/i })).not.toBeInTheDocument()
+  })
+
+  it('does not offer to delete a still-running run', async () => {
+    // The worker is still writing trace events -- the API answers 409.
+    mockedApi.createWsTicket.mockResolvedValue({ ticket: 't' })
+
+    render(<RunDetail runId="r1" status="running" autonomous={false} />)
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.queryByRole('button', { name: /delete this run's content/i })).not.toBeInTheDocument()
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import { formatDateTime } from '../lib/dateFormat'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
 import { useRunTrace } from '../lib/useRunTrace'
 import type { AutomationResult } from '../lib/types'
@@ -18,10 +19,13 @@ type RetryState = 'idle' | 'retrying' | 'error'
 // lib/useRunTrace.ts for the live-WS-vs-historical-fetch mechanics (shared
 // with the admin Trace page's AdminRunDetail).
 export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
-  const { events, error } = useRunTrace(runId, status)
+  const { events, contentPurgedAt, error } = useRunTrace(runId, status)
   const [automationResults, setAutomationResults] = useState<AutomationResult[]>([])
   const [retryState, setRetryState] = useState<RetryState>('idle')
   const [retryError, setRetryError] = useState<string | null>(null)
+  const [purgedAt, setPurgedAt] = useState<string | null>(null)
+  const [purging, setPurging] = useState(false)
+  const [purgeError, setPurgeError] = useState<string | null>(null)
 
   // Property Maintenance Inbox: this run's structured results, if any (most
   // runs have none -- only autonomous email-triggered runs whose output
@@ -57,12 +61,47 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
     }
   }
 
+  const purge = async () => {
+    if (!window.confirm("Remove this run's content? The message text, our drafted reply and the step-by-step trace go; what it cost and when it ran stay. This cannot be undone.")) return
+    setPurging(true)
+    setPurgeError(null)
+    try {
+      await api.purgeRun(runId)
+      // Stamped locally rather than refetched: the trace is now empty by
+      // definition, so there is nothing left to fetch.
+      setPurgedAt(new Date().toISOString())
+      // The already-loaded results were fetched before the purge and are
+      // still in state -- empty their payloads so this panel shows exactly
+      // what a reload would (Codex review finding). The event list and final
+      // output are gated on `purged` below for the same reason.
+      setAutomationResults((rows) => rows.map((row) => ({ ...row, payload: {} })))
+    } catch (e) {
+      setPurgeError((e as Error).message)
+    } finally {
+      setPurging(false)
+    }
+  }
+
   const finalEvent = events.find((e) => e.type === finalEventType)
+  // Already purged when it loaded, or purged from this panel just now.
+  const purged = purgedAt ?? contentPurgedAt
+  // A `running` run's worker is still writing trace events, so the API
+  // refuses it (409) -- don't offer a button that can only fail. `status` is
+  // set once at click time by ActivityPage, so a run that finished while this
+  // panel stayed open needs its own terminal event as the second signal, the
+  // same way Retry does below.
+  const terminal = status !== 'running' || finalEventType !== undefined
 
   return (
     <div className="run-detail">
       {error && <p className="banner banner-error">{error}</p>}
-      {events.length === 0 && !error ? (
+      {purged ? (
+        <p className="hint">
+          The content of this run was removed on {formatDateTime(purged)} by your
+          data retention settings. What it cost and when it ran are still on
+          record.
+        </p>
+      ) : events.length === 0 && !error ? (
         <p className="hint">{status === 'running' ? 'Waiting for events…' : 'No trace recorded for this run.'}</p>
       ) : (
         <ul className="run-detail-events">
@@ -75,7 +114,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
           ))}
         </ul>
       )}
-      {finalEvent && (
+      {finalEvent && !purged && (
         <section className={`result result-${finalEvent.type}`}>
           <h3>{RESULT_LABELS[finalEvent.type]}</h3>
           {/* Safe: terminal-event `data` is guaranteed to be a string by the backend's
@@ -89,6 +128,17 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
           <ul className="automation-results-list">
             {automationResults.map((result) => {
               const payload = result.payload || {}
+              // A retention cleanup empties the payload and keeps the row --
+              // its status and source_key are what stop a retry re-drafting
+              // the same message. Say so rather than render blank fields.
+              if (Object.keys(payload).length === 0) {
+                return (
+                  <li key={result.id}>
+                    <span className="status-badge">{result.status}</span>
+                    <p className="hint">Content removed.</p>
+                  </li>
+                )
+              }
               return (
                 <li key={result.id}>
                   <span className="status-badge">{result.status}</span>
@@ -127,6 +177,14 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
             {retryState === 'retrying' ? 'Retrying…' : 'Retry'}
           </button>
           {retryState === 'error' && <p className="banner banner-error">{retryError}</p>}
+        </section>
+      )}
+      {terminal && !purged && (
+        <section className="run-detail-purge">
+          <button type="button" onClick={() => void purge()} disabled={purging}>
+            {purging ? 'Deleting…' : "Delete this run's content"}
+          </button>
+          {purgeError && <p className="banner banner-error">{purgeError}</p>}
         </section>
       )}
     </div>

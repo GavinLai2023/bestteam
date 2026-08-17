@@ -22,9 +22,9 @@ import math
 import os
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select, update
@@ -35,10 +35,11 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
-from . import secret_store
+from . import secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
-from .db.email_credentials import get_email_credentials
+from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 from .db.email_triggers import get_email_trigger
+from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
     claim_events,
     mailbox_identity,
@@ -47,13 +48,22 @@ from .db.inbox_events import (
     release_events,
     resolve_retry_events,
 )
-from .db.models import EmailTrigger, Organization, Run, SkillRecord, WorkflowRecord
+from .db.models import (
+    EmailTrigger,
+    Organization,
+    OrgEmailCredential,
+    Run,
+    SkillRecord,
+    WorkflowRecord,
+)
 from .email_tools import spec_uses_email
 from .knowledge_bases import (
     contain_workflow_config_for_load,
     ensure_workflow_cache_paths_for_source,
     load_knowledge_base_tools,
 )
+from .notifications import dispatch_pending
+from .retention import sweep_retention
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -172,6 +182,38 @@ def _mailbox_drafted_uids(backend, trigger_context, uids) -> set:
     return {key_to_uid[key] for key in found or () if key in key_to_uid}
 
 
+def _apply_health(db, trigger, outcome: str) -> None:
+    """Fold one outcome into the trigger's alert state, raising a notification
+    if the evaluator says this transition is worth telling someone about.
+
+    Deliberately additive: every existing `last_error`/`last_error_kind` write
+    stays exactly where it was. Those drive the dashboard's error surface and
+    are pinned by Phase 0's tests; this adds the *telling someone* half.
+
+    Isolated like the other health writes -- alerting must never be the reason
+    a poll cycle or a run fails.
+    """
+    try:
+        decision = trigger_health.evaluate(
+            outcome=outcome,
+            consecutive_faults=trigger.consecutive_faults or 0,
+            alerted_fingerprint=trigger.alerted_fingerprint,
+            threshold=trigger_health.alert_threshold(),
+        )
+        trigger.consecutive_faults = decision.consecutive_faults
+        trigger.alerted_fingerprint = decision.alerted_fingerprint
+        if decision.notification is not None:
+            draft = decision.notification
+            create_notification(
+                db, org_id=trigger.org_id, kind=draft.kind, severity=draft.severity,
+                title=draft.title, body=draft.body, fingerprint=draft.fingerprint,
+            )
+    except Exception:  # noqa: BLE001 -- alerting must never break the caller
+        _logger.exception(
+            "email trigger: health evaluation failed for org %s", trigger.org_id
+        )
+
+
 def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
     """True if `run_id` has outlived `run_timeout_seconds()` and has now been
     released, so the overlap guard should stop honouring it.
@@ -211,6 +253,7 @@ def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
         run_row.output = message
     trigger.last_error = message
     trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+    _apply_health(db, trigger, trigger_health.OUTCOME_TIMEOUT)
     # Infrastructure-class: the run hung, the messages are innocent. Hand them
     # back so they are reprocessed rather than consumed by a wedged run. This
     # path never reaches runtime's completion hook (the worker produced no
@@ -602,6 +645,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             )
             trigger.last_error_kind = _ERROR_KIND_MAILBOX
             trigger.last_checked_at = _utcnow()
+            _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX)
             db.commit()
             return
         except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
@@ -609,6 +653,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             trigger.last_error = _friendly_poll_error(exc)
             trigger.last_error_kind = _ERROR_KIND_MAILBOX
             trigger.last_checked_at = _utcnow()
+            _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX)
             db.commit()
             return
 
@@ -622,6 +667,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
             trigger.last_error = None
             trigger.last_error_kind = None
+        _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX_OK)
 
         # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
         # re-baseline to now, never reprocess.
@@ -1105,6 +1151,115 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         return new_run.id
 
 
+# Warn this far ahead of a Microsoft 365 client secret expiring. Entra secrets
+# last at most two years and always expire; when one does, IMAP starts refusing
+# the app and the error reads exactly like a wrong password, so an unwarned
+# customer looks in the wrong place.
+# Tightest band FIRST: the lookup takes the first match, and a secret with five
+# days left belongs in the seven-day band, not the thirty-day one.
+_SECRET_EXPIRY_BANDS = ((7, "secret_expiry_7"), (30, "secret_expiry_30"))
+_SECRET_EXPIRED_FINGERPRINT = "secret_expired"
+
+
+def _expiry_fingerprint(band: str, expiry_date: date) -> str:
+    """Scope a band to the secret it is warning about.
+
+    `has_fingerprint` searches an org's whole notification history, so a bare
+    band name warns each org exactly once ever: replace the expiring secret
+    and the new one's 30-day warning is suppressed by the old one's record
+    (Codex review finding). The expiry date distinguishes secrets -- a
+    replacement has a new one, and a replacement that somehow expires on the
+    same day genuinely is the same deadline.
+    """
+    return f"{band}:{expiry_date.isoformat()}"
+
+
+def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
+    """Warn each org whose stored M365 client secret is close to expiring.
+
+    `today` is injected so the test never depends on the wall clock. Returns
+    how many notifications were raised.
+
+    Credentials with no recorded expiry are skipped entirely: the date is
+    optional and admin-entered, and inventing one would warn about a deadline
+    nobody stated. The already-warned check reads the notifications themselves
+    because this state belongs to the credential, which has no fingerprint
+    column of its own.
+    """
+    reference = today or datetime.now(timezone.utc).date()
+    raised = 0
+    credentials = (
+        db.query(OrgEmailCredential)
+        .filter(OrgEmailCredential.auth_type == AUTH_MICROSOFT_OAUTH)
+        .filter(OrgEmailCredential.oauth_secret_expires_at.isnot(None))
+        .all()
+    )
+    for cred in credentials:
+        expires = cred.oauth_secret_expires_at
+        if expires is None:
+            continue
+        expiry_date = expires.date() if isinstance(expires, datetime) else expires
+        days_left = (expiry_date - reference).days
+
+        if days_left <= 0:
+            fingerprint = _expiry_fingerprint(_SECRET_EXPIRED_FINGERPRINT, expiry_date)
+            severity, title = "error", "Your Microsoft 365 app password has expired"
+            body = (
+                "The client secret for this mailbox has expired, so no new mail "
+                "can be collected. Create a new client secret in Azure and "
+                "reconnect the mailbox in your organisation's settings."
+            )
+        else:
+            band = next((f for d, f in _SECRET_EXPIRY_BANDS if days_left <= d), None)
+            if band is None:
+                continue
+            fingerprint = _expiry_fingerprint(band, expiry_date)
+            severity, title = "warning", "Your Microsoft 365 app password expires soon"
+            body = (
+                f"The client secret for this mailbox expires in {days_left} day(s). "
+                "Create a new client secret in Azure and reconnect the mailbox "
+                "before then, or automatic email runs will stop."
+            )
+
+        if has_fingerprint(db, cred.org_id, fingerprint):
+            continue
+        create_notification(
+            db, org_id=cred.org_id, kind="secret_expiry", severity=severity,
+            title=title, body=body, fingerprint=fingerprint,
+        )
+        raised += 1
+
+    if raised:
+        db.commit()
+    return raised
+
+
+def run_maintenance(db: Session) -> None:
+    """Timer-driven upkeep: secret-expiry warnings, the retention sweep, and
+    notification delivery.
+
+    Piggy-backs on the poller because it already runs on a timer. Never raises:
+    the poll loop must outlive any one of these.
+    """
+    try:
+        sweep_secret_expiry(db)
+        sweep_retention(db)
+        dispatch_pending(db)
+    except Exception:  # noqa: BLE001 -- upkeep must never break polling
+        db.rollback()
+        _logger.exception("email trigger: maintenance failed")
+
+
+def maintenance_once(session_factory=None) -> None:
+    """`run_maintenance` with its own session, for the paused branch of
+    `poll_forever` -- retention is not part of what a trigger pause pauses."""
+    from .db_session import SessionLocal  # late import: keep module import-light
+
+    factory = session_factory or SessionLocal
+    with factory() as db:
+        run_maintenance(db)
+
+
 def poll_once(get_workflow: Callable, session_factory=None) -> None:
     """One pass over every enabled org. Runs on a worker thread (imaplib and
     SQLAlchemy here are synchronous); a failure in one org never stops the rest."""
@@ -1125,6 +1280,13 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
                 _logger.exception("email trigger: unexpected failure for org %s",
                                   trigger.org_id)
 
+        # Deliver whatever this cycle (or an earlier one) raised, and run the
+        # rest of the timer-driven upkeep. Piggy-backing on the poller rather
+        # than running a thread of its own: it already runs on a timer, and a
+        # notification that waits one cycle has still arrived far sooner than
+        # the customer noticing by themselves.
+        run_maintenance(db)
+
 
 async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:
     """The poller task: sleep FIRST, then poll, forever until `stop_event`.
@@ -1139,6 +1301,12 @@ async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> N
         if stop_event.is_set():
             return
         if triggers_disabled():
+            # A platform-wide pause of AUTOMATION is not a pause of data
+            # deletion -- an org's retention policy keeps running.
+            try:
+                await asyncio.to_thread(maintenance_once)
+            except Exception:  # noqa: BLE001 -- never let the task die
+                _logger.exception("email trigger: maintenance cycle failed")
             continue
         try:
             await asyncio.to_thread(poll_once, get_workflow)

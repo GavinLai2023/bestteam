@@ -810,6 +810,53 @@ def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):
     assert len(calls) >= 1
 
 
+# --- maintenance tail ---------------------------------------------------------
+
+
+def test_maintenance_runs_the_retention_sweep(db):
+    from ui.backend.db.retention import get_retention_settings, set_retention_days
+    from ui.backend.email_trigger import run_maintenance
+
+    org = get_or_create_org(db, "acme")
+    set_retention_days(db, org.id, 30)
+    db.commit()
+
+    run_maintenance(db)
+
+    assert get_retention_settings(db, org.id).last_swept_at is not None
+
+
+def test_maintenance_survives_a_failing_sweep(db, monkeypatch):
+    """The poll loop must outlive any one maintenance job."""
+
+    def boom(*a, **k):
+        raise RuntimeError("sweep exploded")
+
+    monkeypatch.setattr(email_trigger, "sweep_retention", boom)
+    email_trigger.run_maintenance(db)  # must not raise
+
+
+def test_poll_forever_still_maintains_while_triggers_are_disabled(monkeypatch):
+    """Pausing automation is not a decision to pause data deletion."""
+    maintained = []
+    monkeypatch.setattr(email_trigger, "poll_once",
+                        lambda gw, session_factory=None: pytest.fail("polled"))
+    monkeypatch.setattr(email_trigger, "maintenance_once",
+                        lambda: maintained.append(1))
+    monkeypatch.setattr(email_trigger, "poll_seconds", lambda: 0.01)
+    monkeypatch.setenv("BESTTEAM_TRIGGERS_DISABLED", "1")
+
+    async def run_briefly():
+        stop = asyncio.Event()
+        task = asyncio.ensure_future(poll_forever(stop, _no_workflow))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await task
+
+    asyncio.run(run_briefly())
+    assert maintained  # the sweep still gets a chance to run
+
+
 # --- validate_trigger_env -----------------------------------------------------
 
 
@@ -1889,6 +1936,28 @@ def _hung_run(db, org, trigger, *, uids, age_seconds=4000):
     return run_id
 
 
+def _hung_run_named(db, org, trigger, *, uids, run_id, age_seconds=4000):
+    """`_hung_run` with a caller-chosen id, so one test can wedge twice."""
+    from datetime import timedelta
+
+    from ui.backend.db import inbox_events as store
+    from ui.backend.db.models import Run as _R
+
+    db.add(_R(
+        id=run_id, workflow="triage", input="x", status="running", org_id=org.id,
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        trigger_context={"trigger_type": "email", "uids": [int(u) for u in uids]},
+    ))
+    store.record_events(db, org_id=org.id, mailbox_identity="m",
+                        mailbox_generation="3", external_ids=uids)
+    db.commit()
+    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids))
+    store.mark_dispatched(db, run_id)
+    trigger.last_run_id = run_id
+    db.commit()
+    return run_id
+
+
 def test_the_watchdog_releases_a_hung_runs_events(db):
     # Phase 0's watchdog frees the trigger from a hung run; its messages must
     # come back too, or they are consumed with nothing having processed them.
@@ -1953,3 +2022,194 @@ def test_a_run_predating_the_ledger_still_retries_via_trigger_context(db, monkey
     monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
     assert retry_triggered_run(db, run_row)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a: a broken trigger announces itself.
+# ---------------------------------------------------------------------------
+
+
+def _notifications(db, org_id):
+    from ui.backend.db.notifications import list_notifications
+
+    return list_notifications(db, org_id)
+
+
+def test_the_watchdog_notifies_immediately(db):
+    # A run wedged for the full run timeout is already a sustained symptom;
+    # waiting for the threshold would mean another 90 minutes of silence.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_id = _hung_run(db, org, trigger, uids=["11"])
+    email_trigger._release_stale_run(db, trigger, run_id)
+    assert [n.fingerprint for n in _notifications(db, org.id)] == ["run_timeout"]
+    assert trigger.alerted_fingerprint == "run_timeout"
+
+
+def test_repeated_watchdog_releases_notify_once(db):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    for uid in ("11", "12"):
+        run_id = _hung_run_named(db, org, trigger, uids=[uid], run_id=f"hung-{uid}")
+        email_trigger._release_stale_run(db, trigger, run_id)
+    assert len(_notifications(db, org.id)) == 1
+
+
+def test_mailbox_failures_notify_only_at_the_threshold(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "3")
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
+    for _ in range(2):
+        poll_org(db, trigger, _fake_workflow_getter([]))
+    assert _notifications(db, org.id) == []
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    emitted = _notifications(db, org.id)
+    assert [n.fingerprint for n in emitted] == ["mailbox"]
+    assert emitted[0].severity == "error"
+
+
+def test_a_recovered_mailbox_announces_the_recovery(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "1")
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    # Newest first, the order the notifications page renders.
+    assert [n.fingerprint for n in _notifications(db, org.id)] == ["recovered", "mailbox"]
+    assert trigger.alerted_fingerprint is None
+    assert trigger.consecutive_faults == 0
+
+
+def test_a_failing_health_evaluation_never_breaks_the_poll(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+    monkeypatch.setattr(
+        email_trigger.trigger_health, "evaluate",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("evaluator exploded")),
+    )
+    poll_org(db, trigger, _fake_workflow_getter([]))  # must not raise
+    assert trigger.last_checked_at is not None
+
+
+def _m365_credential(db, org_id, *, expires_in_days=None, today=None):
+    from datetime import timedelta
+
+    from ui.backend.db.email_credentials import (
+        AUTH_MICROSOFT_OAUTH,
+        MICROSOFT_IMAP_HOST,
+        set_email_credentials,
+    )
+
+    cred = set_email_credentials(
+        db, org_id, host=MICROSOFT_IMAP_HOST, username="u@acme.com",
+        password="client-secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="t", oauth_client_id="c",
+    )
+    if expires_in_days is not None:
+        base = today or datetime.now(timezone.utc).date()
+        cred.oauth_secret_expires_at = datetime.combine(
+            base + timedelta(days=expires_in_days), datetime.min.time()
+        )
+    db.commit()
+    return cred
+
+
+@pytest.mark.parametrize("days,fingerprint", [
+    (25, "secret_expiry_30"),
+    (5, "secret_expiry_7"),
+    (0, "secret_expired"),
+    (-3, "secret_expired"),
+])
+def test_each_secret_expiry_band_warns_once(db, days, fingerprint):
+    from datetime import date as _date, timedelta as _timedelta
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    _m365_credential(db, org.id, expires_in_days=days, today=today)
+
+    assert email_trigger.sweep_secret_expiry(db, today) == 1
+    # Running again must not warn again: the notification itself is the record.
+    assert email_trigger.sweep_secret_expiry(db, today) == 0
+    # The band is scoped to the secret's own expiry date, so the record is of
+    # "this secret was warned about", not "this org was warned about".
+    expiry = (today + _timedelta(days=days)).isoformat()
+    assert [n.fingerprint for n in _notifications(db, org.id)] == [
+        f"{fingerprint}:{expiry}"
+    ]
+
+
+def test_a_secret_expiring_far_out_is_not_warned_about(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    _m365_credential(db, org.id, expires_in_days=200, today=today)
+    assert email_trigger.sweep_secret_expiry(db, today) == 0
+    assert _notifications(db, org.id) == []
+
+
+def test_a_credential_with_no_recorded_expiry_is_skipped(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    _m365_credential(db, org.id, expires_in_days=None)
+    assert email_trigger.sweep_secret_expiry(db, _date(2026, 8, 17)) == 0
+
+
+def test_password_mailboxes_are_never_swept(db):
+    from datetime import date as _date
+
+    # `_org_with_trigger` stores an ordinary IMAP password credential.
+    org, _ = _org_with_trigger(db)
+    assert email_trigger.sweep_secret_expiry(db, _date(2026, 8, 17)) == 0
+
+
+def test_crossing_from_the_thirty_day_band_into_seven_warns_again(db):
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    cred = _m365_credential(db, org.id, expires_in_days=25, today=today)
+    email_trigger.sweep_secret_expiry(db, today)
+
+    # Three weeks later the same secret is inside the seven-day band: a
+    # different fingerprint, so the customer is told again -- this one is
+    # urgent in a way the first was not.
+    later = _date(2026, 9, 8)
+    email_trigger.sweep_secret_expiry(db, later)
+    expiry = _date(2026, 9, 11).isoformat()
+    assert {n.fingerprint for n in _notifications(db, org.id)} == {
+        f"secret_expiry_30:{expiry}", f"secret_expiry_7:{expiry}",
+    }
+    assert cred.oauth_secret_expires_at is not None
+
+
+def test_a_replacement_secret_is_warned_about_in_its_own_right(db):
+    # `has_fingerprint` searches an org's whole history, so an unscoped band
+    # name warned each org exactly once ever: renew the secret and its 30-day
+    # warning was suppressed by the previous secret's record.
+    from datetime import date as _date
+
+    org, _ = _org_with_trigger(db)
+    today = _date(2026, 8, 17)
+    cred = _m365_credential(db, org.id, expires_in_days=25, today=today)
+    assert email_trigger.sweep_secret_expiry(db, today) == 1
+
+    # The admin creates a new client secret expiring two years out, and two
+    # years later it too approaches its deadline.
+    cred.oauth_secret_expires_at = datetime(2028, 8, 17)
+    db.commit()
+    assert email_trigger.sweep_secret_expiry(db, _date(2028, 7, 25)) == 1
+    assert {n.fingerprint for n in _notifications(db, org.id)} == {
+        "secret_expiry_30:2026-09-11", "secret_expiry_30:2028-08-17",
+    }

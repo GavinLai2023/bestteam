@@ -111,3 +111,78 @@ describe('EmailConnect', () => {
     expect(screen.getByLabelText(/client secret/i)).toHaveValue('')
   })
 })
+
+describe('EmailConnect secret expiry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getOrgEmail.mockResolvedValue({ connected: false })
+    mockedApi.setOrgEmail.mockResolvedValue({ connected: true })
+  })
+
+  const fillMicrosoft = () => {
+    fireEvent.change(screen.getByLabelText(/email address/i), {
+      target: { value: 'support@acme.com' },
+    })
+    fireEvent.change(screen.getByLabelText(/directory \(tenant\) id/i), {
+      target: { value: 'tenant-1' },
+    })
+    fireEvent.change(screen.getByLabelText(/application \(client\) id/i), {
+      target: { value: 'client-1' },
+    })
+    fireEvent.change(screen.getByLabelText(/client secret/i), { target: { value: 'shh' } })
+  }
+
+  it('offers the expiry date only for Microsoft 365', async () => {
+    render(<EmailConnect />)
+    await screen.findByLabelText(/imap server/i)
+    expect(screen.queryByLabelText(/secret expiry date/i)).not.toBeInTheDocument()
+    chooseMicrosoft()
+    expect(screen.getByLabelText(/secret expiry date/i)).toBeInTheDocument()
+  })
+
+  it('sends the expiry date when one is entered', async () => {
+    render(<EmailConnect />)
+    await screen.findByLabelText(/imap server/i)
+    chooseMicrosoft()
+    fillMicrosoft()
+    fireEvent.change(screen.getByLabelText(/secret expiry date/i), {
+      target: { value: '2027-01-31' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /connect mailbox/i }))
+
+    await waitFor(() => expect(mockedApi.setOrgEmail).toHaveBeenCalled())
+    expect(mockedApi.setOrgEmail.mock.calls[0][0]).toMatchObject({
+      oauth_secret_expires_at: '2027-01-31',
+    })
+  })
+
+  it('leaves the expiry null when it is left blank, since it is optional', async () => {
+    render(<EmailConnect />)
+    await screen.findByLabelText(/imap server/i)
+    chooseMicrosoft()
+    fillMicrosoft()
+    fireEvent.click(screen.getByRole('button', { name: /connect mailbox/i }))
+
+    await waitFor(() => expect(mockedApi.setOrgEmail).toHaveBeenCalled())
+    expect(mockedApi.setOrgEmail.mock.calls[0][0]).toMatchObject({
+      oauth_secret_expires_at: null,
+    })
+  })
+
+  it('never sends an expiry for a plain IMAP mailbox', async () => {
+    render(<EmailConnect />)
+    fireEvent.change(await screen.findByLabelText(/imap server/i), {
+      target: { value: 'imap.example.com' },
+    })
+    fireEvent.change(screen.getByLabelText(/email address/i), {
+      target: { value: 'me@example.com' },
+    })
+    fireEvent.change(screen.getByLabelText(/app password/i), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: /connect mailbox/i }))
+
+    await waitFor(() => expect(mockedApi.setOrgEmail).toHaveBeenCalled())
+    expect(mockedApi.setOrgEmail.mock.calls[0][0]).toMatchObject({
+      oauth_secret_expires_at: null,
+    })
+  })
+})

@@ -223,3 +223,26 @@ URL + auth once, call it with a path/params) is a reasonable next step for
 covering many integrations without bespoke code per customer, but that's a
 bigger platform feature (self-service config, credential storage) and isn't
 designed here.
+
+## Draft idempotency (email Phase 3a)
+
+When `make_email_tools` is given a `draft_marker_prefix`, `email_draft_reply`
+searches Drafts for the message's source key **under a process-wide per-key
+lock** (`_lock_for_source_key`) before APPENDing, and returns
+`_DRAFT_ALREADY_EXISTS` instead of writing a second draft.
+
+Why a lock and not just a check: the stale-run watchdog releases a timed-out
+run's overlap guard without being able to stop the worker, so the wedged worker
+and the retry it enabled can both be drafting for the same message. They are
+threads of the **same** process, which is what makes a process-wide lock a
+closure rather than a mitigation. A multi-worker deployment reopens the window;
+the email capability is single-instance by design.
+
+The scan is advisory -- a failing `drafts_with_source_keys` logs and drafts
+anyway. Refusing to draft because a mailbox search misbehaved would be a worse
+failure than a rare duplicate.
+
+A skipped draft is reported to the trace as `outcome: "draft_exists"`, distinct
+from `draft_created` so the trace never claims a write that did not happen, but
+both are in `automation_results.CONFIRMED_DRAFT_OUTCOMES` so a skipped draft
+still excludes its message from the next retry.

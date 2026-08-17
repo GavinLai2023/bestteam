@@ -108,6 +108,26 @@ class RunRegistry:
     def get(self, run_id: str) -> "Run | None":
         return self._runs.get(run_id)
 
+    def purge_content(self, run_id: str) -> bool:
+        """Forget a finished run's input and events, keeping the entry.
+
+        The retention purge (`ui/backend/retention.py`) clears the persisted
+        copy, but this registry holds its own for up to `_MAX_RETAINED_RUNS`
+        runs -- and that copy is what `GET /api/runs/{id}` and the WebSocket
+        replay serve. Without this, content the customer deleted stays
+        readable until the entry is evicted or the process restarts.
+
+        A `running` run is left alone and returns False: its worker is still
+        appending events, and the DB purge refuses it too.
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.status == "running":
+                return False
+            run.input = ""
+            run.events = []
+            return True
+
     def request_cancel(self, run_id: str) -> bool:
         """Ask a running run to stop cooperatively. Returns False (no-op) for
         an unknown run or one that's already terminal -- there's nothing left

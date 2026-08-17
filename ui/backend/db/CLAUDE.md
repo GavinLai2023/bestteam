@@ -308,3 +308,49 @@ this history; `POST /api/runs/{id}/cancel` requests cooperative cancellation
 `run_in_background` between yielded events). Still deferred: rehydrating
 `RunRegistry`'s live layer from the DB across restarts, and enabling SQLite
 foreign-key enforcement.
+
+## `notifications` / `org_notification_settings` (email Phase 3a)
+
+`notifications` is **one table serving two jobs**: the in-app alert list and
+the webhook outbox. That is deliberate -- delivery needs retry state
+(`delivery_state`, `delivery_attempts`, `last_delivery_error`) and the list
+needs the same rows, so two tables would immediately produce "shown in the app
+but never delivered" with no single place to reconcile them.
+
+`delivery_state = "skipped"` means the org configured no webhook. It is a
+normal configuration, **not** a failure, and the UI must not present it as one.
+
+`fingerprint` identifies the *problem*, not the occurrence
+(`workflow`/`mailbox`/`run_timeout`/`secret_expiry_30`/...). `EmailTrigger`
+carries the health state for the first three (`consecutive_faults`,
+`alerted_fingerprint`); the secret-expiry sweep has no such row to write to, so
+it dedups by querying for an existing notification with that fingerprint
+(`has_fingerprint`).
+
+`org_notification_settings` holds one webhook per org. The signing secret is a
+Fernet token via `secret_store`, same scheme as mailbox credentials, so the
+startup check that refuses to boot when a rotated key can't read stored
+credentials covers it too. `set_notification_settings(keep_existing_secret=)`
+exists because the API never returns the secret -- an update that omits it must
+keep it rather than wipe it.
+
+## `org_retention_settings` + `runs.content_purged_at` (email Phase 3b)
+
+`org_retention_settings` is one row per org: `run_retention_days` (NULL = keep
+forever, the default, so an upgrade deletes nothing), plus `last_swept_at` and
+`last_purged_count`. Those two are not decoration -- a retention policy whose
+job silently stopped is indistinguishable from one that is working, until an
+audit, so the UI shows when it last ran and what it took.
+
+`set_retention_days(db, org_id, None)` turns the policy off but **keeps the
+row**: the sweep history outlives any one policy value.
+
+`runs.content_purged_at` is what marks a run purged -- never the emptiness of
+`input`/`output`, since a genuinely empty output is possible. A purge deletes
+that run's `trace_events` rows and empties each `automation_item_results.payload`,
+but never touches `usage_records` (non-nullable `run_id`, and it carries the
+org's cost history) nor an item result's `status`/`source_key` (those exclude
+already-drafted UIDs from a retry -- see `ui/backend/CLAUDE.md`).
+`inbox_events` is deliberately never purged: a UID plus the customer's own
+mailbox address is not data-subject content, and deleting it would break
+`resolve_retry_events`.

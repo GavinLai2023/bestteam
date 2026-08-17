@@ -199,6 +199,101 @@ single process and `_dispatch_lock` stays. Real horizontal scale-out is blocked
 on a Postgres migration -- `make_engine` hardcodes SQLite and takes a file path,
 not a URL.
 
+**Phase 3a: trigger health and alerting**
+
+`trigger_health.py` is a **pure** module -- one function, no I/O, no clock, no
+DB. `evaluate(outcome, consecutive_faults, alerted_fingerprint, threshold)`
+returns a `HealthDecision` (new counter, new fingerprint, optional
+`NotificationDraft`). The whole noise-control policy lives there, so it is
+tested by folding a sequence of outcomes rather than by driving a mailbox.
+
+Two rules are load-bearing and easy to break by "simplifying":
+
+- **Alerts fire on transitions, not occurrences.** `alerted_fingerprint` is the
+  *set* of problems currently reported, sorted and comma-joined into the one
+  column; a condition already alerted for stays quiet until it clears.
+  Removing it turns every poll cycle into an alert. It is a set because two
+  domains can be broken at once: when it held a single value, a mailbox fault
+  overwrote an outstanding workflow one and the next successful mailbox check
+  then cleared it and announced a recovery that had not happened. A
+  pre-existing single value parses as a one-element set, so no migration.
+- **Recovery is domain-specific.** `OUTCOME_MAILBOX_OK` clears only a `mailbox`
+  alert; `OUTCOME_WORKFLOW_OK` clears `workflow` and `run_timeout`. A single
+  generic "healthy" outcome would let a successful mailbox check clear a
+  workflow alert -- exactly the "healthy trigger, every run failing" state
+  Phase 0's item 0.5 exists to prevent (the same asymmetry `last_error_kind`
+  already encodes as F5).
+
+Three sites feed it and each keeps its existing `last_error`/`last_error_kind`
+write untouched -- those drive the dashboard's error surface and are pinned by
+Phase 0's tests; alerting is additive:
+`runtime._safe_record_trigger_health` (workflow outcomes, and note it now
+returns early unless `trigger.last_run_id == run_row.id`, so a superseded run's
+late outcome is ignored), `email_trigger`'s connectivity check (mailbox), and
+`_release_stale_run` (timeout, which alerts immediately -- it has already been
+stuck for the full run timeout).
+
+`notifications.py` delivers. Stdlib `http.client` (no new dependency),
+HMAC-SHA256 over the exact posted body, five attempts then `failed` (still
+readable in-app). HTTPS + `check_host_allowed` **at connect time, dialling the
+validated IP** (`_PinnedHTTPSConnection`) and following **no** redirects:
+`urlopen` re-resolved the hostname and followed redirects automatically, so a
+tenant admin could point a webhook at a rebinding host or a public URL that
+302s inward and walk past the SSRF check. Same pinning as `http_get` and the
+per-org IMAP path (CR-023); a webhook receiver that redirects is unsupported.
+Drained from the end of `poll_once`, not a thread of its own. **The payload carries health information only** -- adding a
+subject or body to it would turn an alerting channel into an email-content
+exfiltration path. An admin-configured webhook is not the model-chosen egress
+`deploy_validation` refuses; the destination is fixed by a human.
+
+`sweep_secret_expiry` warns at 30/7/0 days before a Microsoft 365 client
+secret expires, keyed on an **admin-entered** date (`oauth_secret_expires_at`).
+It is not read from Entra on purpose -- that needs `Application.Read.All`, a
+directory-wide read over every app registration in the tenant.
+
+**Phase 3b: retention, deletion and export**
+
+`retention.py` is the engine; policy lives in `org_retention_settings`
+(`db/retention.py`), NULL = keep forever, which is the default so an upgrade
+deletes nothing. `retention_default_days()` (`BESTTEAM_RUN_RETENTION_DAYS`) is
+applied by `db/orgs.py::create_org` to **newly created** orgs only.
+
+The rule that is easy to break by "simplifying": **a purge clears content and
+keeps accounting.** Content is `runs.input`/`output`, the run's `trace_events`,
+and `automation_item_results.payload`. Accounting is the `runs` row itself
+(deleting it would orphan `usage_records`, which is non-nullable and backs
+`run_analytics_api.py`), `usage_records`, `trigger_context`, and an item
+result's `status`/`source_key` -- those two are what
+`automation_results.CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted
+UIDs from a retry, so clearing them would make a retention sweep cause
+duplicate drafts. `runs.content_purged_at`, not an empty field, is what marks a
+run purged. `purge_run` refuses a `running` run (its worker is mid-write) and
+is idempotent, because the sweep re-selects rows on overlapping cycles. It also
+scrubs the run's entry in `RunRegistry` (`registry.purge_content`): that
+in-memory copy holds the input and the whole event history for the last 1,000
+runs and is what `GET /api/runs/{id}` and the WebSocket replay serve, so
+clearing only the SQL rows left deleted content readable until eviction.
+
+Retention covers **all** of an org's runs, not only `trigger_context`-bearing
+ones: a user who opens their email team and clicks Run produces a manual run
+with the same customer content in it, so filtering to the autonomous half would
+be more code and less protection.
+
+`export_org_runs` emits exactly what a purge removes -- that is what makes
+enabling deletion safe. `PURGED_FIELDS` declares the surface once and
+`tests/test_retention.py::test_export_covers_everything_purge_clears` fails if
+the export stops covering it. `purgeable_run_count` and `purge_org_runs` share
+`_purgeable_query` so the preview can never disagree with the purge.
+
+Scheduling: `run_maintenance(db)` (secret expiry + retention sweep + webhook
+dispatch) is the poller's tail, and `poll_forever`'s
+`BESTTEAM_TRIGGERS_DISABLED` branch calls `maintenance_once()` rather than
+skipping the cycle -- a platform-wide pause of *automation* is not a pause of
+*data deletion*. Routes: `GET/PUT /api/org/retention`,
+`POST /api/org/retention/purge` (`older_than_days` is **required**; a
+destructive button must state what it removes), `GET /api/org/export`, and
+`POST /api/runs/{id}/purge` (cross-org 404, `running` 409).
+
 **Phase 2: Microsoft 365 mailboxes**
 
 Exchange Online no longer accepts basic auth, so an M365 org could not connect

@@ -37,6 +37,7 @@ from . import auth
 from . import automation_results
 from . import email_trigger
 from . import interview
+from . import retention
 from . import secret_store
 from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
@@ -46,6 +47,7 @@ from .interview import router as interview_router
 from .admin_api import router as admin_router
 from .memory_api import router as memory_router
 from .org_knowledge_bases import router as org_knowledge_bases_router
+from .notifications_api import router as notifications_router
 from .org_settings import router as org_settings_router
 from .run_analytics_api import router as run_analytics_router
 from .share_chat import router as share_chat_router
@@ -286,6 +288,7 @@ app.include_router(catalog_read_router)
 app.include_router(memory_router)
 app.include_router(admin_router)
 app.include_router(org_settings_router)
+app.include_router(notifications_router)
 app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
 app.include_router(run_analytics_router)
@@ -650,6 +653,13 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
             }
             for row in usage_rows
         ],
+        # Phase 3b: a purged run has no trace events left, which is
+        # indistinguishable from a run that never recorded any. Without this
+        # the UI can only show an empty timeline, which reads as a bug rather
+        # than as the deletion the customer asked for.
+        "content_purged_at": (
+            iso_utc(run.content_purged_at) if run.content_purged_at else None
+        ),
     }
 
 
@@ -687,6 +697,29 @@ def retry_run(
     except email_trigger.RetryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run_id": new_run_id}
+
+
+@app.post("/api/runs/{run_id}/purge")
+def purge_run_content(
+    run_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Remove one run's content on request (Phase 3b). The run row, its usage
+    records and its automation results' status/source_key survive -- see
+    ui/backend/retention.py. Cross-org is a 404 like every other run route:
+    existence is not revealed."""
+    run_row = db.get(Run, run_id)
+    if run_row is None or run_row.org_id != org.id:
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    if run_row.status == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="This run is still going. Wait for it to finish, or cancel it first.",
+        )
+    purged = retention.purge_run(db, run_row)
+    db.commit()
+    return {"purged": purged}
 
 
 @app.get("/api/runs")

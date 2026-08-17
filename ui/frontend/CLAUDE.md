@@ -76,6 +76,42 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   `autonomous: true`, since every automation result belongs to an autonomous
   run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
   cancellation, and run history", "Property Maintenance Inbox").
+  A fourth **Alerts** tab (email Phase 3a) holds
+  `components/NotificationsPanel.tsx` (the org's alert history, read-only by
+  design — these are raised by the system, and a delete verb would only let
+  someone erase the record of a fault they never fixed) and
+  `components/WebhookSettings.tsx` (one optional webhook per org). The tab
+  label carries the unread count, which `ActivityPage` **fetches itself** (and
+  polls, `ALERT_POLL_INTERVAL_MS`) as well as taking from the panel's
+  `onUnreadChange`. Both, not just the callback: the panel is mounted only
+  once the Alerts tab is open, so a callback-only badge could never appear
+  before the user had already gone looking — the one thing it exists to save
+  them.
+  `WebhookSettings` **omits `webhook_secret` from the payload entirely** when
+  the field wasn't retyped — the API never returns it, so resending an empty
+  string would wipe the stored one. The explicit "remove the stored secret"
+  checkbox is how an org goes back to unsigned delivery: the API takes an
+  empty string for that and a blank field can't mean two things.
+
+  A fifth **Data** tab (email Phase 3b) holds
+  `components/DataRetentionPanel.tsx`: the org's run-history retention period,
+  a JSON export, and an immediate "Delete now" behind a typed confirmation.
+  Two things there are deliberate. The "will remove N runs" line is driven by
+  the **saved** period, not the currently selected one — the backend computes
+  `purgeable_now` from stored policy, so showing it against an unsaved
+  selection would print a false number on the one screen that must not lie; an
+  unsaved selection says "Not saved yet." And "Delete now" is disabled under
+  "Keep forever", because `POST /api/org/retention/purge` requires an explicit
+  window and sending `0` there would silently mean *everything*.
+
+  A purged run must never render as an empty timeline — that reads as a bug.
+  `RunDetail` shows "the content of this run was removed on <date> by your data
+  retention settings" from `content_purged_at` (threaded through
+  `lib/useRunTrace.ts`'s existing fetch, not a second request), and both
+  automation-result lists render a purged item's empty payload as "Content
+  removed" rather than blank fields — including suppressing the "No draft
+  created" line, which would assert something false: `source_key`/`status`
+  survive a purge precisely to record that a draft does exist.
 - **`/advanced`** — `pages/AdvancedPage.tsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.

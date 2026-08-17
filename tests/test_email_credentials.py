@@ -116,6 +116,46 @@ def test_startup_guard_checks_every_row_and_names_affected_orgs(db_session):
         ensure_secrets_key_for_stored_credentials(db_session)
 
 
+def test_startup_guard_covers_a_webhook_secret_with_no_mailbox(db_session, monkeypatch):
+    # A deployment can have an alert webhook and no mailbox at all. That
+    # secret is in the same Fernet scheme, so a missing key must fail at boot
+    # rather than silently failing every alert delivery afterwards.
+    from ui.backend.db.notifications import set_notification_settings
+
+    set_notification_settings(
+        db_session, _org(db_session), webhook_url="https://hooks.example.com/h",
+        webhook_secret="s",
+    )
+    db_session.commit()
+    monkeypatch.delenv(secret_store.SECRETS_KEY_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="webhook"):
+        ensure_secrets_key_for_stored_credentials(db_session)
+
+
+def test_startup_guard_rejects_a_webhook_secret_it_cannot_read(db_session, monkeypatch):
+    from ui.backend.db.notifications import set_notification_settings
+
+    org_id = _org(db_session)
+    set_notification_settings(
+        db_session, org_id, webhook_url="https://hooks.example.com/h", webhook_secret="s",
+    )
+    db_session.commit()
+    monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())
+    with pytest.raises(RuntimeError, match=f"webhook secret for org id\\(s\\) \\[{org_id}\\]"):
+        ensure_secrets_key_for_stored_credentials(db_session)
+
+
+def test_startup_guard_ignores_a_webhook_with_no_signing_secret(db_session):
+    # Unsigned delivery is a valid configuration and stores no ciphertext.
+    from ui.backend.db.notifications import set_notification_settings
+
+    set_notification_settings(
+        db_session, _org(db_session), webhook_url="https://hooks.example.com/h",
+    )
+    db_session.commit()
+    ensure_secrets_key_for_stored_credentials(db_session)  # no error
+
+
 def test_startup_guard_rejects_key_collision(db_session, monkeypatch):
     set_email_credentials(db_session, _org(db_session), host="h", username="u", password="p")
     same = os.environ[secret_store.SECRETS_KEY_ENV]

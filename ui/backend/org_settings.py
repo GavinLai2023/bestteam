@@ -16,9 +16,11 @@ from __future__ import annotations
 import errno
 import logging
 import socket
+from datetime import date
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -36,9 +38,13 @@ from .db.email_credentials import (
     get_email_credentials,
     set_email_credentials,
 )
-from .db.models import Organization
+from .db.models import Organization, iso_utc
+from .db.notifications import get_notification_settings, set_notification_settings
+from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
 from .email_trigger import disable_trigger, disable_trigger_on_identity_change
+from .notifications import WebhookUrlError, validate_webhook_url
+from .retention import export_org_runs, purge_org_runs, purgeable_run_count
 from .secret_store import SecretsKeyError
 
 logger = logging.getLogger(__name__)
@@ -61,6 +67,10 @@ class EmailConnectRequest(BaseModel):
     client_secret: Optional[str] = None
     oauth_tenant_id: Optional[str] = None
     oauth_client_id: Optional[str] = None
+    # Optional, Microsoft 365 only. Read off the Azure portal page the admin
+    # is already looking at when they copy the client secret; it powers the
+    # advance warning before the secret expires.
+    oauth_secret_expires_at: Optional[date] = None
     port: int = Field(default=993, ge=1, le=65535)
     drafts: Optional[str] = None
 
@@ -90,7 +100,12 @@ class EmailConnectRequest(BaseModel):
                 raise ValueError("A password is required.")
             if not self.host.strip():
                 raise ValueError("A mail server address is required.")
-            if self.client_secret or self.oauth_tenant_id or self.oauth_client_id:
+            if (
+                self.client_secret
+                or self.oauth_tenant_id
+                or self.oauth_client_id
+                or self.oauth_secret_expires_at
+            ):
                 raise ValueError(
                     "Microsoft 365 details only apply when connecting a Microsoft 365 mailbox."
                 )
@@ -273,6 +288,10 @@ def get_email(
         # `password_encrypted` and is never returned.
         "oauth_tenant_id": cred.oauth_tenant_id,
         "oauth_client_id": cred.oauth_client_id,
+        "oauth_secret_expires_at": (
+            cred.oauth_secret_expires_at.date().isoformat()
+            if cred.oauth_secret_expires_at is not None else None
+        ),
     }
 
 
@@ -298,6 +317,7 @@ def set_email(
             port=req.port, drafts_folder=req.drafts, auth_type=req.auth_type,
             oauth_tenant_id=(req.oauth_tenant_id or "").strip() or None,
             oauth_client_id=(req.oauth_client_id or "").strip() or None,
+            oauth_secret_expires_at=req.oauth_secret_expires_at,
         )
     except SecretsKeyError as exc:
         # The encryption key (BESTTEAM_SECRETS_KEY) is missing/invalid -- a server
@@ -349,3 +369,145 @@ def delete_email(
     """Disconnect the org's mailbox."""
     clear_email_credentials(db, org.id)
     disable_trigger(db, org.id)
+
+
+# --- notification settings ---------------------------------------------------
+
+
+class NotificationSettingsRequest(BaseModel):
+    """Where this org wants its alerts delivered, if anywhere.
+
+    `webhook_secret` is write-only: `GET` reports only whether one is stored,
+    so the UI can never echo it back. Omitting it on an update keeps whatever
+    is already stored; sending an empty string clears it.
+    """
+
+    webhook_url: Optional[str] = None
+    webhook_secret: Optional[str] = None
+    enabled: bool = True
+
+
+@router.get("/notifications")
+def get_notification_settings_route(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """The org's delivery settings. Never returns the webhook secret."""
+    row = get_notification_settings(db, org.id)
+    if row is None:
+        return {"webhook_url": None, "has_webhook_secret": False, "enabled": True}
+    return {
+        "webhook_url": row.webhook_url,
+        "has_webhook_secret": bool(row.webhook_secret_encrypted),
+        "enabled": bool(row.enabled),
+    }
+
+
+@router.put("/notifications")
+def put_notification_settings(
+    req: NotificationSettingsRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Save the org's delivery settings.
+
+    The URL is validated synchronously and a bad one is a 400: here the
+    customer is present to fix it, unlike the delivery path where a failure
+    must never break the poll cycle.
+    """
+    url = (req.webhook_url or "").strip()
+    if url:
+        try:
+            url = validate_webhook_url(url)
+        except WebhookUrlError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_notification_settings(
+        db, org.id,
+        webhook_url=url or None,
+        webhook_secret=req.webhook_secret,
+        enabled=req.enabled,
+        # No secret in the payload means "leave the stored one alone" -- the UI
+        # never received it, so it cannot resend it. An explicit empty string
+        # clears it.
+        keep_existing_secret=req.webhook_secret is None,
+    )
+    db.commit()
+    return get_notification_settings_route(db=db, org=org)
+
+
+# --- run-history retention and export (Phase 3b) ------------------------------
+
+
+class RetentionRequest(BaseModel):
+    """NULL means keep forever -- the default, so an upgrade deletes nothing."""
+
+    run_retention_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class PurgeRequest(BaseModel):
+    """`older_than_days` is required on purpose: a destructive action whose
+    body says what it will remove is the difference between a confirmed action
+    and a slip. 0 means everything terminal."""
+
+    older_than_days: int = Field(ge=0, le=3650)
+
+
+@router.get("/retention")
+def get_retention(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """This org's retention policy, plus proof the sweep is actually running."""
+    row = get_retention_settings(db, org.id)
+    days = row.run_retention_days if row else None
+    return {
+        "run_retention_days": days,
+        "last_swept_at": iso_utc(row.last_swept_at) if row and row.last_swept_at else None,
+        "last_purged_count": row.last_purged_count if row else 0,
+        # What saving this setting would remove on the next sweep -- the number
+        # that makes it safe to press save.
+        "purgeable_now": (
+            0 if days is None
+            else purgeable_run_count(db, org_id=org.id, older_than_days=days)
+        ),
+    }
+
+
+@router.put("/retention")
+def put_retention(
+    req: RetentionRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Set or clear the policy. Saving deletes nothing by itself -- the sweep
+    does, on its next cycle."""
+    set_retention_days(db, org.id, req.run_retention_days)
+    db.commit()
+    return get_retention(db=db, org=org)
+
+
+@router.post("/retention/purge")
+def purge_retention(
+    req: PurgeRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Remove the content of this org's runs older than the given window, now."""
+    purged = purge_org_runs(db, org_id=org.id, older_than_days=req.older_than_days)
+    db.commit()
+    return {"purged": purged}
+
+
+@router.get("/export")
+def export_org(
+    days: Optional[int] = None,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> JSONResponse:
+    """The org's run history as JSON, so a customer can take their data out
+    before a retention policy removes it."""
+    bundle = export_org_runs(db, org_id=org.id, days=days)
+    filename = f"bestteam-export-org-{org.id}.json"
+    return JSONResponse(
+        content=bundle,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

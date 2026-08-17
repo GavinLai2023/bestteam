@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import functools
 import imaplib
+import logging
 import os
 import re
 import socket
 import ssl
+import threading
+from collections import OrderedDict
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -744,6 +747,66 @@ def email_draft_reply(message_id: str, body: str) -> str:
     return _draft_impl(_get_backend(), message_id, body)
 
 
+_logger = logging.getLogger(__name__)
+
+_DRAFT_ALREADY_EXISTS = (
+    "A draft reply for this message already exists; nothing was written."
+)
+
+_SOURCE_KEY_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
+_SOURCE_KEY_LOCKS_GUARD = threading.Lock()
+_MAX_TRACKED_SOURCE_KEYS = 4096
+
+
+def _lock_for_source_key(key: str) -> threading.Lock:
+    """A process-wide lock per draft source key.
+
+    The duplicate-draft race this closes is intra-process. The stale-run
+    watchdog releases a timed-out run's overlap guard without being able to
+    stop the worker -- a node executing inside `workflow.stream()` can't be
+    interrupted -- so the wedged worker and the retry it enabled are both
+    threads of the SAME uvicorn process. Serialising check-then-APPEND here
+    therefore closes the window rather than merely narrowing it.
+
+    Bounded LRU because keys are unique per (mailbox, uidvalidity, uid) and
+    would otherwise accumulate for the process's lifetime. Eviction only drops
+    the registry entry -- a current holder keeps its own lock object -- and
+    would need `_MAX_TRACKED_SOURCE_KEYS` distinct drafts inside one draft's
+    window to matter.
+
+    With more than one worker process this degrades to per-process and the
+    window reopens; the email capability is single-instance by design, and
+    multi-worker safety needs the DB-authoritative overlap guard already
+    tracked in STATUS.md.
+    """
+    with _SOURCE_KEY_LOCKS_GUARD:
+        lock = _SOURCE_KEY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SOURCE_KEY_LOCKS[key] = lock
+            if len(_SOURCE_KEY_LOCKS) > _MAX_TRACKED_SOURCE_KEYS:
+                _SOURCE_KEY_LOCKS.popitem(last=False)
+        else:
+            _SOURCE_KEY_LOCKS.move_to_end(key)
+        return lock
+
+
+def _draft_once(backend, message_id: str, body: str, source_key: str) -> str:
+    """Write the draft unless one with this source key is already in Drafts."""
+    with _lock_for_source_key(source_key):
+        scan = getattr(backend, "drafts_with_source_keys", None)
+        if scan is not None:
+            try:
+                if source_key in (scan([source_key]) or set()):
+                    return _DRAFT_ALREADY_EXISTS
+            except Exception:  # noqa: BLE001 -- advisory; never block drafting
+                _logger.warning(
+                    "email_draft_reply: idempotency scan failed; drafting anyway",
+                    exc_info=True,
+                )
+        return _draft_impl(backend, message_id, body, source_key)
+
+
 def make_email_tools(backend, allowed_uids=None, draft_marker_prefix=None) -> Dict[str, Any]:
     """Return the three email tools bound to `backend`.
 
@@ -786,6 +849,8 @@ def make_email_tools(backend, allowed_uids=None, draft_marker_prefix=None) -> Di
         source_key = (
             None if draft_marker_prefix is None else f"{draft_marker_prefix}{message_id.strip()}"
         )
-        return _draft_impl(backend, message_id, body, source_key)
+        if source_key is None:
+            return _draft_impl(backend, message_id, body, source_key)
+        return _draft_once(backend, message_id, body, source_key)
 
     return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}

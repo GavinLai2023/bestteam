@@ -391,3 +391,22 @@ def test_every_email_tool_is_redacted_and_redaction_needs_no_run_context():
     assert "lease dispute" not in str(data)
     assert "555-1234" not in str(data)
     assert data["outcome"] == "read"
+
+
+def test_a_skipped_duplicate_draft_is_reported_as_draft_exists():
+    from bestteam.adapters.langgraph_adapter import _redacted_email_tool_data
+    from ui.backend.automation_results import CONFIRMED_DRAFT_OUTCOMES
+
+    # The idempotency guard skipped the APPEND because the source key was
+    # already in Drafts. The trace must not claim a write happened, but the
+    # outcome must still count as a confirmed draft -- otherwise the next
+    # retry would draft the same message again, which is the whole defect.
+    data = _redacted_email_tool_data(
+        "email_draft_reply",
+        {"message_id": "42"},
+        "A draft reply for this message already exists; nothing was written.",
+    )
+    assert data["outcome"] == "draft_exists"
+    assert data["message_id"] == "42"
+    assert "already existed" in data["summary"]
+    assert data["outcome"] in CONFIRMED_DRAFT_OUTCOMES

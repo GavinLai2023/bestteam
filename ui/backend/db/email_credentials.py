@@ -9,12 +9,13 @@ token. Reading a credential does NOT decrypt the password; call
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from .. import secret_store
-from .models import OrgEmailCredential
+from .models import OrgEmailCredential, OrgNotificationSetting
 
 # How a stored mailbox authenticates.
 AUTH_PASSWORD = "password"
@@ -41,6 +42,7 @@ def set_email_credentials(
     auth_type: str = AUTH_PASSWORD,
     oauth_tenant_id: Optional[str] = None,
     oauth_client_id: Optional[str] = None,
+    oauth_secret_expires_at: Optional[date] = None,
 ) -> OrgEmailCredential:
     """Create or replace an org's mailbox credentials (upsert on `org_id`).
 
@@ -68,6 +70,12 @@ def set_email_credentials(
     row.auth_type = auth_type
     row.oauth_tenant_id = oauth_tenant_id
     row.oauth_client_id = oauth_client_id
+    # Assigned unconditionally like the other OAuth fields, so switching a
+    # mailbox back to password auth can't leave a stale expiry behind.
+    row.oauth_secret_expires_at = (
+        datetime.combine(oauth_secret_expires_at, datetime.min.time())
+        if oauth_secret_expires_at is not None else None
+    )
     db.commit()
     db.refresh(row)
     return row
@@ -84,22 +92,36 @@ def clear_email_credentials(db: Session, org_id: int) -> bool:
 
 
 def ensure_secrets_key_for_stored_credentials(db: Session) -> None:
-    """Refuse to boot if credentials are stored but the secrets key can't read them.
+    """Refuse to boot if secrets are stored but the secrets key can't read them.
 
     A missing/rotated `BESTTEAM_SECRETS_KEY` would otherwise surface only when a
     run first tries to use email -- much worse than failing at startup. Checks
     **every** stored row (a partial rotation could leave some rows readable and
-    others not) and names the affected orgs. No-op when no org has stored
-    credentials (the key isn't needed then).
+    others not) and names the affected orgs. No-op when nothing encrypted is
+    stored (the key isn't needed then).
+
+    Covers both Fernet stores: per-org mailbox credentials and per-org webhook
+    signing secrets. The webhook secret used to go unchecked, so a deployment
+    with an alert webhook but no mailbox started happily and then failed every
+    alert delivery instead of naming the key problem (Codex review finding).
     """
     rows = db.query(OrgEmailCredential).all()
-    if not rows:
+    webhook_rows = [
+        row
+        for row in db.query(OrgNotificationSetting).all()
+        if row.webhook_secret_encrypted
+    ]
+    if not rows and not webhook_rows:
         return
     secret_store.ensure_key_separation()
     if not secret_store.secrets_key_configured():
+        kinds = " and ".join(
+            (["per-org email credentials"] if rows else [])
+            + (["per-org alert webhook secrets"] if webhook_rows else [])
+        )
         raise RuntimeError(
-            f"Stored per-org email credentials exist, but {secret_store.SECRETS_KEY_ENV} "
-            "is not set. Set it to the Fernet key those credentials were encrypted with."
+            f"Stored {kinds} exist, but {secret_store.SECRETS_KEY_ENV} "
+            "is not set. Set it to the Fernet key those secrets were encrypted with."
         )
     undecryptable = [r.org_id for r in rows if not secret_store.can_decrypt(r.password_encrypted)]
     if undecryptable:
@@ -109,4 +131,14 @@ def ensure_secrets_key_for_stored_credentials(db: Session) -> None:
             "key, or clear and re-enter the affected mailboxes "
             "(`admin clear-email <org>` / `set-email <org>`). The operator CLI runs even when "
             "the app refuses to start."
+        )
+    unreadable_webhooks = [
+        r.org_id for r in webhook_rows
+        if not secret_store.can_decrypt(r.webhook_secret_encrypted)
+    ]
+    if unreadable_webhooks:
+        raise RuntimeError(
+            f"{secret_store.SECRETS_KEY_ENV} cannot decrypt the stored alert webhook secret "
+            f"for org id(s) {sorted(unreadable_webhooks)} (wrong or rotated key). Restore the "
+            "original key, or clear the signing secret for those orgs in their alert settings."
         )

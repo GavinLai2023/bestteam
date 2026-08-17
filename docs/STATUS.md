@@ -1066,6 +1066,67 @@
   would have regressed Phase 0. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-2-microsoft-oauth-design.md`.
 
+- **Email automation Phase 3a — trigger health, alerting, and two correctness
+  fixes.** Phase 0 made a failing trigger *visible* (`last_error`); nothing
+  ever *told* anyone, so a customer whose automation stopped a week ago found
+  out by opening the dashboard. A pure evaluator (`ui/backend/trigger_health.py`)
+  now decides state transitions from four outcomes — workflow fault, mailbox
+  fault, watchdog release, and domain-specific recovery — and the three
+  existing fault sites persist its decision and append a `Notification`.
+  **Alerts fire on transitions, not occurrences**: a trigger remembers the
+  fingerprint of the alert most recently sent, so a condition already reported
+  stays quiet until it clears. Delivery is in-app plus an optional per-org
+  webhook (stdlib `urllib`, HMAC-signed, HTTPS + `check_host_allowed`, health
+  information only — never a subject, address or body). There is no SMTP
+  anywhere and there is not going to be. An admin-entered Microsoft 365 secret
+  expiry drives warnings at 30 days, 7 days and expiry.
+
+  Recovery is deliberately domain-specific: a successful mailbox check proves
+  connectivity is fine but says nothing about whether the team still builds,
+  so it must not clear a workflow alert — flattening that would have
+  re-created the "healthy trigger, every run failing" state Phase 0 fixed.
+
+  Also closed three findings from a review of the Phase 0–2 branch: the
+  egress-tool check is now **workflow-level**, because splitting email and
+  `http_get` across separate agents (the previously documented remedy)
+  contains nothing — `_agent_node` feeds each agent's output into the next
+  agent's context; draft creation is **idempotent per source key** under a
+  process-wide lock, which closes the watchdog/retry duplicate-draft race
+  because both racers are threads of one process; and trigger health ignores
+  a **superseded** run's late outcome. The review's proposal to keep a
+  timed-out run non-retriable was rejected — the wedged worker never
+  acknowledges cancellation, so that would have reinstated the permanent
+  trigger blockage Phase 0 exists to fix. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-3a-health-alerting-design.md`.
+
+- **Email automation Phase 3b — retention, deletion and export.** A generic
+  email team's model output (names, subjects, body excerpts) persisted
+  indefinitely; raw bodies were already redacted at the adapter layer, but a
+  generic team's output *is* the product, so the only lever is time. Each org
+  now has a run-history retention period (`org_retention_settings`, NULL =
+  keep forever, so an upgrade deletes nothing), a "delete now" batch purge over
+  an explicitly stated window, per-run deletion
+  (`POST /api/runs/{id}/purge`), and a JSON export
+  (`GET /api/org/export`) — all on a new **Data** tab.
+
+  **A purge clears content and keeps accounting** (`ui/backend/retention.py`):
+  `runs.input`/`output`, the run's `trace_events` and
+  `automation_item_results.payload` go; the `runs` row, `usage_records`,
+  `trigger_context` and an item result's `status`/`source_key` stay, stamped
+  `runs.content_purged_at`. Deleting the row would have taken the org's cost
+  history with it, and clearing an item's `status`/`source_key` would have made
+  a sweep cause duplicate drafts on retry — `CONFIRMED_DRAFT_OUTCOMES` excludes
+  already-drafted UIDs by exactly those two fields.
+
+  Export exists so deletion is safe enough to enable, and the two are coupled
+  by a test: `PURGED_FIELDS` declares the purge surface once and
+  `test_export_covers_everything_purge_clears` fails if the export stops
+  covering it. The sweep runs from the poller's maintenance tail, and
+  `poll_forever`'s disabled branch now runs `maintenance_once` instead of
+  skipping the cycle — a platform-wide pause of *automation* is not a pause of
+  *data deletion*. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-3b-retention-export-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -1115,18 +1176,43 @@
   deployments refuse); there is no pre-LLM filtering, so spam is billed at
   model rates; the daily cap counts runs, not messages or spend; attachments
   are invisible; and one org gets exactly one mailbox, one trigger, one team.
-- **Generic email runs have no retention policy for their output** — a
-  non-property-maintenance email team's model output (names, subjects, body
-  excerpts) persists indefinitely in `runs.output`/`trace_events`. Deliberately
-  NOT fixed by extending the property-maintenance redaction: that output is the
-  entire product result a generic team produces, so redacting it would delete
-  the feature. Raw email bodies are already redacted for every run at the
-  adapter layer (`_redacted_email_tool_data`, pinned by
-  `tests/test_trace_granularity.py`). The real remedy is tenant-level retention
-  /deletion/export, which is the joint programme's Phase 3.
-- **No alerting on trigger health** — Phase 0 makes a failing workflow visible
-  on the trigger row (`last_error`), but nothing notifies anyone; a customer
-  still has to look. Consecutive-failure counting and delivery are Phase 3.
+- **Erasure by data subject is not possible** — a customer asking to delete
+  everything about `alice@example.com` cannot be served. The address is not
+  stored anywhere indexed; it exists only inside `runs.output` free text the
+  model may have paraphrased. Matching it would both miss (rewritten text) and
+  over-delete (an unrelated run that mentions the address), so Phase 3b
+  deliberately offers age-based retention and per-run deletion instead of a
+  promise it cannot keep. Tell customers this plainly.
+- **A purge is not a secure erase** — SQLite leaves the old page contents on
+  disk until `VACUUM`, which nothing runs. Adequate for "stop keeping it";
+  not adequate for an adversary with the database file.
+- **`inbox_events` is never purged and grows without bound** — the row holds
+  an IMAP UID, the customer's own mailbox address and a status, so there is no
+  data-subject content in it and deleting it would break `resolve_retry_events`
+  for no privacy gain. It is still an unbounded table on a busy mailbox.
+- **Retention is per-org and opt-in, so the default deployment still keeps
+  everything forever** — `run_retention_days` defaults to NULL by design (an
+  upgrade must delete nothing), and `BESTTEAM_RUN_RETENTION_DAYS` only supplies
+  a default for *newly created* orgs. An operator who wants existing customers
+  bounded has to set each one.
+- **Alert delivery is in-app + one optional webhook per org, and nothing
+  else** — no SMTP anywhere (by design), no per-user preferences, no digests
+  or quiet hours, and one webhook URL per org rather than per fault kind.
+  Anything finer is speculative until a customer asks. A webhook that fails
+  five times is marked `failed` and stays visible in-app; nothing retries it
+  afterwards and nothing tells the admin their webhook is broken except that
+  row's own state.
+- **Draft idempotency is process-wide, not deployment-wide** — the per-source-key
+  lock closes the duplicate-draft race between a watchdog-released worker and
+  its retry only because both are threads of one uvicorn process. A
+  multi-worker deployment reopens the window; closing it needs the
+  DB-authoritative overlap guard already listed above.
+- **A Microsoft 365 secret's expiry date is admin-entered and unverified** —
+  nothing checks it against Entra, so a wrong or stale date warns at the wrong
+  time or not at all. Reading the real value needs `Application.Read.All`, a
+  directory-wide read over every app registration in the customer's tenant,
+  which is far broader than the single-mailbox `IMAP.AccessAsApp` the
+  connection itself uses — a permission a customer's IT should refuse.
 - **Draft outcomes are never observed** — nothing records whether a human sent,
   edited or discarded a generated draft, so there is no quality signal and no
   ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a

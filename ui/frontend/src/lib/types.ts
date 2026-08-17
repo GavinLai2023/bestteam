@@ -202,6 +202,8 @@ export interface OrgEmailStatus {
   auth_type?: OrgEmailAuthType
   oauth_tenant_id?: string | null
   oauth_client_id?: string | null
+  // Admin-entered, Microsoft 365 only. ISO date (YYYY-MM-DD) or null.
+  oauth_secret_expires_at?: string | null
 }
 
 // The mailbox connect/test body. `password` and the three OAuth fields are
@@ -214,6 +216,7 @@ export interface OrgEmailConnectPayload {
   client_secret: string | null
   oauth_tenant_id: string | null
   oauth_client_id: string | null
+  oauth_secret_expires_at: string | null
   port: number
   drafts: string | null
 }
@@ -286,4 +289,66 @@ export interface ShareMessage {
   content: string
   turn_number: number
   created_at?: string
+}
+
+// --- notifications ----------------------------------------------------------
+
+export type NotificationSeverity = 'error' | 'warning' | 'info'
+
+// "skipped" means no webhook is configured -- in-app only, not a failure.
+export type NotificationDeliveryState = 'pending' | 'delivered' | 'failed' | 'skipped'
+
+export interface AppNotification {
+  id: number
+  kind: string
+  severity: NotificationSeverity
+  title: string
+  body: string
+  fingerprint: string
+  created_at: string | null
+  read: boolean
+  delivery_state: NotificationDeliveryState
+}
+
+export interface NotificationList {
+  notifications: AppNotification[]
+  unread: number
+}
+
+// The webhook secret is write-only: the API reports only whether one is
+// stored, so the UI can never echo it back.
+export interface NotificationSettings {
+  webhook_url: string | null
+  has_webhook_secret: boolean
+  enabled: boolean
+}
+
+export interface NotificationSettingsPayload {
+  webhook_url: string | null
+  // Omitted entirely to keep the stored secret; '' clears it.
+  webhook_secret?: string | null
+  enabled: boolean
+}
+
+// --- run-history retention and export (Phase 3b) ----------------------------
+
+// `run_retention_days` null means keep forever -- the default, so nothing is
+// ever removed until the customer chooses a period. `purgeable_now` is what
+// the SAVED policy would remove on the next cleanup, not a preview of an
+// unsaved selection (the API computes it from the stored value).
+export interface RetentionSettings {
+  run_retention_days: number | null
+  last_swept_at: string | null
+  last_purged_count: number
+  purgeable_now: number
+}
+
+// Everything a cleanup would remove. `truncated` is explicit: a partial
+// export that looked complete would be worse than no export at all.
+export interface OrgExportBundle {
+  org_id: number
+  exported_at: string
+  truncated: boolean
+  oldest_included: string | null
+  runs: unknown[]
 }

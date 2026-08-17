@@ -113,18 +113,25 @@ def test_egress_alone_is_fine():
     assert find_email_egress_conflicts([("researcher", {"http_get", "web_search"})]) == []
 
 
-def test_the_capabilities_split_across_separate_agents_is_fine():
-    # The documented remedy: read mail in one agent, reach the web in another.
-    assert find_email_egress_conflicts([
+def test_the_capabilities_split_across_separate_agents_is_still_rejected():
+    # Splitting was the ORIGINAL remedy and it does not work: `_agent_node`
+    # passes each agent's output into the next agent's context, so an injected
+    # instruction the mail agent read arrives in the egress agent's prompt.
+    problems = find_email_egress_conflicts([
         ("triager", {"email_read", "email_draft_reply"}),
         ("researcher", {"http_get"}),
-    ]) == []
+    ])
+    assert len(problems) == 1
+    assert "triager" in problems[0] and "researcher" in problems[0]
 
 
-def test_every_conflicting_agent_is_reported_at_once():
+def test_the_conflict_is_reported_once_for_the_whole_workflow():
+    # One problem, not one per agent: the fault is the workflow holding both
+    # capabilities, and naming every pairing would just be noise.
     problems = find_email_egress_conflicts([
         ("a", {"email_read", "http_get"}),
         ("b", {"calculator"}),
         ("c", {"email_draft_reply", "web_search"}),
     ])
-    assert len(problems) == 2
+    assert len(problems) == 1
+    assert "http_get" in problems[0] and "web_search" in problems[0]

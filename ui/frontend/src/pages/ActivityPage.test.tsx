@@ -15,6 +15,7 @@ vi.mock('../lib/api', () => ({
     automationResultsSummary: vi.fn(),
     listAutomationResults: vi.fn(),
     retryRun: vi.fn(),
+    listNotifications: vi.fn(),
   },
 }))
 
@@ -39,6 +40,22 @@ describe('ActivityPage', () => {
       needs_attention: 0, possible_emergency: 0, skipped_non_maintenance: 0, errors: 0,
     })
     mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
+    mockedApi.listNotifications.mockResolvedValue({ notifications: [], unread: 0 })
+  })
+
+  it('shows the unread alert badge before the Alerts tab has ever been opened', async () => {
+    // The count used to arrive only through NotificationsPanel's callback,
+    // and that panel is mounted only once the tab is open -- so the badge
+    // could never appear before the user had already gone looking, which is
+    // the one thing it exists to save them (Codex review finding).
+    mockedApi.listNotifications.mockResolvedValue({ notifications: [], unread: 3 })
+
+    renderPage()
+
+    const alertsTab = await screen.findByRole('button', { name: /^Alerts/ })
+    expect(await screen.findByText('3')).toBeInTheDocument()
+    expect(alertsTab).not.toHaveClass('active')
+    expect(mockedApi.listNotifications).toHaveBeenCalledWith(true, 1)
   })
 
   it('defaults to the Automations tab', async () => {

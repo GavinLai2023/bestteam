@@ -22,6 +22,7 @@ from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
 from .automation_results import (
+    CONFIRMED_DRAFT_OUTCOMES,
     RESULT_TYPE_BATCH_MARKER,
     already_drafted_uids,
     normalize_run_result,
@@ -125,6 +126,40 @@ _TRIGGER_RUN_FAILED_MESSAGE = (
 )
 
 
+def _apply_trigger_health(db: Session, trigger, run_status: str) -> None:
+    """Fold a terminal run status into the trigger's alert state.
+
+    Additive: the caller's existing `last_error`/`last_error_kind` writes stay
+    exactly where they were -- those drive the dashboard's error surface and
+    are pinned by Phase 0's tests. This adds the *telling someone* half.
+
+    Late import for the same reason as `get_email_trigger` below: `email_trigger`
+    imports this module, so a module-level import would be circular.
+    """
+    from . import trigger_health
+    from .db.notifications import create_notification
+
+    outcome = (
+        trigger_health.OUTCOME_WORKFLOW_OK
+        if run_status == "completed"
+        else trigger_health.OUTCOME_WORKFLOW
+    )
+    decision = trigger_health.evaluate(
+        outcome=outcome,
+        consecutive_faults=trigger.consecutive_faults or 0,
+        alerted_fingerprint=trigger.alerted_fingerprint,
+        threshold=trigger_health.alert_threshold(),
+    )
+    trigger.consecutive_faults = decision.consecutive_faults
+    trigger.alerted_fingerprint = decision.alerted_fingerprint
+    if decision.notification is not None:
+        draft = decision.notification
+        create_notification(
+            db, org_id=trigger.org_id, kind=draft.kind, severity=draft.severity,
+            title=draft.title, body=draft.body, fingerprint=draft.fingerprint,
+        )
+
+
 def _safe_record_trigger_health(db: Session, run_row) -> None:
     """Reflect an autonomous email run's outcome on its org's `EmailTrigger`.
 
@@ -155,14 +190,31 @@ def _safe_record_trigger_health(db: Session, run_row) -> None:
         trigger = get_email_trigger(db, run_row.org_id)
         if trigger is None:
             return
+        # A finishing run is not necessarily the run this trigger is waiting
+        # on. The stale-run watchdog releases a wedged run's overlap guard and
+        # lets a new run start while the old one is still executing, so the
+        # old one's outcome arrives late and stale -- applying it would let an
+        # abandoned run's failure overwrite health the current run just
+        # established, or an old success clear a current failure. `None` means
+        # no run is being tracked (a pre-watchdog or freshly-enabled trigger),
+        # which stays permissive.
+        if trigger.last_run_id is not None and trigger.last_run_id != run_row.id:
+            return
         if run_row.status in ("failed", "cancelled"):
             trigger.last_error = _TRIGGER_RUN_FAILED_MESSAGE
             trigger.last_error_kind = "workflow"
-        elif run_row.status == "completed" and trigger.last_error_kind == "workflow":
-            trigger.last_error = None
-            trigger.last_error_kind = None
+        elif run_row.status == "completed":
+            if trigger.last_error_kind == "workflow":
+                trigger.last_error = None
+                trigger.last_error_kind = None
         else:
+            # Not a terminal status: nothing is known yet, so neither the error
+            # surface nor the alert state should move.
             return
+        # Alerting runs for every terminal outcome, including a completed run
+        # that had no `workflow` error to clear -- the success still ends a
+        # fault streak and can clear a timeout alert.
+        _apply_trigger_health(db, trigger, run_row.status)
         db.commit()
     except Exception:  # noqa: BLE001 -- health reporting must never break a run
         _logger.warning(
@@ -594,7 +646,7 @@ def run_in_background(
                     and isinstance(event.data, dict)
                     and event.data.get("tool") == "email_draft_reply"
                     and event.data.get("success")
-                    and event.data.get("outcome") == "draft_created"
+                    and event.data.get("outcome") in CONFIRMED_DRAFT_OUTCOMES
                 ):
                     # Ground truth for automation_results.py's normalization:
                     # a model's envelope can CLAIM action.draft_created for any

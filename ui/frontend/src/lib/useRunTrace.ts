@@ -5,6 +5,11 @@ import type { TraceEvent, UsageRecord } from './types'
 interface RunTrace {
   events: TraceEvent[]
   usage: UsageRecord[]
+  // When a retention cleanup removed this run's content, or null. Comes from
+  // the same historical fetch as `events` -- a purged run has none left, and
+  // without this the caller cannot tell that apart from a run that never
+  // recorded any.
+  contentPurgedAt: string | null
   error: string | null
 }
 
@@ -21,6 +26,7 @@ interface RunTrace {
 export function useRunTrace(runId: string, status: string): RunTrace {
   const [events, setEvents] = useState<TraceEvent[]>([])
   const [usage, setUsage] = useState<UsageRecord[]>([])
+  const [contentPurgedAt, setContentPurgedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -58,6 +64,7 @@ export function useRunTrace(runId: string, status: string): RunTrace {
         if (!ignore) {
           setEvents(data.events)
           setUsage(data.usage ?? [])
+          setContentPurgedAt(data.content_purged_at ?? null)
         }
       })
       .catch((e: Error) => {
@@ -68,5 +75,5 @@ export function useRunTrace(runId: string, status: string): RunTrace {
     }
   }, [runId, status])
 
-  return { events, usage, error }
+  return { events, usage, contentPurgedAt, error }
 }

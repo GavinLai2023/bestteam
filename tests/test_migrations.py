@@ -710,3 +710,88 @@ def test_the_oauth_credential_columns_upgrade_and_downgrade(tmp_path, monkeypatc
             ).scalar() == 1
     finally:
         engine.dispose()
+
+
+def test_the_notification_migration_upgrades_and_downgrades(tmp_path, monkeypatch):
+    """Additive: an existing trigger comes through as healthy, nothing reported."""
+    db_path = tmp_path / "notifications.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "i6j7k8l9m0n1")  # the revision before this one
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO organizations (name, display_name, active, created_at) "
+                "VALUES ('acme', 'Acme', 1, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO email_triggers "
+                "(org_id, workflow_name, enabled, last_uid, runs_today, "
+                " created_at, updated_at) "
+                "VALUES (1, 'w', 1, 5, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+
+        command.upgrade(cfg, "j7k8l9m0n1o2")
+        with engine.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT consecutive_faults, alerted_fingerprint "
+                "FROM email_triggers WHERE org_id = 1"
+            )).one()
+            tables = set(sa.inspect(conn).get_table_names())
+        # Zero faults and no fingerprint is exactly "healthy, nothing reported
+        # yet", so no backfill is needed.
+        assert row.consecutive_faults == 0
+        assert row.alerted_fingerprint is None
+        assert {"notifications", "org_notification_settings"} <= tables
+
+        command.downgrade(cfg, "i6j7k8l9m0n1")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("email_triggers")}
+            tables = set(sa.inspect(conn).get_table_names())
+            surviving = conn.execute(
+                sa.text("SELECT COUNT(*) FROM email_triggers")
+            ).scalar()
+        assert "consecutive_faults" not in columns
+        assert "alerted_fingerprint" not in columns
+        assert not ({"notifications", "org_notification_settings"} & tables)
+        assert surviving == 1  # the trigger survives the round trip
+    finally:
+        engine.dispose()
+
+
+def test_the_secret_expiry_column_upgrades_and_downgrades(tmp_path, monkeypatch):
+    db_path = tmp_path / "secret_expiry.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "i6j7k8l9m0n1")
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO organizations (name, display_name, active, created_at) "
+                "VALUES ('acme', 'Acme', 1, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO org_email_credentials "
+                "(org_id, backend, host, port, username, password_encrypted, "
+                " auth_type, created_at, updated_at) "
+                "VALUES (1, 'imap', 'outlook.office365.com', 993, 'u', 'tok', "
+                " 'microsoft_oauth', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+
+        command.upgrade(cfg, "j7k8l9m0n1o2")
+        with engine.connect() as conn:
+            expires = conn.execute(sa.text(
+                "SELECT oauth_secret_expires_at FROM org_email_credentials WHERE org_id = 1"
+            )).scalar()
+        # NULL means "no expiry recorded", which switches the sweep off for
+        # this credential rather than warning about a date we invented.
+        assert expires is None
+
+        command.downgrade(cfg, "i6j7k8l9m0n1")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("org_email_credentials")}
+        assert "oauth_secret_expires_at" not in columns
+    finally:
+        engine.dispose()

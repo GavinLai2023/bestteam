@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
+import DataRetentionPanel from '../components/DataRetentionPanel'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
+import NotificationsPanel from '../components/NotificationsPanel'
 import RunDetail from '../components/RunDetail'
 import RunsPager from '../components/RunsPager'
 import SharedSessionsPanel from '../components/SharedSessionsPanel'
+import WebhookSettings from '../components/WebhookSettings'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -18,6 +21,11 @@ const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 // its run finishes, since the list is otherwise only fetched on tab/filter
 // change.
 const RUN_POLL_INTERVAL_MS = 5000
+
+// How often to refresh the unread-alert badge. Far slower than the run poll:
+// an alert only fires on a health *transition*, and a minute's delay in
+// noticing one is nothing next to the hours it replaces.
+const ALERT_POLL_INTERVAL_MS = 60000
 
 interface Filters {
   workflow: string
@@ -41,7 +49,14 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared'>('automations') // automations | runs | shared
+  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
+  // Kept here so the tab label can carry the unread badge without the
+  // panel having to be mounted. Fetched below rather than only through
+  // NotificationsPanel's callback: the panel is mounted only once the Alerts
+  // tab is open, so the badge could never appear before the user had already
+  // gone looking -- which is the one thing it exists to save them (Codex
+  // review finding).
+  const [unreadAlerts, setUnreadAlerts] = useState(0)
   const [workflows, setWorkflows] = useState<string[]>([])
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -68,6 +83,25 @@ export default function ActivityPage() {
   useEffect(() => {
     if (selectedRun) runDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [selectedRun])
+
+  // Keeps polling while this page is open, so an alert raised minutes from
+  // now still reaches the badge. `limit: 1` because only `unread` is wanted.
+  useEffect(() => {
+    let ignore = false
+    const refresh = () =>
+      api
+        .listNotifications(true, 1)
+        .then((d) => {
+          if (!ignore) setUnreadAlerts(d.unread)
+        })
+        .catch(() => {})
+    void refresh()
+    const id = setInterval(() => void refresh(), ALERT_POLL_INTERVAL_MS)
+    return () => {
+      ignore = true
+      clearInterval(id)
+    }
+  }, [])
 
   useEffect(() => {
     api
@@ -145,7 +179,22 @@ export default function ActivityPage() {
         <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
           Shared
         </button>
+        <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
+          Alerts{unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
+        </button>
+        <button type="button" className={tab === 'data' ? 'active' : ''} onClick={() => setTab('data')}>
+          Data
+        </button>
       </div>
+
+      {tab === 'alerts' && (
+        <>
+          <NotificationsPanel onUnreadChange={setUnreadAlerts} />
+          <WebhookSettings />
+        </>
+      )}
+
+      {tab === 'data' && <DataRetentionPanel />}
 
       {tab === 'automations' && (
         <>

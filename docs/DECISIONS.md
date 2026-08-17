@@ -232,3 +232,148 @@ Append new entries at the bottom using this template:
   Graph-native ever becomes necessary, nothing here blocks it — but it should
   be justified by a capability Graph has and IMAP lacks, not by the connector
   abstraction on its own.
+
+## Alerts go in-app and to a webhook, never by email (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: Phase 0 made a failing trigger visible on the trigger row, but
+  nothing notified anyone. The obvious channel for "your email automation is
+  broken" is email — which this product deliberately cannot send.
+- **Decision**: Alerts land in an in-app list, and optionally on one
+  admin-configured webhook per org. No SMTP is added.
+- **Why**:
+  - The draft-only toolkit's entire containment argument is that the worst
+    outcome is a bad draft a human reviews, because there is no send verb
+    anywhere. Adding SMTP to deliver alerts would put a send capability in the
+    process purely for the convenience of the alerting feature, and every
+    future reader would reasonably ask why the email agent may not use it.
+  - In-app alone is too weak: an admin who does not log in for a week does not
+    learn for a week, which is the exact failure being fixed.
+  - A webhook reaches Slack, Teams or an on-call rota without this codebase
+    knowing about any of them, and the customer already has one of those.
+  - An admin-configured webhook is **not** the model-chosen egress that
+    `find_email_egress_conflicts` refuses. The destination is fixed by a human;
+    the refused case is an agent choosing a URL while reading
+    attacker-controlled mail. It is still HTTPS-only and still goes through
+    `check_host_allowed`, because a tenant admin is not trusted to reach the
+    host's internal network.
+- **Consequences**: Self-hosted internal webhook endpoints are unsupported.
+  Payloads carry health information only — never a subject, address or body —
+  so a webhook cannot become an email-content exfiltration path. There are no
+  per-user preferences, digests or quiet hours until a customer asks.
+
+## Email and egress tools are refused per WORKFLOW, not per agent (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted, supersedes the per-agent rule shipped in Phase 0 (0.6)
+- **Context**: Phase 0 refused an agent holding both an email tool and
+  `http_get`/`web_search`, and documented "split them across two agents" as the
+  remedy. A review pointed out that the split contains nothing.
+- **Decision**: Refuse the combination anywhere in a workflow, regardless of
+  which agent holds what, and drop the splitting advice.
+- **Why**:
+  - `_agent_node` (`adapters/langgraph_adapter.py`) feeds each agent's output
+    into the next agent's context, and a workflow's steps share state. An
+    injected instruction the mail agent reads therefore arrives in the egress
+    agent's prompt as ordinary text.
+  - The check is deliberately blunt — it does not reason about ordering or
+    collaboration mode. That reasoning would have to be redone, correctly,
+    every time routing changes, and a wrong answer is an exfiltration path.
+  - Nothing legitimate is refused: no shipped workflow combines the two.
+- **Consequences**: A customer who genuinely needs both must run them as
+  separate workflows against separate deployments. The old advice is gone from
+  the rejection message and from `tests/test_deploy_validation.py`, whose
+  `..._is_fine` test now asserts the opposite.
+
+## A timed-out run stays retriable; drafting became idempotent instead (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: Phase 0's watchdog marks a run that outlived the run timeout as
+  failed so the trigger stops being blocked, but it cannot stop the worker — a
+  node inside `workflow.stream()` is not interruptible. A review found that the
+  released run is therefore retriable while its worker may still draft, and
+  proposed keeping it non-retriable until the worker acknowledges cancellation.
+- **Decision**: Rejected that proposal. Instead, `email_draft_reply` checks the
+  Drafts folder for the message's source key under a process-wide per-key lock
+  before `APPEND`, and reports `outcome: "draft_exists"` when it skips.
+- **Why**:
+  - The wedged worker never acknowledges cancellation — being wedged is the
+    premise. Waiting for it reinstates the permanent, silent trigger blockage
+    that Phase 0 item 0.4 exists to fix, trading a rare duplicate draft for a
+    guaranteed silent stop.
+  - The defect is not in when a retry is planned; it is that `APPEND` is not
+    idempotent. Fixes belong at the point of writing.
+  - Both racers are threads of the **same** uvicorn process, so a process-wide
+    lock closes the window rather than narrowing it.
+- **Consequences**: One extra Drafts search per drafted message, on a path that
+  already opens an IMAP connection per tool call. A multi-worker deployment
+  reopens the window; that needs the DB-authoritative overlap guard already
+  tracked in `STATUS.md`, and the email capability is single-instance by
+  design. `CONFIRMED_DRAFT_OUTCOMES` keeps the two readers of confirmed drafts
+  in agreement so a skipped draft still excludes its message from the next
+  retry.
+
+## Retention purges a run's content and keeps its accounting (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: A generic email team's model output — names, subjects, body
+  excerpts — persisted indefinitely in `runs.output` and `trace_events`. Raw
+  email bodies were already redacted at the adapter layer, but a generic team's
+  *output* is the product, so redaction cannot reach it. The only lever is time.
+- **Decision**: A purge clears `runs.input`/`output`, deletes the run's
+  `trace_events`, and empties `automation_item_results.payload`, then stamps
+  `runs.content_purged_at`. The `runs` row itself, `usage_records`,
+  `trigger_context`, and an item result's `status`/`source_key` all survive.
+- **Why**:
+  - `usage_records.run_id` is non-nullable and `run_analytics_api.py` reports
+    over exactly those rows. Deleting run rows would destroy the organisation's
+    token and cost history — a worse bug than the one being fixed. The
+    customer's concern is the personal data, not that a run happened at 03:14
+    and cost $0.02.
+  - `automation_item_results.status`/`source_key` are what
+    `CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted UIDs from a
+    retry. Clearing them would make a retention sweep cause duplicate drafts —
+    the exact defect Phase 3a's per-source-key lock exists to prevent.
+  - It is honest to state: we stop keeping what was in the email; we keep that
+    the work happened.
+- **Consequences**: A purged run renders as an explicit "content was removed"
+  rather than an empty timeline, in `RunDetail` and in both automation-result
+  lists. A purge is not a secure erase — SQLite leaves the old page contents on
+  disk until `VACUUM`.
+
+## Retention covers all of an org's runs, not only email-triggered ones (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: The problem was raised about autonomous email runs, and
+  `Run.trigger_context` identifies exactly those.
+- **Decision**: The policy applies to every run belonging to the organisation.
+- **Why**: There is no reliable "is this an email run" predicate. A user who
+  opens their email team and clicks Run produces a *manual* run whose output
+  contains the same names, subjects and excerpts. Filtering to the autonomous
+  half would be more code and less protection, and would leave the customer
+  believing they were covered when they were not. One uniform rule is also the
+  one a customer can state back to you: run history is kept for N days.
+- **Consequences**: An organisation that turns retention on loses old manual
+  run history too. That is why the default is NULL — keep forever — so an
+  upgrade deletes nothing and enabling it is always a deliberate act.
+
+## Per-data-subject erasure was refused rather than approximated (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: The natural request behind a retention feature is "delete
+  everything about alice@example.com".
+- **Decision**: Not built. Retention is by age; deletion is by run or by batch.
+- **Why**: The address is not stored anywhere indexed. It exists only inside
+  `runs.output` free text that the model may have paraphrased or summarised.
+  Matching it would both miss (rewritten text) and over-delete (an unrelated
+  run that merely mentions the address). Shipping that as an erasure feature
+  would be a compliance promise that cannot be kept, which is worse than not
+  offering it.
+- **Consequences**: A customer with a genuine subject-access erasure obligation
+  has age-based retention and per-run deletion, and must be told plainly that
+  identifier-based erasure is not available. Recorded in `STATUS.md`.
