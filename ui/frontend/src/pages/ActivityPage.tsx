@@ -4,9 +4,11 @@ import { formatDateTime } from '../lib/dateFormat'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
+import NotificationsPanel from '../components/NotificationsPanel'
 import RunDetail from '../components/RunDetail'
 import RunsPager from '../components/RunsPager'
 import SharedSessionsPanel from '../components/SharedSessionsPanel'
+import WebhookSettings from '../components/WebhookSettings'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
@@ -41,7 +43,10 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared'>('automations') // automations | runs | shared
+  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts'>('automations')
+  // Kept here so the tab label can carry the unread badge without the
+  // panel having to be mounted.
+  const [unreadAlerts, setUnreadAlerts] = useState(0)
   const [workflows, setWorkflows] = useState<string[]>([])
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -145,7 +150,17 @@ export default function ActivityPage() {
         <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
           Shared
         </button>
+        <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
+          Alerts{unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
+        </button>
       </div>
+
+      {tab === 'alerts' && (
+        <>
+          <NotificationsPanel onUnreadChange={setUnreadAlerts} />
+          <WebhookSettings />
+        </>
+      )}
 
       {tab === 'automations' && (
         <>

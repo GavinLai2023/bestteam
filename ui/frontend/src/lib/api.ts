@@ -1,7 +1,8 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
-  ModelCatalogEntry, OrgEmailConnectPayload, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
+  OrgEmailConnectPayload, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -378,6 +379,18 @@ export const api = {
   testOrgEmail: (payload: OrgEmailConnectPayload) =>
     request<{ ok: boolean; error?: string }>('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
   clearOrgEmail: () => request<void>('/api/org/email', { method: 'DELETE' }),
+
+  // Alerting: the in-app list, and where else the org wants it delivered.
+  listNotifications: (unreadOnly = false) =>
+    request<NotificationList>(`/api/notifications?unread_only=${unreadOnly}`),
+  markNotificationRead: (id: number) =>
+    request<{ ok: boolean; unread: number }>(`/api/notifications/${id}/read`, { method: 'POST' }),
+  getNotificationSettings: () => request<NotificationSettings>('/api/org/notifications'),
+  setNotificationSettings: (payload: NotificationSettingsPayload) =>
+    request<NotificationSettings>('/api/org/notifications', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   // Org self-service: share a deployed team with colleagues via a
   // revocable, anonymous link (see docs/superpowers/specs/

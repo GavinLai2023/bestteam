@@ -15,13 +15,16 @@ interface EmailForm {
   tenantId: string
   clientId: string
   clientSecret: string
+  // ISO date (YYYY-MM-DD). Optional, Microsoft 365 only.
+  secretExpiresAt: string
   port: number | string
   drafts: string
 }
 
 const EMPTY_FORM: EmailForm = {
   authType: 'password', host: '', username: '', password: '',
-  tenantId: '', clientId: '', clientSecret: '', port: 993, drafts: '',
+  tenantId: '', clientId: '', clientSecret: '', secretExpiresAt: '',
+  port: 993, drafts: '',
 }
 
 // Connect / test / rotate / disconnect the org's mailbox for the email tools.
@@ -75,6 +78,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
     client_secret: isM365 ? form.clientSecret : null,
     oauth_tenant_id: isM365 ? form.tenantId.trim() : null,
     oauth_client_id: isM365 ? form.clientId.trim() : null,
+    oauth_secret_expires_at: isM365 ? form.secretExpiresAt.trim() || null : null,
     port: Number(form.port) || 993,
     drafts: form.drafts.trim() || null,
   })
@@ -130,6 +134,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
       username: status.username || '',
       tenantId: status.oauth_tenant_id || '',
       clientId: status.oauth_client_id || '',
+      secretExpiresAt: status.oauth_secret_expires_at || '',
       port: status.port || 993,
       drafts: status.drafts || '',
     })
@@ -226,6 +231,16 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
               <div className="field">
                 <label htmlFor="ec-secret">Client secret</label>
                 <input id="ec-secret" type="password" value={form.clientSecret} onChange={field('clientSecret')} autoComplete="off" />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-secret-expiry">Secret expiry date (optional)</label>
+                <input id="ec-secret-expiry" type="date" value={form.secretExpiresAt} onChange={field('secretExpiresAt')} />
+                <p className="hint">
+                  Azure shows this beside the secret you just copied. Every client secret
+                  expires, and when one does the mailbox stops working with an error that
+                  looks like a wrong password — enter the date and we&rsquo;ll warn you a
+                  month beforehand.
+                </p>
               </div>
             </>
           ) : (
