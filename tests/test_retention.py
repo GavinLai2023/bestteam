@@ -59,3 +59,137 @@ def test_record_sweep_stamps_history(db):
     row = get_retention_settings(db, org.id)
     assert row.last_purged_count == 4
     assert row.last_swept_at.replace(tzinfo=timezone.utc) == at
+
+
+from datetime import datetime, timedelta, timezone
+
+from ui.backend.db.models import (
+    AutomationItemResult,
+    Run,
+    TraceEventRecord,
+    UsageRecord,
+)
+from ui.backend.retention import purge_org_runs, purge_run
+
+
+def _run(db, org_id, *, run_id="r1", status="completed", age_days=0):
+    created = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=age_days)
+    run = Run(
+        id=run_id, workflow="support", input="From alice@example.com: my boiler leaks",
+        output="Drafted a reply to alice@example.com", status=status,
+        org_id=org_id, created_at=created,
+    )
+    db.add(run)
+    db.add(TraceEventRecord(run_id=run_id, seq=1, type="agent_completed",
+                            agent="writer", data='{"text": "alice@example.com"}'))
+    db.add(UsageRecord(run_id=run_id, agent="writer", model="fake:",
+                       input_tokens=10, output_tokens=5, org_id=org_id))
+    db.add(AutomationItemResult(
+        org_id=org_id, run_id=run_id, source_key="mbx:7", result_type="email",
+        status="processed", needs_attention=False,
+        payload={"sender": "alice@example.com", "summary": "boiler"},
+    ))
+    db.flush()
+    return run
+
+
+def test_purge_clears_content(db):
+    org = create_org(db, "acme")
+    run = _run(db, org.id)
+
+    assert purge_run(db, run) is True
+    db.commit()
+
+    assert run.input == ""
+    assert run.output is None
+    assert run.content_purged_at is not None
+    assert db.query(TraceEventRecord).filter_by(run_id=run.id).count() == 0
+    assert db.query(AutomationItemResult).filter_by(run_id=run.id).one().payload == {}
+
+
+def test_purge_keeps_the_accounting(db):
+    """I2: usage rows and the run row itself survive -- they are the org's
+    cost history, not email content."""
+    org = create_org(db, "acme")
+    run = _run(db, org.id)
+
+    purge_run(db, run)
+    db.commit()
+
+    assert db.get(Run, run.id) is not None
+    usage = db.query(UsageRecord).filter_by(run_id=run.id).one()
+    assert (usage.input_tokens, usage.output_tokens) == (10, 5)
+
+
+def test_purge_keeps_item_status_and_source_key(db):
+    """I1: clearing these would make a sweep cause duplicate drafts, because
+    automation_results.py excludes already-drafted UIDs by exactly these two
+    fields."""
+    org = create_org(db, "acme")
+    run = _run(db, org.id)
+
+    purge_run(db, run)
+    db.commit()
+
+    item = db.query(AutomationItemResult).filter_by(run_id=run.id).one()
+    assert item.source_key == "mbx:7"
+    assert item.status == "processed"
+
+
+def test_purge_refuses_a_running_run(db):
+    """I3: the worker is still writing trace events."""
+    org = create_org(db, "acme")
+    run = _run(db, org.id, status="running")
+
+    assert purge_run(db, run) is False
+    assert run.input != ""
+
+
+def test_purge_is_idempotent(db):
+    """I4: the sweep re-selects rows on overlapping cycles."""
+    org = create_org(db, "acme")
+    run = _run(db, org.id)
+
+    assert purge_run(db, run) is True
+    db.commit()
+    first = run.content_purged_at
+
+    assert purge_run(db, run) is False
+    db.commit()
+    assert run.content_purged_at == first
+
+
+def test_purge_org_runs_respects_the_cutoff(db):
+    org = create_org(db, "acme")
+    _run(db, org.id, run_id="old", age_days=40)
+    _run(db, org.id, run_id="new", age_days=2)
+
+    assert purge_org_runs(db, org_id=org.id, older_than_days=30) == 1
+    db.commit()
+
+    assert db.get(Run, "old").content_purged_at is not None
+    assert db.get(Run, "new").content_purged_at is None
+
+
+def test_purge_org_runs_is_scoped_to_one_org(db):
+    a = create_org(db, "acme")
+    b = create_org(db, "beta")
+    _run(db, a.id, run_id="a1", age_days=40)
+    _run(db, b.id, run_id="b1", age_days=40)
+
+    assert purge_org_runs(db, org_id=a.id, older_than_days=30) == 1
+    db.commit()
+
+    assert db.get(Run, "b1").content_purged_at is None
+
+
+def test_purge_org_runs_zero_days_takes_everything_terminal(db):
+    org = create_org(db, "acme")
+    _run(db, org.id, run_id="done", age_days=0)
+    _run(db, org.id, run_id="live", age_days=0, status="running")
+
+    assert purge_org_runs(db, org_id=org.id, older_than_days=0) == 1
+    db.commit()
+
+    assert db.get(Run, "done").content_purged_at is not None
+    assert db.get(Run, "live").content_purged_at is None
