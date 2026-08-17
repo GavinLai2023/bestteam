@@ -329,3 +329,26 @@ export interface NotificationSettingsPayload {
   webhook_secret?: string | null
   enabled: boolean
 }
+
+// --- run-history retention and export (Phase 3b) ----------------------------
+
+// `run_retention_days` null means keep forever -- the default, so nothing is
+// ever removed until the customer chooses a period. `purgeable_now` is what
+// the SAVED policy would remove on the next cleanup, not a preview of an
+// unsaved selection (the API computes it from the stored value).
+export interface RetentionSettings {
+  run_retention_days: number | null
+  last_swept_at: string | null
+  last_purged_count: number
+  purgeable_now: number
+}
+
+// Everything a cleanup would remove. `truncated` is explicit: a partial
+// export that looked complete would be worse than no export at all.
+export interface OrgExportBundle {
+  org_id: number
+  exported_at: string
+  truncated: boolean
+  oldest_included: string | null
+  runs: unknown[]
+}

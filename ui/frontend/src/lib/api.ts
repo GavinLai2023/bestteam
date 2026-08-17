@@ -2,7 +2,8 @@ import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
-  OrgEmailConnectPayload, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, RetentionSettings, RunListItem, Requirements,
+  ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -391,6 +392,47 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  // Run-history retention (Phase 3b): how long the org keeps run content,
+  // taking a copy out before it goes, and removing it on demand. A cleanup
+  // clears content and keeps accounting -- see ui/backend/retention.py.
+  getRetention: () => request<RetentionSettings>('/api/org/retention'),
+  // null turns the policy off (keep forever). Saving removes nothing by
+  // itself -- the sweep does, on its next cycle.
+  setRetention: (days: number | null) =>
+    request<RetentionSettings>('/api/org/retention', {
+      method: 'PUT',
+      body: JSON.stringify({ run_retention_days: days }),
+    }),
+  // The window is always explicit, never defaulted from the stored policy:
+  // this is a destructive action and the request must say what it removes.
+  purgeRuns: (olderThanDays: number) =>
+    request<{ purged: number }>('/api/org/retention/purge', {
+      method: 'POST',
+      body: JSON.stringify({ older_than_days: olderThanDays }),
+    }),
+  purgeRun: (runId: string) =>
+    request<{ purged: boolean }>(`/api/runs/${runId}/purge`, { method: 'POST' }),
+  // Fetches the bundle and hands it to the browser as a file. This is the
+  // real app, not a sandboxed artifact, so an object URL + <a download>
+  // works. Returns the bundle so the caller can report its size and whether
+  // the server's cap truncated it.
+  exportOrgData: async (days?: number | null): Promise<OrgExportBundle> => {
+    const bundle = await request<OrgExportBundle>(
+      `/api/org/export${days == null ? '' : `?days=${days}`}`,
+    )
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' }),
+    )
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `bestteam-export-${bundle.exported_at.slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    return bundle
+  },
 
   // Org self-service: share a deployed team with colleagues via a
   // revocable, anonymous link (see docs/superpowers/specs/

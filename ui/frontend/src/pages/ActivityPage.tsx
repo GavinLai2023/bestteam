@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
+import DataRetentionPanel from '../components/DataRetentionPanel'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
@@ -43,7 +44,7 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts'>('automations')
+  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted.
   const [unreadAlerts, setUnreadAlerts] = useState(0)
@@ -153,6 +154,9 @@ export default function ActivityPage() {
         <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
           Alerts{unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
         </button>
+        <button type="button" className={tab === 'data' ? 'active' : ''} onClick={() => setTab('data')}>
+          Data
+        </button>
       </div>
 
       {tab === 'alerts' && (
@@ -161,6 +165,8 @@ export default function ActivityPage() {
           <WebhookSettings />
         </>
       )}
+
+      {tab === 'data' && <DataRetentionPanel />}
 
       {tab === 'automations' && (
         <>
