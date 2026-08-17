@@ -488,6 +488,86 @@ class _ImapBackend:
         finally:
             _imap_logout(conn)
 
+    def attachments(self, message_id: str) -> Optional[List[Dict[str, Any]]]:
+        """List the message's attachments, or None if there is no such message.
+
+        Nothing is written to disk -- sizes come from the decoded payload held
+        in memory, and the fetch is the same read-only `BODY.PEEK[]` as `read`.
+        """
+        conn = self._connect()
+        try:
+            conn.select("INBOX", readonly=True)
+            msg = self._fetch_message(conn, message_id)
+            if msg is None:
+                return None
+            return [
+                {
+                    "filename": part.get_filename(),
+                    "content_type": part.get_content_type(),
+                    "size": len(part.get_payload(decode=True) or b""),
+                }
+                for part in _attachment_parts(msg)
+            ]
+        finally:
+            _imap_logout(conn)
+
+    def read_attachment(self, message_id: str, filename: str) -> Optional[Dict[str, Any]]:
+        """One attachment's bytes, or None if there is no such message.
+
+        `filename` is matched against this message's own MIME parts and
+        nothing else -- no path is resolved, nothing is read off the
+        filesystem, and nothing is written to it. A name that is not one of
+        these parts is simply not found.
+
+        A breached limit comes back as `{"error": ...}` rather than an
+        exception: an attachment too large to read is a fact about the
+        message, not a fault that should fail the customer's whole run.
+        """
+        conn = self._connect()
+        try:
+            conn.select("INBOX", readonly=True)
+            msg = self._fetch_message(conn, message_id)
+            if msg is None:
+                return None
+            parts = [(p, p.get_payload(decode=True) or b"") for p in _attachment_parts(msg)]
+            total = sum(len(data) for _, data in parts)
+            if total > _MAX_ATTACHMENTS_TOTAL_BYTES:
+                return {
+                    "error": (
+                        f"This message's attachments total {total / (1024 * 1024):.1f} MB, "
+                        f"over the {_MAX_ATTACHMENTS_TOTAL_BYTES / (1024 * 1024):.0f} MB "
+                        "limit for one message, so none of them can be read."
+                    )
+                }
+            wanted = filename.strip().lower()
+            for part, data in parts:
+                if (part.get_filename() or "").strip().lower() != wanted:
+                    continue
+                if len(data) > _MAX_ATTACHMENT_BYTES:
+                    return {
+                        "error": (
+                            f"The attachment '{part.get_filename()}' is "
+                            f"{len(data) / (1024 * 1024):.1f} MB, too large to read "
+                            f"(the limit is {_MAX_ATTACHMENT_BYTES / (1024 * 1024):.0f} MB)."
+                        )
+                    }
+                return {
+                    "filename": part.get_filename(),
+                    "content_type": part.get_content_type(),
+                    "size": len(data),
+                    "data": data,
+                }
+            return {
+                "error": (
+                    f"No attachment named '{filename.strip()}' on message "
+                    f"{message_id}. Its attachments are: "
+                    + (", ".join(p.get_filename() for p, _ in parts) or "(none)")
+                    + "."
+                )
+            }
+        finally:
+            _imap_logout(conn)
+
     def draft_reply(self, message_id: str, body: str, source_key: Optional[str] = None) -> Optional[str]:
         conn = self._connect()
         try:
@@ -632,6 +712,23 @@ def _extract_text_body(msg: EmailMessage) -> str:
         content = re.sub(r"<[^>]+>", " ", content)
         content = re.sub(r"[ \t]+", " ", content)
     return content.strip()
+
+
+# An attachment is parsed in memory, never written to disk, so these bound
+# what one message can make this process decompress. A parser is a
+# decompressor and an unbounded one is a denial-of-service surface.
+_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+_MAX_ATTACHMENTS_TOTAL_BYTES = 25 * 1024 * 1024
+
+
+def _attachment_parts(msg: EmailMessage):
+    """The message's real attachments, body parts excluded.
+
+    `iter_attachments()` is what draws that line -- `get_body()`'s chosen part
+    and its alternatives are not attachments, and a multipart body would
+    otherwise be reported to the customer as a file they could open.
+    """
+    return [p for p in msg.iter_attachments() if p.get_filename()]
 
 
 # ---------------------------------------------------------------------------

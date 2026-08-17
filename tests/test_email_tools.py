@@ -508,6 +508,107 @@ def test_imap_retries_on_connect_oserror(imap_env):
     assert "No unread emails" in result
 
 
+def _multipart_raw(*, attachment_bytes=b"%PDF-1.4 fake", filename="quote.pdf"):
+    """A message with a text body and one attachment, as bytes on the wire."""
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "Alice <alice@example.com>"
+    msg["To"] = "support@example.com"
+    msg["Subject"] = "Quote for the boiler"
+    msg["Date"] = "Tue, 15 Jul 2026 08:00:00 +0000"
+    msg.set_content("Please see attached.")
+    msg.add_attachment(
+        attachment_bytes, maintype="application", subtype="pdf", filename=filename
+    )
+    return msg.as_bytes()
+
+
+def _conn_returning(raw):
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [(b"7 (BODY[] {1}", raw), b")"])
+    return conn
+
+
+def test_attachments_lists_name_type_and_size(imap_env):
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        items = _ImapBackend.from_env().attachments("7")
+
+    assert [i["filename"] for i in items] == ["quote.pdf"]
+    assert items[0]["content_type"] == "application/pdf"
+    assert items[0]["size"] == len(b"%PDF-1.4 fake")
+    # BODY.PEEK, never BODY: the toolkit must not mark a customer's mail seen.
+    assert "BODY.PEEK" in conn.uid.call_args_list[0].args[2]
+
+
+def test_a_message_with_no_attachments_lists_none(imap_env):
+    conn = _conn_returning(_RAW_MESSAGE)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        assert _ImapBackend.from_env().attachments("7") == []
+
+
+def test_the_body_is_not_reported_as_an_attachment(imap_env):
+    # `set_content` makes the body a part too; only real attachments count.
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        items = _ImapBackend.from_env().attachments("7")
+    assert all(i["filename"] == "quote.pdf" for i in items)
+
+
+def test_attachments_of_a_missing_message_is_none(imap_env):
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [None])
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        assert _ImapBackend.from_env().attachments("7") is None
+
+
+def test_read_attachment_returns_the_bytes(imap_env):
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "quote.pdf")
+    assert record["data"] == b"%PDF-1.4 fake"
+
+
+def test_read_attachment_matches_the_name_case_insensitively(imap_env):
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "QUOTE.PDF")
+    assert record["data"] == b"%PDF-1.4 fake"
+
+
+def test_read_attachment_never_treats_the_name_as_a_path(imap_env):
+    # The name is matched against the message's own parts, never resolved.
+    # This must report "not found", not read anything off the filesystem.
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "../../etc/passwd")
+    assert "error" in record
+
+
+def test_an_unknown_attachment_name_is_an_error_not_an_exception(imap_env):
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "nope.pdf")
+    assert "error" in record
+
+
+def test_an_oversized_attachment_is_refused_before_it_is_parsed(imap_env, monkeypatch):
+    monkeypatch.setattr("bestteam.tools.email_client._MAX_ATTACHMENT_BYTES", 8)
+    conn = _conn_returning(_multipart_raw(attachment_bytes=b"0123456789"))
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "quote.pdf")
+    assert "error" in record and "large" in record["error"].lower()
+
+
+def test_a_message_over_the_total_limit_is_refused(imap_env, monkeypatch):
+    monkeypatch.setattr("bestteam.tools.email_client._MAX_ATTACHMENTS_TOTAL_BYTES", 4)
+    conn = _conn_returning(_multipart_raw(attachment_bytes=b"0123456789"))
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        record = _ImapBackend.from_env().read_attachment("7", "quote.pdf")
+    assert "error" in record
+
+
 # ---------------------------------------------------------------------------
 # OAuth (SASL XOAUTH2) authentication -- Exchange Online has no basic auth
 # ---------------------------------------------------------------------------
