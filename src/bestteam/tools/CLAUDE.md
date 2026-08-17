@@ -5,7 +5,7 @@ See the root `CLAUDE.md` for project overview, architecture, and commands.
 
 ## Built-in tools
 
-Eight ready-made tools clients can attach directly to any Agent:
+Nine ready-made tools clients can attach directly to any Agent:
 
 | Tool | Import | Env var required | Extra dep |
 |---|---|---|---|
@@ -16,6 +16,7 @@ Eight ready-made tools clients can attach directly to any Agent:
 | `calculator(expression)` | `from bestteam import calculator` | — | none (stdlib only) |
 | `email_find(query="")` | `from bestteam import email_find` | `BESTTEAM_EMAIL_BACKEND` + backend creds | `graph`: `pip install 'bestteam[tools-email]'` (httpx); `imap`: none |
 | `email_read(message_id)` | `from bestteam import email_read` | (same) | (same) |
+| `email_read_attachment(message_id, filename)` | `from bestteam import email_read_attachment` | (same) | (same) + `bestteam[tools-files]` for PDF/Excel/Word attachments |
 | `email_draft_reply(message_id, body)` | `from bestteam import email_draft_reply` | (same) | (same) |
 
 ### Local business search (`google_places.py`)
@@ -45,7 +46,7 @@ outcome is a bad draft a human reviews in their own mail client. Design:
 
 The built-in `email_triage_reply` Skill (seeded into the Skills library on
 backend bootstrap, `ui/backend/skills.py::seed_default_skills`) packages the
-triage playbook + these three tools for Team Builder customers.
+triage playbook + these four tools for Team Builder customers.
 
 **Code usage:**
 ```python
@@ -82,11 +83,13 @@ laughs") DoS — the same unmitigated-DoS posture the PDF/Excel/Word parsers
 already have against decompression bombs, not a new risk class for this
 tool's trust boundary.
 
-**Email trust boundaries**: email bodies are attacker-controlled input to
-the LLM (prompt injection). Mitigations: no send capability exists (bounded
-blast radius — drafts are human-reviewed), the seeded skill instructs the
-agent to treat message content as data rather than instructions, and
-`email_read` caps body size. For the Graph backend, use least privilege:
+**Email trust boundaries**: email bodies — and, since Phase 4b, the text
+extracted from attachments — are attacker-controlled input to the LLM (prompt
+injection). Mitigations: no send capability exists (bounded blast radius —
+drafts are human-reviewed), the seeded skill instructs the agent to treat
+message content as data rather than instructions, and `email_read` caps body
+size (`email_read_attachment` caps extracted text at the same 8,000
+characters — see "Attachment reading" below). For the Graph backend, use least privilege:
 `Mail.ReadWrite` **application** permission restricted to the single mailbox
 with an Exchange Application Access Policy. In this SDK layer, credentials
 live in env vars (one mailbox per process): `_get_backend()` builds the
@@ -95,7 +98,7 @@ backend via `_ImapBackend.from_env()` / `_GraphBackend()`.
 **Per-mailbox seam (used by the UI backend for multi-tenancy).**
 `_ImapBackend(host=, user=, password=, port=, drafts=, restrict_to_public=,
 token_provider=)` builds a backend from explicit params (not env), and `make_email_tools(backend)`
-returns the three `email_*` tools bound to it — same names/docstrings the model
+returns the four `email_*` tools bound to it — same names/docstrings the model
 sees for the env tools. `_connect()` always uses a verifying TLS context
 (`ssl.create_default_context()` — imaplib's fallback does *not* verify the cert)
 and a bounded socket timeout. `restrict_to_public=True` (set by the per-org
@@ -246,3 +249,137 @@ A skipped draft is reported to the trace as `outcome: "draft_exists"`, distinct
 from `draft_created` so the trace never claims a write that did not happen, but
 both are in `automation_results.CONFIRMED_DRAFT_OUTCOMES` so a skipped draft
 still excludes its message from the next retry.
+
+## Attachment reading (email Phase 4b)
+
+`email_read` now ends with a manifest of what the message carries — each
+attachment's filename, declared type and size in KB — and
+`email_read_attachment(message_id, filename)` extracts the text of exactly one
+of them. Spec:
+`docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
+
+**No path, no disk.** This is the decision the whole feature is shaped around.
+`parse_file`'s own docstring — the contract the Trust boundaries note above
+restates — says it reads whatever local path it is given with no sandboxing,
+and that the caller is responsible for constraining which paths an agent can be
+prompted to access. That contract is
+fine for a knowledge base, where an *operator* chose the paths. It is exactly
+wrong for email, where **the filename is chosen by whoever sent the message**,
+in a process that holds the org's mailbox credentials and its Fernet secrets
+key. So the tool takes a message id — already confined to the run's batch by
+`make_email_tools`' `allowed_uids`, refused with the same `_OUT_OF_BATCH`
+sentinel `email_read` uses — and a name compared for equality against *that
+message's own* MIME part filenames. Parsing runs on `io.BytesIO`; nothing is
+ever written to disk, so there is no temp-file lifetime to get wrong, nothing
+to purge and no second copy for Phase 3b's retention sweep to miss. Path
+traversal is not defended against; it is made **structurally impossible**,
+because there is no path. `../../etc/passwd` is simply a name no MIME part has.
+
+`file_parser.py` carries this: the parsers are `*_bytes` functions behind
+`parse_bytes(data, filename)`, and `parse_file(path)` keeps its signature and
+becomes a thin wrapper that reads the file and delegates. The knowledge-base
+path is unchanged.
+
+**Two tools, not one enriched one.** `email_read` lists; it never inlines
+attachment text. Cost — Phase 4a exists because customers were billed for
+content they did not need, and inlining would put a 40-page PDF into the
+context of a message the model only had to acknowledge; on demand, the model
+pays for what it decides to read. Auditability — each extraction is its own
+`tool_completed` event, so the trace shows which attachments were opened.
+Bounded output — `email_read` is already truncated at 8,000 characters, and an
+inlined attachment would push the actual message body out of that window.
+
+**Three limits, all checked before any parser sees the bytes**: 10 MB per
+attachment (a parser is a decompressor, and an unbounded one is a
+denial-of-service surface), 25 MB for a message's attachments in total (which
+bounds the fifty-small-files case the per-attachment limit does not), and 8,000
+characters of extracted text — `_MAX_BODY_CHARS`, the same cap the body has, so
+a 500-page PDF cannot become two million tokens of context. Truncation is
+announced in the returned text. Breaching a limit returns a plain sentence the
+model can relay, never an exception: an attachment too large to read is a fact
+about the message, not a fault in the automation. Every path through
+`_attachment_impl` returns a string for the same reason.
+
+**Types**: exactly the set `parse_file` already supported (`SUPPORTED_SUFFIXES`
+— `.pdf`, `.xlsx`, `.xlsm`, `.docx`, `.xml` and the plain-text suffixes).
+Anything else returns a sentence naming the type and listing what can be read.
+**Archives are refused, not expanded** — recursive extraction of an
+attacker-supplied archive is a zip-bomb surface, and "the invoice was inside a
+zip" is not worth that risk until a customer actually presents it. **Dispatch
+is by filename suffix**, as `parse_file`'s is: a sender can name a text file
+`.pdf`, `pypdf` then raises, and the tool answers "couldn't be read" — the
+correct outcome, and no reason for a content-sniffing layer. The suffix checked
+is taken from the *matched part's* name, the same string `parse_bytes`
+dispatches on, so the check and the parse cannot disagree.
+
+**The trust boundary is unchanged in class.** Attachment text is
+attacker-controlled input to the LLM, exactly as the body already is; this
+widens the *volume* of such input, not its kind. The containment argument still
+holds unaltered: there is no send verb, no SMTP exists anywhere in the process,
+and the worst outcome of a successful injection is a strange draft a human sees
+before anything leaves the building.
+
+Two sender-controlled channels were closed while building it:
+
+- **A filename can carry a literal newline.** RFC 2231 percent-encoding
+  (`filename*=utf-8''bad%0Aline.pdf`) and RFC 2047 encoded-words both survive
+  `get_filename()` intact — only ordinary header folding is normalised — so a
+  sender could have forged extra lines into the manifest block. Note the
+  asymmetry, because "the library would have caught it" is not an argument
+  available here: `EmailMessage.add_attachment` *refuses to build* such a
+  header, but nothing guards the read path. `_one_line()` now flattens `\r`/`\n`
+  to spaces in the manifest and in `_attachment_impl`'s sentences. It cannot
+  change dispatch — a space is neither a dot nor a separator.
+- **Attachment text could have forged a draft confirmation.** Without its own
+  branch in `_redacted_email_tool_data` (`adapters/langgraph_adapter.py`), an
+  attachment result fell through to the `email_draft_reply` prefix matching, so
+  a PDF whose extracted text began "Draft reply saved…" would have been
+  recorded with `outcome: "draft_created"` for that message id. The branch now
+  returns `{"summary", "message_id", "outcome": "attachment_read"}` and no
+  extracted text; the filename is deliberately *not* recorded, being
+  sender-chosen and unbounded, where `message_id` is bounded by
+  `_bounded_message_id`.
+
+  Accepted cost: a refused or unparseable attachment also traces as
+  `attachment_read`, so it does not force `needs_attention` the way a raised
+  call does. Distinguishing it would mean string-matching sentences that embed
+  a sender-chosen filename — fragile, and an outcome the sender could steer.
+  Deliberately not done.
+
+### The enumerations that must all learn a new email tool's name
+
+A new email tool is not one addition but six, and five of the six fail
+**silently and open**:
+
+| Site | What breaks if missed |
+|---|---|
+| `ui/backend/deploy_validation.py::EMAIL_TOOL_NAMES` | **The containment boundary.** `find_email_egress_conflicts` intersects each agent's tools against it, so a missing name lets a workflow pair the tool with `http_get` — an injected attachment directing mailbox content into a fetched URL, exfiltration with no send verb involved. |
+| `ui/backend/email_tools.py::EMAIL_TOOL_NAMES` + `_fixed_message_tools` | **A cross-tenant read.** `spec_uses_email` gates on the set, so an attachment-only team resolved as "does not use email", no per-org tools were built, and on a deployment that also sets `BESTTEAM_EMAIL_BACKEND` the run fell through to the process-env mailbox. The placeholder set has the same shape of miss: an org with no mailbox, or an undecryptable key, got no override for that one name, so it fell through to the env tool. (The two frozensets are duplicated by necessity — `src/bestteam/` must not import from `ui/backend/`.) |
+| `adapters/langgraph_adapter.py::_EMAIL_TOOLS_NEEDING_REDACTION` | The generic 200-character `_summarize(result)` — i.e. extracted attachment text — lands in `trace_events`, `runs.output` and the live WebSocket broadcast. |
+| `tools/__init__.py` — `REGISTRY` and `__all__` | The only one that fails *loudly*: the name cannot be resolved from a workflow YAML at all. |
+| `bestteam/__init__.py` — re-export and `__all__` | `from bestteam import email_read_attachment` fails. |
+| `make_email_tools`' returned dict | The per-org scoped path silently lacks the tool while the env path has it. |
+
+The first three rows carry four **structural** tests between them (the second
+row has one per site), each asserting that every key `make_email_tools` returns
+is a member of the list in question — so the next email tool cannot repeat
+this. The failure-path branches that retain a `message_id` for correlation
+(`langgraph_adapter.py` and its consumer in `ui/backend/runtime.py`, which
+builds `failed_tool_message_ids`) name the tool too, so a raised attachment
+read escalates its message to a human: a name in one and not the other is half
+a wire.
+
+### Two notes on the bytes refactor
+
+- **`parse_file`'s "bytes and path agree" tests are now tautological.** Both
+  entry points execute the same `parse_bytes` code, so an assertion comparing
+  them verifies the plumbing, not the parsing. It was demonstrated empirically:
+  a mutation that broke `_decode_text`'s newline translation left the agreement
+  test green on Windows, where the file on disk genuinely contains `\r\n`. The
+  guard that actually holds the property asserts on literal bytes. General
+  lesson for this module: once two entry points are expressed in terms of each
+  other, a test comparing them can no longer pin the shared code.
+- **Peak memory for a parsed file is now the whole file**, where
+  `openpyxl(read_only=True)` previously streamed from disk. Inherent to parsing
+  from bytes; bounded for attachments by the 10 MB limit, unbounded for a
+  knowledge-base workbook. Recorded, not worked around.
