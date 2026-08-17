@@ -53,7 +53,27 @@ def create_org(db: Session, name: str, display_name: str = "") -> Organization:
     db.add(org)
     db.commit()
     db.refresh(org)
+    _apply_default_retention(db, org.id)
     return org
+
+
+def _apply_default_retention(db: Session, org_id: int) -> None:
+    """Give a NEW org the deployment's default retention period, if one is set.
+
+    Only ever applied at creation. An existing org is never touched, because an
+    upgrade must not start deleting a customer's history on the operator's
+    behalf -- see the Phase 3b spec's invariant I5.
+    """
+    # Late imports: `ui.backend.retention` imports this package, so a
+    # module-level import here would be a cycle.
+    from ..retention import retention_default_days
+    from .retention import set_retention_days
+
+    days = retention_default_days()
+    if days is None:
+        return
+    set_retention_days(db, org_id, days)
+    db.commit()
 
 
 def get_org_by_name(db: Session, name: str) -> Optional[Organization]:

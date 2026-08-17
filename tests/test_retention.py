@@ -288,3 +288,30 @@ def test_export_covers_everything_purge_clears(db):
     assert "trace_events" in run
     for field in PURGED_FIELDS["automation_item_results"]:
         assert field in run["automation_item_results"][0]
+
+
+def test_a_new_org_starts_with_the_deployments_default(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_RUN_RETENTION_DAYS", "90")
+
+    org = create_org(db, "acme")
+
+    assert get_retention_settings(db, org.id).run_retention_days == 90
+
+
+def test_an_existing_org_is_never_retro_fitted(db, monkeypatch):
+    """I5: setting the deployment default must not start deleting the history
+    of orgs that already exist."""
+    monkeypatch.delenv("BESTTEAM_RUN_RETENTION_DAYS", raising=False)
+    org = create_org(db, "acme")
+
+    monkeypatch.setenv("BESTTEAM_RUN_RETENTION_DAYS", "90")
+
+    assert get_retention_settings(db, org.id) is None
+
+
+def test_no_default_leaves_a_new_org_keeping_everything(db, monkeypatch):
+    monkeypatch.delenv("BESTTEAM_RUN_RETENTION_DAYS", raising=False)
+
+    org = create_org(db, "acme")
+
+    assert get_retention_settings(db, org.id) is None
