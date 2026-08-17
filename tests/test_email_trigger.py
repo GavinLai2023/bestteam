@@ -810,6 +810,53 @@ def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):
     assert len(calls) >= 1
 
 
+# --- maintenance tail ---------------------------------------------------------
+
+
+def test_maintenance_runs_the_retention_sweep(db):
+    from ui.backend.db.retention import get_retention_settings, set_retention_days
+    from ui.backend.email_trigger import run_maintenance
+
+    org = get_or_create_org(db, "acme")
+    set_retention_days(db, org.id, 30)
+    db.commit()
+
+    run_maintenance(db)
+
+    assert get_retention_settings(db, org.id).last_swept_at is not None
+
+
+def test_maintenance_survives_a_failing_sweep(db, monkeypatch):
+    """The poll loop must outlive any one maintenance job."""
+
+    def boom(*a, **k):
+        raise RuntimeError("sweep exploded")
+
+    monkeypatch.setattr(email_trigger, "sweep_retention", boom)
+    email_trigger.run_maintenance(db)  # must not raise
+
+
+def test_poll_forever_still_maintains_while_triggers_are_disabled(monkeypatch):
+    """Pausing automation is not a decision to pause data deletion."""
+    maintained = []
+    monkeypatch.setattr(email_trigger, "poll_once",
+                        lambda gw, session_factory=None: pytest.fail("polled"))
+    monkeypatch.setattr(email_trigger, "maintenance_once",
+                        lambda: maintained.append(1))
+    monkeypatch.setattr(email_trigger, "poll_seconds", lambda: 0.01)
+    monkeypatch.setenv("BESTTEAM_TRIGGERS_DISABLED", "1")
+
+    async def run_briefly():
+        stop = asyncio.Event()
+        task = asyncio.ensure_future(poll_forever(stop, _no_workflow))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await task
+
+    asyncio.run(run_briefly())
+    assert maintained  # the sweep still gets a chance to run
+
+
 # --- validate_trigger_env -----------------------------------------------------
 
 

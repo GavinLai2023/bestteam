@@ -63,6 +63,7 @@ from .knowledge_bases import (
     load_knowledge_base_tools,
 )
 from .notifications import dispatch_pending
+from .retention import sweep_retention
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -1220,6 +1221,32 @@ def sweep_secret_expiry(db: Session, today: Optional[date] = None) -> int:
     return raised
 
 
+def run_maintenance(db: Session) -> None:
+    """Timer-driven upkeep: secret-expiry warnings, the retention sweep, and
+    notification delivery.
+
+    Piggy-backs on the poller because it already runs on a timer. Never raises:
+    the poll loop must outlive any one of these.
+    """
+    try:
+        sweep_secret_expiry(db)
+        sweep_retention(db)
+        dispatch_pending(db)
+    except Exception:  # noqa: BLE001 -- upkeep must never break polling
+        db.rollback()
+        _logger.exception("email trigger: maintenance failed")
+
+
+def maintenance_once(session_factory=None) -> None:
+    """`run_maintenance` with its own session, for the paused branch of
+    `poll_forever` -- retention is not part of what a trigger pause pauses."""
+    from .db_session import SessionLocal  # late import: keep module import-light
+
+    factory = session_factory or SessionLocal
+    with factory() as db:
+        run_maintenance(db)
+
+
 def poll_once(get_workflow: Callable, session_factory=None) -> None:
     """One pass over every enabled org. Runs on a worker thread (imaplib and
     SQLAlchemy here are synchronous); a failure in one org never stops the rest."""
@@ -1240,16 +1267,12 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
                 _logger.exception("email trigger: unexpected failure for org %s",
                                   trigger.org_id)
 
-        # Deliver whatever this cycle (or an earlier one) raised. Piggy-backing
-        # on the poller rather than running a thread of its own: it already
-        # runs on a timer, and a notification that waits one cycle has still
-        # arrived far sooner than the customer noticing by themselves.
-        try:
-            sweep_secret_expiry(db)
-            dispatch_pending(db)
-        except Exception:  # noqa: BLE001 -- delivery must never break polling
-            db.rollback()
-            _logger.exception("email trigger: notification dispatch failed")
+        # Deliver whatever this cycle (or an earlier one) raised, and run the
+        # rest of the timer-driven upkeep. Piggy-backing on the poller rather
+        # than running a thread of its own: it already runs on a timer, and a
+        # notification that waits one cycle has still arrived far sooner than
+        # the customer noticing by themselves.
+        run_maintenance(db)
 
 
 async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:
@@ -1265,6 +1288,12 @@ async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> N
         if stop_event.is_set():
             return
         if triggers_disabled():
+            # A platform-wide pause of AUTOMATION is not a pause of data
+            # deletion -- an org's retention policy keeps running.
+            try:
+                await asyncio.to_thread(maintenance_once)
+            except Exception:  # noqa: BLE001 -- never let the task die
+                _logger.exception("email trigger: maintenance cycle failed")
             continue
         try:
             await asyncio.to_thread(poll_once, get_workflow)
