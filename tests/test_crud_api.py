@@ -2190,8 +2190,12 @@ def test_workflow_put_rejects_email_combined_with_an_egress_tool(client):
     ).json()["workflows"]
 
 
-def test_workflow_put_allows_email_and_egress_on_separate_agents(client):
-    ok = {
+def test_workflow_put_rejects_email_and_egress_on_separate_agents(client):
+    # Splitting the capabilities across agents used to be the recommended
+    # remedy. It does not contain anything: a sequential team feeds the mail
+    # agent's output into the next agent's context, so the injected text
+    # reaches the agent holding `http_get`.
+    split = {
         "knowledge_bases": [],
         "agents": [
             {"name": "mailer", "role": "Triage", "goal": "read mail",
@@ -2202,8 +2206,9 @@ def test_workflow_put_allows_email_and_egress_on_separate_agents(client):
         "teams": [{"name": "t", "agents": ["mailer", "researcher"], "mode": "sequential"}],
         "workflow": {"steps": ["t"]},
     }
-    resp = client.put("/api/config/workflows/split_wf?org=default", json=ok)
-    assert resp.status_code in (200, 201), resp.text
+    resp = client.put("/api/config/workflows/split_wf?org=default", json=split)
+    assert resp.status_code == 400, resp.text
+    assert "mailer" in resp.text and "researcher" in resp.text
 
 
 def test_workflow_put_still_allows_email_only_agents(client):

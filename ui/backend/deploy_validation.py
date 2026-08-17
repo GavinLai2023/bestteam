@@ -48,16 +48,28 @@ EGRESS_TOOL_NAMES = frozenset({"http_get", "web_search"})
 
 
 def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
-    """Return a problem string per agent that holds both an email tool and a
-    general-purpose egress tool.
+    """Return a problem string if this workflow holds both an email tool and a
+    general-purpose egress tool ANYWHERE -- on one agent or spread across
+    several. Empty list means the combination is absent.
 
     Email bodies are attacker-controlled input to the model, and the toolkit's
     containment story is that the worst outcome is a bad draft a human reviews
-    -- there is no send verb anywhere. That bound only holds while the agent
-    reading the mail has no *other* way to reach the outside world. Give the
-    same agent `http_get` and an injected message can direct it to put mailbox
-    or knowledge-base content into a URL it fetches, which exfiltrates without
-    ever sending an email (Phase 0, item 0.6).
+    -- there is no send verb anywhere. That bound only holds while the mail
+    cannot reach a route out. Give the same agent `http_get` and an injected
+    message can direct it to put mailbox or knowledge-base content into a URL
+    it fetches, which exfiltrates without ever sending an email (Phase 0,
+    item 0.6).
+
+    Splitting the two capabilities across separate agents does NOT restore the
+    bound, which is what this check originally assumed. `_agent_node`
+    (`adapters/langgraph_adapter.py`) feeds each agent's output into the next
+    agent's context, and a workflow's steps share state, so an injected
+    instruction read by the mail agent arrives in the egress agent's prompt as
+    ordinary text. The check is therefore workflow-level and deliberately
+    blunt: it does not try to reason about ordering or collaboration mode,
+    because that reasoning would have to be redone -- correctly -- every time
+    routing changes, and a wrong answer is an exfiltration path. No shipped
+    workflow combines the two, so nothing legitimate is refused.
 
     Prompt-level defences (the `email_input_security_core_v1` skill) reduce the
     likelihood but are not a boundary, so this refuses the combination at
@@ -65,17 +77,26 @@ def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
     with each agent's tool names ALREADY resolved through its skills -- the
     caller does that, exactly as `email_tools.spec_uses_email` does.
     """
-    problems: List[str] = []
-    for name, tools in agent_tool_sets:
-        names = set(tools)
-        egress = sorted(names & EGRESS_TOOL_NAMES)
-        if names & EMAIL_TOOL_NAMES and egress:
-            problems.append(
-                f"agent '{name}' combines email access with {', '.join(egress)}, "
-                "which would let a malicious email send mailbox content to an "
-                "outside address"
-            )
-    return problems
+    # Materialise once: the caller may pass a generator, and this reads twice.
+    pairs = [(name, set(tools)) for name, tools in agent_tool_sets]
+    email_agents = [name for name, tools in pairs if tools & EMAIL_TOOL_NAMES]
+    egress_agents = [name for name, tools in pairs if tools & EGRESS_TOOL_NAMES]
+    if not email_agents or not egress_agents:
+        return []
+    egress_tools = sorted({t for _, tools in pairs for t in tools & EGRESS_TOOL_NAMES})
+    tool_list = ", ".join(egress_tools)
+    if email_agents == egress_agents == [email_agents[0]]:
+        where = f"agent '{email_agents[0]}' combines email access with {tool_list}"
+    else:
+        where = (
+            f"agent '{email_agents[0]}' reads email while agent "
+            f"'{egress_agents[0]}' has {tool_list}, and a workflow's agents "
+            "share what they produce"
+        )
+    return [
+        f"{where}, which would let a malicious email send mailbox content to "
+        "an outside address"
+    ]
 
 
 def find_kb_tool_collisions(

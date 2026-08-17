@@ -488,7 +488,7 @@ def upsert_workflow_config(
                     detail=(
                         "This team can't be deployed: "
                         + "; ".join(egress_problems)
-                        + ". Split the mail-reading and web-access work into separate agents."
+                        + ". Remove the web-access tool, or move that work to a workflow with no mailbox access."
                     ),
                 )
 
