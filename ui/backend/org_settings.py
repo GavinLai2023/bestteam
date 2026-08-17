@@ -38,8 +38,10 @@ from .db.email_credentials import (
     set_email_credentials,
 )
 from .db.models import Organization
+from .db.notifications import get_notification_settings, set_notification_settings
 from .db_session import get_db
 from .email_trigger import disable_trigger, disable_trigger_on_identity_change
+from .notifications import WebhookUrlError, validate_webhook_url
 from .secret_store import SecretsKeyError
 
 logger = logging.getLogger(__name__)
@@ -364,3 +366,67 @@ def delete_email(
     """Disconnect the org's mailbox."""
     clear_email_credentials(db, org.id)
     disable_trigger(db, org.id)
+
+
+# --- notification settings ---------------------------------------------------
+
+
+class NotificationSettingsRequest(BaseModel):
+    """Where this org wants its alerts delivered, if anywhere.
+
+    `webhook_secret` is write-only: `GET` reports only whether one is stored,
+    so the UI can never echo it back. Omitting it on an update keeps whatever
+    is already stored; sending an empty string clears it.
+    """
+
+    webhook_url: Optional[str] = None
+    webhook_secret: Optional[str] = None
+    enabled: bool = True
+
+
+@router.get("/notifications")
+def get_notification_settings_route(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """The org's delivery settings. Never returns the webhook secret."""
+    row = get_notification_settings(db, org.id)
+    if row is None:
+        return {"webhook_url": None, "has_webhook_secret": False, "enabled": True}
+    return {
+        "webhook_url": row.webhook_url,
+        "has_webhook_secret": bool(row.webhook_secret_encrypted),
+        "enabled": bool(row.enabled),
+    }
+
+
+@router.put("/notifications")
+def put_notification_settings(
+    req: NotificationSettingsRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Save the org's delivery settings.
+
+    The URL is validated synchronously and a bad one is a 400: here the
+    customer is present to fix it, unlike the delivery path where a failure
+    must never break the poll cycle.
+    """
+    url = (req.webhook_url or "").strip()
+    if url:
+        try:
+            url = validate_webhook_url(url)
+        except WebhookUrlError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_notification_settings(
+        db, org.id,
+        webhook_url=url or None,
+        webhook_secret=req.webhook_secret,
+        enabled=req.enabled,
+        # No secret in the payload means "leave the stored one alone" -- the UI
+        # never received it, so it cannot resend it. An explicit empty string
+        # clears it.
+        keep_existing_secret=req.webhook_secret is None,
+    )
+    db.commit()
+    return get_notification_settings_route(db=db, org=org)
