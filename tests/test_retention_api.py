@@ -153,3 +153,23 @@ def test_export_respects_the_cap(client, seeded_runs, monkeypatch):
     body = client.get("/api/org/export").json()
     assert body["truncated"] is True
     assert len(body["runs"]) == 1
+
+
+# --- /api/runs/{run_id}/purge -------------------------------------------------
+
+
+def test_purge_one_run(client, seeded_runs):
+    assert client.post(f"/api/runs/{seeded_runs['old']}/purge").json() == {"purged": True}
+
+
+def test_purging_twice_is_not_an_error(client, seeded_runs):
+    client.post(f"/api/runs/{seeded_runs['old']}/purge")
+    assert client.post(f"/api/runs/{seeded_runs['old']}/purge").json() == {"purged": False}
+
+
+def test_purge_another_orgs_run_is_404(client, other_org_run):
+    assert client.post(f"/api/runs/{other_org_run}/purge").status_code == 404
+
+
+def test_purge_a_running_run_is_409(client, running_run):
+    assert client.post(f"/api/runs/{running_run}/purge").status_code == 409

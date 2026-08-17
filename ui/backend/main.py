@@ -37,6 +37,7 @@ from . import auth
 from . import automation_results
 from . import email_trigger
 from . import interview
+from . import retention
 from . import secret_store
 from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
@@ -689,6 +690,29 @@ def retry_run(
     except email_trigger.RetryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run_id": new_run_id}
+
+
+@app.post("/api/runs/{run_id}/purge")
+def purge_run_content(
+    run_id: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+):
+    """Remove one run's content on request (Phase 3b). The run row, its usage
+    records and its automation results' status/source_key survive -- see
+    ui/backend/retention.py. Cross-org is a 404 like every other run route:
+    existence is not revealed."""
+    run_row = db.get(Run, run_id)
+    if run_row is None or run_row.org_id != org.id:
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    if run_row.status == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="This run is still going. Wait for it to finish, or cancel it first.",
+        )
+    purged = retention.purge_run(db, run_row)
+    db.commit()
+    return {"purged": purged}
 
 
 @app.get("/api/runs")
