@@ -350,3 +350,44 @@ def test_message_id_is_stripped_in_the_trace_to_match_the_email_tools_own_normal
     )
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["message_id"] == "42"
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.3): the email-tool trace redaction is NOT contract-gated.
+#
+# An architecture review proposed extending the property-maintenance output
+# redaction (`runtime._PM_REDACTED_EVENT_TYPES`, gated on a run's
+# `result_contract`) to every email run, on the assumption that a generic email
+# team leaks raw message content into its trace. It does not: the redaction
+# that strips subjects/bodies/draft text happens one layer down, in the
+# adapter, for every run -- as the three tests above demonstrate using a plain
+# Workflow with no run row, no trigger_context and no contract.
+#
+# What the PM gate additionally redacts is the MODEL'S OWN output, which for a
+# generic email team is the entire product result the customer needs to read --
+# so it must stay. This test pins the real boundary so a future change can't
+# quietly make the tool-level redaction contract-dependent and reintroduce the
+# leak the review was worried about. The remaining genuine gap is retention of
+# that output, which is deliberately deferred to Phase 3.
+# ---------------------------------------------------------------------------
+
+
+def test_every_email_tool_is_redacted_and_redaction_needs_no_run_context():
+    from bestteam.adapters.langgraph_adapter import (
+        _EMAIL_TOOLS_NEEDING_REDACTION,
+        _redacted_email_tool_data,
+    )
+
+    assert set(_EMAIL_TOOLS_NEEDING_REDACTION) == {
+        "email_find", "email_read", "email_draft_reply",
+    }
+    # Callable with tool name + args + result alone: there is no run, org,
+    # trigger_context or contract parameter it could ever be gated on.
+    data = _redacted_email_tool_data(
+        "email_read",
+        {"message_id": "42"},
+        "Subject: confidential lease dispute\n\nbody text with 555-1234",
+    )
+    assert "lease dispute" not in str(data)
+    assert "555-1234" not in str(data)
+    assert data["outcome"] == "read"

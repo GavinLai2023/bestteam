@@ -37,7 +37,7 @@ from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
-from .deploy_validation import validate_agent_models
+from .deploy_validation import find_email_egress_conflicts, validate_agent_models
 from .db.models import (
     BuilderSession,
     IngestionJob,
@@ -60,7 +60,7 @@ from .db.share_links import count_active_share_links
 from .db.skills import publish_skill_version
 from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
-from .email_tools import load_email_tools
+from .email_tools import load_email_tools, resolve_agent_tool_sets
 from .db_session import get_db
 from .ingestion import delete_kb_ingestion_data, job_status_payload
 from .knowledge_bases import (
@@ -477,6 +477,20 @@ def upsert_workflow_config(
                     + ". Pick a model from the catalog."
                 ),
             )
+
+        if org_id is not None:
+            egress_problems = find_email_egress_conflicts(
+                resolve_agent_tool_sets(db, raw, org_id)
+            )
+            if egress_problems:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This team can't be deployed: "
+                        + "; ".join(egress_problems)
+                        + ". Split the mail-reading and web-access work into separate agents."
+                    ),
+                )
 
         # Attribute an admin-side deploy to the org's own member (schema
         # guarantees at most one) so it shows up on that member's My Teams

@@ -38,6 +38,10 @@ _MAX_RESULTS = 20
 _MAX_BODY_CHARS = 8000
 _SNIPPET_CHARS = 120
 
+# Stamped on drafts the autonomous trigger creates, so a retry can reconcile
+# against the mailbox itself rather than trusting run bookkeeping alone.
+_SOURCE_KEY_HEADER = "X-BestTeam-Source-Key"
+
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -418,7 +422,7 @@ class _ImapBackend:
         finally:
             _imap_logout(conn)
 
-    def draft_reply(self, message_id: str, body: str) -> Optional[str]:
+    def draft_reply(self, message_id: str, body: str, source_key: Optional[str] = None) -> Optional[str]:
         conn = self._connect()
         try:
             conn.select("INBOX", readonly=True)
@@ -427,6 +431,12 @@ class _ImapBackend:
                 return None
 
             reply = EmailMessage()
+            if source_key:
+                # Deterministic idempotency marker: lets a retry search the
+                # Drafts folder and recognise a draft that was really written
+                # even if the run died before recording it (see
+                # `drafts_with_source_keys`).
+                reply[_SOURCE_KEY_HEADER] = source_key
             reply["From"] = self._user
             reply["To"] = str(original.get("Reply-To") or original.get("From", ""))
             subject = str(original.get("Subject", "") or "")
@@ -444,6 +454,66 @@ class _ImapBackend:
             if typ != "OK":
                 raise ConfigurationError(f"IMAP APPEND to '{folder}' failed")
             return f"Draft reply saved to the '{folder}' folder (reply to message {message_id})."
+        finally:
+            _imap_logout(conn)
+
+    def drafts_with_source_keys(self, source_keys) -> set:
+        """The subset of `source_keys` that already has a draft in the Drafts
+        folder (matched on the `X-BestTeam-Source-Key` header).
+
+        Used by the retry path as defence in depth behind the run's own trace
+        evidence: it is the only thing that can see a draft that was really
+        APPENDed but whose confirming trace event never got persisted. Read-only
+        -- the folder is SELECTed readonly and nothing is written.
+        """
+        keys = [k for k in source_keys if k]
+        if not keys:
+            return set()
+        conn = self._connect()
+        try:
+            folder = self._drafts_folder(conn)
+            typ, _ = conn.select(folder, readonly=True)
+            if typ != "OK":
+                raise OSError(f"IMAP SELECT of '{folder}' failed: {typ}")
+            found = set()
+            for key in keys:
+                typ, data = conn.uid("search", None, "HEADER", _SOURCE_KEY_HEADER, f'"{key}"')
+                if typ == "OK" and data and data[0]:
+                    found.add(key)
+            return found
+        finally:
+            _imap_logout(conn)
+
+    def check_drafts_writable(self) -> str:
+        """Resolve the Drafts folder and confirm it can be selected for
+        writing. Returns the resolved folder name; raises `ConfigurationError`
+        if it can't be used.
+
+        Writes nothing -- a `SELECT` that succeeds without reporting
+        `[READ-ONLY]` is enough to catch the realistic failures (the folder
+        doesn't exist under the configured name, or the account can't write to
+        it), without leaving a stray test draft in a customer's mailbox.
+        """
+        conn = self._connect()
+        try:
+            folder = self._drafts_folder(conn)
+            try:
+                typ, data = conn.select(folder, readonly=False)
+            except imaplib.IMAP4.error as exc:
+                raise ConfigurationError(
+                    f"The drafts folder '{folder}' could not be opened on this mailbox: {exc}"
+                ) from exc
+            if typ != "OK":
+                raise ConfigurationError(
+                    f"The drafts folder '{folder}' does not exist on this mailbox."
+                )
+            markers = b" ".join(part for part in (data or []) if isinstance(part, bytes))
+            if b"READ-ONLY" in markers.upper():
+                raise ConfigurationError(
+                    f"The drafts folder '{folder}' is read-only for this account, "
+                    "so reply drafts could not be saved."
+                )
+            return folder
         finally:
             _imap_logout(conn)
 
@@ -549,10 +619,17 @@ def _read_impl(backend, message_id: str) -> str:
     )
 
 
-def _draft_impl(backend, message_id: str, body: str) -> str:
+def _draft_impl(backend, message_id: str, body: str, source_key: Optional[str] = None) -> str:
     if not body.strip():
         raise ConfigurationError("email_draft_reply requires a non-empty body")
-    result = backend.draft_reply(message_id.strip(), body)
+    # Only pass source_key when one was asked for, so a backend whose
+    # draft_reply takes just (message_id, body) -- the Graph backend, whose
+    # createReply builds the draft server-side, and any custom backend --
+    # keeps working unchanged.
+    if source_key is None:
+        result = backend.draft_reply(message_id.strip(), body)
+    else:
+        result = backend.draft_reply(message_id.strip(), body, source_key=source_key)
     if result is None:
         return f"No message found with id '{message_id.strip()}'."
     return result
@@ -616,7 +693,7 @@ def email_draft_reply(message_id: str, body: str) -> str:
     return _draft_impl(_get_backend(), message_id, body)
 
 
-def make_email_tools(backend, allowed_uids=None) -> Dict[str, Any]:
+def make_email_tools(backend, allowed_uids=None, draft_marker_prefix=None) -> Dict[str, Any]:
     """Return the three email tools bound to `backend`.
 
     `allowed_uids=None` -> unchanged behavior. A set/iterable of IMAP UIDs
@@ -624,6 +701,13 @@ def make_email_tools(backend, allowed_uids=None) -> Dict[str, Any]:
     only those messages, and `email_read`/`email_draft_reply` refuse any id
     outside the set. Used by the autonomous-trigger path so a run can only ever
     touch the messages the poller detected.
+
+    `draft_marker_prefix` (also the autonomous-trigger path) stamps each draft
+    with a deterministic `X-BestTeam-Source-Key: <prefix><message_id>` header,
+    so a later retry can reconcile against the mailbox and recognise a draft
+    that was really APPENDed but whose confirming trace event never got
+    persisted (a process killed between the two). `None` -> no header, and the
+    backend is called with its original two-argument signature.
     """
     allowed = None if allowed_uids is None else {str(u) for u in allowed_uids}
 
@@ -648,6 +732,9 @@ def make_email_tools(backend, allowed_uids=None) -> Dict[str, Any]:
             return _OUT_OF_BATCH
         if not body.strip():
             raise ConfigurationError("email_draft_reply requires a non-empty body")
-        return _draft_impl(backend, message_id, body)
+        source_key = (
+            None if draft_marker_prefix is None else f"{draft_marker_prefix}{message_id.strip()}"
+        )
+        return _draft_impl(backend, message_id, body, source_key)
 
     return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}

@@ -1519,3 +1519,196 @@ def test_retry_rechecks_retry_already_running_freshly_inside_the_lock(db, monkey
     with pytest.raises(RetryError, match="already in progress"):
         retry_triggered_run(db, run_row)
     assert recorder.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.1 / 0.2 / 0.4): draft idempotency and the stuck-run watchdog.
+# ---------------------------------------------------------------------------
+
+
+def _trace_draft(db, run_id, message_id, seq=0):
+    """A persisted `tool_completed` trace row proving a real draft call -- the
+    evidence every run records regardless of workflow template."""
+    import json
+
+    from ui.backend.db.models import TraceEventRecord
+
+    db.add(TraceEventRecord(
+        run_id=run_id, seq=seq, type="tool_completed", agent="Triage",
+        data=json.dumps({
+            "tool": "email_draft_reply", "success": True, "duration_ms": 3,
+            "summary": "Draft reply saved.",
+            "message_id": message_id, "outcome": "draft_created",
+        }),
+    ))
+    db.commit()
+
+
+def test_retry_of_a_generic_email_run_excludes_trace_confirmed_drafts(db, monkeypatch):
+    # The gap this closes: a generic (non-property-maintenance) email team
+    # never gets automation_item_results rows, so the retry guard used to see
+    # no evidence at all and resubmitted the whole partially-drafted batch,
+    # creating a duplicate draft for every message already replied to. No
+    # crash needed -- an ordinary mid-run failure was enough.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+    _trace_draft(db, run_row.id, "42")
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    calls = []
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert db.get(_RunRow, new_run_id).trigger_context["uids"] == [43]
+    assert calls[0][2] == {43}
+
+
+def test_retry_excludes_uids_the_mailbox_itself_still_has_a_draft_for(db, monkeypatch):
+    # Defence in depth behind the trace evidence: a draft that was really
+    # APPENDed but whose confirming trace event never got persisted (process
+    # killed between the two) is only visible in the mailbox.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(
+        email_trigger, "_mailbox_drafted_uids",
+        lambda backend, trigger_context, uids: {"42"},
+    )
+    calls = []
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+
+    assert db.get(_RunRow, new_run_id).trigger_context["uids"] == [43]
+    assert calls[0][2] == {43}
+
+
+def test_a_failing_mailbox_scan_never_blocks_a_legitimate_retry(db, monkeypatch):
+    # The scan is best-effort: an IMAP server that cannot search custom
+    # headers must degrade to trace evidence alone, not break retry entirely.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
+
+    class _ScanFails:
+        def drafts_with_source_keys(self, keys):
+            raise OSError("SEARCH not supported")
+
+    monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
+    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: _ScanFails())
+    calls = []
+    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+
+    new_run_id = retry_triggered_run(db, run_row)
+    assert db.get(_RunRow, new_run_id).trigger_context["uids"] == [42]
+
+
+def test_build_trigger_workflow_stamps_a_deterministic_draft_marker(db, monkeypatch):
+    from ui.backend.db.email_credentials import get_email_credentials
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(
+        db, org_id=org.id, name="triage",
+        config={"agents": [{"name": "a", "model": "fake:x", "tools": ["email_read"]}]},
+    )
+    db.commit()
+    captured = {}
+
+    def _fake_make_email_tools(backend, allowed_uids=None, draft_marker_prefix=None):
+        captured["prefix"] = draft_marker_prefix
+        return {}
+
+    monkeypatch.setattr(email_trigger, "make_email_tools", _fake_make_email_tools)
+    monkeypatch.setattr(email_trigger, "_build_workflow", lambda *a, **k: object())
+    monkeypatch.setattr(email_trigger, "load_knowledge_base_tools", lambda *a, **k: {})
+    monkeypatch.setattr(email_trigger, "load_skills", lambda *a, **k: {})
+    monkeypatch.setattr(email_trigger, "spec_uses_email", lambda *a, **k: True)
+
+    cred_id = get_email_credentials(db, org.id).id
+    email_trigger.build_trigger_workflow("triage", db, org.id, {42}, object())
+
+    # Same shape automation_results._source_key generates, so the mailbox
+    # marker and the stored source keys agree by construction.
+    assert captured["prefix"] == "mailbox:%s:uidvalidity:3:uid:" % cred_id
+
+
+def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
+    # Without a watchdog, a hung run leaves the overlap guard permanently
+    # closed: the org's automation silently stops forever, with last_error
+    # empty so nothing in the UI reports a fault.
+    from datetime import datetime, timedelta, timezone
+
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    stale = _RunRow(
+        id="stuck-1", workflow="triage", input="x", status="running",
+        org_id=org.id, username="email-trigger",
+        created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+        trigger_context={"trigger_type": "email", "uids": [40]},
+    )
+    db.add(stale)
+    trigger.last_run_id = "stuck-1"
+    db.commit()
+
+    class _LiveRun:
+        status = "running"
+
+    monkeypatch.setattr(email_trigger.registry, "get", lambda rid: _LiveRun())
+    cancelled = []
+    monkeypatch.setattr(
+        email_trigger.registry, "request_cancel", lambda rid: cancelled.append(rid)
+    )
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda backend, last_uid: (3, 45, [42]))
+    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: object())
+    calls = []
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    email_trigger.poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    assert cancelled == ["stuck-1"]
+    assert db.get(_RunRow, "stuck-1").status == "failed"
+    assert len(recorder.calls) == 1          # the new run went out
+    assert trigger.last_uid == 42
+
+
+def test_a_fresh_running_run_still_blocks_the_trigger(db, monkeypatch):
+    from datetime import datetime, timezone
+
+    org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+    fresh = _RunRow(
+        id="live-1", workflow="triage", input="x", status="running",
+        org_id=org.id, username="email-trigger",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(fresh)
+    trigger.last_run_id = "live-1"
+    db.commit()
+
+    class _LiveRun:
+        status = "running"
+
+    monkeypatch.setattr(email_trigger.registry, "get", lambda rid: _LiveRun())
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    email_trigger.poll_org(db, trigger, _no_workflow)
+
+    assert recorder.calls == []
+    assert db.get(_RunRow, "live-1").status == "running"
+
+
+def test_run_timeout_env_is_validated_at_startup(monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS", "nonsense")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS"):
+        email_trigger.validate_trigger_env()
+    monkeypatch.setenv("BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS", "5")
+    with pytest.raises(RuntimeError, match="BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS"):
+        email_trigger.validate_trigger_env()

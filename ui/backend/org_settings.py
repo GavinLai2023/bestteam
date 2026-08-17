@@ -95,6 +95,37 @@ def _reject_private_host(host: str) -> None:
         raise HTTPException(status_code=400, detail=f"Cannot connect to that host: {exc}") from exc
 
 
+def _mailbox_problem(req: "EmailConnectRequest") -> Optional[str]:
+    """`None` if the mailbox is genuinely usable, else a customer-facing reason.
+
+    Checks BOTH halves of what the toolkit needs, because a successful login
+    alone was never enough: every reply this platform produces is an APPEND to
+    the drafts folder, so a mailbox whose drafts folder doesn't exist under the
+    configured name (or isn't writable by this account) passes a login test and
+    then fails on the very first real draft, long after the customer has left
+    the wizard (Phase 0, item 0.7). Nothing is written to the mailbox -- a
+    SELECT that succeeds without reporting READ-ONLY is enough.
+    """
+    backend = _ImapBackend(
+        host=req.host, user=req.username, password=req.password, port=req.port,
+        drafts=req.drafts, restrict_to_public=True,
+    )
+    try:
+        conn = backend._connect()
+        conn.logout()
+    except (ConfigurationError, OSError) as exc:
+        return _friendly_connect_error(exc, req.host, req.port)
+    try:
+        backend.check_drafts_writable()
+    except ConfigurationError as exc:
+        # Already written for a human by check_drafts_writable (it names the
+        # folder it actually resolved), so it passes through as-is.
+        return str(exc)
+    except OSError as exc:
+        return _friendly_connect_error(exc, req.host, req.port)
+    return None
+
+
 @router.get("/email")
 def get_email(
     db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
@@ -120,6 +151,12 @@ def set_email(
 ) -> Dict[str, Any]:
     """Connect or rotate the org's mailbox (encrypts the password before store)."""
     _reject_private_host(req.host)
+    # Validate BEFORE storing: a mailbox saved without a working login or a
+    # writable drafts folder looks "connected" everywhere in the UI while
+    # every automatic run against it fails.
+    problem = _mailbox_problem(req)
+    if problem is not None:
+        raise HTTPException(status_code=400, detail=problem)
     prior = get_email_credentials(db, org.id)
     prior_identity = (prior.host, prior.username) if prior is not None else None
     try:
@@ -164,15 +201,9 @@ def test_email(
     is a hard 400 (SSRF guard).
     """
     _reject_private_host(req.host)
-    backend = _ImapBackend(
-        host=req.host, user=req.username, password=req.password, port=req.port,
-        drafts=req.drafts, restrict_to_public=True,
-    )
-    try:
-        conn = backend._connect()
-        conn.logout()
-    except (ConfigurationError, OSError) as exc:
-        return {"ok": False, "error": _friendly_connect_error(exc, req.host, req.port)}
+    problem = _mailbox_problem(req)
+    if problem is not None:
+        return {"ok": False, "error": problem}
     return {"ok": True}
 
 

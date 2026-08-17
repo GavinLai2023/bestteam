@@ -142,9 +142,13 @@ implemented** — don't assume they exist:
   on top of a PR that touches backend still runs the backend jobs, which is
   the point. The jobs: 4 PR-gate (`backend-unit-integration` — under
   `-n auto`, `backend-optional-deps`, `frontend`, `e2e-smoke`) on every
-  PR/push; 2 gated to `main` (`backend-full`, `e2e-full`), also manually
-  dispatchable (`workflow_dispatch`) for a pre-merge run from a feature
-  branch. `backend-full` runs **serially and in one process on purpose** —
+  PR/push; 2 gated to `main` (`backend-full`, `e2e-full`). Both guard on
+  `github.ref == 'refs/heads/main'`, which is the *ref*, not the event — so
+  `workflow_dispatch` from a feature branch does **not** enable them (verified
+  empirically: dispatched on `feat/email-phase-0-hardening`, both still
+  skipped). To get that coverage before merging, run the same command locally:
+  `python -m pytest -m "not e2e"`, serial, no `-n auto`.
+  `backend-full` runs **serially and in one process on purpose** —
   with the PR gate distributed and out of order, it is what still catches
   ordering and cross-test isolation bugs. The path filters are allowlists;
   adding a new top-level directory means adding it there too.

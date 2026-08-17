@@ -42,6 +42,42 @@ def validate_agent_models(raw_spec: Dict[str, Any], catalog_specs: Iterable[str]
     return problems
 
 
+EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
+# Tools that can carry data to an arbitrary destination the model chooses.
+EGRESS_TOOL_NAMES = frozenset({"http_get", "web_search"})
+
+
+def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
+    """Return a problem string per agent that holds both an email tool and a
+    general-purpose egress tool.
+
+    Email bodies are attacker-controlled input to the model, and the toolkit's
+    containment story is that the worst outcome is a bad draft a human reviews
+    -- there is no send verb anywhere. That bound only holds while the agent
+    reading the mail has no *other* way to reach the outside world. Give the
+    same agent `http_get` and an injected message can direct it to put mailbox
+    or knowledge-base content into a URL it fetches, which exfiltrates without
+    ever sending an email (Phase 0, item 0.6).
+
+    Prompt-level defences (the `email_input_security_core_v1` skill) reduce the
+    likelihood but are not a boundary, so this refuses the combination at
+    deploy instead. `agent_tool_sets` is an iterable of `(agent_name, tools)`
+    with each agent's tool names ALREADY resolved through its skills -- the
+    caller does that, exactly as `email_tools.spec_uses_email` does.
+    """
+    problems: List[str] = []
+    for name, tools in agent_tool_sets:
+        names = set(tools)
+        egress = sorted(names & EGRESS_TOOL_NAMES)
+        if names & EMAIL_TOOL_NAMES and egress:
+            problems.append(
+                f"agent '{name}' combines email access with {', '.join(egress)}, "
+                "which would let a malicious email send mailbox content to an "
+                "outside address"
+            )
+    return problems
+
+
 def find_kb_tool_collisions(
     raw_spec: Dict[str, Any],
     standalone_kb_names: Iterable[str],

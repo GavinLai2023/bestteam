@@ -42,6 +42,38 @@ _logger = logging.getLogger(__name__)
 EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
 
 
+def resolve_agent_tool_sets(
+    db: Session,
+    spec_raw: Dict[str, Any],
+    org_id: int,
+    *,
+    workflow_version_id: int | None = None,
+) -> list:
+    """`[(agent_name, {tool names}), ...]` with each agent's tools resolved
+    through the skills it references.
+
+    Tools reach an agent either directly (its `tools:`) or via a skill
+    (`skills:`, e.g. the built-in `email_triage_reply`), so any capability
+    question about an agent has to resolve both. Shared by `spec_uses_email`
+    and the deploy-time egress-conflict check so the two can never disagree
+    about what an agent can actually do.
+    """
+    from .skills import load_skills
+
+    skills = load_skills(db, org_id, workflow_version_id=workflow_version_id)
+    resolved = []
+    for index, agent in enumerate(spec_raw.get("agents", []) or []):
+        if not isinstance(agent, dict):
+            continue
+        names = set(agent.get("tools", []) or [])
+        for skill_name in agent.get("skills", []) or []:
+            skill = skills.get(skill_name)
+            if skill is not None:
+                names.update(skill.tools)
+        resolved.append((agent.get("name") or f"#{index}", names))
+    return resolved
+
+
 def spec_uses_email(
     db: Session,
     spec_raw: Dict[str, Any],
@@ -51,25 +83,15 @@ def spec_uses_email(
 ) -> bool:
     """True if any agent in a Specification resolves to an email tool.
 
-    Email tools reach an agent either directly (its `tools:`) or via a skill it
-    references (`skills:`, e.g. the built-in `email_triage_reply`), so this
-    resolves each referenced skill to its tools. Used by the wizard to decide
-    whether to ask the customer to connect a mailbox (and to gate deploy).
+    Used by the wizard to decide whether to ask the customer to connect a
+    mailbox (and to gate deploy).
     """
-    from .skills import load_skills
-
-    skills = load_skills(
-        db, org_id, workflow_version_id=workflow_version_id
+    return any(
+        names & EMAIL_TOOL_NAMES
+        for _name, names in resolve_agent_tool_sets(
+            db, spec_raw, org_id, workflow_version_id=workflow_version_id
+        )
     )
-    for agent in spec_raw.get("agents", []) or []:
-        names = set(agent.get("tools", []) or [])
-        for skill_name in agent.get("skills", []) or []:
-            skill = skills.get(skill_name)
-            if skill is not None:
-                names.update(skill.tools)
-        if names & EMAIL_TOOL_NAMES:
-            return True
-    return False
 
 _NOT_CONNECTED = (
     "No mailbox is connected for your team yet. Ask an admin to connect one "

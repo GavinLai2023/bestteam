@@ -46,6 +46,7 @@ class _FakeConn:
 
 class _FakeBackend:
     ok = True
+    drafts_ok = True
 
     def __init__(self, **kw):
         self.kw = kw
@@ -55,6 +56,13 @@ class _FakeBackend:
             raise ConfigurationError("IMAP login failed")
         return _FakeConn()
 
+    def check_drafts_writable(self):
+        if not _FakeBackend.drafts_ok:
+            raise ConfigurationError(
+                "The drafts folder 'Drafts' does not exist on this mailbox."
+            )
+        return "Drafts"
+
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
@@ -62,6 +70,11 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
     backend_main._workflow_cache.clear()
     _FakeBackend.ok = True
+    _FakeBackend.drafts_ok = True
+    # PUT /api/org/email validates the mailbox before storing it, so the
+    # default for this module is a mailbox that works; individual tests flip
+    # `_FakeBackend.ok`/`drafts_ok` or substitute their own double.
+    monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -357,6 +370,9 @@ class _TimeoutBackend:
     def _connect(self):
         raise TimeoutError("timed out")
 
+    def check_drafts_writable(self):
+        raise TimeoutError("timed out")
+
 
 def test_test_connection_returns_friendly_timeout(client, monkeypatch):
     # End-to-end: a connect timeout via /test surfaces the friendly message,
@@ -457,3 +473,53 @@ def test_deploy_rejects_kb_named_after_builtin(client):
     assert resp.status_code == 400
     assert "web_search" in resp.json()["detail"]
     assert "built-in tool name" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.7): a mailbox is only "connected" if it is genuinely usable.
+#
+# Saving used to store whatever was posted, and the connection test only
+# attempted a login. Every reply this platform produces is an APPEND to the
+# drafts folder, so a mailbox whose drafts folder doesn't exist under the
+# configured name passed both and then failed on the first real draft -- long
+# after the customer had left the wizard.
+# ---------------------------------------------------------------------------
+
+
+def _creds(**over):
+    base = {"host": "imap.acme.com", "username": "u@acme.com", "password": "pw"}
+    base.update(over)
+    return base
+
+
+def test_test_connection_fails_when_the_drafts_folder_is_unusable(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _FakeBackend.drafts_ok = False
+    body = client.post("/api/org/email/test", json=_creds()).json()
+    assert body["ok"] is False
+    assert "drafts folder" in body["error"].lower()
+
+
+def test_saving_is_refused_when_the_drafts_folder_is_unusable(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _FakeBackend.drafts_ok = False
+    resp = client.put("/api/org/email", json=_creds())
+    assert resp.status_code == 400
+    assert "drafts folder" in resp.json()["detail"].lower()
+    # Nothing was stored -- the mailbox must not look connected afterwards.
+    assert client.get("/api/org/email").json() == {"connected": False}
+
+
+def test_saving_is_refused_when_the_login_fails(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _FakeBackend.ok = False
+    resp = client.put("/api/org/email", json=_creds())
+    assert resp.status_code == 400
+    assert client.get("/api/org/email").json() == {"connected": False}
+
+
+def test_a_working_mailbox_still_saves(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    resp = client.put("/api/org/email", json=_creds())
+    assert resp.status_code == 200
+    assert client.get("/api/org/email").json()["connected"] is True
