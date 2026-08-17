@@ -66,6 +66,24 @@ def purge_run(db: Session, run: Run) -> bool:
     return True
 
 
+def _purgeable_query(
+    db: Session, *, org_id: int, older_than_days: int, now: Optional[datetime] = None
+):
+    """The one definition of "what a purge would take".
+
+    Both the purge and its preview count go through here, so the number the
+    customer is shown before pressing the button can never disagree with what
+    the button then removes.
+    """
+    cutoff = (now or _utcnow()) - timedelta(days=older_than_days)
+    return db.query(Run).filter(
+        Run.org_id == org_id,
+        Run.created_at < cutoff,
+        Run.content_purged_at.is_(None),
+        Run.status.in_(_TERMINAL_STATUSES),
+    )
+
+
 def purge_org_runs(
     db: Session, *, org_id: int, older_than_days: int, now: Optional[datetime] = None
 ) -> int:
@@ -73,18 +91,19 @@ def purge_org_runs(
 
     `older_than_days=0` means everything terminal, right now. Does NOT commit.
     """
-    cutoff = (now or _utcnow()) - timedelta(days=older_than_days)
-    runs = (
-        db.query(Run)
-        .filter(
-            Run.org_id == org_id,
-            Run.created_at < cutoff,
-            Run.content_purged_at.is_(None),
-            Run.status.in_(_TERMINAL_STATUSES),
-        )
-        .all()
-    )
+    runs = _purgeable_query(
+        db, org_id=org_id, older_than_days=older_than_days, now=now
+    ).all()
     return sum(1 for run in runs if purge_run(db, run))
+
+
+def purgeable_run_count(
+    db: Session, *, org_id: int, older_than_days: int, now: Optional[datetime] = None
+) -> int:
+    """How many runs `purge_org_runs` would take with these arguments."""
+    return _purgeable_query(
+        db, org_id=org_id, older_than_days=older_than_days, now=now
+    ).count()
 
 
 def _int_env(name: str, default: Optional[int], *, minimum: int) -> Optional[int]:

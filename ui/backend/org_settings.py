@@ -20,6 +20,7 @@ from datetime import date
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -37,11 +38,13 @@ from .db.email_credentials import (
     get_email_credentials,
     set_email_credentials,
 )
-from .db.models import Organization
+from .db.models import Organization, iso_utc
 from .db.notifications import get_notification_settings, set_notification_settings
+from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
 from .email_trigger import disable_trigger, disable_trigger_on_identity_change
 from .notifications import WebhookUrlError, validate_webhook_url
+from .retention import export_org_runs, purge_org_runs, purgeable_run_count
 from .secret_store import SecretsKeyError
 
 logger = logging.getLogger(__name__)
@@ -430,3 +433,81 @@ def put_notification_settings(
     )
     db.commit()
     return get_notification_settings_route(db=db, org=org)
+
+
+# --- run-history retention and export (Phase 3b) ------------------------------
+
+
+class RetentionRequest(BaseModel):
+    """NULL means keep forever -- the default, so an upgrade deletes nothing."""
+
+    run_retention_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class PurgeRequest(BaseModel):
+    """`older_than_days` is required on purpose: a destructive action whose
+    body says what it will remove is the difference between a confirmed action
+    and a slip. 0 means everything terminal."""
+
+    older_than_days: int = Field(ge=0, le=3650)
+
+
+@router.get("/retention")
+def get_retention(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """This org's retention policy, plus proof the sweep is actually running."""
+    row = get_retention_settings(db, org.id)
+    days = row.run_retention_days if row else None
+    return {
+        "run_retention_days": days,
+        "last_swept_at": iso_utc(row.last_swept_at) if row and row.last_swept_at else None,
+        "last_purged_count": row.last_purged_count if row else 0,
+        # What saving this setting would remove on the next sweep -- the number
+        # that makes it safe to press save.
+        "purgeable_now": (
+            0 if days is None
+            else purgeable_run_count(db, org_id=org.id, older_than_days=days)
+        ),
+    }
+
+
+@router.put("/retention")
+def put_retention(
+    req: RetentionRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Set or clear the policy. Saving deletes nothing by itself -- the sweep
+    does, on its next cycle."""
+    set_retention_days(db, org.id, req.run_retention_days)
+    db.commit()
+    return get_retention(db=db, org=org)
+
+
+@router.post("/retention/purge")
+def purge_retention(
+    req: PurgeRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Remove the content of this org's runs older than the given window, now."""
+    purged = purge_org_runs(db, org_id=org.id, older_than_days=req.older_than_days)
+    db.commit()
+    return {"purged": purged}
+
+
+@router.get("/export")
+def export_org(
+    days: Optional[int] = None,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> JSONResponse:
+    """The org's run history as JSON, so a customer can take their data out
+    before a retention policy removes it."""
+    bundle = export_org_runs(db, org_id=org.id, days=days)
+    filename = f"bestteam-export-org-{org.id}.json"
+    return JSONResponse(
+        content=bundle,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
