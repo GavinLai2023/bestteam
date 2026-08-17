@@ -429,6 +429,60 @@ class EmailTrigger(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class InboxEvent(Base):
+    """One detected inbound message, durable and independent of any run.
+
+    The row exists so that the commit which consumes the mail (advancing
+    `EmailTrigger.last_uid`) is the SAME commit that records the work. Before
+    this, `_start_triggered_run` advanced the cursor and only then handed the
+    workflow to a thread pool, so a process killed in between consumed mail
+    that nothing ever processed.
+
+    Identity is `(org, connector, mailbox, generation, external_id)`. The
+    generation is load-bearing: an IMAP UID is only meaningful within a
+    UIDVALIDITY, so after a mailbox rebuild UID 7 is a different message and
+    must not be mistaken for a duplicate. It is `""` -- never NULL -- for
+    connectors with no such concept, because SQLite treats NULLs as distinct
+    in a UNIQUE constraint, which would silently disable dedup.
+
+    `connector_type`/`mailbox_generation`/`external_id` are deliberately
+    connector-neutral: Phase 2 adds Graph/Gmail and this table will hold real
+    customer rows by then. `decision` is reserved for Phase 4's pre-LLM filter
+    (why a message was skipped) and is never written today; `filtered` is a
+    documented but currently unreachable status.
+    See docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md.
+    """
+
+    __tablename__ = "inbox_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "connector_type", "mailbox_identity",
+            "mailbox_generation", "external_id",
+            name="uq_inbox_events_identity",
+        ),
+        Index("ix_inbox_events_org_id_status_id", "org_id", "status", "id"),
+        Index("ix_inbox_events_run_id", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    connector_type: Mapped[str] = mapped_column(default="imap")
+    mailbox_identity: Mapped[str]
+    mailbox_generation: Mapped[str] = mapped_column(default="")
+    external_id: Mapped[str]
+    # pending | claimed | done | failed | filtered (filtered: Phase 4, unused)
+    status: Mapped[str] = mapped_column(default="pending")
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # Charged when a run is actually dispatched, never at claim -- see
+    # db/inbox_events.py::mark_dispatched.
+    attempts: Mapped[int] = mapped_column(default=0)
+    decision: Mapped[Optional[str]] = mapped_column(nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+
 class BuilderSession(Base):
     """State for one customer's trip through the Team Builder Wizard.
 

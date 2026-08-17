@@ -21,7 +21,12 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
-from .automation_results import RESULT_TYPE_BATCH_MARKER, normalize_run_result
+from .automation_results import (
+    RESULT_TYPE_BATCH_MARKER,
+    already_drafted_uids,
+    normalize_run_result,
+)
+from .db.inbox_events import complete_events
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -162,6 +167,48 @@ def _safe_record_trigger_health(db: Session, run_row) -> None:
     except Exception:  # noqa: BLE001 -- health reporting must never break a run
         _logger.warning(
             "Trigger health update failed for run %s; run unaffected", run_row.id, exc_info=True
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _safe_complete_inbox_events(db: Session, run_row) -> None:
+    """Give this run's claimed inbox events their terminal status.
+
+    Everything that reaches here has actually executed the model, which is what
+    makes "terminal here => workflow-class" sound: the two infrastructure-class
+    paths (a failed dispatch, and the stale-run watchdog) never get this far and
+    release their events at the site instead.
+
+    A failed run still leaves real drafts behind for the messages it got
+    through, so `already_drafted_uids` -- Phase 0's union of trace evidence, the
+    X-BestTeam-Source-Key mailbox scan and automation_item_results -- decides
+    which are done. Reprocessing one of those would create a second draft, since
+    `email_draft_reply` has no dedup of its own. The rest are terminal and wait
+    for the human retry, which is today's product behaviour for a run whose
+    model ran and failed.
+
+    Isolated like `_safe_record_usage`: bookkeeping must never flip an otherwise
+    successful run to failed.
+    """
+    trigger_context = getattr(run_row, "trigger_context", None) or {}
+    if trigger_context.get("trigger_type") != "email" or run_row.org_id is None:
+        return
+    try:
+        if run_row.status == "completed":
+            done = {str(u) for u in (trigger_context.get("uids") or [])}
+            error = None
+        else:
+            done = {str(u) for u in already_drafted_uids(db, run_row)}
+            error = _TRIGGER_RUN_FAILED_MESSAGE
+        complete_events(db, run_row.id, done_external_ids=done, error=error)
+        db.commit()
+    except Exception:  # noqa: BLE001 -- bookkeeping must never break a run
+        _logger.warning(
+            "Inbox event completion failed for run %s; run unaffected",
+            run_row.id, exc_info=True,
         )
         try:
             db.rollback()
@@ -439,6 +486,7 @@ def run_in_background(
             # Same set of terminal paths, same ordering guarantee: the run's
             # own status is already committed by the time this runs.
             _safe_record_trigger_health(db, run_row)
+            _safe_complete_inbox_events(db, run_row)
 
     def _maybe_record_share_reply(output: Optional[str]) -> None:
         # Share-chat turns (share_chat.py) are regular runs stamped with

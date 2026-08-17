@@ -1028,19 +1028,52 @@
   spec's "Judgement calls". Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-0-hardening-design.md`.
 
+- Email automation Phase 1, the durable inbox ledger
+  (`feat/email-phase-1-inbox-events`): a new `inbox_events` table records one
+  row per detected message **in the same commit that advances the mailbox
+  cursor**, and a run then claims its batch from it. This closes the window
+  `_start_triggered_run` conceded in its own docstring — it advanced
+  `last_uid`, persisted the run row and burned the daily cap in one commit and
+  only then handed the workflow to a thread pool, so a process killed between
+  the two consumed mail that nothing ever ran. Batching survives as a claim
+  policy rather than a coupling, so the daily cap, the property-maintenance
+  batch contract and `trigger_context`'s shape are all unchanged. Failure
+  handling splits by class: infrastructure failures (dispatch failure, the
+  stale-run watchdog, a build failure) release the messages, workflow failures
+  stay terminal for the existing human retry, and Phase 0's
+  `already_drafted_uids` is what decides per message which is which. Attempts
+  are charged at dispatch, never at claim, so a broken team config retries
+  forever instead of dead-lettering a day of an org's mail;
+  `BESTTEAM_TRIGGER_MAX_EVENT_ATTEMPTS` (default 3) bounds the rest. **The
+  joint review's Phase 1 also bundled leader election and multi-worker safety;
+  those were dropped during design as not reachable** — see the sharpened
+  Known-issues entry below. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
 
-- **Email automation is not horizontally scalable, and its data model is not
-  platformised** — the joint review's Phases 1-5, none of which Phase 0
-  touched. The poller, `_dispatch_lock` and `RunRegistry` are all in-process,
-  so a second ASGI worker or replica would double-process mail; there is no
-  durable `InboxEvent`/outbox (state is committed and *then* handed to a
-  thread pool, so a process killed in that window advances the UID baseline
-  without running anything); polling is serial across orgs and every email
+- **Horizontal scale-out of the email poller is blocked on a Postgres
+  migration, not on the poller.** `make_engine` hardcodes SQLite and takes a
+  *file path*, not a URL (`ui/backend/db/database.py:41`), and there is no
+  Postgres driver in `pyproject.toml` — replicas cannot share the file, so no
+  amount of work inside `email_trigger.py` makes multi-host workers possible.
+  The joint review's Phase 1 bundled leader election with the durable ledger;
+  only the ledger was reachable, and it shipped (above). What remains
+  in-process is `RunRegistry`, so the overlap guard and cooperative
+  cancellation still assume one process and `_dispatch_lock` stays — `uvicorn
+  --workers N` is still unsupported even on one host. Phase 1's claim *is*
+  atomic (`UPDATE ... WHERE status='pending'`), so message-level double-
+  processing is already excluded; making the overlap guard DB-authoritative is
+  the next reachable step and is now cheaper than it was, since Phase 0's
+  stale-run watchdog removed the original objection to it. The Postgres
+  migration itself is platform-wide and unrelated to email — already raised
+  and deferred once in `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
+- **The email data model is not platformised** — the joint review's Phases
+  2-5. Polling is serial across orgs and every email
   tool call opens its own IMAP connection (a 20-message batch is ~41 logins);
   multi-tenant connection is IMAP username/password only (the Graph backend is
   unreachable outside the process-env single-mailbox path, which multi-org
