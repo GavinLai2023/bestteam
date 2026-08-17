@@ -385,3 +385,74 @@ def test_a_real_triggered_run_completes_its_events_end_to_end(tmp_path):
 
     with Session() as s:
         assert s.query(InboxEvent).one().status == "done"
+
+
+def test_repeated_run_failures_notify_once_at_the_threshold(tmp_path, monkeypatch):
+    from ui.backend.db.email_triggers import get_email_trigger
+    from ui.backend.db.notifications import list_notifications
+
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "2")
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+
+    for index in range(3):
+        run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+        with Session() as s:
+            trigger = get_email_trigger(s, org_id)
+            trigger.last_run_id = run.id
+            s.add(_triggered_run_row(run.id, org_id))
+            s.commit()
+        run_in_background(
+            run.id, _failing_workflow(tmp_path), "in",
+            engine=engine, org_id=org_id, username="email-trigger",
+        )
+
+    with Session() as s:
+        emitted = list_notifications(s, org_id)
+        trigger = get_email_trigger(s, org_id)
+    # Three failures, one alert: the fingerprint suppresses the rest until the
+    # condition clears.
+    assert [n.fingerprint for n in emitted] == ["workflow"]
+    assert trigger.consecutive_faults == 3
+
+
+def test_a_successful_run_announces_the_recovery(tmp_path, monkeypatch):
+    from ui.backend.db.email_triggers import get_email_trigger
+    from ui.backend.db.notifications import list_notifications
+
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "1")
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+
+    failing = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        get_email_trigger(s, org_id).last_run_id = failing.id
+        s.add(_triggered_run_row(failing.id, org_id))
+        s.commit()
+    run_in_background(
+        failing.id, _failing_workflow(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+
+    good = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        get_email_trigger(s, org_id).last_run_id = good.id
+        s.add(_triggered_run_row(good.id, org_id))
+        s.commit()
+    run_in_background(
+        good.id, _workflow(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+
+    with Session() as s:
+        emitted = list_notifications(s, org_id)
+        trigger = get_email_trigger(s, org_id)
+    assert [n.fingerprint for n in emitted] == ["recovered", "workflow"]
+    assert trigger.alerted_fingerprint is None
+    assert trigger.consecutive_faults == 0

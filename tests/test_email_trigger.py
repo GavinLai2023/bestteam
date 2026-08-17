@@ -1889,6 +1889,28 @@ def _hung_run(db, org, trigger, *, uids, age_seconds=4000):
     return run_id
 
 
+def _hung_run_named(db, org, trigger, *, uids, run_id, age_seconds=4000):
+    """`_hung_run` with a caller-chosen id, so one test can wedge twice."""
+    from datetime import timedelta
+
+    from ui.backend.db import inbox_events as store
+    from ui.backend.db.models import Run as _R
+
+    db.add(_R(
+        id=run_id, workflow="triage", input="x", status="running", org_id=org.id,
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        trigger_context={"trigger_type": "email", "uids": [int(u) for u in uids]},
+    ))
+    store.record_events(db, org_id=org.id, mailbox_identity="m",
+                        mailbox_generation="3", external_ids=uids)
+    db.commit()
+    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids))
+    store.mark_dispatched(db, run_id)
+    trigger.last_run_id = run_id
+    db.commit()
+    return run_id
+
+
 def test_the_watchdog_releases_a_hung_runs_events(db):
     # Phase 0's watchdog frees the trigger from a hung run; its messages must
     # come back too, or they are consumed with nothing having processed them.
@@ -1953,3 +1975,80 @@ def test_a_run_predating_the_ledger_still_retries_via_trigger_context(db, monkey
     monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
     assert retry_triggered_run(db, run_row)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a: a broken trigger announces itself.
+# ---------------------------------------------------------------------------
+
+
+def _notifications(db, org_id):
+    from ui.backend.db.notifications import list_notifications
+
+    return list_notifications(db, org_id)
+
+
+def test_the_watchdog_notifies_immediately(db):
+    # A run wedged for the full run timeout is already a sustained symptom;
+    # waiting for the threshold would mean another 90 minutes of silence.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_id = _hung_run(db, org, trigger, uids=["11"])
+    email_trigger._release_stale_run(db, trigger, run_id)
+    assert [n.fingerprint for n in _notifications(db, org.id)] == ["run_timeout"]
+    assert trigger.alerted_fingerprint == "run_timeout"
+
+
+def test_repeated_watchdog_releases_notify_once(db):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    for uid in ("11", "12"):
+        run_id = _hung_run_named(db, org, trigger, uids=[uid], run_id=f"hung-{uid}")
+        email_trigger._release_stale_run(db, trigger, run_id)
+    assert len(_notifications(db, org.id)) == 1
+
+
+def test_mailbox_failures_notify_only_at_the_threshold(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "3")
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
+    for _ in range(2):
+        poll_org(db, trigger, _fake_workflow_getter([]))
+    assert _notifications(db, org.id) == []
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    emitted = _notifications(db, org.id)
+    assert [n.fingerprint for n in emitted] == ["mailbox"]
+    assert emitted[0].severity == "error"
+
+
+def test_a_recovered_mailbox_announces_the_recovery(db, monkeypatch):
+    monkeypatch.setenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", "1")
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    # Newest first, the order the notifications page renders.
+    assert [n.fingerprint for n in _notifications(db, org.id)] == ["recovered", "mailbox"]
+    assert trigger.alerted_fingerprint is None
+    assert trigger.consecutive_faults == 0
+
+
+def test_a_failing_health_evaluation_never_breaks_the_poll(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+    monkeypatch.setattr(
+        email_trigger.trigger_health, "evaluate",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("evaluator exploded")),
+    )
+    poll_org(db, trigger, _fake_workflow_getter([]))  # must not raise
+    assert trigger.last_checked_at is not None

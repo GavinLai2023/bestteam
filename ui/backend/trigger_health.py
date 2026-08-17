@@ -18,10 +18,17 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-OUTCOME_HEALTHY = "healthy"
 OUTCOME_WORKFLOW = "workflow_fault"
 OUTCOME_MAILBOX = "mailbox_fault"
 OUTCOME_TIMEOUT = "run_timeout"
+# Recovery is domain-specific on purpose. A successful mailbox check is direct
+# proof that connectivity and credentials are fine; it says nothing about
+# whether the team still builds and runs, so it must not clear a workflow
+# fault. That asymmetry is the existing `last_error_kind` convention (F5) and
+# flattening it here would silently re-introduce the "healthy trigger, every
+# run failing" state Phase 0 fixed.
+OUTCOME_MAILBOX_OK = "mailbox_ok"
+OUTCOME_WORKFLOW_OK = "workflow_ok"
 
 FINGERPRINT_WORKFLOW = "workflow"
 FINGERPRINT_MAILBOX = "mailbox"
@@ -40,6 +47,18 @@ _FAULT_FINGERPRINTS = {
     OUTCOME_WORKFLOW: FINGERPRINT_WORKFLOW,
     OUTCOME_MAILBOX: FINGERPRINT_MAILBOX,
     OUTCOME_TIMEOUT: FINGERPRINT_TIMEOUT,
+}
+
+# Which alerts each kind of success is entitled to clear. A completed run also
+# clears a timeout alert: the wedge it reported is demonstrably gone.
+_OK_CLEARS = {
+    OUTCOME_MAILBOX_OK: frozenset({FINGERPRINT_MAILBOX}),
+    OUTCOME_WORKFLOW_OK: frozenset({FINGERPRINT_WORKFLOW, FINGERPRINT_TIMEOUT}),
+}
+
+_RECOVERY_TITLES = {
+    OUTCOME_MAILBOX_OK: "Your mailbox is reachable again",
+    OUTCOME_WORKFLOW_OK: "Automatic email replies are working again",
 }
 
 
@@ -119,11 +138,11 @@ def _draft(outcome: str, faults: int) -> NotificationDraft:
     )
 
 
-def _recovery_draft() -> NotificationDraft:
+def _recovery_draft(outcome: str) -> NotificationDraft:
     return NotificationDraft(
         kind=KIND_TRIGGER_HEALTH,
         severity=SEVERITY_INFO,
-        title="Automatic email replies are working again",
+        title=_RECOVERY_TITLES[outcome],
         body="The problem reported earlier has cleared and automatic runs are succeeding.",
         fingerprint="recovered",
     )
@@ -149,10 +168,17 @@ def evaluate(
     """
     faults = max(int(consecutive_faults or 0), 0)
 
-    if outcome == OUTCOME_HEALTHY:
+    clears = _OK_CLEARS.get(outcome)
+    if clears is not None:
         if alerted_fingerprint is None:
+            # Nothing was reported, so there is nothing to announce -- but the
+            # streak did end.
             return HealthDecision(0, None, None)
-        return HealthDecision(0, None, _recovery_draft())
+        if alerted_fingerprint in clears:
+            return HealthDecision(0, None, _recovery_draft(outcome))
+        # An alert from the other domain is still outstanding: this success
+        # does not speak to it, so leave both the alert and the streak alone.
+        return HealthDecision(faults, alerted_fingerprint, None)
 
     fingerprint = _FAULT_FINGERPRINTS.get(outcome)
     if fingerprint is None:

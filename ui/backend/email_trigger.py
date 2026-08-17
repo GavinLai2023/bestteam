@@ -35,9 +35,10 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
-from . import secret_store
+from . import secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_credentials import get_email_credentials
+from .db.notifications import create_notification
 from .db.email_triggers import get_email_trigger
 from .db.inbox_events import (
     claim_events,
@@ -172,6 +173,38 @@ def _mailbox_drafted_uids(backend, trigger_context, uids) -> set:
     return {key_to_uid[key] for key in found or () if key in key_to_uid}
 
 
+def _apply_health(db, trigger, outcome: str) -> None:
+    """Fold one outcome into the trigger's alert state, raising a notification
+    if the evaluator says this transition is worth telling someone about.
+
+    Deliberately additive: every existing `last_error`/`last_error_kind` write
+    stays exactly where it was. Those drive the dashboard's error surface and
+    are pinned by Phase 0's tests; this adds the *telling someone* half.
+
+    Isolated like the other health writes -- alerting must never be the reason
+    a poll cycle or a run fails.
+    """
+    try:
+        decision = trigger_health.evaluate(
+            outcome=outcome,
+            consecutive_faults=trigger.consecutive_faults or 0,
+            alerted_fingerprint=trigger.alerted_fingerprint,
+            threshold=trigger_health.alert_threshold(),
+        )
+        trigger.consecutive_faults = decision.consecutive_faults
+        trigger.alerted_fingerprint = decision.alerted_fingerprint
+        if decision.notification is not None:
+            draft = decision.notification
+            create_notification(
+                db, org_id=trigger.org_id, kind=draft.kind, severity=draft.severity,
+                title=draft.title, body=draft.body, fingerprint=draft.fingerprint,
+            )
+    except Exception:  # noqa: BLE001 -- alerting must never break the caller
+        _logger.exception(
+            "email trigger: health evaluation failed for org %s", trigger.org_id
+        )
+
+
 def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
     """True if `run_id` has outlived `run_timeout_seconds()` and has now been
     released, so the overlap guard should stop honouring it.
@@ -211,6 +244,7 @@ def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
         run_row.output = message
     trigger.last_error = message
     trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+    _apply_health(db, trigger, trigger_health.OUTCOME_TIMEOUT)
     # Infrastructure-class: the run hung, the messages are innocent. Hand them
     # back so they are reprocessed rather than consumed by a wedged run. This
     # path never reaches runtime's completion hook (the worker produced no
@@ -602,6 +636,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             )
             trigger.last_error_kind = _ERROR_KIND_MAILBOX
             trigger.last_checked_at = _utcnow()
+            _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX)
             db.commit()
             return
         except Exception as exc:  # noqa: BLE001 -- a poll failure must never kill the loop
@@ -609,6 +644,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             trigger.last_error = _friendly_poll_error(exc)
             trigger.last_error_kind = _ERROR_KIND_MAILBOX
             trigger.last_checked_at = _utcnow()
+            _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX)
             db.commit()
             return
 
@@ -622,6 +658,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
             trigger.last_error = None
             trigger.last_error_kind = None
+        _apply_health(db, trigger, trigger_health.OUTCOME_MAILBOX_OK)
 
         # Mailbox rebuilt/migrated: UIDs are not comparable across validities --
         # re-baseline to now, never reprocess.

@@ -7,10 +7,11 @@ of outcomes and asserting which notifications come out.
 import pytest
 
 from ui.backend.trigger_health import (
-    OUTCOME_HEALTHY,
+    OUTCOME_MAILBOX_OK,
     OUTCOME_MAILBOX,
     OUTCOME_TIMEOUT,
     OUTCOME_WORKFLOW,
+    OUTCOME_WORKFLOW_OK,
     alert_threshold,
     evaluate,
 )
@@ -47,18 +48,18 @@ def test_reaching_the_threshold_alerts_once_and_then_stays_quiet():
 
 
 def test_a_recovery_is_announced_and_resets_the_streak():
-    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_HEALTHY])
+    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_WORKFLOW_OK])
     assert [n.fingerprint for n in emitted] == ["workflow", "recovered"]
     assert emitted[1].severity == "info"
 
 
 def test_success_without_a_prior_alert_says_nothing():
-    assert _fold([OUTCOME_HEALTHY, OUTCOME_HEALTHY]) == []
+    assert _fold([OUTCOME_WORKFLOW_OK, OUTCOME_WORKFLOW_OK]) == []
 
 
 def test_a_brief_wobble_below_the_threshold_never_alerts():
     # Two failures then a success: the streak resets, nobody is told.
-    assert _fold([OUTCOME_WORKFLOW, OUTCOME_WORKFLOW, OUTCOME_HEALTHY,
+    assert _fold([OUTCOME_WORKFLOW, OUTCOME_WORKFLOW, OUTCOME_WORKFLOW_OK,
                   OUTCOME_WORKFLOW, OUTCOME_WORKFLOW]) == []
 
 
@@ -118,3 +119,32 @@ def test_the_threshold_env_var_is_read_and_clamped(monkeypatch, raw, expected):
 def test_the_threshold_defaults_to_three_when_unset(monkeypatch):
     monkeypatch.delenv("BESTTEAM_TRIGGER_ALERT_THRESHOLD", raising=False)
     assert alert_threshold() == 3
+
+
+def test_a_successful_mailbox_check_does_not_clear_a_workflow_alert():
+    # The existing `last_error_kind` asymmetry (F5): connectivity being fine
+    # says nothing about whether the team still builds and runs. Flattening
+    # this would re-create the "healthy trigger, every run failing" state.
+    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX_OK] * 2)
+    assert [n.fingerprint for n in emitted] == ["workflow"]
+
+
+def test_a_successful_mailbox_check_clears_a_mailbox_alert():
+    emitted = _fold([OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK])
+    assert [n.fingerprint for n in emitted] == ["mailbox", "recovered"]
+    assert emitted[1].title == "Your mailbox is reachable again"
+
+
+def test_a_completed_run_clears_a_timeout_alert():
+    # The wedge the watchdog reported is demonstrably gone.
+    emitted = _fold([OUTCOME_TIMEOUT, OUTCOME_WORKFLOW_OK])
+    assert [n.fingerprint for n in emitted] == ["run_timeout", "recovered"]
+
+
+def test_a_mailbox_success_does_not_reset_an_outstanding_workflow_streak():
+    decision = evaluate(
+        outcome=OUTCOME_MAILBOX_OK, consecutive_faults=4,
+        alerted_fingerprint="workflow", threshold=3,
+    )
+    assert decision.consecutive_faults == 4
+    assert decision.alerted_fingerprint == "workflow"
