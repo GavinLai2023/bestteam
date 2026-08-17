@@ -193,6 +193,67 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
     assert row.needs_attention is True
 
 
+def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path):
+    """The failed-tool collector is an enumeration of tool names, so a new
+    email tool is silently exempt from spec 9.5's "tool failure ->
+    needs_attention" until it is added -- nothing errors, the escalation just
+    stops happening for that tool."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
+    from ui.backend.db.models import AutomationItemResult, Run
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed", "summary": "s",
+            "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _FailedAttachmentReadWorkflow:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(
+                type="tool_completed", workflow="wf", agent="a",
+                data={
+                    "tool": "email_read_attachment", "success": False,
+                    "summary": "Tool call failed", "message_id": "42",
+                },
+            )
+            yield _TE(type="run_completed", workflow="wf", data=envelope)
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, workflow="wf", input="in", status="running", org_id=1,
+            username="email-trigger", trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _FailedAttachmentReadWorkflow(), "in", engine=engine,
+                      org_id=1, username="email-trigger")
+
+    with Session() as s:
+        row = s.query(AutomationItemResult).filter_by(run_id=run.id).one()
+    # The envelope claims a routine, processed item; only the trace's own
+    # failure forces a human to look at the message whose quote went unread.
+    assert row.needs_attention is True
+
+
 def _triggered_run_context(uids):
     return {
         "trigger_type": "email", "mailbox_credential_id": 1, "uidvalidity": 1,

@@ -1,5 +1,5 @@
 from .calculator import calculator
-from .email_client import email_draft_reply, email_find, email_read
+from .email_client import email_draft_reply, email_find, email_read, email_read_attachment
 from .file_parser import parse_file
 from .google_places import local_business_search
 from .http_client import http_get
@@ -12,6 +12,7 @@ REGISTRY: dict = {
     "calculator": calculator,
     "email_find": email_find,
     "email_read": email_read,
+    "email_read_attachment": email_read_attachment,
     "email_draft_reply": email_draft_reply,
     "local_business_search": local_business_search,
 }
@@ -23,6 +24,7 @@ __all__ = [
     "calculator",
     "email_find",
     "email_read",
+    "email_read_attachment",
     "email_draft_reply",
     "local_business_search",
     "REGISTRY",

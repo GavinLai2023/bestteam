@@ -209,7 +209,9 @@ def _summarize(value: Any, limit: int = 200) -> str:
 # rather than parsed out of the tool's return text (robust to the return
 # text's exact wording changing). See docs/superpowers/specs/
 # 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2.
-_EMAIL_TOOLS_NEEDING_REDACTION = frozenset({"email_find", "email_read", "email_draft_reply"})
+_EMAIL_TOOLS_NEEDING_REDACTION = frozenset(
+    {"email_find", "email_read", "email_read_attachment", "email_draft_reply"}
+)
 
 # `message_id` is a model-controlled tool-call argument (not our own deterministic
 # text), so it needs the same length bound `_summarize()` gives everything else --
@@ -218,7 +220,8 @@ _EMAIL_TOOLS_NEEDING_REDACTION = frozenset({"email_find", "email_read", "email_d
 _MESSAGE_ID_TRACE_CHARS = 64
 
 # Mirrors tools/email_client.py's `_OUT_OF_BATCH` sentinel (a UID-scoped run's
-# email_read/email_draft_reply refuse any id outside the poller-detected batch).
+# email_read/email_read_attachment/email_draft_reply refuse any id outside the
+# poller-detected batch).
 # Not imported directly to avoid the adapters layer depending on a specific
 # tools implementation -- see src/bestteam/tools/CLAUDE.md.
 _OUT_OF_BATCH_TEXT = "That message isn't part of this batch of new mail."
@@ -267,6 +270,20 @@ def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result:
         }
     if tool_name == "email_read":
         return {"summary": f"Read message '{message_id}'.", "message_id": message_id, "outcome": "read"}
+    if tool_name == "email_read_attachment":
+        # The result IS the extracted attachment text -- the most sender-
+        # controlled string the toolkit produces -- so nothing derived from it
+        # goes into the trace. The filename is left out for the same reason:
+        # the sender chose it and it carries no length bound of its own.
+        # A single outcome, because every other path this tool takes (an
+        # unsupported type, a parser that gave up) is reported in a sentence
+        # that embeds that same filename, and matching on those sentences
+        # would hand the sender a say in which outcome gets recorded.
+        return {
+            "summary": f"Read an attachment on message '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "attachment_read",
+        }
     # email_draft_reply: both backends' success text starts with "Draft reply"
     # (see tools/email_client.py's Graph/IMAP `draft_reply` implementations).
     if text.startswith("Draft reply"):
@@ -397,12 +414,13 @@ def _run_agent(
                         "duration_ms": int((time.monotonic() - start) * 1000),
                         "summary": "Tool call failed",
                     }
-                    if call["name"] in ("email_read", "email_draft_reply"):
+                    if call["name"] in ("email_read", "email_read_attachment", "email_draft_reply"):
                         # Retain the bounded message id on failure too, same as a
                         # successful call's redacted data -- otherwise a failed
-                        # email_read/email_draft_reply can't be correlated back to
-                        # its UID downstream (automation_results.py's per-UID
-                        # needs_attention enforcement, Codex review finding).
+                        # email_read/email_read_attachment/email_draft_reply can't
+                        # be correlated back to its UID downstream
+                        # (automation_results.py's per-UID needs_attention
+                        # enforcement, Codex review finding).
                         failure_data["message_id"] = _bounded_message_id(call["args"])
                     _emit("tool_completed", failure_data)
                 else:

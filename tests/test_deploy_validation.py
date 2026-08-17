@@ -83,7 +83,7 @@ def test_validate_agent_models_exempts_fake_architect():
 # is exactly such a route, and prompt-level defences are not a boundary.
 # ---------------------------------------------------------------------------
 
-from ui.backend.deploy_validation import find_email_egress_conflicts
+from ui.backend.deploy_validation import EMAIL_TOOL_NAMES, find_email_egress_conflicts
 
 
 def test_email_plus_http_get_on_one_agent_is_flagged():
@@ -123,6 +123,27 @@ def test_the_capabilities_split_across_separate_agents_is_still_rejected():
     ])
     assert len(problems) == 1
     assert "triager" in problems[0] and "researcher" in problems[0]
+
+
+def test_attachment_reading_conflicts_with_an_egress_tool():
+    # An injected attachment could otherwise direct the model to put mailbox
+    # content into a URL it fetches -- exfiltration without ever sending mail.
+    problems = find_email_egress_conflicts(
+        [("triager", {"email_read_attachment", "http_get"})]
+    )
+    assert problems
+
+
+def test_every_tool_the_email_toolkit_returns_is_treated_as_an_email_tool():
+    # Structural, so the NEXT email tool cannot repeat Phase 4b's near-miss:
+    # a tool absent from EMAIL_TOOL_NAMES is silently exempt from the
+    # egress-conflict rule, with nothing failing anywhere.
+    from bestteam.tools.email_client import make_email_tools
+
+    class _Backend:
+        pass
+
+    assert set(make_email_tools(_Backend())) <= EMAIL_TOOL_NAMES
 
 
 def test_the_conflict_is_reported_once_for_the_whole_workflow():

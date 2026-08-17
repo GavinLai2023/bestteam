@@ -659,7 +659,9 @@ def run_in_background(
                 if (
                     event.type == "tool_completed"
                     and isinstance(event.data, dict)
-                    and event.data.get("tool") in ("email_read", "email_draft_reply")
+                    and event.data.get("tool") in (
+                        "email_read", "email_read_attachment", "email_draft_reply",
+                    )
                     and (
                         event.data.get("success") is False
                         or event.data.get("outcome") in ("not_found", "out_of_batch")

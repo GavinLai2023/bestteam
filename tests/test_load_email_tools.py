@@ -116,7 +116,9 @@ def test_no_credentials_with_env_yields_empty(db_session, monkeypatch):
 def test_no_credentials_no_env_yields_friendly_tools(db_session, monkeypatch):
     monkeypatch.delenv("BESTTEAM_EMAIL_BACKEND", raising=False)
     tools = email_tools.load_email_tools(db_session, _org(db_session, "acme"))
-    assert set(tools) == {"email_find", "email_read", "email_draft_reply"}
+    assert set(tools) == {
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
+    }
     msg = tools["email_find"]("anything")
     assert "no mailbox" in msg.lower()
     # Names/docs preserved so the model still recognizes them as the email tools.
@@ -130,7 +132,9 @@ def test_undecryptable_credentials_yield_unreadable_tools_not_a_crash(db_session
     set_email_credentials(db_session, org_id, host="h", username="u", password="p")
     monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())  # wrong key
     tools = email_tools.load_email_tools(db_session, org_id)
-    assert set(tools) == {"email_find", "email_read", "email_draft_reply"}
+    assert set(tools) == {
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
+    }
     assert "can't be read" in tools["email_find"]("").lower()
 
 
@@ -188,6 +192,43 @@ def test_connecting_mailbox_invalidates_workflow_cache_key(db_session):
     before = backend_main._dependency_freshness(db_session)
     set_email_credentials(db_session, org_id, host="h", username="u", password="p")
     assert backend_main._dependency_freshness(db_session) != before
+
+
+# ---------------------------------------------------------------------------
+# Structural: this module's own enumeration of the email tool names
+#
+# `load_email_tools`'s result is merged into a workflow's `extra_tools` and
+# overrides the env-based tools in `REGISTRY` **by name**. A name this module
+# doesn't know is therefore never overridden: the run falls through to the
+# process-env mailbox, which on a deployment that also sets
+# BESTTEAM_EMAIL_BACKEND is a read of a different tenant's mailbox. Nothing
+# errors -- the boundary just stops applying -- so it is pinned structurally.
+# ---------------------------------------------------------------------------
+
+class _Backend:
+    """Attribute-free stand-in: `make_email_tools` only binds, never calls."""
+
+
+def test_every_tool_the_email_toolkit_returns_is_known_to_this_module():
+    from bestteam.tools.email_client import make_email_tools
+
+    assert set(make_email_tools(_Backend())) <= email_tools.EMAIL_TOOL_NAMES
+
+
+def test_every_resolvable_email_tool_has_an_unconnected_placeholder():
+    # An org with no mailbox (or an undecryptable key) must get a placeholder
+    # for EVERY tool, or the missing one falls through to the env mailbox.
+    from bestteam.tools.email_client import make_email_tools
+
+    assert set(email_tools._fixed_message_tools("m")) == set(make_email_tools(_Backend()))
+
+
+def test_an_attachment_only_team_still_counts_as_using_email(db_session):
+    # Otherwise the wizard never asks this customer to connect a mailbox and
+    # no per-org tools are built for the run at all.
+    org_id = _org(db_session, "acme")
+    spec = {"agents": [{"name": "a", "tools": ["email_read_attachment"]}]}
+    assert email_tools.spec_uses_email(db_session, spec, org_id) is True
 
 
 # ---------------------------------------------------------------------------

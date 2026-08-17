@@ -23,7 +23,9 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 def test_registry_contains_email_tools():
-    assert {"email_find", "email_read", "email_draft_reply"} <= set(REGISTRY)
+    assert {
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
+    } <= set(REGISTRY)
 
 
 @pytest.mark.parametrize("tool_call", [

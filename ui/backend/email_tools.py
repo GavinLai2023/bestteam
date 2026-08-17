@@ -2,7 +2,7 @@
 
 Mirrors `knowledge_bases.py::load_knowledge_base_tools`: returns a name -> tool
 mapping merged into a workflow's `extra_tools`, where it overrides the
-env-based `email_find`/`email_read`/`email_draft_reply` in `REGISTRY` by name
+env-based `email_*` tools (`EMAIL_TOOL_NAMES`) in `REGISTRY` by name
 (`core/loader.py`). So a run for org A resolves org A's mailbox and never org
 B's.
 
@@ -32,6 +32,7 @@ from bestteam.tools.email_client import (
     email_draft_reply,
     email_find,
     email_read,
+    email_read_attachment,
     make_email_tools,
 )
 
@@ -40,7 +41,17 @@ from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 
 _logger = logging.getLogger(__name__)
 
-EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
+# Every name `make_email_tools` can return. A name missing here is never
+# overridden by the per-org tools (see the module docstring), so a workflow
+# using only that tool resolves as "does not use email": no per-org tools are
+# built, the run falls through to the process-env mailbox, and the wizard never
+# asks the customer to connect one. Pinned structurally in
+# tests/test_load_email_tools.py -- it is a separate set from
+# deploy_validation.EMAIL_TOOL_NAMES only because the SDK cannot import from
+# ui/backend/.
+EMAIL_TOOL_NAMES = frozenset(
+    {"email_find", "email_read", "email_read_attachment", "email_draft_reply"}
+)
 
 
 def resolve_agent_tool_sets(
@@ -105,10 +116,13 @@ _UNREADABLE = (
 
 
 def _fixed_message_tools(message: str) -> Dict[str, Any]:
-    """Three email tools that ignore their input and return `message`.
+    """One tool per `EMAIL_TOOL_NAMES` that ignores its input and returns `message`.
 
     Keeps the public names/docstrings so a workflow referencing the built-in
     email skill still compiles, while communicating the state to the model.
+    Covering every name matters as much as the set itself does: a tool with no
+    placeholder is not overridden either, so it falls through to the process-env
+    mailbox for an org that has none of its own.
     """
 
     @functools.wraps(email_find)
@@ -119,11 +133,20 @@ def _fixed_message_tools(message: str) -> Dict[str, Any]:
     def read(message_id: str) -> str:
         return message
 
+    @functools.wraps(email_read_attachment)
+    def read_attachment(message_id: str, filename: str) -> str:
+        return message
+
     @functools.wraps(email_draft_reply)
     def draft_reply(message_id: str, body: str) -> str:
         return message
 
-    return {"email_find": find, "email_read": read, "email_draft_reply": draft_reply}
+    return {
+        "email_find": find,
+        "email_read": read,
+        "email_read_attachment": read_attachment,
+        "email_draft_reply": draft_reply,
+    }
 
 
 def build_org_imap_backend(db: Session, org_id: int):

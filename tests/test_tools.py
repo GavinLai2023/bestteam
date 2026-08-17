@@ -25,9 +25,14 @@ pytestmark = pytest.mark.unit
 def test_registry_contains_all_tools():
     assert set(REGISTRY) == {
         "web_search", "parse_file", "http_get", "calculator",
-        "email_find", "email_read", "email_draft_reply",
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
         "local_business_search",
     }
+
+
+def test_registry_exposes_attachment_reading():
+    # Named in a workflow YAML only if the loader can resolve it here.
+    assert "email_read_attachment" in REGISTRY
 
 
 def test_knowledge_base_discovery_excludes_legacy_xls():

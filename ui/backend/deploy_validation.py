@@ -42,7 +42,9 @@ def validate_agent_models(raw_spec: Dict[str, Any], catalog_specs: Iterable[str]
     return problems
 
 
-EMAIL_TOOL_NAMES = frozenset({"email_find", "email_read", "email_draft_reply"})
+EMAIL_TOOL_NAMES = frozenset(
+    {"email_find", "email_read", "email_read_attachment", "email_draft_reply"}
+)
 # Tools that can carry data to an arbitrary destination the model chooses.
 EGRESS_TOOL_NAMES = frozenset({"http_get", "web_search"})
 
