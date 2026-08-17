@@ -178,14 +178,17 @@ def test_a_spend_cap_saves_even_when_a_model_is_unpriced(client, automated_team)
     }).status_code == 200
 
 
-def test_an_unreadable_config_still_lets_the_cap_be_saved(client, automated_team):
-    # The `except Exception -> []` contract, exercised rather than asserted:
-    # a config whose `agents` is not a list of dicts makes the walk raise. The
-    # admin must still get their cap.
+def test_a_corrupt_config_still_lets_the_cap_be_saved(client, automated_team):
+    # The `except Exception -> []` contract, genuinely reached rather than
+    # merely asserted. It has to be `config` ITSELF that is not a mapping: an
+    # `agents` value of the wrong shape is filtered out element-by-element by
+    # the walk's own `isinstance(agent, dict)` guard and returns [] through the
+    # ordinary "no specs" branch without the handler ever running. A string
+    # `config` makes `.get("agents")` raise AttributeError inside the `try`.
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
         record = db.query(WorkflowRecord).filter_by(name="triage", org_id=org_id).one()
-        record.config = {"name": "triage", "agents": "not-a-list"}
+        record.config = "not-a-mapping"
         db.commit()
         assert unpriced_models_for_org(db, org_id) == []
     resp = client.put("/api/org/email-budget", json={
