@@ -508,8 +508,18 @@ def test_imap_retries_on_connect_oserror(imap_env):
     assert "No unread emails" in result
 
 
-def _multipart_raw(*, attachment_bytes=b"%PDF-1.4 fake", filename="quote.pdf"):
-    """A message with a text body and one attachment, as bytes on the wire."""
+def _multipart_raw(
+    *,
+    attachment_bytes=b"%PDF-1.4 fake",
+    filename="quote.pdf",
+    extra_bytes=None,
+    extra_filename="handbook.pdf",
+):
+    """A message with a text body and one attachment, as bytes on the wire.
+
+    Pass `extra_bytes` for a second attachment -- needed to tell a total
+    across all parts apart from the size of the one part being requested.
+    """
     from email.message import EmailMessage
 
     msg = EmailMessage()
@@ -521,6 +531,10 @@ def _multipart_raw(*, attachment_bytes=b"%PDF-1.4 fake", filename="quote.pdf"):
     msg.add_attachment(
         attachment_bytes, maintype="application", subtype="pdf", filename=filename
     )
+    if extra_bytes is not None:
+        msg.add_attachment(
+            extra_bytes, maintype="application", subtype="pdf", filename=extra_filename
+        )
     return msg.as_bytes()
 
 
@@ -553,7 +567,8 @@ def test_the_body_is_not_reported_as_an_attachment(imap_env):
     conn = _conn_returning(_multipart_raw())
     with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
         items = _ImapBackend.from_env().attachments("7")
-    assert all(i["filename"] == "quote.pdf" for i in items)
+    assert len(items) == 1
+    assert items[0]["filename"] == "quote.pdf"
 
 
 def test_attachments_of_a_missing_message_is_none(imap_env):
@@ -561,6 +576,15 @@ def test_attachments_of_a_missing_message_is_none(imap_env):
     conn.uid.return_value = ("OK", [None])
     with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
         assert _ImapBackend.from_env().attachments("7") is None
+
+
+def test_read_attachment_of_a_missing_message_is_none(imap_env):
+    # None, never {"error": ...}: Task 3's tool layer tells "no such message"
+    # apart from "no such attachment" on exactly this distinction.
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [None])
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        assert _ImapBackend.from_env().read_attachment("7", "quote.pdf") is None
 
 
 def test_read_attachment_returns_the_bytes(imap_env):
@@ -602,11 +626,19 @@ def test_an_oversized_attachment_is_refused_before_it_is_parsed(imap_env, monkey
 
 
 def test_a_message_over_the_total_limit_is_refused(imap_env, monkeypatch):
-    monkeypatch.setattr("bestteam.tools.email_client._MAX_ATTACHMENTS_TOTAL_BYTES", 4)
-    conn = _conn_returning(_multipart_raw(attachment_bytes=b"0123456789"))
+    # Two attachments on purpose. The requested one is far under the per-part
+    # limit and it is the *pair* that breaches the total, so an implementation
+    # that summed only the requested part would hand back its bytes here. With
+    # a single-attachment message the total and the part are the same number
+    # and this test would prove nothing -- the "fifty small files" case.
+    monkeypatch.setattr("bestteam.tools.email_client._MAX_ATTACHMENTS_TOTAL_BYTES", 50)
+    conn = _conn_returning(
+        _multipart_raw(attachment_bytes=b"0123456789", extra_bytes=b"x" * 100)
+    )
     with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
         record = _ImapBackend.from_env().read_attachment("7", "quote.pdf")
     assert "error" in record
+    assert "data" not in record
 
 
 # ---------------------------------------------------------------------------

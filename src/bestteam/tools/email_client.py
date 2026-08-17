@@ -714,14 +714,18 @@ def _extract_text_body(msg: EmailMessage) -> str:
     return content.strip()
 
 
-# An attachment is parsed in memory, never written to disk, so these bound
-# what one message can make this process decompress. A parser is a
-# decompressor and an unbounded one is a denial-of-service surface.
+# An attachment is held in memory and never written to disk. These bound what
+# one message can hand onward to be parsed: a parser is a decompressor, and an
+# unbounded one is a denial-of-service surface. They do NOT bound the fetch --
+# `BODY.PEEK[]` has already pulled the whole message, attachments included,
+# into memory and decoded every payload before either limit is consulted, and
+# `attachments()` applies no limit at all. Bounding the fetch itself would be
+# a separate change at the IMAP layer.
 _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _MAX_ATTACHMENTS_TOTAL_BYTES = 25 * 1024 * 1024
 
 
-def _attachment_parts(msg: EmailMessage):
+def _attachment_parts(msg: EmailMessage) -> List[EmailMessage]:
     """The message's real attachments, body parts excluded.
 
     `iter_attachments()` is what draws that line -- `get_body()`'s chosen part
