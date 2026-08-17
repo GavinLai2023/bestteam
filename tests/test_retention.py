@@ -193,3 +193,98 @@ def test_purge_org_runs_zero_days_takes_everything_terminal(db):
 
     assert db.get(Run, "done").content_purged_at is not None
     assert db.get(Run, "live").content_purged_at is None
+
+
+def test_sweep_applies_each_orgs_own_policy(db):
+    from ui.backend.db.retention import set_retention_days
+    from ui.backend.retention import sweep_retention
+
+    a = create_org(db, "acme")
+    b = create_org(db, "beta")
+    set_retention_days(db, a.id, 30)
+    _run(db, a.id, run_id="a-old", age_days=40)
+    _run(db, b.id, run_id="b-old", age_days=40)  # no policy at all
+    db.commit()
+
+    assert sweep_retention(db) == 1
+
+    assert db.get(Run, "a-old").content_purged_at is not None
+    assert db.get(Run, "b-old").content_purged_at is None  # I5: NULL keeps forever
+
+
+def test_sweep_records_that_it_ran(db):
+    from ui.backend.db.retention import get_retention_settings, set_retention_days
+    from ui.backend.retention import sweep_retention
+
+    org = create_org(db, "acme")
+    set_retention_days(db, org.id, 30)
+    _run(db, org.id, run_id="old", age_days=40)
+    db.commit()
+
+    sweep_retention(db)
+
+    row = get_retention_settings(db, org.id)
+    assert row.last_swept_at is not None
+    assert row.last_purged_count == 1
+
+
+def test_export_carries_the_content(db):
+    from ui.backend.retention import export_org_runs
+
+    org = create_org(db, "acme")
+    _run(db, org.id, run_id="r1")
+    db.commit()
+
+    bundle = export_org_runs(db, org_id=org.id)
+
+    assert bundle["truncated"] is False
+    run = bundle["runs"][0]
+    assert run["id"] == "r1"
+    assert "alice@example.com" in run["output"]
+    assert run["trace_events"][0]["data"] == '{"text": "alice@example.com"}'
+    assert run["automation_item_results"][0]["payload"]["sender"] == "alice@example.com"
+
+
+def test_export_is_scoped_to_one_org(db):
+    from ui.backend.retention import export_org_runs
+
+    a = create_org(db, "acme")
+    b = create_org(db, "beta")
+    _run(db, a.id, run_id="a1")
+    _run(db, b.id, run_id="b1")
+    db.commit()
+
+    assert [r["id"] for r in export_org_runs(db, org_id=a.id)["runs"]] == ["a1"]
+
+
+def test_export_flags_truncation(db):
+    from ui.backend.retention import export_org_runs
+
+    org = create_org(db, "acme")
+    for i in range(3):
+        _run(db, org.id, run_id=f"r{i}", age_days=i)
+    db.commit()
+
+    bundle = export_org_runs(db, org_id=org.id, limit=2)
+
+    assert bundle["truncated"] is True
+    assert len(bundle["runs"]) == 2
+    assert bundle["oldest_included"] is not None
+
+
+def test_export_covers_everything_purge_clears(db):
+    """The coupling that makes deletion safe: if a field is added to the purge
+    and not to the export, the export silently stops being a way out."""
+    from ui.backend.retention import PURGED_FIELDS, export_org_runs
+
+    org = create_org(db, "acme")
+    _run(db, org.id, run_id="r1")
+    db.commit()
+
+    run = export_org_runs(db, org_id=org.id)["runs"][0]
+
+    for field in PURGED_FIELDS["runs"]:
+        assert field in run
+    assert "trace_events" in run
+    for field in PURGED_FIELDS["automation_item_results"]:
+        assert field in run["automation_item_results"][0]
