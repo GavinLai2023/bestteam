@@ -2453,8 +2453,15 @@ def test_the_message_cap_truncates_the_claim(db, monkeypatch):
 
 
 def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
+    # Deliberately given a workflow getter that WOULD succeed if it were
+    # reached: with `_no_workflow` the build-failure branch produces the same
+    # observable outcome as the cap working (no run, no Run row, events handed
+    # back pending), so the test would pass with the cap removed. The
+    # notification is the other half -- truncating the claim to zero would also
+    # dispatch nothing, so only the alert distinguishes "the cap stopped this"
+    # from "there was nothing to claim".
     from ui.backend.db.email_budget_settings import set_budget_caps
-    from ui.backend.db.models import Run
+    from ui.backend.db.models import Notification, Run
 
     org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43))
     set_budget_caps(db, org.id, daily_message_cap=2, monthly_cost_cap=None)
@@ -2462,11 +2469,15 @@ def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
     trigger.runs_date = email_trigger._today()
     db.commit()
 
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _fake_workflow_getter([]))
 
     assert recorder.calls == []
     assert db.query(Run).count() == 0
     assert {e.status for e in _events_by_id(db, org.id).values()} == {"pending"}
+    alerts = db.query(Notification).filter_by(org_id=org.id, kind="budget").all()
+    assert [n.fingerprint for n in alerts] == [
+        f"budget_messages:{email_trigger._today()}"
+    ]
 
 
 def test_the_message_counter_resets_with_the_date(db, monkeypatch):
@@ -2488,6 +2499,9 @@ def test_the_message_counter_resets_with_the_date(db, monkeypatch):
 
 
 def test_a_reached_spend_cap_blocks_dispatch(db, monkeypatch):
+    # Same reasoning as the message-cap test above: the getter must be one that
+    # WOULD dispatch if it were reached, or a build failure would satisfy every
+    # assertion here and the test would pass with the spend cap removed.
     from ui.backend.db.email_budget_settings import set_budget_caps
     from ui.backend.db.models import Run
 
@@ -2495,7 +2509,7 @@ def test_a_reached_spend_cap_blocks_dispatch(db, monkeypatch):
     set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
     _spend(db, org.id, 10.0, datetime.now(timezone.utc))
 
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _fake_workflow_getter([]))
 
     assert recorder.calls == []
     assert db.query(Run).count() == 1  # only the spend fixture's own row

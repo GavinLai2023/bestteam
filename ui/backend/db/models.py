@@ -784,7 +784,7 @@ class Notification(Base):
     org_id: Mapped[int] = mapped_column(
         ForeignKey("organizations.id"), nullable=False, index=True
     )
-    kind: Mapped[str]  # "trigger_health" | "secret_expiry"
+    kind: Mapped[str]  # "trigger_health" | "secret_expiry" | "budget"
     severity: Mapped[str]  # "error" | "warning" | "info"
     title: Mapped[str]
     body: Mapped[str]

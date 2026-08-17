@@ -643,7 +643,10 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         trigger.runs_today = 0
         # The customer's daily MESSAGE cap shares `runs_date` on purpose: one
         # rollover check resets both counters, so they can never disagree about
-        # which day it is. Resetting it anywhere else would reintroduce that.
+        # which day it is. `retry_triggered_run` rolls the same date over and so
+        # resets both here too -- a site that rolled `runs_date` but not this
+        # would carry a stale message count into the new day, and no later check
+        # would ever clear it.
         trigger.messages_today = 0
         trigger.runs_date = today
     if trigger.runs_today >= daily_cap():
