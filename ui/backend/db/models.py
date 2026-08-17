@@ -477,9 +477,11 @@ class InboxEvent(Base):
 
     `connector_type`/`mailbox_generation`/`external_id` are deliberately
     connector-neutral: Phase 2 adds Graph/Gmail and this table will hold real
-    customer rows by then. `decision` is reserved for Phase 4's pre-LLM filter
-    (why a message was skipped) and is never written today; `filtered` is a
-    documented but currently unreachable status.
+    customer rows by then. `decision` and the `filtered` status are Phase 4's
+    pre-LLM filter outcome: `record_events`'s `decisions` argument inserts a
+    row `filtered` with the reason recorded in `decision` instead of
+    `pending`, and `release_filtered_event` hands one back for normal
+    processing.
     See docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md.
     """
 
@@ -500,7 +502,7 @@ class InboxEvent(Base):
     mailbox_identity: Mapped[str]
     mailbox_generation: Mapped[str] = mapped_column(default="")
     external_id: Mapped[str]
-    # pending | claimed | done | failed | filtered (filtered: Phase 4, unused)
+    # pending | claimed | done | failed | filtered
     status: Mapped[str] = mapped_column(default="pending")
     run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     # Charged when a run is actually dispatched, never at claim -- see

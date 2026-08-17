@@ -294,3 +294,116 @@ def test_the_attempt_count_release_reads_is_not_stale(db):
     assert store.release_events(db, "run-a", max_attempts=1, error="crashed") == 1
     db.commit()
     assert db.query(InboxEvent).one().status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# The store: the pre-LLM filter (Phase 4a) -- `filtered` status and release.
+# ---------------------------------------------------------------------------
+
+
+def test_a_decision_records_the_row_filtered_not_pending(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"], decisions={"11": "bulk:list-id"})
+    db.commit()
+    rows = {r.external_id: r for r in db.query(InboxEvent).all()}
+    assert rows["10"].status == "pending" and rows["10"].decision is None
+    assert rows["11"].status == "filtered" and rows["11"].decision == "bulk:list-id"
+
+
+def test_a_filtered_row_is_never_claimed(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"], decisions={"10": "not_allowlisted"})
+    db.commit()
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
+    assert [e.external_id for e in claimed] == ["11"]
+
+
+def test_releasing_a_filtered_row_makes_it_claimable(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
+
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is True
+    db.commit()
+
+    db.refresh(row)
+    assert row.status == "pending"
+    assert row.decision is None
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
+    assert [e.external_id for e in claimed] == ["10"]
+
+
+def test_releasing_twice_reports_the_second_as_nothing_to_do(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is True
+    db.commit()
+    # Already pending -- a second release changes nothing and says so, which is
+    # what lets the route answer 404 without a separate existence query.
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
+
+
+def test_releasing_never_resurrects_a_row_that_already_ran(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"])
+    db.commit()
+    row = db.query(InboxEvent).one()
+    row.status = "done"
+    db.commit()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
+    db.refresh(row)
+    assert row.status == "done"
+
+
+def test_releasing_another_orgs_row_does_nothing(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
+    db.refresh(row)
+    assert row.status == "filtered"
+
+
+def test_filtered_events_list_newest_first_and_only_this_org(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"],
+                        decisions={"10": "bulk:list-id", "11": "not_allowlisted"})
+    store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
+                        external_ids=["99"], decisions={"99": "bulk:list-id"})
+    db.commit()
+    rows = store.list_filtered_events(db, org_id=1, limit=10)
+    assert [r.external_id for r in rows] == ["11", "10"]
+
+
+def test_recording_with_no_decisions_is_unchanged(db):
+    # The existing call site passes no `decisions` at all; that path must stay
+    # exactly equivalent to today's behaviour.
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"])
+    db.commit()
+    assert {r.status for r in db.query(InboxEvent).all()} == {"pending"}
+    assert all(r.decision is None for r in db.query(InboxEvent).all())
