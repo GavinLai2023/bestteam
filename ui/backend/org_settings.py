@@ -46,7 +46,8 @@ from .db.email_credentials import (
     set_email_credentials,
 )
 from .db.email_filter_settings import get_filter_settings, set_filter_settings
-from .db.models import EmailTrigger, Organization, iso_utc
+from .db.email_triggers import get_email_trigger
+from .db.models import Organization, iso_utc
 from .db.notifications import get_notification_settings, set_notification_settings
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
@@ -593,7 +594,7 @@ def get_email_budget(
     """
     now = datetime.now(timezone.utc)
     caps = get_budget_caps(db, org.id)
-    trigger = db.query(EmailTrigger).filter(EmailTrigger.org_id == org.id).one_or_none()
+    trigger = get_email_trigger(db, org.id)
     return {
         "daily_message_cap": caps.daily_message_cap,
         "monthly_cost_cap": caps.monthly_cost_cap,

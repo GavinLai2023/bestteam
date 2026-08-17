@@ -7,16 +7,20 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
 from helpers import create_user_and_login, open_test_db
+from ui.backend.db.email_budget_settings import unpriced_models_for_org
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.email_triggers import upsert_email_trigger
+from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 from ui.backend.db.model_catalog import upsert_entry
-from ui.backend.db.models import WorkflowRecord
+from ui.backend.db.models import Run, UsageRecord, WorkflowRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
+from ui.backend.email_budget import day_key
 
 
 @pytest.fixture
@@ -174,6 +178,53 @@ def test_a_spend_cap_saves_even_when_a_model_is_unpriced(client, automated_team)
     }).status_code == 200
 
 
+def test_an_unreadable_config_still_lets_the_cap_be_saved(client, automated_team):
+    # The `except Exception -> []` contract, exercised rather than asserted:
+    # a config whose `agents` is not a list of dicts makes the walk raise. The
+    # admin must still get their cap.
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = db.query(WorkflowRecord).filter_by(name="triage", org_id=org_id).one()
+        record.config = {"name": "triage", "agents": "not-a-list"}
+        db.commit()
+        assert unpriced_models_for_org(db, org_id) == []
+    resp = client.put("/api/org/email-budget", json={
+        "daily_message_cap": None, "monthly_cost_cap": 10.0,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["unpriced_models"] == []
+    assert client.get("/api/org/email-budget").json()["monthly_cost_cap"] == 10.0
+
+
+# --- today's message count ----------------------------------------------------
+
+
+def _set_message_count(org_id, *, count, runs_date):
+    with open_test_db() as db:
+        trigger = get_email_trigger(db, org_id)
+        trigger.messages_today = count
+        trigger.runs_date = runs_date
+        db.commit()
+
+
+def test_messages_today_reports_todays_count(client, automated_team):
+    _set_message_count(automated_team, count=7,
+                       runs_date=day_key(datetime.now(timezone.utc)))
+    assert client.get("/api/org/email-budget").json()["messages_today"] == 7
+
+
+def test_yesterdays_message_count_is_not_reported_as_todays(client, automated_team):
+    # `messages_today` is only today's count while `runs_date` is still today:
+    # the poller resets both together on the first cycle of a new day, so
+    # reading the column raw would show an admin yesterday's total at 09:00 --
+    # on the very card explaining their daily message cap.
+    _set_message_count(
+        automated_team, count=18,
+        runs_date=day_key(datetime.now(timezone.utc) - timedelta(days=1)),
+    )
+    assert client.get("/api/org/email-budget").json()["messages_today"] == 0
+
+
 # --- org scoping --------------------------------------------------------------
 
 
@@ -191,3 +242,54 @@ def test_an_org_sees_only_its_own_rules(client):
     ).json()
     assert body["skip_bulk"] is True
     assert body["sender_blocklist"] == []
+
+
+def test_another_orgs_save_leaves_these_rules_alone(client):
+    # Write isolation, not just read isolation: one row per org, so a second
+    # org saving its own rules must create its own row rather than overwrite
+    # the row it can already not read.
+    client.put("/api/org/email-filter", json={
+        "skip_bulk": False, "sender_blocklist": ["noreply@x.test"],
+        "sender_allowlist": [], "subject_blocklist": ["out of office"],
+    })
+    other = create_user_and_login(client, username="bob", org="beta")
+    client.put("/api/org/email-filter",
+               headers={"Authorization": f"Bearer {other}"},
+               json={"skip_bulk": True, "sender_blocklist": ["theirs@y.test"],
+                     "sender_allowlist": [], "subject_blocklist": []})
+    mine = client.get("/api/org/email-filter").json()
+    assert mine["skip_bulk"] is False
+    assert mine["sender_blocklist"] == ["noreply@x.test"]
+    assert mine["subject_blocklist"] == ["out of office"]
+
+
+def test_an_org_sees_only_its_own_budget(client, automated_team):
+    # Every value on this page is org-scoped separately -- the caps, the
+    # message counter on the trigger, and the month's spend -- so each is
+    # checked from a second org's session.
+    client.put("/api/org/email-budget", json={
+        "daily_message_cap": 25, "monthly_cost_cap": 40.0,
+    })
+    _set_message_count(automated_team, count=7,
+                       runs_date=day_key(datetime.now(timezone.utc)))
+    with open_test_db() as db:
+        db.add(Run(id="a-1", workflow="triage", input="x", status="completed",
+                   org_id=automated_team))
+        db.add(UsageRecord(run_id="a-1", agent="t", model="openai:gpt-4o-mini",
+                           input_tokens=1000, output_tokens=100,
+                           cost_estimate=1.25, org_id=automated_team))
+        db.commit()
+    mine = client.get("/api/org/email-budget").json()
+    assert (mine["daily_message_cap"], mine["messages_today"],
+            mine["spent_this_month"]) == (25, 7, 1.25)
+
+    other = create_user_and_login(client, username="bob", org="beta")
+    body = client.get(
+        "/api/org/email-budget", headers={"Authorization": f"Bearer {other}"}
+    ).json()
+    assert body["daily_message_cap"] is None
+    assert body["monthly_cost_cap"] is None
+    assert body["messages_today"] == 0
+    assert body["spent_this_month"] is None
+    assert body["unpriced_runs_this_month"] == 0
+    assert body["unpriced_models"] == []
