@@ -294,6 +294,15 @@ def _xoauth2_authobject(user: str, access_token: str):
     return authobject
 
 
+# Headers the UI backend's pre-LLM filter needs (email automation Phase 4a).
+# Repeated here rather than imported: `src/bestteam` is the SDK and must not
+# depend on `ui/backend`. The two lists are small, stable, and defined by RFCs.
+_SUMMARY_HEADER_FIELDS = (
+    "FROM", "SUBJECT", "DATE",
+    "AUTO-SUBMITTED", "PRECEDENCE", "LIST-ID", "LIST-UNSUBSCRIBE",
+)
+
+
 class _ImapBackend:
     """Read + draft against any IMAP server. Drafts only — no SMTP anywhere."""
 
@@ -431,21 +440,24 @@ class _ImapBackend:
             if isinstance(uid, str):
                 uid = uid.encode()
             typ, msg_data = conn.uid(
-                "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+                "fetch",
+                uid,
+                f"(BODY.PEEK[HEADER.FIELDS ({' '.join(_SUMMARY_HEADER_FIELDS)})])",
             )
             raw = _imap_fetch_bytes(typ, msg_data)
             if raw is None:
                 continue
             headers = message_from_bytes(raw, policy=policy.default)
-            messages.append(
-                {
-                    "id": uid.decode(),
-                    "from": str(headers.get("From", "")),
-                    "subject": str(headers.get("Subject", "")),
-                    "date": str(headers.get("Date", "")),
-                    "snippet": "",
-                }
-            )
+            summary = {
+                "id": uid.decode(),
+                "from": str(headers.get("From", "")),
+                "subject": str(headers.get("Subject", "")),
+                "date": str(headers.get("Date", "")),
+                "snippet": "",
+            }
+            for field_name in _SUMMARY_HEADER_FIELDS[3:]:
+                summary[field_name.lower()] = str(headers.get(field_name, ""))
+            messages.append(summary)
         return messages
 
     def summaries_for(self, uids) -> List[Dict[str, Any]]:

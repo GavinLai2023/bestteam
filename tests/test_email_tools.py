@@ -336,6 +336,37 @@ def test_imap_find_unseen_lists_messages(imap_env):
     assert "BODY.PEEK" in fetch_call.args[2]
 
 
+def test_summaries_carry_the_bulk_headers_for_the_pre_llm_filter(imap_env):
+    # Phase 4a filters on headers, so the summary fetch has to return them.
+    # BODY.PEEK is asserted too: the draft-only toolkit never marks mail seen,
+    # and this must not become the thing that does.
+    raw = (
+        b"From: news@example.com\r\n"
+        b"Subject: Weekly\r\n"
+        b"Date: Mon, 17 Aug 2026 09:00:00 +0000\r\n"
+        b"List-Id: <news.example.com>\r\n"
+        b"Precedence: bulk\r\n\r\n"
+    )
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [(b"7 (BODY[HEADER.FIELDS (...)] {120}", raw), b")"])
+
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        backend = _ImapBackend.from_env()
+        summaries = backend.summaries_for(["7"])
+
+    assert summaries[0]["list-id"] == "<news.example.com>"
+    assert summaries[0]["precedence"] == "bulk"
+    assert summaries[0]["auto-submitted"] == ""
+    assert summaries[0]["subject"] == "Weekly"
+
+    fetch_call = conn.uid.call_args_list[0]
+    spec = fetch_call.args[2]
+    assert "BODY.PEEK" in spec
+    for header in ("FROM", "SUBJECT", "DATE",
+                   "AUTO-SUBMITTED", "PRECEDENCE", "LIST-ID", "LIST-UNSUBSCRIBE"):
+        assert header in spec
+
+
 def test_imap_find_empty_returns_string(imap_env):
     conn = _mock_imap_conn()
     conn.uid.return_value = ("OK", [b""])
