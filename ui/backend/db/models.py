@@ -400,6 +400,13 @@ class OrgEmailCredential(Base):
     # `password_encrypted`. NULL for password auth.
     oauth_tenant_id: Mapped[Optional[str]] = mapped_column(nullable=True)
     oauth_client_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Admin-entered, Microsoft 365 only, optional. Entra client secrets expire
+    # in at most two years and the resulting failure looks exactly like a wrong
+    # password, so this powers an advance warning. Deliberately NOT read from
+    # Graph: that needs `Application.Read.All`, a directory-wide read over
+    # every app registration in the customer's tenant, which is far broader
+    # than the single-mailbox `IMAP.AccessAsApp` the connection itself uses.
+    oauth_secret_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -438,6 +445,12 @@ class EmailTrigger(Base):
     # a real successful dispatch, F5) | None (no error, or a pre-migration
     # row whose kind is unknown -- treated conservatively as sticky).
     last_error_kind: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Alerting state (Phase 3a). `consecutive_faults` counts fault cycles of
+    # any kind and resets on any healthy outcome; `alerted_fingerprint` is the
+    # problem most recently ALERTED about, so a condition already reported
+    # stays quiet until it clears. See `ui/backend/trigger_health.py`.
+    consecutive_faults: Mapped[int] = mapped_column(default=0)
+    alerted_fingerprint: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -739,3 +752,58 @@ class ShareMessage(Base):
     content: Mapped[str]
     run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class Notification(Base):
+    """One thing the customer should know about, in-app and over the webhook.
+
+    Deliberately one table for both: webhook delivery needs retry state and the
+    in-app list needs the same rows, so splitting them would immediately
+    produce "shown in the app but never delivered" with no single place to
+    reconcile it. `delivery_state = "skipped"` means the org configured no
+    webhook -- in-app only, which is not a failure.
+
+    `fingerprint` identifies the *problem*, not the occurrence: the health
+    evaluator (`ui/backend/trigger_health.py`) uses it to keep a condition
+    already alerted for from alerting again until it clears.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    kind: Mapped[str]  # "trigger_health" | "secret_expiry"
+    severity: Mapped[str]  # "error" | "warning" | "info"
+    title: Mapped[str]
+    body: Mapped[str]
+    fingerprint: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    read_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # "pending" | "delivered" | "failed" | "skipped"
+    delivery_state: Mapped[str] = mapped_column(default="pending")
+    delivery_attempts: Mapped[int] = mapped_column(default=0)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_delivery_error: Mapped[Optional[str]] = mapped_column(nullable=True)
+
+
+class OrgNotificationSetting(Base):
+    """Where an org wants its notifications delivered, if anywhere.
+
+    The webhook secret lives in the same Fernet scheme as mailbox credentials
+    (`ui/backend/secret_store.py`), so the startup check that refuses to boot
+    when a rotated key can't read stored credentials covers it too.
+    """
+
+    __tablename__ = "org_notification_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, nullable=False
+    )
+    webhook_url: Mapped[Optional[str]] = mapped_column(nullable=True)
+    webhook_secret_encrypted: Mapped[Optional[str]] = mapped_column(nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
