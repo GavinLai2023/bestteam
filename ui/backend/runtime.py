@@ -42,10 +42,11 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 # email content (the envelope's free-text `extracted`/`missing_information`/
 # `risk_reasons` fields can quote it directly) -- the same trust boundary that
 # already redacts tool_completed data for email_find/email_read/
-# email_draft_reply (adapters/langgraph_adapter.py) applies here too, so this
-# placeholder replaces the raw agent_completed/run_completed text before it's
-# ever published live or persisted to trace_events/runs.output (Codex review
-# finding). The structured result stays fully available via
+# email_read_attachment/email_draft_reply (adapters/langgraph_adapter.py)
+# applies here too, so this placeholder replaces the raw agent_completed/
+# run_completed text before it's ever published live or persisted to
+# trace_events/runs.output (Codex review finding). The structured result
+# stays fully available via
 # automation_item_results -- normalize_run_result still gets the real text,
 # just never the trace/output columns.
 _PM_TRACE_REDACTED = "[redacted -- Property Maintenance Inbox response; see automation results for this run]"

@@ -278,14 +278,26 @@ because there is no path. `../../etc/passwd` is simply a name no MIME part has.
 `file_parser.py` carries this: the parsers are `*_bytes` functions behind
 `parse_bytes(data, filename)`, and `parse_file(path)` keeps its signature and
 becomes a thin wrapper that reads the file and delegates. The knowledge-base
-path is unchanged.
+path is unchanged **except in one respect**: `_decode_text` decodes with
+`errors="replace"`, where `Path.read_text(encoding="utf-8")` used to raise
+`UnicodeDecodeError`. Right for an attachment — a sender can name anything
+`.txt` and one bad file must not fail a run — but it also reaches
+`LocalFolderKnowledgeBase`, which used to skip a mis-encoded document with a
+warning and now ingests it silently as mojibake. Kept deliberately; recorded in
+`src/bestteam/core/CLAUDE.md`'s knowledge-base limitations.
 
 **Two tools, not one enriched one.** `email_read` lists; it never inlines
 attachment text. Cost — Phase 4a exists because customers were billed for
 content they did not need, and inlining would put a 40-page PDF into the
 context of a message the model only had to acknowledge; on demand, the model
-pays for what it decides to read. Auditability — each extraction is its own
-`tool_completed` event, so the trace shows which attachments were opened.
+pays for what it decides to read. That spend is metered like any other token
+usage, but be exact about what Phase 4a's monthly cost cap does with it: the
+cap is evaluated at **dispatch** (`email_trigger.py::_start_triggered_run`),
+so it stops the *following* run — it cannot interrupt the run that is
+currently reading. Attachment reading materially raises per-run variance, so
+the run that crosses the cap can overshoot it further than a body-only run
+would. Auditability — each extraction is its own `tool_completed` event, so
+the trace shows which attachments were opened.
 Bounded output — `email_read` is already truncated at 8,000 characters, and an
 inlined attachment would push the actual message body out of that window.
 

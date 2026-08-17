@@ -59,7 +59,15 @@ So:
   wrong, and no second copy for Phase 3b's retention sweep to miss.
 - `file_parser.py` grows internal `*_bytes` parsers; `parse_file(path)` keeps
   its public signature and becomes a thin wrapper that reads the file and
-  delegates. The knowledge-base path is unchanged.
+  delegates. The knowledge-base path is unchanged **except in one respect,
+  which shipped deliberately**: `_decode_text` decodes with
+  `errors="replace"`, where `Path.read_text(encoding="utf-8")` used to raise
+  `UnicodeDecodeError`. That is right for an attachment — a sender can name
+  anything `.txt`, and one bad file must not fail a customer's whole run — but
+  it also reaches `LocalFolderKnowledgeBase`, where a mis-encoded document used
+  to be skipped with a warning (`core/knowledge_base.py`) and is now silently
+  ingested as mojibake chunks. The decoding is kept; the claim of "unchanged"
+  is what was wrong.
 
 Path traversal is not defended against here. It is made **structurally
 impossible**: there is no path.
@@ -176,12 +184,19 @@ The tool joins `make_email_tools`' dictionary, so every email team gets it on
 upgrade, with no per-org switch.
 
 A switch was considered and rejected as YAGNI. Cost is already governed by the
-model's own choice — a message with no attachments produces no call — and by
-Phase 4a's spend cap, which measures actual token usage and therefore covers
-this automatically with no new accounting. The injection surface is the same
-class as the body the model already reads. A flag would add a column, a route,
-a panel and a migration to protect against a risk the product already accepts
-one paragraph earlier.
+model's own choice — a message with no attachments produces no call — and the
+spend it does incur is metered like any other token usage, so Phase 4a's
+monthly cost cap sees it with no new accounting. Note precisely what that cap
+can and cannot do: it is evaluated at **dispatch**
+(`email_trigger.py::_start_triggered_run`, against `spent_this_month`), so it
+stops the *following* run — it cannot interrupt the run currently reading a
+40-page PDF. Attachment reading materially raises per-run variance, so the run
+that crosses the cap can overshoot it by more than a body-only run would. That
+is a bounded overshoot on a metered, capped account, not an unbounded one, and
+it is the honest version of the claim. The injection surface is the same class
+as the body the model already reads. A flag would add a column, a route, a
+panel and a migration to protect against a risk the product already accepts one
+paragraph earlier.
 
 ## Testing
 

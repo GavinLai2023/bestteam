@@ -11,7 +11,8 @@
 - CLI: `init` / `run` / `graph`.
 - YAML loader, including `local_folder` (BM25) and `vector` knowledge bases.
 - Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator`, and
-  the draft-only email toolkit (`email_find`/`email_read`/`email_draft_reply`).
+  the draft-only email toolkit (`email_find`/`email_read`/
+  `email_read_attachment`/`email_draft_reply`).
 - UI backend: monitoring API, 6-stage builder session state machine, config
   CRUD ("advanced view"), model catalog, usage metering.
 - UI frontend: monitoring dashboard, 4-stage Team Builder wizard, login UI.
@@ -1297,10 +1298,14 @@
 
   **On by default, with no per-org switch**, and that was argued rather than
   assumed: cost is already governed by the model's own choice (a message with
-  no attachments produces no call) and by Phase 4a's spend cap, which measures
-  real token usage and so covers this with no new accounting; the injection
-  surface is the class the product accepts one paragraph earlier. A flag would
-  have added a column, a route, a panel and a migration for nothing. The
+  no attachments produces no call), and the spend it does incur is metered like
+  any other token usage, so Phase 4a's monthly cost cap sees it with no new
+  accounting — though that cap is evaluated at **dispatch**, so it stops the
+  *following* run and cannot interrupt the one currently reading a 40-page PDF,
+  which is a real overshoot given how much attachment reading raises per-run
+  variance; the injection surface is the class the product accepts one
+  paragraph earlier. A flag would have added a column, a route, a panel and a
+  migration for nothing. The
   capability reaches teams through the seeded skills, which had to be told
   about it: `property_maintenance_intake_v1` positively *denied* the capability
   ("You cannot read attachments"), so registering the tool everywhere would
@@ -1341,6 +1346,23 @@
   than editing code that phase otherwise did not touch. The per-org OAuth
   provider (`tools/_oauth.py`) does *not* have this bug; it refreshes 60
   seconds before expiry.
+- **The Graph backend cannot read attachments at all, and a seeded skill now
+  says it can.** `_GraphBackend.read()` returns no `attachments` key and the
+  class has no `read_attachment`, so on `BESTTEAM_EMAIL_BACKEND=graph`
+  `email_read` renders no manifest and `email_read_attachment` answers "This
+  mailbox connection cannot read attachments." That is safe and non-raising —
+  `_attachment_impl` checks `hasattr` before calling — but `email_triage_reply`
+  gained a playbook step in Phase 4b that tells the model it *can* read them,
+  so a Graph-backed deployment promises a capability its mailbox never
+  delivers, and the model has to discover that from a tool result. Bounded by
+  who can reach it: the Graph path exists only in the process-env
+  single-mailbox configuration (multi-org deployments refuse it, and the
+  per-org store is IMAP-only), and the M365 customers who would use it are
+  better served by per-org IMAP-with-OAuth, which *does* read attachments.
+  Implementing it means `/messages/{id}/attachments` plus base64 payload
+  decoding against a backend no test tenant has ever exercised (see the entry
+  above) — deliberately not started; recorded so it is not discovered by a
+  customer.
 - **Horizontal scale-out of the email poller is blocked on a Postgres
   migration, not on the poller.** `make_engine` hardcodes SQLite and takes a
   *file path*, not a URL (`ui/backend/db/database.py:41`), and there is no
@@ -1387,7 +1409,11 @@
   A related consequence of parsing from bytes: **peak memory for a parsed file
   is now the whole file**, where `openpyxl(read_only=True)` previously streamed
   from disk — bounded at 10 MB for attachments, unbounded for a knowledge-base
-  workbook.
+  workbook. A second consequence reaches the knowledge base: `_decode_text` uses
+  `errors="replace"`, so **a mis-encoded plain-text document is now ingested as
+  mojibake instead of being skipped with a warning** (`Path.read_text` used to
+  raise `UnicodeDecodeError`). Right for attachments, kept deliberately, and
+  recorded in `src/bestteam/core/CLAUDE.md`.
   Finally, **a refused or unparseable attachment is traced as
   `outcome: "attachment_read"`** like a successful one, so it does not force
   `needs_attention` the way a raised call does. Distinguishing it would mean

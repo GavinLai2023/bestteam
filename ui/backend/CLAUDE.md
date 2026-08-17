@@ -782,7 +782,8 @@ and `run_completed`'s -- `core/workflow.py`'s `last_output`, the same text)
 is derived from customer email content -- the envelope's free-text
 `extracted`/`missing_information`/`risk_reasons` fields can quote it
 directly -- so it gets the same redaction boundary that already covers
-`tool_completed` for `email_find`/`email_read`/`email_draft_reply`
+`tool_completed` for `email_find`/`email_read`/`email_read_attachment`/
+`email_draft_reply`
 (`_redacted_email_tool_data`), just applied one layer up in `runtime.py`
 instead of at the SDK/adapter layer (the SDK itself has no notion of
 "property maintenance"; only `runtime.py` knows a run's `trigger_context`).

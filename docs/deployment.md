@@ -161,7 +161,8 @@ run workflows creates themselves an org user too.
 
 ## 4c. Connect each org's mailbox (per-org email)
 
-The email tools (`email_find`/`email_read`/`email_draft_reply`) read one mailbox
+The email tools (`email_find`/`email_read`/`email_read_attachment`/
+`email_draft_reply`) read one mailbox
 **per organization** — each customer's agents reach only that customer's inbox.
 Requires `BESTTEAM_SECRETS_KEY` set (step 1) — the single deployment-wide key
 encrypts every org's password; the passwords are stored encrypted, the key is

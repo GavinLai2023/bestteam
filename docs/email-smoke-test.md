@@ -12,12 +12,12 @@ test mailbox and an OpenAI key.
 
 ## 1. What this exercises
 
-- The three agent-facing tools — `email_find`, `email_read`,
-  `email_draft_reply` — over one env-configured mailbox
-  (`src/bestteam/tools/email_client.py`).
+- The four agent-facing tools — `email_find`, `email_read`,
+  `email_read_attachment`, `email_draft_reply` — over one env-configured
+  mailbox (`src/bestteam/tools/email_client.py`).
 - The seeded built-in Skill `email_triage_reply` (platform tier,
   `org_id IS NULL`, visible to every org) that packages the triage playbook +
-  those three tools. Note this runs the playbook **as currently stored** in the
+  those four tools. Note this runs the playbook **as currently stored** in the
   database, which on an existing deployment may lag the shipped default — if
   you're validating a change to the rule itself, adopt it first (see
   `docs/deployment.md` → "Updating built-in skills").
@@ -61,8 +61,16 @@ Before running, seed the inbox so the agent has something to triage:
    least one clearly "needs a reply" (e.g. *"Hi, what are your refund
    terms?"*) and one obviously informational (e.g. a newsletter) so you can
    see the agent categorize differently.
-2. Leave them **unread** — `email_find` with no query lists unread messages.
-3. Note the mailbox's Drafts folder; that's where results land.
+2. **Attach a file to the needs-reply one** — a small PDF or `.docx` quote,
+   or a `.xlsx`/`.csv` price list. Put a distinctive phrase inside it (e.g.
+   *"callout fee £95"*) that appears **nowhere in the email body**, so §10 can
+   tell reading the attachment apart from reading the message. One attachment
+   is enough; a second on the same message shows the manifest listing more
+   than one. Keep them under 10 MB each (25 MB across one message) — above
+   either limit the tool refuses to read them, which is itself a fine thing to
+   try deliberately.
+3. Leave them **unread** — `email_find` with no query lists unread messages.
+4. Note the mailbox's Drafts folder; that's where results land.
 
 ---
 
@@ -213,12 +221,22 @@ The agent works the playbook, and these tool calls appear in order (repeating
 per message):
 
 - `email_find` (no query) → lists unread messages
-- `email_read` → fetches one message body
+- `email_read` → fetches one message body, ending in an
+  `Attachments (N):` block naming each file, its type and its size — this is
+  a *list*, never the contents
+- `email_read_attachment` → only for the message you attached a file to, and
+  only when the playbook judges the attachment worth opening (the step is
+  deliberately conditional, so a run that skips an obviously irrelevant
+  attachment is correct behaviour, not a failure)
 - `email_draft_reply` → saves a draft for a *needs-reply* message only
 
 The run ends with a `run_completed` event whose summary lists every message
 seen, its category (needs-reply / FYI / spam / escalate), and whether a draft
 was created.
+
+The trace shows *that* an attachment was read, never what it said: the
+`email_read_attachment` event is redacted to a summary + message id, exactly
+like the other email tools. Extracted text appearing in the trace is a bug.
 
 ---
 
@@ -231,8 +249,17 @@ was created.
   this run. The toolkit has no send path.
 - **Nothing marked read (IMAP):** the unread messages should still be unread
   (`BODY.PEEK` is read-only).
+- **The attachment was really read (IMAP):** if the agent opened it, the
+  distinctive phrase you hid inside the file (§3 step 2) should turn up in the
+  draft or the run summary. If it doesn't, check the trace: no
+  `email_read_attachment` call at all means the playbook judged it not worth
+  opening — re-run with an input that asks for the attachment's contents
+  explicitly. **On the Graph backend there is no attachment reading at all**:
+  `email_read` renders no manifest and the tool answers "This mailbox
+  connection cannot read attachments." That is the current, documented
+  limitation, not a failure of this test.
 
-If all three hold, the smoke test passes.
+If all of these hold, the smoke test passes.
 
 ---
 
@@ -273,6 +300,8 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 | Trace shows the agent answering **without** any `email_*` tool calls | `OPENAI_API_KEY` missing/invalid, or a `fake:` model | set a real key; `fake:` models never call tools |
 | `email_find` errors with auth failure | bad IMAP/Graph credentials | verify creds; for Graph, confirm `Mail.ReadWrite` **application** permission + Application Access Policy scoped to the mailbox |
 | `email_find` errors with a TLS/certificate verification failure | IMAP server presents an untrusted (e.g. private/self-signed) certificate — the client always verifies TLS, there is no verify-off switch by design | trust the server's CA: point `SSL_CERT_FILE` at a PEM bundle that includes it before starting the backend (public providers like Gmail/O365 need nothing) |
+| `email_read` lists no `Attachments (N):` block on a message that has one | Graph backend (no attachment support), or the part carries no filename | use the IMAP backend for this check — see §10 |
+| `email_read_attachment` answers "couldn't be read" or names a type it cannot read | the file's suffix is unsupported (archives are refused, never expanded), or it lies about its format and the parser gave up | attach a `.pdf`/`.docx`/`.xlsx`/`.csv`/`.txt` instead; PDF/Excel/Word need `pip install 'bestteam[tools-files]'` |
 | Frontend loads but every API call fails | backend not on `:8000`, or CORS | confirm backend port; default CORS allows `localhost:5173` |
 | Drafts don't appear but the run completed | wrong Drafts folder detected (IMAP) | set `BESTTEAM_IMAP_DRAFTS` to the exact folder name |
 
