@@ -285,17 +285,23 @@ would wedge a customer's automation entirely) and over silence:
 
 ### API
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` / `PUT` | `/api/email/filter` | filter settings |
-| `GET` / `PUT` | `/api/email/budget` | caps + current usage + `unpriced_models` |
-| `GET` | `/api/email/filtered` | this org's filtered events (paged, newest first) |
-| `POST` | `/api/email/filtered/{id}/release` | flip one back to `pending` |
+Every route lives under the existing `/api/org` prefix, in the file that
+already owns that concern — settings in `org_settings.py`, anything about the
+trigger's activity in `email_trigger_api.py`:
 
-All org-scoped and admin-authenticated exactly as
-`/api/email/notifications` and `/api/retention` already are. `release` is
-idempotent and returns 404 for an id belonging to another org — never 403,
-which would confirm the row exists.
+| Method | Path | File |
+|---|---|---|
+| `GET` / `PUT` | `/api/org/email-filter` | `org_settings.py` |
+| `GET` / `PUT` | `/api/org/email-budget` | `org_settings.py` |
+| `GET` | `/api/org/email-trigger/filtered` | `email_trigger_api.py` |
+| `POST` | `/api/org/email-trigger/filtered/{id}/release` | `email_trigger_api.py` |
+
+`GET /api/org/email-budget` returns the caps, the current period's usage
+against each, and `unpriced_models`. All routes are org-scoped through
+`Depends(get_current_org)` exactly as `/api/org/retention` and
+`/api/org/notifications` already are. `release` is idempotent and returns 404
+for an id belonging to another org — never 403, which would confirm the row
+exists.
 
 ### UI
 
