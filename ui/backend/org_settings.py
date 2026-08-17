@@ -17,11 +17,11 @@ import errno
 import logging
 import socket
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy.orm import Session
 
 from bestteam.exceptions import ConfigurationError
@@ -525,14 +525,22 @@ def export_org(
 # --- pre-LLM mail filter and automation budgets (Phase 4a) --------------------
 
 
+# One stored pattern: a full address, `*@domain`, or a subject term. Bounded
+# per item, not just per list, because the poll loop reads every pattern an org
+# has stored and compares it against every sender address -- a customer-supplied
+# field the hot path reads is not left unbounded, and 200 characters is generous
+# for all three uses.
+FilterPattern = Annotated[str, StringConstraints(max_length=200)]
+
+
 class EmailFilterRequest(BaseModel):
     """Patterns are literals, never regular expressions -- see
     `ui/backend/email_filter.py` for why."""
 
     skip_bulk: bool = True
-    sender_blocklist: List[str] = Field(default_factory=list, max_length=200)
-    sender_allowlist: List[str] = Field(default_factory=list, max_length=200)
-    subject_blocklist: List[str] = Field(default_factory=list, max_length=200)
+    sender_blocklist: List[FilterPattern] = Field(default_factory=list, max_length=200)
+    sender_allowlist: List[FilterPattern] = Field(default_factory=list, max_length=200)
+    subject_blocklist: List[FilterPattern] = Field(default_factory=list, max_length=200)
 
 
 class EmailBudgetRequest(BaseModel):

@@ -105,6 +105,9 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
         trigger = get_email_trigger(db, org_id)
         if trigger is None or not trigger.workflow_name:
             return []
+        # `status="deployed"` is intended, not an oversight: a trigger pointing
+        # at a draft cannot run, so it cannot spend, so it has no models the cap
+        # fails to cover. Do not widen this to scan drafts.
         record = (
             db.query(WorkflowRecord)
             .filter_by(name=trigger.workflow_name, org_id=org_id, status="deployed")

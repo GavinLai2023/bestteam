@@ -109,6 +109,20 @@ def test_a_regex_is_stored_as_a_literal_not_compiled(client):
     assert client.get("/api/org/email-filter").json()["sender_blocklist"] == ["(a+)+@x.test"]
 
 
+def test_an_over_long_pattern_is_rejected(client):
+    # Every stored pattern is read on every poll cycle and compared against
+    # every sender address, so a customer-supplied string here is bounded.
+    assert client.put("/api/org/email-filter", json={
+        "skip_bulk": True, "sender_blocklist": ["a" * 201 + "@x.test"],
+        "sender_allowlist": [], "subject_blocklist": [],
+    }).status_code == 422
+    # ...on all three lists, not just the first.
+    assert client.put("/api/org/email-filter", json={
+        "skip_bulk": True, "sender_blocklist": [], "sender_allowlist": [],
+        "subject_blocklist": ["x" * 201],
+    }).status_code == 422
+
+
 # --- /api/org/email-budget ----------------------------------------------------
 
 
