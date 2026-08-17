@@ -93,8 +93,8 @@ live in env vars (one mailbox per process): `_get_backend()` builds the
 backend via `_ImapBackend.from_env()` / `_GraphBackend()`.
 
 **Per-mailbox seam (used by the UI backend for multi-tenancy).**
-`_ImapBackend(host=, user=, password=, port=, drafts=, restrict_to_public=)`
-builds a backend from explicit params (not env), and `make_email_tools(backend)`
+`_ImapBackend(host=, user=, password=, port=, drafts=, restrict_to_public=,
+token_provider=)` builds a backend from explicit params (not env), and `make_email_tools(backend)`
 returns the three `email_*` tools bound to it — same names/docstrings the model
 sees for the env tools. `_connect()` always uses a verifying TLS context
 (`ssl.create_default_context()` — imaplib's fallback does *not* verify the cert)
@@ -106,7 +106,34 @@ It stays `False` for the operator-trusted env path, which may legitimately point
 at an internal IMAP server. TLS is still verified there — an internal server
 with a private/self-signed CA must have that CA trusted (point `SSL_CERT_FILE`
 at the CA bundle, which `ssl.create_default_context()` honors); there is no
-verification-off switch, by design. The UI backend uses this to give each org its own encrypted mailbox
+verification-off switch, by design.
+
+**Auth strategy: exactly one of `password=` or `token_provider=`**, checked in
+the constructor rather than at connect time. With a provider, `_connect()`
+authenticates with SASL `XOAUTH2` instead of `login()` — the multi-tenant path
+for Microsoft 365 / Exchange Online, which no longer accepts basic auth.
+Everything *above* `_connect()` is unchanged and shared by both: after
+`AUTHENTICATE` succeeds the session is an ordinary authenticated IMAP session,
+so `find`/`read`/`draft_reply`/`summaries_for`/`drafts_with_source_keys`/
+`check_drafts_writable` — and the whole of `ui/backend/email_trigger.py`,
+including the UID cursor and Phase 1's event ledger — need no knowledge of
+which auth was used. The token is fetched *before* the socket is opened, so a
+credential failure leaves no dangling connection and stays distinguishable from
+a mailbox-access failure.
+
+The provider is `bestteam.tools._oauth.MicrosoftClientCredentialsToken`
+(app-only client credentials, scope `https://outlook.office365.com/.default`).
+It is **stdlib `urllib` only, deliberately no httpx**: the per-org IMAP path has
+no third-party HTTP dependency and `backend-optional-deps` runs without optional
+extras (the httpx note on `tools-email` in `pyproject.toml` still means "Graph
+backend only"). It caches the token until 60 seconds before expiry — the poller
+is a long-lived process and the token lasts about an hour, so caching forever
+would break it. (`_GraphBackend._token()` *does* cache forever; that is a
+pre-existing bug in the unrelated env-only Graph path, recorded in
+`docs/STATUS.md`.) Design:
+`docs/superpowers/specs/2026-08-17-email-phase-2-microsoft-oauth-design.md`.
+
+The UI backend uses this to give each org its own encrypted mailbox
 (see `ui/backend/email_tools.py`), overriding the env-based `REGISTRY` tools
 by name. With `BESTTEAM_EMAIL_BACKEND` set and more than one org, the UI
 backend still refuses to start (`ensure_email_single_org`, CR-031) — the env

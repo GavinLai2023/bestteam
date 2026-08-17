@@ -199,6 +199,30 @@ single process and `_dispatch_lock` stays. Real horizontal scale-out is blocked
 on a Postgres migration -- `make_engine` hardcodes SQLite and takes a file path,
 not a URL.
 
+**Phase 2: Microsoft 365 mailboxes**
+
+Exchange Online no longer accepts basic auth, so an M365 org could not connect
+a mailbox at all. `org_email_credentials.auth_type` now selects how
+`email_tools.build_org_imap_backend` authenticates: a password login, or an
+app-only OAuth token (`bestteam.tools._oauth.MicrosoftClientCredentialsToken`)
+handed to `_ImapBackend` as `token_provider=`, which makes `_connect()` use
+SASL `XOAUTH2`. **Nothing in `email_trigger.py` or `runtime.py` changed** --
+after `AUTHENTICATE` the session is an ordinary IMAP session, so the UID
+cursor, the drafts resolution, Phase 0's source-key headers and the ledger
+above all work untouched. That is why this was built as an auth strategy rather
+than a Graph connector; see `docs/DECISIONS.md`.
+
+Two things in `org_settings.py` are load-bearing. The host for
+`microsoft_oauth` is set **server-side** to `outlook.office365.com` and any
+client-supplied value is discarded -- the OAuth scope is bound to that
+endpoint, so another host could only fail confusingly. And `_mailbox_problem`
+fetches the token as its own step *before* connecting, so a credential problem
+(wrong client ID, expired secret, unknown tenant) is distinguishable from a
+mailbox-access problem (admin consent or `Add-MailboxPermission` missing):
+those have completely different fixes and cannot be told apart from Microsoft's
+error text, only from which step failed. A working token with a refused mailbox
+is the likeliest outcome of a half-finished Azure setup.
+
 Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
 resolves the IMAP backend once per cycle and threads it into
 `build_trigger_workflow` instead of letting it re-fetch credentials

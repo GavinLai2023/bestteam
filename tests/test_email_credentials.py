@@ -14,6 +14,9 @@ from cryptography.fernet import Fernet
 from ui.backend import secret_store
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_credentials import (
+    AUTH_MICROSOFT_OAUTH,
+    AUTH_PASSWORD,
+    MICROSOFT_IMAP_HOST,
     clear_email_credentials,
     ensure_secrets_key_for_stored_credentials,
     get_email_credentials,
@@ -125,3 +128,67 @@ def test_set_credentials_rejects_key_collision(db_session, monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRET_KEY", os.environ[secret_store.SECRETS_KEY_ENV])
     with pytest.raises(secret_store.SecretsKeyError):
         set_email_credentials(db_session, _org(db_session), host="h", username="u", password="p")
+
+
+# ---------------------------------------------------------------------------
+# Microsoft 365 (OAuth) mailboxes -- Exchange Online has no basic auth
+# ---------------------------------------------------------------------------
+
+def test_an_oauth_credential_round_trips_with_the_secret_encrypted(db_session):
+    org_id = _org(db_session)
+    row = set_email_credentials(
+        db_session, org_id,
+        host=MICROSOFT_IMAP_HOST, username="support@acme.com",
+        password="the-client-secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="tenant-1", oauth_client_id="client-1",
+    )
+
+    assert row.auth_type == AUTH_MICROSOFT_OAUTH
+    assert row.oauth_tenant_id == "tenant-1"
+    assert row.oauth_client_id == "client-1"
+    # The client secret goes through exactly the same encrypted column the
+    # mailbox password does -- one place a secret is written, one place the
+    # boot-time key check has to look.
+    assert "the-client-secret" not in row.password_encrypted
+    assert secret_store.decrypt(row.password_encrypted) == "the-client-secret"
+
+
+def test_credentials_default_to_password_auth(db_session):
+    org_id = _org(db_session)
+    row = set_email_credentials(
+        db_session, org_id, host="imap.example.com", username="u", password="p"
+    )
+    assert row.auth_type == AUTH_PASSWORD
+    assert row.oauth_tenant_id is None
+    assert row.oauth_client_id is None
+
+
+def test_switching_an_oauth_mailbox_back_to_a_password_clears_the_oauth_fields(db_session):
+    org_id = _org(db_session)
+    set_email_credentials(
+        db_session, org_id, host=MICROSOFT_IMAP_HOST, username="support@acme.com",
+        password="secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="tenant-1", oauth_client_id="client-1",
+    )
+    row = set_email_credentials(
+        db_session, org_id, host="imap.example.com", username="u", password="p"
+    )
+
+    assert row.auth_type == AUTH_PASSWORD
+    assert row.oauth_tenant_id is None
+    assert row.oauth_client_id is None
+
+
+def test_the_boot_key_check_still_catches_an_unreadable_oauth_credential(
+    db_session, monkeypatch
+):
+    org_id = _org(db_session)
+    set_email_credentials(
+        db_session, org_id, host=MICROSOFT_IMAP_HOST, username="support@acme.com",
+        password="secret", auth_type=AUTH_MICROSOFT_OAUTH,
+        oauth_tenant_id="tenant-1", oauth_client_id="client-1",
+    )
+    monkeypatch.setattr(secret_store, "can_decrypt", lambda token: False)
+
+    with pytest.raises(RuntimeError, match="cannot decrypt"):
+        ensure_secrets_key_for_stored_credentials(db_session)

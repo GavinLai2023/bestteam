@@ -5,6 +5,7 @@ module (same style as test_tools.py's http_get tests) and the IMAP backend
 against a patched imaplib.IMAP4_SSL. No live mailbox is ever contacted.
 """
 import email
+import imaplib
 from email import policy
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ import pytest
 
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools import REGISTRY, email_draft_reply, email_find, email_read
+from bestteam.tools.email_client import _ImapBackend
 
 pytestmark = pytest.mark.unit
 
@@ -473,3 +475,104 @@ def test_imap_retries_on_connect_oserror(imap_env):
             result = email_find("")
     assert mock_sleep.call_count == 1
     assert "No unread emails" in result
+
+
+# ---------------------------------------------------------------------------
+# OAuth (SASL XOAUTH2) authentication -- Exchange Online has no basic auth
+# ---------------------------------------------------------------------------
+
+class _StubTokenProvider:
+    """Duck-types MicrosoftClientCredentialsToken.token()."""
+
+    def __init__(self, token="tok-1", error=None):
+        self._token = token
+        self._error = error
+        self.calls = 0
+
+    def token(self):
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._token
+
+
+def test_the_xoauth2_initial_response_is_the_sasl_client_first_string():
+    from bestteam.tools.email_client import _xoauth2_authobject
+
+    authobject = _xoauth2_authobject("support@acme.com", "tok-1")
+    # imaplib base64-encodes whatever this returns, so it must be the raw SASL
+    # bytes: user=<addr>^Aauth=Bearer <token>^A^A
+    assert authobject(b"") == b"user=support@acme.com\x01auth=Bearer tok-1\x01\x01"
+
+
+def test_the_xoauth2_authobject_answers_a_rejection_challenge_with_an_empty_line():
+    """Exchange sends a base64 JSON error and waits for an empty client response
+    before issuing the tagged NO. Returning anything else stalls the exchange
+    until the socket timeout."""
+    from bestteam.tools.email_client import _xoauth2_authobject
+
+    authobject = _xoauth2_authobject("support@acme.com", "tok-1")
+    authobject(b"")
+    assert authobject(b'{"status":"401"}') == b""
+
+
+def test_connect_authenticates_with_xoauth2_when_a_token_provider_is_given():
+    conn = _mock_imap_conn()
+    backend = _ImapBackend(
+        host="outlook.office365.com", user="support@acme.com",
+        token_provider=_StubTokenProvider("tok-1"),
+    )
+
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        backend._connect()
+
+    conn.login.assert_not_called()
+    mechanism, authobject = conn.authenticate.call_args.args
+    assert mechanism == "XOAUTH2"
+    assert authobject(b"") == b"user=support@acme.com\x01auth=Bearer tok-1\x01\x01"
+
+
+def test_connect_still_uses_a_password_login_when_no_token_provider_is_given():
+    conn = _mock_imap_conn()
+    backend = _ImapBackend(host="imap.example.com", user="u", password="p")
+
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        backend._connect()
+
+    conn.login.assert_called_once_with("u", "p")
+    conn.authenticate.assert_not_called()
+
+
+def test_a_backend_needs_exactly_one_of_password_or_token_provider():
+    with pytest.raises(ConfigurationError, match="neither"):
+        _ImapBackend(host="h", user="u")
+    with pytest.raises(ConfigurationError, match="both"):
+        _ImapBackend(host="h", user="u", password="p", token_provider=_StubTokenProvider())
+
+
+def test_a_token_failure_is_raised_before_any_socket_is_opened():
+    """A credential problem must not leave a connection dangling, and its error
+    is about credentials rather than connectivity -- so it stays a token error
+    instead of being remapped to a sign-in-refused message."""
+    backend = _ImapBackend(
+        host="outlook.office365.com", user="support@acme.com",
+        token_provider=_StubTokenProvider(error=ConfigurationError("AADSTS7000215: bad secret")),
+    )
+
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL") as imap:
+        with pytest.raises(ConfigurationError, match="AADSTS7000215"):
+            backend._connect()
+    imap.assert_not_called()
+
+
+def test_a_refused_xoauth2_exchange_is_reported_as_a_refused_sign_in():
+    conn = _mock_imap_conn()
+    conn.authenticate.side_effect = imaplib.IMAP4.error("AUTHENTICATE failed")
+    backend = _ImapBackend(
+        host="outlook.office365.com", user="support@acme.com",
+        token_provider=_StubTokenProvider(),
+    )
+
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        with pytest.raises(ConfigurationError, match="refused"):
+            backend._connect()

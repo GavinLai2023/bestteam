@@ -26,6 +26,7 @@ from typing import Any, Dict
 from cryptography.fernet import InvalidToken
 from sqlalchemy.orm import Session
 
+from bestteam.tools._oauth import MicrosoftClientCredentialsToken
 from bestteam.tools.email_client import (
     _ImapBackend,
     email_draft_reply,
@@ -35,7 +36,7 @@ from bestteam.tools.email_client import (
 )
 
 from . import secret_store
-from .db.email_credentials import get_email_credentials
+from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 
 _logger = logging.getLogger(__name__)
 
@@ -128,17 +129,32 @@ def _fixed_message_tools(message: str) -> Dict[str, Any]:
 def build_org_imap_backend(db: Session, org_id: int):
     """The org's IMAP backend from stored credentials, or None if unconnected.
 
-    Decrypts the password; raises secret_store.SecretsKeyError / InvalidToken on
-    a bad/rotated key (the caller decides how to surface that).
+    Decrypts the stored secret; raises secret_store.SecretsKeyError /
+    InvalidToken on a bad/rotated key (the caller decides how to surface that).
+    `auth_type` chooses how the connection authenticates -- Exchange Online
+    mailboxes use an app-only OAuth token because basic auth is gone there.
     """
     cred = get_email_credentials(db, org_id)
     if cred is None:
         return None
-    password = secret_store.decrypt(cred.password_encrypted)
+    secret = secret_store.decrypt(cred.password_encrypted)
+    if cred.auth_type == AUTH_MICROSOFT_OAUTH:
+        return _ImapBackend(
+            host=cred.host,
+            user=cred.username,
+            port=cred.port,
+            drafts=cred.drafts_folder,
+            restrict_to_public=True,
+            token_provider=MicrosoftClientCredentialsToken(
+                tenant_id=cred.oauth_tenant_id or "",
+                client_id=cred.oauth_client_id or "",
+                client_secret=secret,
+            ),
+        )
     return _ImapBackend(
         host=cred.host,
         user=cred.username,
-        password=password,
+        password=secret,
         port=cred.port,
         drafts=cred.drafts_folder,
         restrict_to_public=True,  # customer-supplied host: validate + pin on connect

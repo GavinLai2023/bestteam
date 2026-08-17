@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import type { OrgEmailStatus } from '../lib/types'
+import type { OrgEmailAuthType, OrgEmailConnectPayload, OrgEmailStatus } from '../lib/types'
 
 interface EmailConnectProps {
   onChange?: () => void
@@ -8,11 +8,20 @@ interface EmailConnectProps {
 }
 
 interface EmailForm {
+  authType: OrgEmailAuthType
   host: string
   username: string
   password: string
+  tenantId: string
+  clientId: string
+  clientSecret: string
   port: number | string
   drafts: string
+}
+
+const EMPTY_FORM: EmailForm = {
+  authType: 'password', host: '', username: '', password: '',
+  tenantId: '', clientId: '', clientSecret: '', port: 993, drafts: '',
 }
 
 // Connect / test / rotate / disconnect the org's mailbox for the email tools.
@@ -24,7 +33,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
   const [status, setStatus] = useState<OrgEmailStatus | null>(null) // {connected, host, username, ...} | null
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState<EmailForm>({ host: '', username: '', password: '', port: 993, drafts: '' })
+  const [form, setForm] = useState<EmailForm>(EMPTY_FORM)
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'' | 'test' | 'save' | 'clear'>('')
@@ -55,10 +64,17 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
   const field = (k: keyof EmailForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value })
 
-  const payload = () => ({
-    host: form.host.trim(),
+  const isM365 = form.authType === 'microsoft_oauth'
+
+  const payload = (): OrgEmailConnectPayload => ({
+    auth_type: form.authType,
+    // Fixed server-side for Microsoft 365; sending '' says so honestly.
+    host: isM365 ? '' : form.host.trim(),
     username: form.username.trim(),
-    password: form.password,
+    password: isM365 ? null : form.password,
+    client_secret: isM365 ? form.clientSecret : null,
+    oauth_tenant_id: isM365 ? form.tenantId.trim() : null,
+    oauth_client_id: isM365 ? form.clientId.trim() : null,
     port: Number(form.port) || 993,
     drafts: form.drafts.trim() || null,
   })
@@ -79,7 +95,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
     try {
       await api.setOrgEmail(payload())
       setEditing(false)
-      setForm({ host: '', username: '', password: '', port: 993, drafts: '' })
+      setForm(EMPTY_FORM)
       setTestResult(null)
       await refresh()
       onChange?.()
@@ -108,9 +124,12 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
   const startReconnect = () => {
     if (!status) return
     setForm({
+      ...EMPTY_FORM,
+      authType: status.auth_type || 'password',
       host: status.host || '',
       username: status.username || '',
-      password: '',
+      tenantId: status.oauth_tenant_id || '',
+      clientId: status.oauth_client_id || '',
       port: status.port || 993,
       drafts: status.drafts || '',
     })
@@ -135,7 +154,9 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
     )
   }
 
-  const canSubmit = form.host.trim() && form.username.trim() && form.password
+  const canSubmit = isM365
+    ? form.username.trim() && form.tenantId.trim() && form.clientId.trim() && form.clientSecret
+    : form.host.trim() && form.username.trim() && form.password
 
   return (
     <div className="wizard-card" style={{ background: '#f9fafb' }}>
@@ -161,18 +182,68 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
         </>
       ) : (
         <>
-          <div className="field">
-            <label htmlFor="ec-host">IMAP server</label>
-            <input id="ec-host" type="text" value={form.host} onChange={field('host')} placeholder="imap.gmail.com" />
-          </div>
-          <div className="field">
-            <label htmlFor="ec-user">Email address / username</label>
-            <input id="ec-user" type="text" value={form.username} onChange={field('username')} placeholder="you@example.com" />
-          </div>
-          <div className="field">
-            <label htmlFor="ec-pass">App password</label>
-            <input id="ec-pass" type="password" value={form.password} onChange={field('password')} autoComplete="off" />
-          </div>
+          <fieldset className="field">
+            <legend>How is this mailbox hosted?</legend>
+            <label htmlFor="ec-auth-password">
+              <input
+                id="ec-auth-password" type="radio" name="ec-auth" value="password"
+                checked={!isM365}
+                onChange={() => setForm({ ...form, authType: 'password' })}
+              />{' '}
+              Standard mailbox (IMAP) — Gmail, and most providers
+            </label>
+            <label htmlFor="ec-auth-m365">
+              <input
+                id="ec-auth-m365" type="radio" name="ec-auth" value="microsoft_oauth"
+                checked={isM365}
+                onChange={() => setForm({ ...form, authType: 'microsoft_oauth' })}
+              />{' '}
+              Microsoft 365 / Outlook (Exchange Online)
+            </label>
+          </fieldset>
+
+          {isM365 ? (
+            <>
+              <p className="hint">
+                Microsoft 365 no longer allows app passwords, so this connects through an
+                app registration instead. Ask your IT administrator to register an app in
+                Azure, grant it the <strong>IMAP.AccessAsApp</strong> permission with admin
+                consent, and give it access to this mailbox in Exchange Online. They will
+                then have the three values below.
+              </p>
+              <div className="field">
+                <label htmlFor="ec-user">Email address</label>
+                <input id="ec-user" type="text" value={form.username} onChange={field('username')} placeholder="support@yourcompany.com" />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-tenant">Directory (tenant) ID</label>
+                <input id="ec-tenant" type="text" value={form.tenantId} onChange={field('tenantId')} />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-client">Application (client) ID</label>
+                <input id="ec-client" type="text" value={form.clientId} onChange={field('clientId')} />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-secret">Client secret</label>
+                <input id="ec-secret" type="password" value={form.clientSecret} onChange={field('clientSecret')} autoComplete="off" />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="ec-host">IMAP server</label>
+                <input id="ec-host" type="text" value={form.host} onChange={field('host')} placeholder="imap.gmail.com" />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-user">Email address / username</label>
+                <input id="ec-user" type="text" value={form.username} onChange={field('username')} placeholder="you@example.com" />
+              </div>
+              <div className="field">
+                <label htmlFor="ec-pass">App password</label>
+                <input id="ec-pass" type="password" value={form.password} onChange={field('password')} autoComplete="off" />
+              </div>
+            </>
+          )}
 
           <button
             type="button"
@@ -185,6 +256,8 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
 
           {showAdvanced && (
             <>
+              {/* Exchange Online is always 993, so there is nothing to choose. */}
+              {!isM365 && (
               <div className="field">
                 <label htmlFor="ec-port">IMAP port</label>
                 {/* type=number changes on mouse-wheel scroll; blur on wheel so a
@@ -201,6 +274,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
                 />
                 <p className="hint">Almost always 993 — leave as-is unless your email provider says otherwise.</p>
               </div>
+              )}
               <div className="field">
                 <label htmlFor="ec-drafts">Drafts folder</label>
                 <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder="Leave blank" />

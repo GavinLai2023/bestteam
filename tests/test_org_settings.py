@@ -523,3 +523,140 @@ def test_a_working_mailbox_still_saves(client, monkeypatch):
     resp = client.put("/api/org/email", json=_creds())
     assert resp.status_code == 200
     assert client.get("/api/org/email").json()["connected"] is True
+
+
+# --- Microsoft 365 mailboxes -------------------------------------------------
+
+_OAUTH_BODY = {
+    "auth_type": "microsoft_oauth",
+    "username": "support@acme.com",
+    "client_secret": "shh",
+    "oauth_tenant_id": "tenant-1",
+    "oauth_client_id": "client-1",
+}
+
+
+def _working_token(monkeypatch):
+    """Patch the token provider so it issues a token without any network."""
+    provider = type("_P", (), {"token": lambda self: "tok-1"})()
+    monkeypatch.setattr(org_settings, "MicrosoftClientCredentialsToken", lambda **kw: provider)
+    return provider
+
+
+def _failing_token(monkeypatch, message):
+    def _make(**kw):
+        raise_exc = ConfigurationError(message)
+
+        class _P:
+            def token(self):
+                raise raise_exc
+
+        return _P()
+
+    monkeypatch.setattr(org_settings, "MicrosoftClientCredentialsToken", _make)
+
+
+def test_connecting_a_microsoft_mailbox_stores_the_oauth_identifiers(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+
+    resp = client.put("/api/org/email", json=_OAUTH_BODY)
+    assert resp.status_code == 200
+
+    got = client.get("/api/org/email").json()
+    assert got["auth_type"] == "microsoft_oauth"
+    assert got["oauth_tenant_id"] == "tenant-1"
+    assert got["oauth_client_id"] == "client-1"
+    # Fixed server-side: the OAuth scope is bound to this host.
+    assert got["host"] == "outlook.office365.com"
+    # The secret is never echoed back, in any field.
+    assert "shh" not in str(got) and "shh" not in resp.text
+    with open_test_db() as db:
+        cred = get_email_credentials(db, get_or_create_org(db, "default").id)
+        assert cred.password_encrypted != "shh"
+
+
+def test_a_client_supplied_host_is_discarded_for_a_microsoft_mailbox(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+
+    client.put("/api/org/email", json={**_OAUTH_BODY, "host": "evil.example.com"})
+    assert client.get("/api/org/email").json()["host"] == "outlook.office365.com"
+
+
+@pytest.mark.parametrize("missing", ["client_secret", "oauth_tenant_id", "oauth_client_id"])
+def test_a_microsoft_mailbox_needs_every_oauth_field(client, missing):
+    body = {k: v for k, v in _OAUTH_BODY.items() if k != missing}
+    assert client.put("/api/org/email", json=body).status_code == 422
+
+
+def test_a_microsoft_mailbox_rejects_a_password(client):
+    assert client.put("/api/org/email", json={**_OAUTH_BODY, "password": "p"}).status_code == 422
+
+
+def test_a_password_mailbox_rejects_stray_oauth_fields(client):
+    assert client.put("/api/org/email", json={
+        "host": "imap.example.com", "username": "u", "password": "p",
+        "oauth_tenant_id": "tenant-1",
+    }).status_code == 422
+
+
+def test_the_existing_password_body_still_works_unchanged(client, monkeypatch):
+    """An older client posts no auth_type at all; it must keep working."""
+    _bypass_ssrf(monkeypatch)
+    resp = client.put("/api/org/email", json={
+        "host": "imap.example.com", "username": "u", "password": "p",
+        "port": 993, "drafts": None,
+    })
+    assert resp.status_code == 200
+    assert client.get("/api/org/email").json()["auth_type"] == "password"
+
+
+def test_a_bad_client_secret_is_reported_as_an_application_problem(client, monkeypatch):
+    """A token failure and a mailbox-access failure have completely different
+    fixes, and by Microsoft's message alone they are not tellable apart -- so
+    they are told apart by which step failed."""
+    _bypass_ssrf(monkeypatch)
+    _failing_token(monkeypatch, "Microsoft rejected the application's sign-in (401): "
+                                "AADSTS7000215: Invalid client secret provided.")
+
+    body = client.post("/api/org/email/test", json=_OAUTH_BODY).json()
+    assert body["ok"] is False
+    assert "client secret" in body["error"].lower()
+    assert "app password" not in body["error"].lower(), "password advice is wrong here"
+
+
+def test_an_unknown_tenant_is_reported_as_a_tenant_problem(client, monkeypatch):
+    _bypass_ssrf(monkeypatch)
+    _failing_token(monkeypatch, "Microsoft rejected the application's sign-in (400): "
+                                "AADSTS90002: Tenant 'nope' not found.")
+
+    assert "Directory (tenant) ID" in client.post(
+        "/api/org/email/test", json=_OAUTH_BODY
+    ).json()["error"]
+
+
+def test_a_working_token_with_a_refused_mailbox_names_the_exchange_setup(client, monkeypatch):
+    """The most likely outcome of a half-finished Azure setup, and the one that
+    is useless without a specific message."""
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+    _FakeBackend.ok = False  # _connect() raises: the token was fine, access was not
+
+    error = client.post("/api/org/email/test", json=_OAUTH_BODY).json()["error"]
+    assert "Add-MailboxPermission" in error
+    assert "IMAP.AccessAsApp" in error
+    assert "support@acme.com" in error
+
+
+def test_a_microsoft_mailbox_is_not_stored_when_its_drafts_folder_is_unusable(
+    client, monkeypatch
+):
+    """The Phase 0 guarantee holds for both auth types: a mailbox that can't
+    hold a draft must not look connected."""
+    _bypass_ssrf(monkeypatch)
+    _working_token(monkeypatch)
+    _FakeBackend.drafts_ok = False
+
+    assert client.put("/api/org/email", json=_OAUTH_BODY).status_code == 400
+    assert client.get("/api/org/email").json() == {"connected": False}

@@ -531,3 +531,67 @@ def test_create_org_rejects_dot_segments(session_local):
         for name in (".", ".."):
             with pytest.raises(ValueError):
                 create_org(db, name)
+
+
+# ---------------------------------------------------------------------------
+# Microsoft 365 mailboxes (set-email --auth microsoft-oauth)
+# ---------------------------------------------------------------------------
+
+def test_set_email_stores_a_microsoft_oauth_mailbox(session_local, secrets_key, monkeypatch):
+    from ui.backend import secret_store
+    from ui.backend.db.email_credentials import (
+        AUTH_MICROSOFT_OAUTH,
+        MICROSOFT_IMAP_HOST,
+        get_email_credentials,
+    )
+
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch, "the-client-secret")
+
+    assert admin_cli.main([
+        "set-email", "acme", "--auth", "microsoft-oauth", "--user", "support@acme.com",
+        "--tenant", "tenant-1", "--client-id", "client-1",
+    ]) == 0
+
+    with session_local() as db:
+        cred = get_email_credentials(db, get_org_by_name(db, "acme").id)
+        assert cred.auth_type == AUTH_MICROSOFT_OAUTH
+        # The host is not asked for: Exchange Online's endpoint is fixed.
+        assert cred.host == MICROSOFT_IMAP_HOST
+        assert cred.oauth_tenant_id == "tenant-1"
+        assert cred.oauth_client_id == "client-1"
+        assert secret_store.decrypt(cred.password_encrypted) == "the-client-secret"
+
+
+def test_set_email_microsoft_oauth_requires_the_entra_identifiers(
+    session_local, secrets_key, monkeypatch, capsys
+):
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    with pytest.raises(SystemExit):
+        admin_cli.main([
+            "set-email", "acme", "--auth", "microsoft-oauth", "--user", "support@acme.com",
+        ])
+    assert "--tenant" in capsys.readouterr().err
+
+
+def test_set_email_password_auth_still_requires_a_host(
+    session_local, secrets_key, monkeypatch, capsys
+):
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    with pytest.raises(SystemExit):
+        admin_cli.main(["set-email", "acme", "--user", "u"])
+    assert "--host" in capsys.readouterr().err
+
+
+def test_set_email_rejects_entra_identifiers_on_a_password_mailbox(
+    session_local, secrets_key, monkeypatch, capsys
+):
+    admin_cli.main(["create-org", "acme"])
+    _patch_password(monkeypatch)
+    with pytest.raises(SystemExit):
+        admin_cli.main([
+            "set-email", "acme", "--host", "h", "--user", "u", "--tenant", "tenant-1",
+        ])
+    assert "microsoft-oauth" in capsys.readouterr().err

@@ -180,12 +180,54 @@ connect themselves.
 docker compose exec backend python -m ui.backend.admin set-email acme \
   --host imap.gmail.com --user support@acme.com --test
 
+# Microsoft 365 / Exchange Online (prompts for the client secret). No --host:
+# Exchange Online's IMAP endpoint is fixed. See "Microsoft 365 mailboxes" below
+# for what your customer's IT has to set up first.
+docker compose exec backend python -m ui.backend.admin set-email acme \
+  --auth microsoft-oauth --user support@acme.com \
+  --tenant <directory-id> --client-id <application-id> --test
+
 # Disconnect:
 docker compose exec backend python -m ui.backend.admin clear-email acme
 ```
 
-IMAP only for now (Microsoft Graph / OAuth per-org are future work). This is
-the multi-tenant path; the process-wide `BESTTEAM_EMAIL_*` env vars remain the
+### Microsoft 365 mailboxes
+
+Exchange Online no longer accepts basic authentication, so an app password does
+not exist for these mailboxes and the standard IMAP option will always be
+rejected. They connect with app-only OAuth instead (SASL XOAUTH2 over IMAP).
+
+The setup happens once, in the **customer's own Azure tenant** — the platform
+cannot do it for them:
+
+1. Register an application in Entra ID (Azure AD). Note the **Directory
+   (tenant) ID** and **Application (client) ID**, and create a **client
+   secret**.
+2. Add the API permission **Office 365 Exchange Online → Application →
+   `IMAP.AccessAsApp`**, and grant admin consent.
+3. In Exchange Online PowerShell, register the service principal and give it
+   access to the one mailbox:
+   ```powershell
+   New-ServicePrincipal -AppId <client-id> -ServiceId <object-id>
+   Add-MailboxPermission -Identity <mailbox> -User <object-id> -AccessRights FullAccess
+   ```
+4. Recommended: restrict the app to that single mailbox with an Exchange
+   **Application Access Policy**, so the credentials cannot reach any other
+   mailbox in the tenant.
+
+The customer then enters the mailbox address, tenant ID, client ID and client
+secret in the wizard (or you run the `--auth microsoft-oauth` command above).
+The client secret is encrypted with `BESTTEAM_SECRETS_KEY` exactly like an IMAP
+password. **Azure client secrets expire** (typically 6–24 months): when one
+does, every automatic run for that org starts failing with a mailbox-kind error
+on the Automations page, and the fix is to create a new secret and reconnect.
+
+If a connection attempt fails, the error distinguishes the two causes, which
+have different fixes: a rejected *token* means the tenant/client ID or the
+secret is wrong; a token that works but a refused *mailbox* means step 2 or 3
+is incomplete.
+
+This is the multi-tenant path; the process-wide `BESTTEAM_EMAIL_*` env vars remain the
 single-mailbox path for the SDK/CLI and single-customer deployments, and stay
 **refused** on a multi-org deployment (one mailbox can't be shared safely
 across tenants). An org with no mailbox connected gets a clear "no mailbox

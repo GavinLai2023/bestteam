@@ -266,6 +266,31 @@ class _PinnedIMAP4_SSL(imaplib.IMAP4_SSL):
         return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
 
 
+def _xoauth2_authobject(user: str, access_token: str):
+    """SASL XOAUTH2 exchange: the client-first response, then an empty line.
+
+    ``imaplib._Authenticator`` base64-*decodes* the server's continuation before
+    calling this and base64-*encodes* whatever comes back, and ``authenticate()``
+    invokes it on the server's first continuation — so the client-first initial
+    response is delivered by returning it from the first call, the same path
+    ``imaplib.login_cram_md5`` relies on.
+
+    On rejection Exchange sends a base64 JSON error and waits for an empty client
+    response before issuing the tagged NO; returning b"" there lets the exchange
+    finish instead of stalling until the socket timeout.
+    """
+    initial = f"user={user}\x01auth=Bearer {access_token}\x01\x01".encode()
+    state = {"sent": False}
+
+    def authobject(_challenge: bytes) -> bytes:
+        if state["sent"]:
+            return b""
+        state["sent"] = True
+        return initial
+
+    return authobject
+
+
 class _ImapBackend:
     """Read + draft against any IMAP server. Drafts only — no SMTP anywhere."""
 
@@ -274,14 +299,25 @@ class _ImapBackend:
         *,
         host: str,
         user: str,
-        password: str,
+        password: Optional[str] = None,
         port: int = 993,
         drafts: Optional[str] = None,
         restrict_to_public: bool = False,
+        token_provider: Any = None,
     ) -> None:
+        # Exactly one credential: a password (basic auth) or a token provider
+        # (OAuth / SASL XOAUTH2, which is all Exchange Online still accepts).
+        # Caught here rather than at connect time so a miswired caller fails
+        # where it is wrong.
+        if (password is None) == (token_provider is None):
+            raise ConfigurationError(
+                "_ImapBackend needs exactly one of `password` or `token_provider`, got "
+                + ("both" if password is not None else "neither")
+            )
         self._host = host
         self._user = user
         self._password = password
+        self._token_provider = token_provider
         self._port = port
         self._drafts_override = (drafts or "").strip() or None
         # Customer-supplied hosts (per-org store) validate + pin to a public IP
@@ -316,6 +352,10 @@ class _ImapBackend:
         )
 
     def _connect(self):
+        # Fetch the OAuth token before dialling: a credential problem should not
+        # leave a socket open, and it is a credential error rather than a
+        # connectivity one, so it must not be remapped below.
+        access_token = None if self._token_provider is None else self._token_provider.token()
         # Verify the server's certificate against the hostname (an explicit
         # default context; imaplib's fallback does not verify), and bound every
         # socket operation so a stalled server can't pin a worker forever.
@@ -337,12 +377,23 @@ class _ImapBackend:
             )
         # Retry only network-level connect errors; auth errors fail fast.
         conn = with_retry(factory, retriable_exc=(OSError,))
-        try:
-            conn.login(self._user, self._password)
-        except imaplib.IMAP4.error as exc:
-            raise ConfigurationError(
-                f"IMAP login to '{self._host}' as '{self._user}' failed: {exc}"
-            ) from exc
+        if access_token is None:
+            try:
+                conn.login(self._user, self._password)
+            except imaplib.IMAP4.error as exc:
+                raise ConfigurationError(
+                    f"IMAP login to '{self._host}' as '{self._user}' failed: {exc}"
+                ) from exc
+        else:
+            try:
+                conn.authenticate("XOAUTH2", _xoauth2_authobject(self._user, access_token))
+            except imaplib.IMAP4.error as exc:
+                # The token was issued, so the app's identity is fine; what was
+                # refused is this app's access to this mailbox.
+                raise ConfigurationError(
+                    f"Microsoft refused the app's sign-in to the mailbox "
+                    f"'{self._user}': {exc}"
+                ) from exc
         return conn
 
     def find(self, query: str) -> List[Dict[str, Any]]:

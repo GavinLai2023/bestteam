@@ -357,7 +357,64 @@ A personal Microsoft account can't be tested with the toolkit as it stands:
 - **Graph backend:** the app-only client-credentials flow requires an Azure
   AD tenant you control; a personal Hotmail isn't in such a tenant.
 
-Supporting personal Outlook.com would require adding **XOAUTH2** (OAuth
-bearer-token auth) to the IMAP backend — a real feature, not a config change.
-It is not on the current roadmap; use Gmail (or a work M365 mailbox) to run
-this test.
+XOAUTH2 now exists in the IMAP backend (see the next section), but only with
+the **app-only client-credentials** grant, which needs an Azure tenant. A
+personal account would need the *delegated* authorisation-code flow instead,
+which is not built. Use Gmail (or a work M365 mailbox) to run this test.
+
+---
+
+## 9. Microsoft 365 / Exchange Online mailbox (per-org, OAuth)
+
+**This section is the only verification that a live Exchange Online tenant
+accepts this flow.** Every test in the repository runs against fakes: they
+prove the SASL string, the token lifecycle, the storage round-trip and the
+error mapping, but nothing in CI can prove that Microsoft accepts the resulting
+`AUTHENTICATE XOAUTH2`. Run this before selling M365 support to a customer.
+
+Budget ~30 minutes, most of it the Azure setup.
+
+### 9.1 Set up the app registration
+
+Follow `docs/deployment.md` → "Microsoft 365 mailboxes", steps 1–4. You need a
+work/school M365 tenant you administer, and a test mailbox in it.
+
+### 9.2 Connect it in the wizard
+
+1. Log in as an org member and reach the "Connect your mailbox" step.
+2. Choose **Microsoft 365 / Outlook (Exchange Online)**. Confirm the server
+   address and port fields disappear.
+3. Enter the mailbox address, Directory (tenant) ID, Application (client) ID
+   and client secret, then **Test connection**.
+
+### 9.3 Confirm each failure mode says something actionable
+
+Each of these has a different fix, so each must produce a different message.
+Test them by changing one value at a time:
+
+| Change | Expected message |
+|---|---|
+| Wrong client secret | names the Application (client) ID / client secret |
+| Wrong tenant ID | names the Directory (tenant) ID |
+| Correct credentials, but skip `Add-MailboxPermission` | names `IMAP.AccessAsApp`, `New-ServicePrincipal` and `Add-MailboxPermission` |
+| Mailbox address not in the tenant | the same access message, naming that address |
+
+The third row is the important one — a working token with a refused mailbox is
+the likeliest outcome of a half-finished setup, and it is indistinguishable
+from a wrong secret unless the message says so.
+
+### 9.4 Run the triage end to end
+
+With the mailbox connected, repeat sections 5–7 above against it: send a test
+message to the mailbox, run the email team, and confirm a reply **draft**
+appears in its Drafts folder and **nothing is sent**. Then enable the automatic
+trigger and confirm a new message starts a run on its own.
+
+Watch for two things specific to this path:
+
+- **Drafts folder resolution.** Exchange Online reports its Drafts folder via
+  SPECIAL-USE, but a mailbox with a localised display name is worth confirming.
+- **Token refresh.** Leave the trigger running for over an hour and confirm
+  runs still succeed. The access token lasts about an hour and is refreshed
+  60 seconds before it expires; a stall at the one-hour mark would mean the
+  refresh is not happening.

@@ -184,3 +184,51 @@ Append new entries at the bottom using this template:
     silent scope-creep of the email-automation feature. See
     `docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`
     section 5.
+
+## Email: OAuth over IMAP for Microsoft 365, not a Graph connector
+
+- **Status**: Accepted (2026-08-17)
+- **Context**: Exchange Online no longer accepts basic authentication, so an
+  M365 org could not connect a mailbox at all — `build_org_imap_backend` only
+  ever built a password login. The email roadmap's Phase 2 named a
+  "MailboxConnector abstraction + Graph/Gmail OAuth".
+- **Decision**: Reach Exchange Online through IMAP with SASL XOAUTH2 and
+  app-only client credentials, stored per org. No connector protocol, no
+  Graph-native code, no Gmail, no interactive authorisation-code OAuth.
+- **Reasons**:
+  - The roadmap item optimised for the abstraction rather than the blocker.
+    Graph-native would mean a second polling implementation (delta queries), a
+    second draft implementation, and migrating `EmailTrigger.last_uid`/
+    `uidvalidity` to opaque cursors — and it would *regress* Phase 0, because
+    Graph's server-side `createReply` cannot carry the `X-BestTeam-Source-Key`
+    header that retry reconciliation reads from the Drafts folder.
+  - XOAUTH2 changes one function. Everything above `_connect()` — the UID
+    cursor, drafts resolution, the source-key headers, Phase 1's event ledger,
+    the whole of `email_trigger.py` — is untouched, because after
+    `AUTHENTICATE` succeeds the session is an ordinary authenticated IMAP
+    session.
+  - A `MailboxConnector` protocol would abstract over one and a half
+    implementations (`_ImapBackend`, plus a `_GraphBackend` the multi-tenant
+    path still would not use). The right time to extract it is while writing a
+    genuine second connector, so it is derived from two real ones rather than
+    invented ahead of one.
+  - Gmail is not blocked — app passwords still authenticate there. App-only
+    Gmail needs a service account with domain-wide delegation, covering every
+    mailbox in the customer's domain: a strictly worse blast radius than
+    Exchange's per-mailbox Application Access Policy, for a customer who is not
+    blocked.
+  - Interactive OAuth needs a multi-tenant app registration this project would
+    own and a stable public HTTPS redirect URI. bestteam ships per-customer
+    with operator-provisioned orgs and no public registration (see "org-scoped
+    multi-tenancy" above), so app-only credentials stored per org fit the
+    existing model with no new infrastructure.
+  - The token provider is stdlib `urllib`, not httpx: the per-org IMAP path has
+    no third-party HTTP dependency today and `backend-optional-deps` runs
+    without optional extras.
+- **Consequences**: Customers must do a one-time Azure app registration
+  (`docs/deployment.md` → "Microsoft 365 mailboxes"); the platform cannot do it
+  for them. No test can prove a live tenant accepts the flow, so
+  `docs/email-smoke-test.md` §9 is the gate before selling M365 support. If
+  Graph-native ever becomes necessary, nothing here blocks it — but it should
+  be justified by a capability Graph has and IMAP lacks, not by the connector
+  abstraction on its own.

@@ -1,7 +1,7 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
-  ModelCatalogEntry, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  ModelCatalogEntry, OrgEmailConnectPayload, OrgEmailStatus, RunListItem, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -373,9 +373,9 @@ export const api = {
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),
-  setOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
+  setOrgEmail: (payload: OrgEmailConnectPayload) =>
     request<OrgEmailStatus>('/api/org/email', { method: 'PUT', body: JSON.stringify(payload) }),
-  testOrgEmail: (payload: { host: string; username: string; password: string; port: number; drafts: string | null }) =>
+  testOrgEmail: (payload: OrgEmailConnectPayload) =>
     request<{ ok: boolean; error?: string }>('/api/org/email/test', { method: 'POST', body: JSON.stringify(payload) }),
   clearOrgEmail: () => request<void>('/api/org/email', { method: 'DELETE' }),
 

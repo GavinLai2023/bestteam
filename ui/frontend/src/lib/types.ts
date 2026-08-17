@@ -191,12 +191,31 @@ export interface EmailTrigger {
   last_checked_at?: string | null
 }
 
+export type OrgEmailAuthType = 'password' | 'microsoft_oauth'
+
 export interface OrgEmailStatus {
   connected: boolean
   host?: string
   username?: string
   port?: number
   drafts?: string | null
+  auth_type?: OrgEmailAuthType
+  oauth_tenant_id?: string | null
+  oauth_client_id?: string | null
+}
+
+// The mailbox connect/test body. `password` and the three OAuth fields are
+// mutually exclusive; the backend rejects a mix.
+export interface OrgEmailConnectPayload {
+  auth_type: OrgEmailAuthType
+  host: string
+  username: string
+  password: string | null
+  client_secret: string | null
+  oauth_tenant_id: string | null
+  oauth_client_id: string | null
+  port: number
+  drafts: string | null
 }
 
 export interface AdminOrg {

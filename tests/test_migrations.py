@@ -665,3 +665,48 @@ def test_workflow_dependencies_backfill_inline_kb_shadows_standalone(tmp_path, m
         )).scalar()
     engine.dispose()
     assert count == 0  # inline KB shadows the standalone -> no dependency row
+
+
+def test_the_oauth_credential_columns_upgrade_and_downgrade(tmp_path, monkeypatch):
+    """Existing password mailboxes must survive the upgrade as `password`."""
+    db_path = tmp_path / "oauth_credentials.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "h5i6j7k8l9m0")  # the revision before this one
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO organizations (name, display_name, active, created_at) "
+                "VALUES ('acme', 'Acme', 1, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO org_email_credentials "
+                "(org_id, backend, host, port, username, password_encrypted, "
+                " created_at, updated_at) "
+                "VALUES (1, 'imap', 'imap.example.com', 993, 'u', 'tok', "
+                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+
+        command.upgrade(cfg, "i6j7k8l9m0n1")
+        with engine.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT auth_type, oauth_tenant_id, oauth_client_id "
+                "FROM org_email_credentials WHERE org_id = 1"
+            )).one()
+        assert row.auth_type == "password"
+        assert row.oauth_tenant_id is None
+        assert row.oauth_client_id is None
+
+        command.downgrade(cfg, "h5i6j7k8l9m0")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("org_email_credentials")}
+        assert "auth_type" not in columns
+        assert "oauth_tenant_id" not in columns
+        # The row itself survives the round trip.
+        with engine.connect() as conn:
+            assert conn.execute(
+                sa.text("SELECT COUNT(*) FROM org_email_credentials")
+            ).scalar() == 1
+    finally:
+        engine.dispose()

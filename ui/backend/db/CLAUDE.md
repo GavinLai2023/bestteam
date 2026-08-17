@@ -139,6 +139,17 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   plaintext. CRUD in `db/email_credentials.py`; resolved at run time by
   `email_tools.load_email_tools`. The multi-tenant replacement for the
   process-wide `BESTTEAM_EMAIL_*` env vars.
+  `auth_type` is `'password'` or `'microsoft_oauth'` (Exchange Online no longer
+  accepts basic auth), with `oauth_tenant_id`/`oauth_client_id` holding the
+  Entra identifiers — those are identifiers, not secrets, and are stored in the
+  clear. **Load-bearing:** `password_encrypted` holds the mailbox password for
+  `'password'` and the Entra **client secret** for `'microsoft_oauth'` — one
+  encrypted column either way, so there is exactly one place a secret is
+  written and exactly one place `ensure_secrets_key_for_stored_credentials`
+  has to check at boot. A second secret column would be a second thing to
+  forget. `set_email_credentials` assigns every field unconditionally, so
+  switching a mailbox between auth types can't leave the previous type's
+  fields behind.
 - `email_triggers` — one org's autonomous new-mail trigger: opt-in flag +
   target `workflow_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
   daily-cap counters (`runs_today`/`runs_date`), overlap guard

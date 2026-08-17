@@ -372,7 +372,12 @@ class OrgEmailCredential(Base):
     running org's credentials (see `ui/backend/email_tools.py`). The password
     is encrypted at rest (`secret_store`); `password_encrypted` holds the
     Fernet token, never plaintext. One mailbox per org (unique `org_id`).
-    IMAP only for now (`backend='imap'`); Graph/OAuth are future work.
+
+    Always IMAP (`backend='imap'`); `auth_type` selects how it authenticates.
+    `password_encrypted` holds the mailbox password for `auth_type='password'`
+    and the Entra **client secret** for `auth_type='microsoft_oauth'` -- one
+    encrypted column either way, so there is exactly one place a secret is
+    written and one place `ensure_secrets_key_for_stored_credentials` checks.
     """
 
     __tablename__ = "org_email_credentials"
@@ -387,6 +392,14 @@ class OrgEmailCredential(Base):
     username: Mapped[str]
     password_encrypted: Mapped[str]
     drafts_folder: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # How this mailbox authenticates: "password" (mailbox / app password) or
+    # "microsoft_oauth" (Entra app-only client credentials, SASL XOAUTH2 over
+    # IMAP -- Exchange Online no longer accepts basic auth).
+    auth_type: Mapped[str] = mapped_column(default="password")
+    # Entra identifiers. Not secrets -- the client *secret* is what goes in
+    # `password_encrypted`. NULL for password auth.
+    oauth_tenant_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    oauth_client_id: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
