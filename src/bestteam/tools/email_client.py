@@ -768,6 +768,20 @@ def _attachment_records(msg: EmailMessage) -> List[Dict[str, Any]]:
 _OUT_OF_BATCH = "That message isn't part of this batch of new mail."
 
 
+def _one_line(text: Any) -> str:
+    """Flatten sender-chosen text before it is rendered into tool output.
+
+    An attachment filename is chosen by whoever sent the message, and a
+    newline in one survives `get_filename()` intact -- verified, not assumed:
+    RFC 2231 percent-encoding (`filename*=utf-8''bad%0Aline.pdf`) and an RFC
+    2047 encoded-word both round-trip one, though ordinary header folding is
+    normalised to a space. Rendered raw, that lets a sender forge extra lines
+    in the `Attachments (N):` block -- lines the model may weight as tool
+    output rather than as the message content it is told to distrust.
+    """
+    return str(text).replace("\r", " ").replace("\n", " ")
+
+
 def _format_summaries(messages) -> str:
     lines = []
     for m in messages:
@@ -805,7 +819,8 @@ def _read_impl(backend, message_id: str) -> str:
     manifest = ""
     if items:
         lines = "\n".join(
-            f"  - {item.get('filename')} ({item.get('content_type')}, "
+            f"  - {_one_line(item.get('filename'))} "
+            f"({_one_line(item.get('content_type'))}, "
             f"{max(1, (item.get('size') or 0) // 1024)} KB)"
             for item in items
         )
@@ -836,8 +851,10 @@ def _attachment_impl(backend, message_id: str, filename: str) -> str:
     if error:
         return error
     # The name the parser will dispatch on, so the check and the parse can't
-    # disagree. Suffix only -- nothing here resolves a path.
-    name = record.get("filename") or filename.strip()
+    # disagree. Suffix only -- nothing here resolves a path. Flattened for the
+    # same reason the manifest is: it is sender-chosen and lands in output the
+    # model reads. Replacing a newline with a space cannot change the suffix.
+    name = _one_line(record.get("filename") or filename.strip())
     suffix = Path(name).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         # Refused before parsing: an archive or an executable is never handed
