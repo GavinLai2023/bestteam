@@ -11,8 +11,8 @@
 # Draft-only end to end: only the Response Coordinator has email_draft_reply
 # (via its skill), and that tool only ever writes a Drafts-folder draft --
 # nothing in this workflow can send email. The Intake Analyst has
-# email_find/email_read (via its skill) but no draft tool, so it can read and
-# summarize but never act.
+# email_find/email_read/email_read_attachment (via its skill) but no draft
+# tool, so it can read and summarize but never act.
 
 name: property_maintenance_inbox_demo
 
