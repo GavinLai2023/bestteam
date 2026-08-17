@@ -145,6 +145,33 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`last_run_id`), and health (`last_checked_at`/`last_error`). Unique
   `org_id` — at most one auto-running team per org. CRUD in
   `db/email_triggers.py`; poll-state mutations in `ui/backend/email_trigger.py`.
+- `inbox_events` (`InboxEvent`) — the durable per-message ledger the email
+  poller writes (Phase 1). Detection records one `pending` row per detected
+  message **in the same commit that advances `email_triggers.last_uid`**, which
+  is the whole point: before this, the cursor advanced and the work existed
+  only inside a thread-pool submission, so a process killed in that window
+  consumed mail nothing ever ran. A run then *claims* rows (one atomic
+  `UPDATE ... WHERE status='pending'`), and the claimed rows' `external_id`s
+  are its batch — batching is a claim policy now, not a coupling.
+  Identity is `UniqueConstraint(org_id, connector_type, mailbox_identity,
+  mailbox_generation, external_id)`. `mailbox_generation` (the IMAP
+  UIDVALIDITY) is **in** the key because a UID is only meaningful within one:
+  after a mailbox rebuild, UID 7 is a different message and must not look like
+  a duplicate. It is `""` and **never NULL** — SQLite treats NULLs as distinct
+  in a UNIQUE constraint, so a nullable column would silently disable dedup for
+  any connector with no generation concept. Because the key makes re-insertion
+  a no-op, the cursor degrades from a correctness requirement to a performance
+  optimisation: losing it re-examines messages, never reprocesses them.
+  `status` is `pending | claimed | done | failed | filtered`; `attempts` is
+  charged at **dispatch**, never at claim, so a workflow that fails to *build*
+  releases its messages penalty-free and retries forever (a broken team config
+  must not dead-letter a day of an org's mail). `connector_type`/
+  `mailbox_generation`/`external_id` are deliberately connector-neutral for
+  Phase 2 (Graph/Gmail); `decision` and the `filtered` status are reserved for
+  Phase 4's pre-LLM filter and are never written today. CRUD in
+  `db/inbox_events.py` (nothing there commits — callers own the transaction
+  boundary, since the durability guarantee is the single commit).
+  See `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`.
 - `builder_sessions` — the wizard's session state machine. `status` is one
   of `intent | requirements | spec | solution | testing | deployed`
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/

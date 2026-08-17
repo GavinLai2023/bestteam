@@ -153,6 +153,52 @@ Five changes to the above:
    to that folder, so a login-only test passed mailboxes that failed on the
    first real draft.
 
+**Phase 1: the durable inbox ledger**
+(`docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`).
+Detection and execution are no longer the same act. `poll_org` records one
+`inbox_events` row per detected message **in the same commit that advances
+`last_uid`** (see `ui/backend/db/CLAUDE.md` for the schema), and
+`_start_triggered_run` then *claims* up to `BESTTEAM_TRIGGER_BATCH_SIZE` of
+them. This closes the window `_start_triggered_run` used to concede in its own
+docstring: it advanced the cursor, persisted the run row and burned the cap in
+one commit, then handed the workflow to a thread pool -- a process killed
+between those two points consumed the mail forever.
+
+The failure handling splits by class, which is the rule to keep in mind when
+touching any of it:
+
+- **Infrastructure-class** (dispatch failure, the stale-run watchdog, a build
+  failure, a trigger disabled mid-build): no model spend was incurred and the
+  messages are innocent, so `release_events` hands them back. These paths never
+  reach `runtime`, so they release at the site.
+- **Workflow-class** (anything reaching `runtime._maybe_normalize` -- the model
+  actually ran): `_safe_complete_inbox_events` marks the messages Phase 0's
+  `already_drafted_uids` proves a draft exists for as `done`, and the rest
+  `failed`, awaiting the existing human retry. That is today's product
+  behaviour, and it is why Phase 0's evidence layer is a dependency of Phase 1
+  rather than something it replaces.
+
+`attempts` is charged at **dispatch, never at claim**, so a build failure is
+penalty-free and a broken team config retries forever instead of dead-lettering
+an org's whole day of mail. `BESTTEAM_TRIGGER_MAX_EVENT_ATTEMPTS` (default 3,
+minimum 1, validated at startup) bounds the infrastructure-class retries; on
+exhaustion the message is dead-lettered and `trigger.last_error` says so,
+because nothing else would surface it. Detection is bounded at
+`BESTTEAM_TRIGGER_BATCH_SIZE * 10` rows per cycle so a long outage cannot open
+an unbounded transaction.
+
+Two consequences worth knowing before editing: `last_uid` is **no longer
+written by the CAS** in `_start_triggered_run` (detection already advanced it,
+past a superset of the claimed batch), and "no message was consumed" is now an
+assertion about event status, not about the cursor.
+
+**This does not make the poller multi-worker safe.** The claim is atomic, which
+removes one class of cross-process duplication, but `RunRegistry` is still
+in-process, so the overlap guard and cooperative cancellation still assume a
+single process and `_dispatch_lock` stays. Real horizontal scale-out is blocked
+on a Postgres migration -- `make_engine` hardcodes SQLite and takes a file path,
+not a URL.
+
 Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
 resolves the IMAP backend once per cycle and threads it into
 `build_trigger_workflow` instead of letting it re-fetch credentials

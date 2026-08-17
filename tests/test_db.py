@@ -50,6 +50,7 @@ def test_init_db_creates_all_tables():
         "workflow_dependencies",
         "builder_sessions",
         "email_triggers",
+        "inbox_events",
         "model_catalog",
         "runs",
         "trace_events",
