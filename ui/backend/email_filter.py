@@ -20,9 +20,12 @@ from email.utils import parseaddr
 from typing import Mapping, Optional, Tuple
 
 # Headers that mean "an automaton sent this, do not reply". `auto-submitted`
-# is checked for a value other than `none`, because RFC 3834 spells "this is
-# ordinary mail" as `Auto-Submitted: none` and filtering on the header's mere
-# presence would drop normal messages.
+# is checked for a value other than "ordinary mail", because RFC 3834 s5
+# spells that as `Auto-Submitted: no` (the other defined values are
+# `auto-generated` and `auto-replied`) and filtering on the header's mere
+# presence would drop normal messages. `none` is tolerated too: it is not the
+# RFC spelling, but a common malformation in the wild, and accepting it only
+# ever fails open -- the direction this module is required to fail.
 BULK_HEADERS: Tuple[str, ...] = (
     "auto-submitted",
     "precedence",
@@ -84,7 +87,7 @@ def _is_bulk(headers: Mapping[str, str]) -> Optional[str]:
         value = _header(headers, name).strip().lower()
         if not value:
             continue
-        if name == "auto-submitted" and value == "none":
+        if name == "auto-submitted" and value in ("no", "none"):
             continue
         if name == "precedence" and value not in _BULK_PRECEDENCE_VALUES:
             continue

@@ -40,10 +40,15 @@ def test_each_bulk_header_is_recognised(header, value):
     assert evaluate(_headers(**{header: value}), FilterSettings()) == f"bulk:{header}"
 
 
-def test_auto_submitted_none_is_not_bulk():
-    # RFC 3834: "no" is spelled `none`, and every ordinary message that sets
-    # the header at all sets it to that. Treating it as bulk would filter
-    # normal mail.
+def test_auto_submitted_no_is_the_rfc_spelling_of_ordinary_mail():
+    # RFC 3834 s5: the field body is `no` / `auto-generated` / `auto-replied`.
+    # Treating `no` as bulk would filter genuine mail.
+    assert evaluate(_headers(**{"auto-submitted": "no"}), FilterSettings()) is None
+
+
+def test_auto_submitted_none_is_tolerated_as_ordinary_too():
+    # Not the RFC spelling, but common in the wild -- and accepting it only
+    # ever fails open, which is the direction this module must fail.
     assert evaluate(_headers(**{"auto-submitted": "none"}), FilterSettings()) is None
 
 
@@ -65,6 +70,19 @@ def test_a_domain_wildcard_blocks_the_whole_domain():
 def test_pattern_matching_ignores_case_on_both_sides():
     settings = FilterSettings(sender_blocklist=("*@EXAMPLE.com",))
     assert evaluate(_headers(**{"from": "ALICE@Example.COM"}), settings) is not None
+
+
+def test_a_domain_wildcard_does_not_match_a_lookalike_domain():
+    # The `@` is retained when the `*` is stripped; without it, `*@example.com`
+    # would match `evil@notexample.com` and block an innocent sender.
+    settings = FilterSettings(sender_blocklist=("*@example.com",))
+    assert evaluate(_headers(**{"from": "evil@notexample.com"}), settings) is None
+    assert evaluate(_headers(**{"from": "real@example.com"}), settings) is not None
+
+
+def test_a_padded_pattern_still_matches():
+    settings = FilterSettings(sender_blocklist=("  *@example.com  ",))
+    assert evaluate(_headers(), settings) is not None
 
 
 def test_matching_uses_the_address_not_the_display_name():
