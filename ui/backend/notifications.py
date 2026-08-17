@@ -12,7 +12,7 @@ fixed by a human, not selected by an agent reading attacker-controlled mail.
 It is still validated with `check_host_allowed`, because in a multi-tenant
 deployment a tenant admin is not trusted to reach the host's internal network.
 
-Stdlib only (`urllib.request`), like `bestteam.tools._oauth`, so the per-org
+Stdlib only (`http.client`), like `bestteam.tools._oauth`, so the per-org
 email path still needs no optional extra.
 """
 
@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import logging
+import socket
+import ssl
 import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import Any, Dict, Optional
@@ -33,7 +35,7 @@ from sqlalchemy.orm import Session
 from bestteam.tools.http_client import check_host_allowed
 
 from . import secret_store
-from .db.models import Notification
+from .db.models import Notification, iso_utc
 from .db.notifications import (
     STATE_DELIVERED,
     STATE_FAILED,
@@ -105,14 +107,57 @@ def _payload(notification: Notification) -> Dict[str, Any]:
         "title": notification.title,
         "body": notification.body,
         "fingerprint": notification.fingerprint,
-        "created_at": created.isoformat() if created is not None else None,
+        # `iso_utc`, not bare `isoformat()`: SQLite round-trips the column
+        # tzinfo-naive, and a receiver parsing a bare timestamp reads it in its
+        # own timezone.
+        "created_at": iso_utc(created) if created is not None else None,
     }
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS that dials a pre-validated IP while verifying TLS against the
+    original hostname (SNI + certificate) -- the same pinning
+    `_PinnedIMAP4_SSL` uses for customer-supplied IMAP hosts (CR-023)."""
+
+    def __init__(self, host: str, port: int, *, pinned_ip: str, timeout: int) -> None:
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:  # noqa: D102 -- overrides HTTPSConnection
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
 def _post(url: str, body: bytes, headers: Dict[str, str]) -> int:
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+    """POST to `url`, connected to a just-validated IP, following no redirects.
+
+    `urlopen` would re-resolve the hostname and follow redirects, so the
+    address `check_host_allowed` approved need not be the address reached: a
+    tenant admin could point the webhook at a rebinding hostname, or at a
+    public endpoint that 302s to an internal one, and either walks straight
+    past the SSRF check. Both are closed by validating at connect time and
+    dialling the checked IP directly.
+
+    A 3xx therefore comes back as a 3xx, which `_deliver` treats as a failed
+    delivery: a webhook receiver that redirects is not supported.
+    """
+    parts = urlparse(url)
+    pinned_ip = check_host_allowed(parts.hostname or "")
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+
+    connection = _PinnedHTTPSConnection(
+        parts.hostname or "", parts.port or 443,
+        pinned_ip=pinned_ip, timeout=_TIMEOUT_SECONDS,
+    )
+    try:
+        connection.request("POST", path, body=body, headers=headers)
+        response = connection.getresponse()
+        response.read()  # drain, so the socket closes cleanly
         return int(response.status or 0)
+    finally:
+        connection.close()
 
 
 def _deliver(notification: Notification, url: str, secret: Optional[str]) -> None:

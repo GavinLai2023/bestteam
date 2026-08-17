@@ -141,6 +141,58 @@ def test_a_completed_run_clears_a_timeout_alert():
     assert [n.fingerprint for n in emitted] == ["run_timeout", "recovered"]
 
 
+def test_a_mailbox_recovery_does_not_announce_an_unfixed_workflow_fault():
+    # Both domains can be broken at once. A single remembered fingerprint let
+    # the mailbox fault overwrite the workflow one, so this mailbox recovery
+    # cleared it and announced a recovery that had not happened.
+    emitted = _fold(
+        [OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
+    )
+    assert [n.fingerprint for n in emitted] == ["workflow", "mailbox", "recovered"]
+    assert emitted[2].title == "Your mailbox is reachable again"
+
+
+def test_the_workflow_alert_survives_a_mailbox_alert_and_its_recovery():
+    decision = evaluate(
+        outcome=OUTCOME_MAILBOX_OK, consecutive_faults=6,
+        alerted_fingerprint="mailbox,workflow", threshold=3,
+    )
+    # Only the mailbox alert clears; the workflow fault is still outstanding,
+    # so it is neither re-announced later nor forgotten now.
+    assert decision.alerted_fingerprint == "workflow"
+
+
+def test_an_outstanding_workflow_alert_is_not_re_announced_after_that():
+    # Following on from the case above: the workflow fault was already
+    # reported and nothing about it changed, so it stays quiet.
+    emitted = _fold(
+        [OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
+        + [OUTCOME_WORKFLOW] * 3
+    )
+    assert [n.fingerprint for n in emitted] == ["workflow", "mailbox", "recovered"]
+
+
+def test_a_timeout_alert_survives_a_mailbox_fault_and_recovery():
+    # The reachable version of the same bug: a timeout is outstanding when the
+    # mailbox breaks and then comes back.
+    emitted = _fold([OUTCOME_TIMEOUT] + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
+                    + [OUTCOME_WORKFLOW_OK])
+    # The last outcome is what genuinely clears the timeout.
+    assert [n.fingerprint for n in emitted] == [
+        "run_timeout", "mailbox", "recovered", "recovered",
+    ]
+
+
+def test_a_single_stored_fingerprint_still_parses():
+    # Rows written before the outstanding set became a set.
+    decision = evaluate(
+        outcome=OUTCOME_MAILBOX_OK, consecutive_faults=3,
+        alerted_fingerprint="mailbox", threshold=3,
+    )
+    assert decision.alerted_fingerprint is None
+    assert decision.notification is not None
+
+
 def test_a_mailbox_success_does_not_reset_an_outstanding_workflow_streak():
     decision = evaluate(
         outcome=OUTCOME_MAILBOX_OK, consecutive_faults=4,

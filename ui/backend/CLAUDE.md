@@ -210,8 +210,13 @@ tested by folding a sequence of outcomes rather than by driving a mailbox.
 Two rules are load-bearing and easy to break by "simplifying":
 
 - **Alerts fire on transitions, not occurrences.** `alerted_fingerprint` is the
-  problem most recently *reported*; a condition already alerted for stays quiet
-  until it clears. Removing it turns every poll cycle into an alert.
+  *set* of problems currently reported, sorted and comma-joined into the one
+  column; a condition already alerted for stays quiet until it clears.
+  Removing it turns every poll cycle into an alert. It is a set because two
+  domains can be broken at once: when it held a single value, a mailbox fault
+  overwrote an outstanding workflow one and the next successful mailbox check
+  then cleared it and announced a recovery that had not happened. A
+  pre-existing single value parses as a one-element set, so no migration.
 - **Recovery is domain-specific.** `OUTCOME_MAILBOX_OK` clears only a `mailbox`
   alert; `OUTCOME_WORKFLOW_OK` clears `workflow` and `run_timeout`. A single
   generic "healthy" outcome would let a successful mailbox check clear a
@@ -228,10 +233,15 @@ late outcome is ignored), `email_trigger`'s connectivity check (mailbox), and
 `_release_stale_run` (timeout, which alerts immediately -- it has already been
 stuck for the full run timeout).
 
-`notifications.py` delivers. Stdlib `urllib` (no new dependency), HMAC-SHA256
-over the exact posted body, HTTPS + `check_host_allowed`, five attempts then
-`failed` (still readable in-app). Drained from the end of `poll_once`, not a
-thread of its own. **The payload carries health information only** -- adding a
+`notifications.py` delivers. Stdlib `http.client` (no new dependency),
+HMAC-SHA256 over the exact posted body, five attempts then `failed` (still
+readable in-app). HTTPS + `check_host_allowed` **at connect time, dialling the
+validated IP** (`_PinnedHTTPSConnection`) and following **no** redirects:
+`urlopen` re-resolved the hostname and followed redirects automatically, so a
+tenant admin could point a webhook at a rebinding host or a public URL that
+302s inward and walk past the SSRF check. Same pinning as `http_get` and the
+per-org IMAP path (CR-023); a webhook receiver that redirects is unsupported.
+Drained from the end of `poll_once`, not a thread of its own. **The payload carries health information only** -- adding a
 subject or body to it would turn an alerting channel into an email-content
 exfiltration path. An admin-configured webhook is not the model-chosen egress
 `deploy_validation` refuses; the destination is fixed by a human.
@@ -258,7 +268,11 @@ result's `status`/`source_key` -- those two are what
 UIDs from a retry, so clearing them would make a retention sweep cause
 duplicate drafts. `runs.content_purged_at`, not an empty field, is what marks a
 run purged. `purge_run` refuses a `running` run (its worker is mid-write) and
-is idempotent, because the sweep re-selects rows on overlapping cycles.
+is idempotent, because the sweep re-selects rows on overlapping cycles. It also
+scrubs the run's entry in `RunRegistry` (`registry.purge_content`): that
+in-memory copy holds the input and the whole event history for the last 1,000
+runs and is what `GET /api/runs/{id}` and the WebSocket replay serve, so
+clearing only the SQL rows left deleted content readable until eviction.
 
 Retention covers **all** of an org's runs, not only `trigger_context`-bearing
 ones: a user who opens their email team and clicks Run produces a manual run

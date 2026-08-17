@@ -9,8 +9,16 @@ asserting which notifications come out -- no database, no clock, no mailbox.
 The policy in one line: **alerts fire on state transitions, not on
 occurrences.** The most common way an alerting system fails is not missing an
 event, it is generating enough noise that people mute it. A trigger remembers
-the fingerprint of the alert most recently sent; a condition already alerted
-for stays quiet until it clears.
+which alerts are outstanding; a condition already alerted for stays quiet
+until it clears.
+
+*Which alerts*, plural: two domains can be broken at once. A single remembered
+fingerprint meant a mailbox fault overwrote an outstanding workflow one, and
+the next successful mailbox check then cleared it and announced a recovery
+that had not happened (Codex review finding). The outstanding set is stored in
+the one `alerted_fingerprint` column as a sorted comma-separated string --
+a single value parses as a one-element set, so nothing already stored needs
+migrating.
 """
 from __future__ import annotations
 
@@ -75,11 +83,27 @@ class NotificationDraft:
 
 @dataclass(frozen=True)
 class HealthDecision:
-    """The trigger's new health state, plus a notification if one is due."""
+    """The trigger's new health state, plus a notification if one is due.
+
+    `alerted_fingerprint` is the whole outstanding set, encoded for the
+    column: sorted, comma-separated, or None when nothing is outstanding.
+    """
 
     consecutive_faults: int
     alerted_fingerprint: Optional[str]
     notification: Optional[NotificationDraft]
+
+
+def _parse(alerted_fingerprint: Optional[str]) -> set:
+    """The outstanding set from the stored column. A pre-existing single
+    value ("mailbox") parses as a one-element set, so old rows just work."""
+    return {part for part in (alerted_fingerprint or "").split(",") if part}
+
+
+def _encode(outstanding: set) -> Optional[str]:
+    """Back to the column. Sorted, so the same set is always the same string
+    and an unchanged state never looks like an update."""
+    return ",".join(sorted(outstanding)) or None
 
 
 def alert_threshold() -> int:
@@ -167,34 +191,36 @@ def evaluate(
     hour and a half of silence about a system that is plainly wedged.
     """
     faults = max(int(consecutive_faults or 0), 0)
+    outstanding = _parse(alerted_fingerprint)
 
     clears = _OK_CLEARS.get(outcome)
     if clears is not None:
-        if alerted_fingerprint is None:
+        cleared = outstanding & clears
+        if not outstanding:
             # Nothing was reported, so there is nothing to announce -- but the
             # streak did end.
             return HealthDecision(0, None, None)
-        if alerted_fingerprint in clears:
-            return HealthDecision(0, None, _recovery_draft(outcome))
+        if cleared:
+            # Only this domain's alerts clear. Anything else outstanding stays
+            # outstanding, so it is neither announced as recovered nor
+            # re-alerted from scratch later.
+            return HealthDecision(0, _encode(outstanding - cleared), _recovery_draft(outcome))
         # An alert from the other domain is still outstanding: this success
         # does not speak to it, so leave both the alert and the streak alone.
-        return HealthDecision(faults, alerted_fingerprint, None)
+        return HealthDecision(faults, _encode(outstanding), None)
 
     fingerprint = _FAULT_FINGERPRINTS.get(outcome)
     if fingerprint is None:
         # An outcome this module doesn't model changes nothing rather than
         # silently resetting a fault streak.
-        return HealthDecision(faults, alerted_fingerprint, None)
+        return HealthDecision(faults, _encode(outstanding), None)
 
     faults += 1
 
-    if outcome == OUTCOME_TIMEOUT:
-        if alerted_fingerprint == FINGERPRINT_TIMEOUT:
-            return HealthDecision(faults, alerted_fingerprint, None)
-        return HealthDecision(faults, FINGERPRINT_TIMEOUT, _draft(outcome, faults))
-
-    if faults < max(int(threshold), 1):
-        return HealthDecision(faults, alerted_fingerprint, None)
-    if alerted_fingerprint == fingerprint:
-        return HealthDecision(faults, alerted_fingerprint, None)
-    return HealthDecision(faults, fingerprint, _draft(outcome, faults))
+    if outcome != OUTCOME_TIMEOUT and faults < max(int(threshold), 1):
+        return HealthDecision(faults, _encode(outstanding), None)
+    if fingerprint in outstanding:
+        return HealthDecision(faults, _encode(outstanding), None)
+    return HealthDecision(
+        faults, _encode(outstanding | {fingerprint}), _draft(outcome, faults)
+    )

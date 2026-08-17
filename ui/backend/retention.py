@@ -6,6 +6,8 @@ the `runs` row itself, `usage_records`, `trigger_context`, and an item result's
 `status`/`source_key` -- see the design spec's invariants I1-I5. Deleting the
 run row instead would take the org's token/cost history with it, and clearing
 an item's status/source_key would make a sweep cause duplicate drafts on retry.
+A purge also scrubs the run's in-memory copy in `RunRegistry`, which serves
+`GET /api/runs/{id}` and the WebSocket replay from its own retained history.
 
 See docs/superpowers/specs/2026-08-17-email-phase-3b-retention-export-design.md.
 """
@@ -19,7 +21,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from .db.models import AutomationItemResult, Run, TraceEventRecord
+from .db.models import AutomationItemResult, Run, TraceEventRecord, iso_utc
 from .db.retention import orgs_with_retention, record_sweep
 
 _logger = logging.getLogger(__name__)
@@ -63,6 +65,17 @@ def purge_run(db: Session, run: Run) -> bool:
     run.output = None
     run.content_purged_at = _utcnow()
     db.flush()
+
+    # The DB is not the only copy. `RunRegistry` keeps the last 1,000 runs in
+    # memory with their full input and event history, and that is what
+    # `GET /api/runs/{id}` and the WebSocket replay serve -- so clearing only
+    # the rows would leave deleted content readable until the entry was
+    # evicted or the process restarted. Late import: `runtime` imports this
+    # package's siblings, and keeping it out of module scope keeps the purge
+    # engine importable on its own.
+    from .runtime import registry
+
+    registry.purge_content(run.id)
     return True
 
 
@@ -181,27 +194,30 @@ def export_org_runs(
             "status": run.status,
             "input": run.input,
             "output": run.output,
-            "created_at": run.created_at.isoformat() if run.created_at else None,
+            # `iso_utc` throughout: these columns come back from SQLite
+            # tzinfo-naive, and an archive a customer keeps must not carry
+            # timestamps that read as local time wherever it is opened.
+            "created_at": iso_utc(run.created_at) if run.created_at else None,
             "content_purged_at": (
-                run.content_purged_at.isoformat() if run.content_purged_at else None
+                iso_utc(run.content_purged_at) if run.content_purged_at else None
             ),
             "trigger_context": run.trigger_context,
             "trace_events": [
                 {"seq": e.seq, "type": e.type, "agent": e.agent, "data": e.data,
-                 "created_at": e.created_at.isoformat() if e.created_at else None}
+                 "created_at": iso_utc(e.created_at) if e.created_at else None}
                 for e in events
             ],
             "automation_item_results": [
                 {"source_key": i.source_key, "status": i.status,
                  "needs_attention": i.needs_attention, "payload": i.payload,
-                 "created_at": i.created_at.isoformat() if i.created_at else None}
+                 "created_at": iso_utc(i.created_at) if i.created_at else None}
                 for i in items
             ],
         })
 
     return {
         "org_id": org_id,
-        "exported_at": _utcnow().isoformat(),
+        "exported_at": iso_utc(_utcnow()),
         "truncated": truncated,
         "oldest_included": runs[-1]["created_at"] if runs else None,
         "runs": runs,

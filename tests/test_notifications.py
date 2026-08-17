@@ -53,6 +53,44 @@ def _notify(db, org_id):
     return row
 
 
+class _FakeConnection:
+    """Stands in for `_PinnedHTTPSConnection`, recording what was dialled."""
+
+    def __init__(self, host, port, *, pinned_ip, timeout, log, status):
+        self._log = log
+        self._status = status
+        self._entry = {"host": host, "port": port, "pinned_ip": pinned_ip}
+
+    @classmethod
+    def record(cls, monkeypatch, status=200):
+        """Patch the connection class in and return the list it appends to."""
+        log = []
+        monkeypatch.setattr(
+            notifications, "_PinnedHTTPSConnection",
+            lambda host, port, *, pinned_ip, timeout: cls(
+                host, port, pinned_ip=pinned_ip, timeout=timeout, log=log, status=status,
+            ),
+        )
+        return log
+
+    def request(self, method, path, body=None, headers=None):
+        self._entry["path"] = path
+        self._log.append(self._entry)
+
+    def getresponse(self):
+        return self
+
+    @property
+    def status(self):
+        return self._status
+
+    def read(self):
+        return b""
+
+    def close(self):
+        pass
+
+
 class _Recorder:
     """Stands in for the network: records posts, returns a scripted status."""
 
@@ -228,6 +266,56 @@ def test_an_error_message_is_truncated(db, monkeypatch):
 def test_unusable_webhook_urls_are_refused(url):
     with pytest.raises(WebhookUrlError):
         validate_webhook_url(url)
+
+
+def test_delivery_dials_the_validated_ip_not_the_hostname(monkeypatch):
+    # `check_host_allowed` approves one resolution; the connection must go to
+    # THAT address. Re-resolving (what `urlopen` did) lets a rebinding
+    # hostname point at an internal service after passing the check.
+    monkeypatch.setattr(notifications, "check_host_allowed", lambda h: "203.0.113.5")
+    dialled = _FakeConnection.record(monkeypatch)
+
+    assert notifications._post(
+        "https://hooks.example.com/services/abc?x=1", b"{}", {"Content-Type": "application/json"}
+    ) == 200
+    assert dialled == [{
+        "host": "hooks.example.com",       # kept for TLS SNI + certificate
+        "pinned_ip": "203.0.113.5",        # but this is what is connected to
+        "port": 443,
+        "path": "/services/abc?x=1",
+    }]
+
+
+def test_a_host_that_rebinds_to_private_is_refused_at_delivery_time(db, monkeypatch):
+    # Validation happens again at connect time, so a URL that was public when
+    # the admin saved it cannot be delivered to once it points inward.
+    org_id = _org(db)
+    set_notification_settings(db, org_id, webhook_url="https://rebind.example.com/h")
+    row = _notify(db, org_id)
+    _FakeConnection.record(monkeypatch)
+    monkeypatch.setattr(
+        notifications, "check_host_allowed",
+        lambda h: (_ for _ in ()).throw(ValueError("resolves to a private/internal address")),
+    )
+
+    dispatch_pending(db)
+    db.refresh(row)
+    assert row.delivery_state == "pending"  # attempted and failed, not delivered
+    assert "private/internal" in row.last_delivery_error
+
+
+def test_a_redirect_is_not_followed(db, monkeypatch):
+    # Following one would take the POST to an address nothing validated.
+    org_id = _org(db)
+    set_notification_settings(db, org_id, webhook_url="https://hooks.example.com/h")
+    row = _notify(db, org_id)
+    monkeypatch.setattr(notifications, "check_host_allowed", lambda h: "203.0.113.5")
+    _FakeConnection.record(monkeypatch, status=302)
+
+    dispatch_pending(db)
+    db.refresh(row)
+    assert row.delivery_state == "pending"
+    assert row.delivery_attempts == 1
 
 
 def test_a_public_https_url_is_accepted(monkeypatch):

@@ -31,6 +31,33 @@ def test_eviction_leaves_registry_under_the_bound(monkeypatch):
     assert reg.get(ids[4]) is not None
 
 
+def test_purge_content_forgets_the_input_and_events():
+    # The retention purge clears the DB; this registry serves GET /api/runs/{id}
+    # and the WebSocket replay from its own copy, which must go too.
+    reg = RunRegistry()
+    run = reg.create("wf", "From alice@example.com: my boiler leaks")
+    _complete(reg, run.id)
+
+    assert reg.purge_content(run.id) is True
+    assert reg.get(run.id).input == ""
+    assert reg.get(run.id).events == []
+    # The entry itself stays -- the run is still a real run that happened.
+    assert reg.get(run.id).status == "completed"
+
+
+def test_purge_content_leaves_a_running_run_alone():
+    # Its worker is still appending events, and the DB purge refuses it too.
+    reg = RunRegistry()
+    run = reg.create("wf", "still going")
+
+    assert reg.purge_content(run.id) is False
+    assert reg.get(run.id).input == "still going"
+
+
+def test_purge_content_is_a_no_op_for_an_unknown_run():
+    assert RunRegistry().purge_content("never-existed") is False
+
+
 def test_running_runs_are_never_evicted(monkeypatch):
     monkeypatch.setattr(registry_module, "_MAX_RETAINED_RUNS", 2)
     reg = RunRegistry()

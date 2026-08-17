@@ -93,6 +93,22 @@ def _run(db, org_id, *, run_id="r1", status="completed", age_days=0):
     return run
 
 
+def test_purge_also_scrubs_the_in_memory_copy(db):
+    # The registry keeps the last 1,000 runs with their full input and event
+    # history, and that copy is what GET /api/runs/{id} and the WebSocket
+    # replay serve -- clearing only the rows leaves deleted content readable.
+    from ui.backend.runtime import registry
+
+    org = create_org(db, "acme")
+    live = registry.create("support", "From alice@example.com: my boiler leaks")
+    registry.publish(live.id, {"type": "run_completed", "data": "drafted a reply"})
+    run = _run(db, org.id, run_id=live.id)
+
+    assert purge_run(db, run) is True
+    assert registry.get(live.id).input == ""
+    assert registry.get(live.id).events == []
+
+
 def test_purge_clears_content(db):
     org = create_org(db, "acme")
     run = _run(db, org.id)
