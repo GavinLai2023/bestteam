@@ -69,3 +69,78 @@ def test_defaults_are_pending_with_no_run_and_no_attempts(db):
     assert row.detected_at is not None
     # Phase 4's filter hook: reserved, never written today.
     assert row.decision is None
+
+
+# ---------------------------------------------------------------------------
+# The store: recording detected mail, and claiming it for a run.
+# ---------------------------------------------------------------------------
+
+
+def test_recording_the_same_ids_twice_inserts_each_only_once(db):
+    from ui.backend.db import inbox_events as store
+
+    kw = dict(org_id=1, mailbox_identity="m", mailbox_generation="99")
+    assert store.record_events(db, external_ids=["1", "2", "3"], **kw) == 3
+    db.commit()
+    # Re-detection of an overlapping window must be a no-op, not a duplicate:
+    # this is what lets the cursor be a performance optimisation rather than a
+    # correctness requirement.
+    assert store.record_events(db, external_ids=["2", "3", "4"], **kw) == 1
+    db.commit()
+    assert {e.external_id for e in db.query(InboxEvent).all()} == {"1", "2", "3", "4"}
+
+
+def test_recording_nothing_is_a_no_op(db):
+    from ui.backend.db import inbox_events as store
+
+    assert store.record_events(
+        db, org_id=1, mailbox_identity="m", mailbox_generation="99", external_ids=[]
+    ) == 0
+
+
+def test_claim_takes_the_oldest_pending_rows_up_to_the_limit(db):
+    from ui.backend.db import inbox_events as store
+
+    kw = dict(org_id=1, mailbox_identity="m", mailbox_generation="99")
+    store.record_events(db, external_ids=["1", "2", "3", "4", "5"], **kw)
+    db.commit()
+
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=3)
+    db.commit()
+    assert [e.external_id for e in claimed] == ["1", "2", "3"]
+    assert all(e.status == "claimed" and e.run_id == "run-a" for e in claimed)
+    # Claiming does NOT charge an attempt -- a workflow that fails to build is
+    # not the message's fault (see mark_dispatched).
+    assert all(e.attempts == 0 for e in claimed)
+
+
+def test_a_second_claim_never_overlaps_the_first(db):
+    from ui.backend.db import inbox_events as store
+
+    kw = dict(org_id=1, mailbox_identity="m", mailbox_generation="99")
+    store.record_events(db, external_ids=["1", "2", "3", "4", "5"], **kw)
+    db.commit()
+
+    first = store.claim_events(db, org_id=1, run_id="run-a", limit=3)
+    db.commit()
+    second = store.claim_events(db, org_id=1, run_id="run-b", limit=3)
+    db.commit()
+    assert [e.external_id for e in second] == ["4", "5"]
+    assert not ({e.id for e in first} & {e.id for e in second})
+
+
+def test_claiming_an_empty_queue_returns_nothing(db):
+    from ui.backend.db import inbox_events as store
+
+    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3) == []
+
+
+def test_claim_is_scoped_to_one_org(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
+                        external_ids=["9"])
+    db.commit()
+    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3) == []
