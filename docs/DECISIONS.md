@@ -232,3 +232,85 @@ Append new entries at the bottom using this template:
   Graph-native ever becomes necessary, nothing here blocks it — but it should
   be justified by a capability Graph has and IMAP lacks, not by the connector
   abstraction on its own.
+
+## Alerts go in-app and to a webhook, never by email (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: Phase 0 made a failing trigger visible on the trigger row, but
+  nothing notified anyone. The obvious channel for "your email automation is
+  broken" is email — which this product deliberately cannot send.
+- **Decision**: Alerts land in an in-app list, and optionally on one
+  admin-configured webhook per org. No SMTP is added.
+- **Why**:
+  - The draft-only toolkit's entire containment argument is that the worst
+    outcome is a bad draft a human reviews, because there is no send verb
+    anywhere. Adding SMTP to deliver alerts would put a send capability in the
+    process purely for the convenience of the alerting feature, and every
+    future reader would reasonably ask why the email agent may not use it.
+  - In-app alone is too weak: an admin who does not log in for a week does not
+    learn for a week, which is the exact failure being fixed.
+  - A webhook reaches Slack, Teams or an on-call rota without this codebase
+    knowing about any of them, and the customer already has one of those.
+  - An admin-configured webhook is **not** the model-chosen egress that
+    `find_email_egress_conflicts` refuses. The destination is fixed by a human;
+    the refused case is an agent choosing a URL while reading
+    attacker-controlled mail. It is still HTTPS-only and still goes through
+    `check_host_allowed`, because a tenant admin is not trusted to reach the
+    host's internal network.
+- **Consequences**: Self-hosted internal webhook endpoints are unsupported.
+  Payloads carry health information only — never a subject, address or body —
+  so a webhook cannot become an email-content exfiltration path. There are no
+  per-user preferences, digests or quiet hours until a customer asks.
+
+## Email and egress tools are refused per WORKFLOW, not per agent (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted, supersedes the per-agent rule shipped in Phase 0 (0.6)
+- **Context**: Phase 0 refused an agent holding both an email tool and
+  `http_get`/`web_search`, and documented "split them across two agents" as the
+  remedy. A review pointed out that the split contains nothing.
+- **Decision**: Refuse the combination anywhere in a workflow, regardless of
+  which agent holds what, and drop the splitting advice.
+- **Why**:
+  - `_agent_node` (`adapters/langgraph_adapter.py`) feeds each agent's output
+    into the next agent's context, and a workflow's steps share state. An
+    injected instruction the mail agent reads therefore arrives in the egress
+    agent's prompt as ordinary text.
+  - The check is deliberately blunt — it does not reason about ordering or
+    collaboration mode. That reasoning would have to be redone, correctly,
+    every time routing changes, and a wrong answer is an exfiltration path.
+  - Nothing legitimate is refused: no shipped workflow combines the two.
+- **Consequences**: A customer who genuinely needs both must run them as
+  separate workflows against separate deployments. The old advice is gone from
+  the rejection message and from `tests/test_deploy_validation.py`, whose
+  `..._is_fine` test now asserts the opposite.
+
+## A timed-out run stays retriable; drafting became idempotent instead (email Phase 3a)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: Phase 0's watchdog marks a run that outlived the run timeout as
+  failed so the trigger stops being blocked, but it cannot stop the worker — a
+  node inside `workflow.stream()` is not interruptible. A review found that the
+  released run is therefore retriable while its worker may still draft, and
+  proposed keeping it non-retriable until the worker acknowledges cancellation.
+- **Decision**: Rejected that proposal. Instead, `email_draft_reply` checks the
+  Drafts folder for the message's source key under a process-wide per-key lock
+  before `APPEND`, and reports `outcome: "draft_exists"` when it skips.
+- **Why**:
+  - The wedged worker never acknowledges cancellation — being wedged is the
+    premise. Waiting for it reinstates the permanent, silent trigger blockage
+    that Phase 0 item 0.4 exists to fix, trading a rare duplicate draft for a
+    guaranteed silent stop.
+  - The defect is not in when a retry is planned; it is that `APPEND` is not
+    idempotent. Fixes belong at the point of writing.
+  - Both racers are threads of the **same** uvicorn process, so a process-wide
+    lock closes the window rather than narrowing it.
+- **Consequences**: One extra Drafts search per drafted message, on a path that
+  already opens an IMAP connection per tool call. A multi-worker deployment
+  reopens the window; that needs the DB-authoritative overlap guard already
+  tracked in `STATUS.md`, and the email capability is single-instance by
+  design. `CONFIRMED_DRAFT_OUTCOMES` keeps the two readers of confirmed drafts
+  in agreement so a skipped draft still excludes its message from the next
+  retry.

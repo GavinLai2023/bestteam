@@ -93,6 +93,12 @@ implemented** — don't assume they exist:
   Admins can view/search/delete a user's memory via the admin-only Memory page
   (`/api/memory`); there's no manual add/edit and no retention/quota policy. Disabled by default
   (`BESTTEAM_MEMORY_DB`) — see `core/memory.py` and `src/bestteam/core/CLAUDE.md`.
+- **Alerting is in-app + one optional per-org webhook, and nothing else.**
+  No SMTP anywhere (deliberate: the draft-only toolkit's containment argument
+  is that there is no send verb in the process), no per-user preferences, no
+  digests. A trigger raises a notification on a health *transition*
+  (`ui/backend/trigger_health.py`), never per occurrence. Retention/deletion/
+  export of email-derived run output remains **unbuilt** — Phase 3b.
 - **Live run state (`RunRegistry`) isn't rehydrated from the DB on restart**:
   a killed/restarted process still loses in-flight/live run state. History no
   longer disappears, though — every `trace_events` row is now persisted per

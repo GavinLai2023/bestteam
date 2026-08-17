@@ -76,6 +76,16 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   `autonomous: true`, since every automation result belongs to an autonomous
   run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
   cancellation, and run history", "Property Maintenance Inbox").
+  A fourth **Alerts** tab (email Phase 3a) holds
+  `components/NotificationsPanel.tsx` (the org's alert history, read-only by
+  design — these are raised by the system, and a delete verb would only let
+  someone erase the record of a fault they never fixed) and
+  `components/WebhookSettings.tsx` (one optional webhook per org). The tab
+  label carries the unread count, which `ActivityPage` keeps in its own state
+  via the panel's `onUnreadChange` so the badge doesn't need a second fetch.
+  `WebhookSettings` **omits `webhook_secret` from the payload entirely** when
+  the field wasn't retyped — the API never returns it, so resending an empty
+  string would wipe the stored one.
 - **`/advanced`** — `pages/AdvancedPage.tsx`, raw-JSON CRUD over
   `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.

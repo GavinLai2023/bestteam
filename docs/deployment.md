@@ -257,6 +257,63 @@ process mail. Leader election is future work; until then, one worker.
 An invalid `BESTTEAM_TRIGGER_*` value (non-numeric or non-positive) refuses
 startup with a clear error instead of silently stopping the poller later.
 
+### Alerts when automation breaks (per-org)
+
+A trigger that starts failing now says so. Alerts appear in the app under
+**Activity → Alerts**, and each org can additionally point them at one webhook
+(**Activity → Alerts → Where to send alerts**). Four things raise one:
+
+| Condition | When it fires |
+|---|---|
+| Repeated workflow failures | after `BESTTEAM_TRIGGER_ALERT_THRESHOLD` consecutive failures (default 3, minimum 1) |
+| Mailbox unreachable | same threshold |
+| A run released by the stale-run watchdog | immediately — it has already been stuck for the full run timeout |
+| A Microsoft 365 client secret nearing expiry | 30 days, 7 days, and on expiry |
+
+Alerts fire on **transitions, not occurrences**: once a condition is reported
+it stays quiet until it clears, and a recovery is announced once. A successful
+mailbox check clears only a mailbox alert — it says nothing about whether the
+team still runs.
+
+The Microsoft 365 expiry date is entered by the admin when connecting the
+mailbox (optional; Azure shows it beside the secret being copied). It is
+deliberately **not** read from Entra: that would need `Application.Read.All`,
+a directory-wide read over every app registration in the tenant. With no date
+recorded, no expiry alerts are sent.
+
+**Webhook contract.** `POST` with `Content-Type: application/json`,
+`X-BestTeam-Delivery: <notification id>`, and — when a signing secret is set —
+`X-BestTeam-Signature: sha256=<hex>`, an HMAC-SHA256 over the exact request
+body. Any 2xx is success; otherwise it is retried on later poll cycles up to
+five attempts, after which it is marked failed and remains readable in-app.
+
+```json
+{
+  "id": 12,
+  "org_id": 3,
+  "kind": "trigger_health",
+  "severity": "error",
+  "title": "Automatic email replies are failing",
+  "body": "The last 3 automatic runs failed, so no replies are being drafted.",
+  "fingerprint": "workflow",
+  "created_at": "2026-08-17T09:14:00+00:00"
+}
+```
+
+Verifying a delivery (Python):
+
+```python
+import hashlib, hmac
+expected = "sha256=" + hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
+assert hmac.compare_digest(expected, request.headers["X-BestTeam-Signature"])
+```
+
+The payload carries **health information only** — never a subject, address or
+message body. Webhook URLs must be HTTPS and must resolve to a public address:
+alerts are not a route into the deployment's own network, so self-hosted
+internal endpoints are not supported. There is no email delivery channel and
+there will not be one — this product has no SMTP anywhere by design.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,

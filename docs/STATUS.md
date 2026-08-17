@@ -1066,6 +1066,39 @@
   would have regressed Phase 0. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-2-microsoft-oauth-design.md`.
 
+- **Email automation Phase 3a — trigger health, alerting, and two correctness
+  fixes.** Phase 0 made a failing trigger *visible* (`last_error`); nothing
+  ever *told* anyone, so a customer whose automation stopped a week ago found
+  out by opening the dashboard. A pure evaluator (`ui/backend/trigger_health.py`)
+  now decides state transitions from four outcomes — workflow fault, mailbox
+  fault, watchdog release, and domain-specific recovery — and the three
+  existing fault sites persist its decision and append a `Notification`.
+  **Alerts fire on transitions, not occurrences**: a trigger remembers the
+  fingerprint of the alert most recently sent, so a condition already reported
+  stays quiet until it clears. Delivery is in-app plus an optional per-org
+  webhook (stdlib `urllib`, HMAC-signed, HTTPS + `check_host_allowed`, health
+  information only — never a subject, address or body). There is no SMTP
+  anywhere and there is not going to be. An admin-entered Microsoft 365 secret
+  expiry drives warnings at 30 days, 7 days and expiry.
+
+  Recovery is deliberately domain-specific: a successful mailbox check proves
+  connectivity is fine but says nothing about whether the team still builds,
+  so it must not clear a workflow alert — flattening that would have
+  re-created the "healthy trigger, every run failing" state Phase 0 fixed.
+
+  Also closed three findings from a review of the Phase 0–2 branch: the
+  egress-tool check is now **workflow-level**, because splitting email and
+  `http_get` across separate agents (the previously documented remedy)
+  contains nothing — `_agent_node` feeds each agent's output into the next
+  agent's context; draft creation is **idempotent per source key** under a
+  process-wide lock, which closes the watchdog/retry duplicate-draft race
+  because both racers are threads of one process; and trigger health ignores
+  a **superseded** run's late outcome. The review's proposal to keep a
+  timed-out run non-retriable was rejected — the wedged worker never
+  acknowledges cancellation, so that would have reinstated the permanent
+  trigger blockage Phase 0 exists to fix. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-3a-health-alerting-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -1123,10 +1156,27 @@
   the feature. Raw email bodies are already redacted for every run at the
   adapter layer (`_redacted_email_tool_data`, pinned by
   `tests/test_trace_granularity.py`). The real remedy is tenant-level retention
-  /deletion/export, which is the joint programme's Phase 3.
-- **No alerting on trigger health** — Phase 0 makes a failing workflow visible
-  on the trigger row (`last_error`), but nothing notifies anyone; a customer
-  still has to look. Consecutive-failure counting and delivery are Phase 3.
+  /deletion/export — **Phase 3b, still undesigned**. (The joint programme's
+  Phase 3 bundled this with alerting; they share no problem, so they were
+  split and alerting shipped as Phase 3a.)
+- **Alert delivery is in-app + one optional webhook per org, and nothing
+  else** — no SMTP anywhere (by design), no per-user preferences, no digests
+  or quiet hours, and one webhook URL per org rather than per fault kind.
+  Anything finer is speculative until a customer asks. A webhook that fails
+  five times is marked `failed` and stays visible in-app; nothing retries it
+  afterwards and nothing tells the admin their webhook is broken except that
+  row's own state.
+- **Draft idempotency is process-wide, not deployment-wide** — the per-source-key
+  lock closes the duplicate-draft race between a watchdog-released worker and
+  its retry only because both are threads of one uvicorn process. A
+  multi-worker deployment reopens the window; closing it needs the
+  DB-authoritative overlap guard already listed above.
+- **A Microsoft 365 secret's expiry date is admin-entered and unverified** —
+  nothing checks it against Entra, so a wrong or stale date warns at the wrong
+  time or not at all. Reading the real value needs `Application.Read.All`, a
+  directory-wide read over every app registration in the customer's tenant,
+  which is far broader than the single-mailbox `IMAP.AccessAsApp` the
+  connection itself uses — a permission a customer's IT should refuse.
 - **Draft outcomes are never observed** — nothing records whether a human sent,
   edited or discarded a generated draft, so there is no quality signal and no
   ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a

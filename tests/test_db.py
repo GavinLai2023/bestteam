@@ -60,6 +60,8 @@ def test_init_db_creates_all_tables():
         "share_links",
         "share_sessions",
         "share_messages",
+        "notifications",
+        "org_notification_settings",
     }
 
 

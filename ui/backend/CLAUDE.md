@@ -199,6 +199,48 @@ single process and `_dispatch_lock` stays. Real horizontal scale-out is blocked
 on a Postgres migration -- `make_engine` hardcodes SQLite and takes a file path,
 not a URL.
 
+**Phase 3a: trigger health and alerting**
+
+`trigger_health.py` is a **pure** module -- one function, no I/O, no clock, no
+DB. `evaluate(outcome, consecutive_faults, alerted_fingerprint, threshold)`
+returns a `HealthDecision` (new counter, new fingerprint, optional
+`NotificationDraft`). The whole noise-control policy lives there, so it is
+tested by folding a sequence of outcomes rather than by driving a mailbox.
+
+Two rules are load-bearing and easy to break by "simplifying":
+
+- **Alerts fire on transitions, not occurrences.** `alerted_fingerprint` is the
+  problem most recently *reported*; a condition already alerted for stays quiet
+  until it clears. Removing it turns every poll cycle into an alert.
+- **Recovery is domain-specific.** `OUTCOME_MAILBOX_OK` clears only a `mailbox`
+  alert; `OUTCOME_WORKFLOW_OK` clears `workflow` and `run_timeout`. A single
+  generic "healthy" outcome would let a successful mailbox check clear a
+  workflow alert -- exactly the "healthy trigger, every run failing" state
+  Phase 0's item 0.5 exists to prevent (the same asymmetry `last_error_kind`
+  already encodes as F5).
+
+Three sites feed it and each keeps its existing `last_error`/`last_error_kind`
+write untouched -- those drive the dashboard's error surface and are pinned by
+Phase 0's tests; alerting is additive:
+`runtime._safe_record_trigger_health` (workflow outcomes, and note it now
+returns early unless `trigger.last_run_id == run_row.id`, so a superseded run's
+late outcome is ignored), `email_trigger`'s connectivity check (mailbox), and
+`_release_stale_run` (timeout, which alerts immediately -- it has already been
+stuck for the full run timeout).
+
+`notifications.py` delivers. Stdlib `urllib` (no new dependency), HMAC-SHA256
+over the exact posted body, HTTPS + `check_host_allowed`, five attempts then
+`failed` (still readable in-app). Drained from the end of `poll_once`, not a
+thread of its own. **The payload carries health information only** -- adding a
+subject or body to it would turn an alerting channel into an email-content
+exfiltration path. An admin-configured webhook is not the model-chosen egress
+`deploy_validation` refuses; the destination is fixed by a human.
+
+`sweep_secret_expiry` warns at 30/7/0 days before a Microsoft 365 client
+secret expires, keyed on an **admin-entered** date (`oauth_secret_expires_at`).
+It is not read from Entra on purpose -- that needs `Application.Read.All`, a
+directory-wide read over every app registration in the tenant.
+
 **Phase 2: Microsoft 365 mailboxes**
 
 Exchange Online no longer accepts basic auth, so an M365 org could not connect
