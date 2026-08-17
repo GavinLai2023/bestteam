@@ -70,6 +70,11 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
       // Stamped locally rather than refetched: the trace is now empty by
       // definition, so there is nothing left to fetch.
       setPurgedAt(new Date().toISOString())
+      // The already-loaded results were fetched before the purge and are
+      // still in state -- empty their payloads so this panel shows exactly
+      // what a reload would (Codex review finding). The event list and final
+      // output are gated on `purged` below for the same reason.
+      setAutomationResults((rows) => rows.map((row) => ({ ...row, payload: {} })))
     } catch (e) {
       setPurgeError((e as Error).message)
     } finally {
@@ -109,7 +114,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
           ))}
         </ul>
       )}
-      {finalEvent && (
+      {finalEvent && !purged && (
         <section className={`result result-${finalEvent.type}`}>
           <h3>{RESULT_LABELS[finalEvent.type]}</h3>
           {/* Safe: terminal-event `data` is guaranteed to be a string by the backend's

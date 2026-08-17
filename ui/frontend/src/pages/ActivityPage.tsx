@@ -22,6 +22,11 @@ const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 // change.
 const RUN_POLL_INTERVAL_MS = 5000
 
+// How often to refresh the unread-alert badge. Far slower than the run poll:
+// an alert only fires on a health *transition*, and a minute's delay in
+// noticing one is nothing next to the hours it replaces.
+const ALERT_POLL_INTERVAL_MS = 60000
+
 interface Filters {
   workflow: string
   manual: '' | 'true' | 'false'
@@ -46,7 +51,11 @@ function runsQueryParams(filters: Filters) {
 export default function ActivityPage() {
   const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
   // Kept here so the tab label can carry the unread badge without the
-  // panel having to be mounted.
+  // panel having to be mounted. Fetched below rather than only through
+  // NotificationsPanel's callback: the panel is mounted only once the Alerts
+  // tab is open, so the badge could never appear before the user had already
+  // gone looking -- which is the one thing it exists to save them (Codex
+  // review finding).
   const [unreadAlerts, setUnreadAlerts] = useState(0)
   const [workflows, setWorkflows] = useState<string[]>([])
   const [runs, setRuns] = useState<RunListItem[]>([])
@@ -74,6 +83,25 @@ export default function ActivityPage() {
   useEffect(() => {
     if (selectedRun) runDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [selectedRun])
+
+  // Keeps polling while this page is open, so an alert raised minutes from
+  // now still reaches the badge. `limit: 1` because only `unread` is wanted.
+  useEffect(() => {
+    let ignore = false
+    const refresh = () =>
+      api
+        .listNotifications(true, 1)
+        .then((d) => {
+          if (!ignore) setUnreadAlerts(d.unread)
+        })
+        .catch(() => {})
+    void refresh()
+    const id = setInterval(() => void refresh(), ALERT_POLL_INTERVAL_MS)
+    return () => {
+      ignore = true
+      clearInterval(id)
+    }
+  }, [])
 
   useEffect(() => {
     api

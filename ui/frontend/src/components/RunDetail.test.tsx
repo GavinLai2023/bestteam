@@ -283,6 +283,40 @@ describe('RunDetail', () => {
     expect(mockedApi.purgeRun).toHaveBeenCalledWith('r1')
   })
 
+  it('hides the content it just deleted, without needing a reload', async () => {
+    // The events and results were fetched before the purge and are still in
+    // state -- leaving them on screen contradicts the confirmation the user
+    // just gave (Codex review finding).
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [{ type: 'run_completed', agent: undefined, data: 'Drafted a reply to alice@example.com' }],
+    })
+    mockedApi.listAutomationResults.mockResolvedValue({
+      results: [{
+        id: 1, run_id: 'r1', status: 'processed', created_at: '2026-01-01T00:00:00Z',
+        payload: { summary: 'Tenant reports a leak.', action: { draft_created: true } },
+      }],
+    })
+    mockedApi.purgeRun.mockResolvedValue({ purged: true })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+    // Twice: once in the event timeline, once as the final output.
+    expect(await screen.findByText('Final output')).toBeInTheDocument()
+    expect(screen.getAllByText('Drafted a reply to alice@example.com')).toHaveLength(2)
+    expect(await screen.findByText('Tenant reports a leak.')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+
+    expect(screen.queryAllByText('Drafted a reply to alice@example.com')).toHaveLength(0)
+    expect(screen.queryByText('Final output')).not.toBeInTheDocument()
+    expect(screen.queryByText('Tenant reports a leak.')).not.toBeInTheDocument()
+    // The result row itself stays: its status is what stops a retry
+    // re-drafting the same message.
+    expect(screen.getByText('Content removed.')).toBeInTheDocument()
+  })
+
   it('does not delete the run when the confirmation is dismissed', async () => {
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
     vi.spyOn(window, 'confirm').mockReturnValue(false)

@@ -9,6 +9,11 @@ export default function WebhookSettings() {
   const [settings, setSettings] = useState<NotificationSettings | null>(null)
   const [url, setUrl] = useState('')
   const [secret, setSecret] = useState('')
+  // Explicitly removing a stored secret. A blank box means "leave it alone"
+  // (we never received it, so we cannot resend it), which left no way at all
+  // to go back to unsigned delivery -- the API takes an empty string for
+  // that, and nothing could send one (Codex review finding).
+  const [clearSecret, setClearSecret] = useState(false)
   const [enabled, setEnabled] = useState(true)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -38,12 +43,14 @@ export default function WebhookSettings() {
       const data = await api.setNotificationSettings({
         webhook_url: url.trim() || null,
         // Omitted when untouched so the stored secret survives -- we never
-        // received it, so we cannot send it back.
-        ...(secret === '' ? {} : { webhook_secret: secret }),
+        // received it, so we cannot send it back. An empty string is the
+        // explicit "remove it" the checkbox below asks for.
+        ...(clearSecret ? { webhook_secret: '' } : secret === '' ? {} : { webhook_secret: secret }),
         enabled,
       })
       setSettings(data)
       setSecret('')
+      setClearSecret(false)
       setSaved(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -85,12 +92,23 @@ export default function WebhookSettings() {
           value={secret}
           onChange={(e) => setSecret(e.target.value)}
           autoComplete="off"
+          disabled={clearSecret}
           placeholder={settings?.has_webhook_secret ? 'Leave blank to keep the current secret' : ''}
         />
         <p className="hint">
           If set, each delivery carries an <code>X-BestTeam-Signature</code> header so
           the receiving service can confirm the alert really came from here.
         </p>
+        {settings?.has_webhook_secret && (
+          <label>
+            <input
+              type="checkbox"
+              checked={clearSecret}
+              onChange={(e) => setClearSecret(e.target.checked)}
+            />{' '}
+            Remove the stored secret (alerts will be sent unsigned)
+          </label>
+        )}
       </div>
 
       <label>

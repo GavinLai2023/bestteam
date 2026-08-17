@@ -81,11 +81,17 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   design — these are raised by the system, and a delete verb would only let
   someone erase the record of a fault they never fixed) and
   `components/WebhookSettings.tsx` (one optional webhook per org). The tab
-  label carries the unread count, which `ActivityPage` keeps in its own state
-  via the panel's `onUnreadChange` so the badge doesn't need a second fetch.
+  label carries the unread count, which `ActivityPage` **fetches itself** (and
+  polls, `ALERT_POLL_INTERVAL_MS`) as well as taking from the panel's
+  `onUnreadChange`. Both, not just the callback: the panel is mounted only
+  once the Alerts tab is open, so a callback-only badge could never appear
+  before the user had already gone looking — the one thing it exists to save
+  them.
   `WebhookSettings` **omits `webhook_secret` from the payload entirely** when
   the field wasn't retyped — the API never returns it, so resending an empty
-  string would wipe the stored one.
+  string would wipe the stored one. The explicit "remove the stored secret"
+  checkbox is how an org goes back to unsigned delivery: the API takes an
+  empty string for that and a blank field can't mean two things.
 
   A fifth **Data** tab (email Phase 3b) holds
   `components/DataRetentionPanel.tsx`: the org's run-history retention period,

@@ -90,6 +90,32 @@ describe('WebhookSettings', () => {
     expect(screen.queryByText(/^Saved\.$/)).not.toBeInTheDocument()
   })
 
+  it('can remove a stored signing secret', async () => {
+    // A blank box means "leave it alone", so without this there was no way at
+    // all to go back to unsigned delivery: the API takes an explicit empty
+    // string and nothing could send one (Codex review finding).
+    mockedApi.getNotificationSettings.mockResolvedValue({
+      webhook_url: 'https://hooks.example.com/x',
+      has_webhook_secret: true,
+      enabled: true,
+    })
+    render(<WebhookSettings />)
+    fireEvent.click(await screen.findByLabelText(/remove the stored secret/i))
+    fireEvent.click(screen.getByRole('button', { name: /save/i }))
+
+    await waitFor(() =>
+      expect(mockedApi.setNotificationSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ webhook_secret: '' }),
+      ),
+    )
+  })
+
+  it('offers no removal checkbox when no secret is stored', async () => {
+    render(<WebhookSettings />)
+    await screen.findByLabelText(/signing secret/i)
+    expect(screen.queryByLabelText(/remove the stored secret/i)).not.toBeInTheDocument()
+  })
+
   it('tells the admin a secret is already stored without revealing it', async () => {
     mockedApi.getNotificationSettings.mockResolvedValue({
       webhook_url: 'https://hooks.example.com/x',

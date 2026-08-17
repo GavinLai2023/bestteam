@@ -386,8 +386,12 @@ export const api = {
   clearOrgEmail: () => request<void>('/api/org/email', { method: 'DELETE' }),
 
   // Alerting: the in-app list, and where else the org wants it delivered.
-  listNotifications: (unreadOnly = false) =>
-    request<NotificationList>(`/api/notifications?unread_only=${unreadOnly}`),
+  // `limit` is for callers that want only the unread *count* (the Activity
+  // page's tab badge) -- the response carries it whatever the page size.
+  listNotifications: (unreadOnly = false, limit?: number) =>
+    request<NotificationList>(
+      `/api/notifications?unread_only=${unreadOnly}${limit ? `&limit=${limit}` : ''}`,
+    ),
   markNotificationRead: (id: number) =>
     request<{ ok: boolean; unread: number }>(`/api/notifications/${id}/read`, { method: 'POST' }),
   getNotificationSettings: () => request<NotificationSettings>('/api/org/notifications'),
