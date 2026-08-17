@@ -70,6 +70,20 @@ def test_unscoped_mode_is_unchanged():
     assert "hi" in tools["email_read"]("99")
 
 
+def test_attachment_reading_is_confined_to_the_batch():
+    # Same containment as email_read: a run may only touch the messages the
+    # poller detected for it.
+    tools = make_email_tools(_FakeBackend(), allowed_uids={"42", "43"})
+    assert tools["email_read_attachment"]("44", "quote.pdf") == _OUT_OF_BATCH
+
+
+def test_the_toolkit_exposes_exactly_four_tools():
+    tools = make_email_tools(_FakeBackend())
+    assert set(tools) == {
+        "email_find", "email_read", "email_draft_reply", "email_read_attachment",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 (0.1): deterministic draft marker header.
 #

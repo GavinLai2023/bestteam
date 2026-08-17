@@ -70,7 +70,9 @@ def test_configured_org_binds_tools_to_its_mailbox(db_session):
     )
     tools = email_tools.load_email_tools(db_session, org_id)
 
-    assert set(tools) == {"email_find", "email_read", "email_draft_reply"}
+    assert set(tools) == {
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
+    }
     # The backend was built with the decrypted password and the org's mailbox.
     backend = _FakeBackend.made[-1]
     assert backend.host == "imap.acme.com"

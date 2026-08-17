@@ -13,7 +13,7 @@ import pytest
 
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools import REGISTRY, email_draft_reply, email_find, email_read
-from bestteam.tools.email_client import _ImapBackend
+from bestteam.tools.email_client import _ImapBackend, email_read_attachment
 
 pytestmark = pytest.mark.unit
 
@@ -639,6 +639,90 @@ def test_a_message_over_the_total_limit_is_refused(imap_env, monkeypatch):
         record = _ImapBackend.from_env().read_attachment("7", "quote.pdf")
     assert "error" in record
     assert "data" not in record
+
+
+# ---------------------------------------------------------------------------
+# The agent-facing attachment surface: the manifest, and reading one file.
+# ---------------------------------------------------------------------------
+
+def test_read_lists_the_attachments_it_found(imap_env):
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read("7")
+    assert "Attachments (1)" in result
+    assert "quote.pdf" in result
+    # The manifest is a list, not the content: reading costs a separate call.
+    assert "%PDF" not in result
+
+
+def test_read_says_nothing_about_attachments_when_there_are_none(imap_env):
+    conn = _conn_returning(_RAW_MESSAGE)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        assert "Attachments" not in email_read("7")
+
+
+def test_read_attachment_returns_the_extracted_text(imap_env):
+    raw = _multipart_raw(attachment_bytes=b"line one\nline two", filename="notes.txt")
+    conn = _conn_returning(raw)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read_attachment("7", "notes.txt")
+    assert "line one" in result
+
+
+def test_an_unsupported_attachment_type_names_the_type(imap_env):
+    raw = _multipart_raw(attachment_bytes=b"MZ", filename="payload.exe")
+    conn = _conn_returning(raw)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read_attachment("7", "payload.exe")
+    assert ".exe" in result
+    # A sentence the model can relay, not a traceback.
+    assert "Traceback" not in result
+
+
+def test_an_archive_is_refused_rather_than_expanded(imap_env):
+    raw = _multipart_raw(attachment_bytes=b"PK\x03\x04", filename="invoices.zip")
+    conn = _conn_returning(raw)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read_attachment("7", "invoices.zip")
+    assert ".zip" in result
+
+
+def test_a_file_that_lies_about_its_type_fails_cleanly(imap_env):
+    # A sender can name anything .pdf. pypdf then raises; the model must get a
+    # sentence, and the run must not fail over one bad attachment.
+    raw = _multipart_raw(attachment_bytes=b"not a pdf at all", filename="fake.pdf")
+    conn = _conn_returning(raw)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read_attachment("7", "fake.pdf")
+    assert isinstance(result, str) and "fake.pdf" in result
+
+
+def test_extracted_text_is_truncated_at_the_body_limit(imap_env):
+    raw = _multipart_raw(attachment_bytes=b"x" * 20000, filename="big.txt")
+    conn = _conn_returning(raw)
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read_attachment("7", "big.txt")
+    assert "truncated" in result.lower()
+    assert len(result) < 20000
+
+
+def test_reading_an_attachment_of_a_missing_message(imap_env):
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [None])
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        assert "No message found" in email_read_attachment("7", "quote.pdf")
+
+
+def test_a_backend_without_attachment_support_says_so(imap_env):
+    # The Graph backend does not implement these methods. The tool must return
+    # a sentence rather than raising AttributeError into the run.
+    class _NoAttachments:
+        pass
+
+    from bestteam.tools.email_client import _attachment_impl
+
+    result = _attachment_impl(_NoAttachments(), "7", "quote.pdf")
+    assert isinstance(result, str) and "attachment" in result.lower()
 
 
 # ---------------------------------------------------------------------------
