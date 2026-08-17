@@ -582,6 +582,10 @@ class Run(Base):
     # The run this run retried, if any -- lets the UI show a retry chain and
     # keeps history immutable (a retry always creates a new row).
     retry_of_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # Phase 3b: when this run's content (input/output/trace/item payloads) was
+    # cleared by a retention purge. The row itself survives -- usage_records
+    # hangs off it and carries the org's cost history. NULL = never purged.
+    content_purged_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
@@ -807,3 +811,23 @@ class OrgNotificationSetting(Base):
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class OrgRetentionSetting(Base):
+    """One org's run-history retention policy, plus proof it is running.
+
+    `run_retention_days` NULL means keep forever -- the default, so an upgrade
+    deletes nothing. `last_swept_at`/`last_purged_count` exist because a
+    retention policy whose job silently stopped is indistinguishable from one
+    that is working, until an audit.
+    """
+
+    __tablename__ = "org_retention_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), unique=True, index=True, nullable=False
+    )
+    run_retention_days: Mapped[Optional[int]] = mapped_column(nullable=True)
+    last_swept_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_purged_count: Mapped[int] = mapped_column(default=0)
