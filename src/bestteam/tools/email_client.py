@@ -495,26 +495,6 @@ class _ImapBackend:
         finally:
             _imap_logout(conn)
 
-    def attachments(self, message_id: str) -> Optional[List[Dict[str, Any]]]:
-        """List the message's attachments, or None if there is no such message.
-
-        `read()` already returns this list under its "attachments" key, which
-        is what the agent-facing manifest renders from; this stands alone for
-        a caller that wants only the list.
-
-        Nothing is written to disk -- sizes come from the decoded payload held
-        in memory, and the fetch is the same read-only `BODY.PEEK[]` as `read`.
-        """
-        conn = self._connect()
-        try:
-            conn.select("INBOX", readonly=True)
-            msg = self._fetch_message(conn, message_id)
-            if msg is None:
-                return None
-            return _attachment_records(msg)
-        finally:
-            _imap_logout(conn)
-
     def read_attachment(self, message_id: str, filename: str) -> Optional[Dict[str, Any]]:
         """One attachment's bytes, or None if there is no such message.
 
@@ -723,8 +703,8 @@ def _extract_text_body(msg: EmailMessage) -> str:
 # unbounded one is a denial-of-service surface. They do NOT bound the fetch --
 # `BODY.PEEK[]` has already pulled the whole message, attachments included,
 # into memory and decoded every payload before either limit is consulted, and
-# `attachments()` applies no limit at all. Bounding the fetch itself would be
-# a separate change at the IMAP layer.
+# the manifest `read()` renders applies no limit at all. Bounding the fetch
+# itself would be a separate change at the IMAP layer.
 _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _MAX_ATTACHMENTS_TOTAL_BYTES = 25 * 1024 * 1024
 
@@ -742,9 +722,9 @@ def _attachment_parts(msg: EmailMessage) -> List[EmailMessage]:
 def _attachment_records(msg: EmailMessage) -> List[Dict[str, Any]]:
     """Name/type/size for each attachment, built off `_attachment_parts`.
 
-    The single source of the manifest: `read()` embeds it and `attachments()`
-    returns it, so the two can never disagree about what counts as an
-    attachment.
+    The single source of the manifest: `read()` embeds it under "attachments",
+    and `read_attachment` matches names against the same `_attachment_parts`,
+    so listing and lookup can never disagree about what counts as one.
     """
     return [
         {
@@ -849,7 +829,15 @@ def _attachment_impl(backend, message_id: str, filename: str) -> str:
         return f"No message found with id '{message_id.strip()}'."
     error = record.get("error")
     if error:
-        return error
+        # Flattened here, not where the backend builds the sentence: this is the
+        # one place ANY backend's error text becomes output the model reads, and
+        # both of `read_attachment`'s sentences embed a raw, sender-chosen
+        # `get_filename()`. Left unflattened it is strictly worse than an
+        # unflattened manifest -- the manifest IS flattened, so the model can
+        # only ever ask back with the flattened name, which then cannot match
+        # the raw one, so a newline-bearing filename ALWAYS lands on the
+        # "No attachment named ..." path and that sentence lists every name.
+        return _one_line(error)
     # The name the parser will dispatch on, so the check and the parse can't
     # disagree. Suffix only -- nothing here resolves a path. Flattened for the
     # same reason the manifest is: it is sender-chosen and lands in output the
