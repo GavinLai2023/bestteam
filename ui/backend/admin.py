@@ -14,6 +14,7 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin list
     docker compose exec backend python -m ui.backend.admin list-orgs
     docker compose exec backend python -m ui.backend.admin set-email acme --host imap.gmail.com --user support@acme.com --test
+    docker compose exec backend python -m ui.backend.admin set-email acme --auth microsoft-oauth --user support@acme.com --tenant <directory-id> --client-id <application-id>
     docker compose exec backend python -m ui.backend.admin clear-email acme
 
 `create-user --platform` creates a platform operator (no org); org members
@@ -34,7 +35,14 @@ from . import email_trigger
 from .account_memory import open_memory_store as _open_memory_store
 from .account_memory import purge_user_memory as _purge_user_memory
 from .account_memory import reconcile_legacy_org as _reconcile_legacy_org
-from .db.email_credentials import clear_email_credentials, get_email_credentials, set_email_credentials
+from .db.email_credentials import (
+    AUTH_MICROSOFT_OAUTH,
+    AUTH_PASSWORD,
+    MICROSOFT_IMAP_HOST,
+    clear_email_credentials,
+    get_email_credentials,
+    set_email_credentials,
+)
 from .db.models import User
 from .db.orgs import (
     DEFAULT_ORG_NAME,
@@ -55,12 +63,12 @@ from .db.users import (
 from .db_session import SessionLocal
 
 
-def _prompt_password(parser: argparse.ArgumentParser) -> str:
-    password = getpass.getpass("Password: ")
+def _prompt_password(parser: argparse.ArgumentParser, label: str = "Password") -> str:
+    password = getpass.getpass(f"{label}: ")
     if not password:
-        parser.error("Password must not be empty")
-    if getpass.getpass("Repeat password: ") != password:
-        parser.error("Passwords do not match")
+        parser.error(f"{label} must not be empty")
+    if getpass.getpass(f"Repeat {label.lower()}: ") != password:
+        parser.error(f"{label}s do not match")
     return password
 
 
@@ -120,11 +128,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     set_email_p = sub.add_parser(
-        "set-email", help="connect an org's IMAP mailbox (prompts for the password)"
+        "set-email",
+        help="connect an org's mailbox (prompts for the password or client secret)",
     )
     set_email_p.add_argument("org", help="organization name")
-    set_email_p.add_argument("--host", required=True, help="IMAP host, e.g. imap.gmail.com")
+    set_email_p.add_argument(
+        "--auth", choices=["password", "microsoft-oauth"], default="password",
+        help="password: an app password. microsoft-oauth: Entra app-only credentials "
+             "for Exchange Online, which no longer accepts basic auth.",
+    )
+    set_email_p.add_argument("--host", default=None,
+                             help="IMAP host, e.g. imap.gmail.com (fixed for microsoft-oauth)")
     set_email_p.add_argument("--user", required=True, help="IMAP username / email address")
+    set_email_p.add_argument("--tenant", default=None,
+                             help="Entra Directory (tenant) ID (microsoft-oauth only)")
+    set_email_p.add_argument("--client-id", dest="client_id", default=None,
+                             help="Entra Application (client) ID (microsoft-oauth only)")
     set_email_p.add_argument("--port", type=int, default=993)
     set_email_p.add_argument("--drafts", default=None, help="Drafts folder name (auto-detected if omitted)")
     set_email_p.add_argument(
@@ -279,35 +298,61 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             org = get_org_by_name(db, args.org)
             if org is None:
                 parser.error(f"Unknown organization '{args.org}'. Create it first with create-org.")
-            password = _prompt_password(parser)
+            oauth = args.auth == "microsoft-oauth"
+            if oauth:
+                if not args.tenant or not args.client_id:
+                    parser.error("--auth microsoft-oauth needs --tenant and --client-id.")
+                # Exchange Online's endpoint; the OAuth scope is bound to it.
+                host = args.host or MICROSOFT_IMAP_HOST
+            else:
+                if not args.host:
+                    parser.error("--host is required with --auth password.")
+                if args.tenant or args.client_id:
+                    parser.error("--tenant/--client-id only apply with --auth microsoft-oauth.")
+                host = args.host
+            secret = _prompt_password(parser, "Client secret" if oauth else "Password")
             if args.test:
                 # Build the same backend the tools use and attempt a login, so a
                 # bad credential is caught here rather than at first run.
                 from bestteam.exceptions import ConfigurationError
+                from bestteam.tools._oauth import MicrosoftClientCredentialsToken
                 from bestteam.tools.email_client import _ImapBackend
 
-                backend = _ImapBackend(
-                    host=args.host, user=args.user, password=password,
-                    port=args.port, drafts=args.drafts, restrict_to_public=True,
-                )
+                if oauth:
+                    backend = _ImapBackend(
+                        host=host, user=args.user, port=args.port, drafts=args.drafts,
+                        restrict_to_public=True,
+                        token_provider=MicrosoftClientCredentialsToken(
+                            tenant_id=args.tenant, client_id=args.client_id,
+                            client_secret=secret,
+                        ),
+                    )
+                else:
+                    backend = _ImapBackend(
+                        host=host, user=args.user, password=secret,
+                        port=args.port, drafts=args.drafts, restrict_to_public=True,
+                    )
                 try:
                     conn = backend._connect()
                     conn.logout()
                 except ConfigurationError as exc:
                     parser.error(f"Login test failed, not saved: {exc}")
                 except OSError as exc:
-                    parser.error(f"Could not reach '{args.host}:{args.port}', not saved: {exc}")
+                    parser.error(f"Could not reach '{host}:{args.port}', not saved: {exc}")
             prior = get_email_credentials(db, org.id)
             prior_identity = (prior.host, prior.username) if prior is not None else None
             try:
                 set_email_credentials(
-                    db, org.id, host=args.host, username=args.user, password=password,
+                    db, org.id, host=host, username=args.user, password=secret,
                     port=args.port, drafts_folder=args.drafts,
+                    auth_type=AUTH_MICROSOFT_OAUTH if oauth else AUTH_PASSWORD,
+                    oauth_tenant_id=args.tenant if oauth else None,
+                    oauth_client_id=args.client_id if oauth else None,
                 )
             except Exception as exc:  # noqa: BLE001 -- surface a clear CLI error (e.g. missing key)
                 parser.error(str(exc))
             email_trigger.disable_trigger_on_identity_change(
-                db, org.id, args.host, args.user, prior_identity
+                db, org.id, host, args.user, prior_identity
             )
             print(f"Connected mailbox '{args.user}' for organization '{args.org}'.")
             return 0
