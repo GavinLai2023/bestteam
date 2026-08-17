@@ -35,8 +35,9 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
-from . import email_filter, secret_store, trigger_health
+from . import email_budget, email_filter, secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
+from .db.email_budget_settings import get_budget_caps, spent_this_month
 from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 from .db.email_filter_settings import get_filter_settings
 from .db.email_triggers import get_email_trigger
@@ -640,6 +641,10 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
     today = _today()
     if trigger.runs_date != today:
         trigger.runs_today = 0
+        # The customer's daily MESSAGE cap shares `runs_date` on purpose: one
+        # rollover check resets both counters, so they can never disagree about
+        # which day it is. Resetting it anywhere else would reintroduce that.
+        trigger.messages_today = 0
         trigger.runs_date = today
     if trigger.runs_today >= daily_cap():
         db.commit()
@@ -796,7 +801,40 @@ def _start_triggered_run(
     run = registry.create(
         trigger.workflow_name, "", org_id=trigger.org_id, username=TRIGGER_USERNAME,
     )
-    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=batch_size())
+    # The customer's two budgets (the operator's `daily_cap()` runs-per-day rail
+    # is separate and unchanged, checked by the caller). Both are read here,
+    # inside the caller's `_dispatch_lock`, immediately before the claim -- same
+    # staleness rationale as `_at_daily_cap`.
+    caps = get_budget_caps(db, trigger.org_id)
+    now = _utcnow()
+
+    if email_budget.cost_exceeded(caps, spent_this_month(db, trigger.org_id, now)):
+        registry.discard(run.id)
+        _raise_budget_alert(
+            db, trigger.org_id, "cost", email_budget.month_key(now),
+            "This organisation has reached its monthly spend limit for automatic "
+            "email runs. New mail is still being collected and will be processed "
+            "when the new month begins, or sooner if you raise the limit.",
+        )
+        db.commit()
+        return
+
+    remaining = email_budget.remaining_messages(caps, trigger.messages_today)
+    if remaining == 0:
+        registry.discard(run.id)
+        _raise_budget_alert(
+            db, trigger.org_id, "messages", email_budget.day_key(now),
+            "This organisation has reached its daily limit for automatically "
+            "processed emails. New mail is still being collected and will be "
+            "processed tomorrow, or sooner if you raise the limit.",
+        )
+        db.commit()
+        return
+
+    # The message cap truncates the claim rather than rejecting the cycle: the
+    # messages it leaves behind stay `pending` and are claimed by a later cycle.
+    limit = batch_size() if remaining is None else min(batch_size(), remaining)
+    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=limit)
     if not claimed:
         registry.discard(run.id)
         db.commit()
@@ -868,6 +906,11 @@ def _start_triggered_run(
             # this run's claimed batch, so writing max(batch) would regress the
             # cursor and re-detect (harmlessly, but pointlessly) the remainder.
             runs_today=EmailTrigger.runs_today + 1,
+            # The customer's message counter advances in exactly this statement
+            # and nowhere else, so it is guarded by the same enabled/active
+            # predicate: every path that releases the claim (build failure,
+            # disabled mid-build, submit failure) leaves it alone for free.
+            messages_today=EmailTrigger.messages_today + len(claimed),
             last_run_id=run.id,
             last_error=None,  # a run is going out: clear any prior fault
             last_error_kind=None,
@@ -1020,6 +1063,10 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     today = _today()
     if trigger.runs_date != today:
         trigger.runs_today = 0
+        # Same rollover, same reason as poll_org's: `messages_today` shares
+        # `runs_date`, so every place that rolls the date over must roll both
+        # counters or a stale message count would survive into the new day.
+        trigger.messages_today = 0
         trigger.runs_date = today
     if trigger.runs_today >= daily_cap():
         db.commit()
@@ -1195,6 +1242,37 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
                 TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
             ))
         return new_run.id
+
+
+_BUDGET_KIND = "budget"
+
+
+def _budget_fingerprint(which: str, period: str) -> str:
+    """Scope a budget alert to the period it is about.
+
+    `has_fingerprint` searches an org's entire notification history, so a bare
+    name would alert once ever and every later month would be silent -- the
+    same trap `_expiry_fingerprint` exists to avoid.
+    """
+    return f"budget_{which}:{period}"
+
+
+def _raise_budget_alert(db: Session, org_id: int, which: str, period: str, body: str) -> None:
+    """Alert once per period that automation has paused on a budget.
+
+    Deliberately NOT routed through `trigger_health.evaluate`: a budget
+    ceiling is a normal operating state, not a fault, and feeding it into the
+    fault evaluator would corrupt `consecutive_faults` and compete with real
+    faults for `alerted_fingerprint`.
+    """
+    fingerprint = _budget_fingerprint(which, period)
+    if has_fingerprint(db, org_id, fingerprint):
+        return
+    create_notification(
+        db, org_id=org_id, kind=_BUDGET_KIND, severity="warning",
+        title="Automatic email runs have paused -- budget reached",
+        body=body, fingerprint=fingerprint,
+    )
 
 
 # Warn this far ahead of a Microsoft 365 client secret expiring. Entra secrets

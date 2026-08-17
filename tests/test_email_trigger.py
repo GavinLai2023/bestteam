@@ -2407,3 +2407,159 @@ def test_make_backend_keeps_ssrf_validation_on(db, monkeypatch):
         "drafts": cred.drafts_folder,
         "restrict_to_public": True,
     }]
+
+
+# --- Phase 4a: the poller enforces both budgets ------------------------------
+
+
+def _budget_org(db, monkeypatch, *, new_uids):
+    """An org whose cycle detects `new_uids` and whose filter passes them all."""
+    summaries = [
+        {"id": str(u), "from": "alice@client.test", "subject": "Quote"}
+        for u in new_uids
+    ]
+    backend = _SummaryBackend(summaries)
+    recorder = _SubmitRecorder()
+    org, trigger = _filtering_org(db, monkeypatch, backend, new_uids=new_uids)
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    return org, trigger, recorder
+
+
+def _spend(db, org_id, amount, when):
+    from ui.backend.db.models import Run, UsageRecord
+    db.add(Run(id=f"spent-{amount}-{when.isoformat()}", workflow="w", input="",
+               status="completed", org_id=org_id))
+    db.add(UsageRecord(run_id=f"spent-{amount}-{when.isoformat()}", org_id=org_id,
+                       model="openai:gpt-4o-mini", input_tokens=1, output_tokens=1,
+                       cost_estimate=amount, created_at=when))
+    db.commit()
+
+
+def test_the_message_cap_truncates_the_claim(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44, 45, 46))
+    set_budget_caps(db, org.id, daily_message_cap=3, monthly_cost_cap=None)
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert len(recorder.calls) == 1
+    _, args, _kwargs = recorder.calls[0]
+    # `_trigger_input` renders the claimed uids as "message ids: 42, 43, 44";
+    # count the ids, not commas -- the surrounding sentence has one of its own.
+    assert "message ids: 42, 43, 44)" in args[2]
+    assert trigger.messages_today == 3
+
+
+def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Run
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43))
+    set_budget_caps(db, org.id, daily_message_cap=2, monthly_cost_cap=None)
+    trigger.messages_today = 2
+    trigger.runs_date = email_trigger._today()
+    db.commit()
+
+    poll_org(db, trigger, _no_workflow)
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 0
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"pending"}
+
+
+def test_the_message_counter_resets_with_the_date(db, monkeypatch):
+    # messages_today shares runs_date on purpose: one rollover check resets
+    # both, so the two counters can never disagree about which day it is.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=5, monthly_cost_cap=None)
+    trigger.messages_today = 5
+    trigger.runs_today = 5
+    trigger.runs_date = "2020-01-01"
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert trigger.messages_today == 1  # reset to 0, then this cycle's one
+    assert trigger.runs_today == 1
+
+
+def test_a_reached_spend_cap_blocks_dispatch(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Run
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _no_workflow)
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 1  # only the spend fixture's own row
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"pending"}
+
+
+def test_a_budget_alert_is_raised_once_per_period(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Notification
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_workflow)
+
+    assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 1
+
+
+def test_a_new_month_alerts_again(db, monkeypatch):
+    # A month-scoped fingerprint is what makes "once per period" mean per
+    # period rather than once ever -- the _expiry_fingerprint lesson, applied
+    # before it can bite a second time.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Notification
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime(2026, 7, 15, tzinfo=timezone.utc))
+    _spend(db, org.id, 10.0, datetime(2026, 8, 15, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(email_trigger, "_utcnow",
+                        lambda: datetime(2026, 7, 20, tzinfo=timezone.utc))
+    poll_org(db, trigger, _no_workflow)
+    monkeypatch.setattr(email_trigger, "_utcnow",
+                        lambda: datetime(2026, 8, 20, tzinfo=timezone.utc))
+    poll_org(db, trigger, _no_workflow)
+
+    assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 2
+
+
+def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
+    # A budget ceiling is a normal operating state, not a fault. Routing it
+    # through trigger_health.evaluate would corrupt consecutive_faults and
+    # compete with real faults for alerted_fingerprint.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=1.0)
+    _spend(db, org.id, 5.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _no_workflow)
+
+    assert trigger.consecutive_faults == 0
+    assert trigger.alerted_fingerprint is None
+    assert trigger.last_error is None
+
+
+def test_an_org_with_no_caps_behaves_exactly_as_before(db, monkeypatch):
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44))
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert len(recorder.calls) == 1
+    assert trigger.messages_today == 3
+    assert trigger.runs_today == 1
