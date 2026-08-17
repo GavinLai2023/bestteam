@@ -314,3 +314,66 @@ Append new entries at the bottom using this template:
   design. `CONFIRMED_DRAFT_OUTCOMES` keeps the two readers of confirmed drafts
   in agreement so a skipped draft still excludes its message from the next
   retry.
+
+## Retention purges a run's content and keeps its accounting (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: A generic email team's model output — names, subjects, body
+  excerpts — persisted indefinitely in `runs.output` and `trace_events`. Raw
+  email bodies were already redacted at the adapter layer, but a generic team's
+  *output* is the product, so redaction cannot reach it. The only lever is time.
+- **Decision**: A purge clears `runs.input`/`output`, deletes the run's
+  `trace_events`, and empties `automation_item_results.payload`, then stamps
+  `runs.content_purged_at`. The `runs` row itself, `usage_records`,
+  `trigger_context`, and an item result's `status`/`source_key` all survive.
+- **Why**:
+  - `usage_records.run_id` is non-nullable and `run_analytics_api.py` reports
+    over exactly those rows. Deleting run rows would destroy the organisation's
+    token and cost history — a worse bug than the one being fixed. The
+    customer's concern is the personal data, not that a run happened at 03:14
+    and cost $0.02.
+  - `automation_item_results.status`/`source_key` are what
+    `CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted UIDs from a
+    retry. Clearing them would make a retention sweep cause duplicate drafts —
+    the exact defect Phase 3a's per-source-key lock exists to prevent.
+  - It is honest to state: we stop keeping what was in the email; we keep that
+    the work happened.
+- **Consequences**: A purged run renders as an explicit "content was removed"
+  rather than an empty timeline, in `RunDetail` and in both automation-result
+  lists. A purge is not a secure erase — SQLite leaves the old page contents on
+  disk until `VACUUM`.
+
+## Retention covers all of an org's runs, not only email-triggered ones (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: The problem was raised about autonomous email runs, and
+  `Run.trigger_context` identifies exactly those.
+- **Decision**: The policy applies to every run belonging to the organisation.
+- **Why**: There is no reliable "is this an email run" predicate. A user who
+  opens their email team and clicks Run produces a *manual* run whose output
+  contains the same names, subjects and excerpts. Filtering to the autonomous
+  half would be more code and less protection, and would leave the customer
+  believing they were covered when they were not. One uniform rule is also the
+  one a customer can state back to you: run history is kept for N days.
+- **Consequences**: An organisation that turns retention on loses old manual
+  run history too. That is why the default is NULL — keep forever — so an
+  upgrade deletes nothing and enabling it is always a deliberate act.
+
+## Per-data-subject erasure was refused rather than approximated (email Phase 3b)
+
+- **Date**: 17 Aug 2026
+- **Status**: accepted
+- **Context**: The natural request behind a retention feature is "delete
+  everything about alice@example.com".
+- **Decision**: Not built. Retention is by age; deletion is by run or by batch.
+- **Why**: The address is not stored anywhere indexed. It exists only inside
+  `runs.output` free text that the model may have paraphrased or summarised.
+  Matching it would both miss (rewritten text) and over-delete (an unrelated
+  run that merely mentions the address). Shipping that as an erasure feature
+  would be a compliance promise that cannot be kept, which is worse than not
+  offering it.
+- **Consequences**: A customer with a genuine subject-access erasure obligation
+  has age-based retention and per-run deletion, and must be told plainly that
+  identifier-based erasure is not available. Recorded in `STATUS.md`.

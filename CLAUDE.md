@@ -97,8 +97,17 @@ implemented** — don't assume they exist:
   No SMTP anywhere (deliberate: the draft-only toolkit's containment argument
   is that there is no send verb in the process), no per-user preferences, no
   digests. A trigger raises a notification on a health *transition*
-  (`ui/backend/trigger_health.py`), never per occurrence. Retention/deletion/
-  export of email-derived run output remains **unbuilt** — Phase 3b.
+  (`ui/backend/trigger_health.py`), never per occurrence.
+- **Run history has retention, but erasure by data subject does not exist.**
+  Each org sets a period (`org_retention_settings`, NULL = keep forever by
+  default) and a purge clears *content* — `runs.input`/`output`, the run's
+  `trace_events`, an `automation_item_results.payload` — while keeping
+  *accounting*: the `runs` row, `usage_records`, and an item result's
+  `status`/`source_key` (clearing those would make a sweep cause duplicate
+  drafts on retry). Deleting everything about one email address is **not**
+  offered and won't be: the address is only in free text the model may have
+  paraphrased. A purge is also not a secure erase — no `VACUUM`. See
+  `ui/backend/retention.py`.
 - **Live run state (`RunRegistry`) isn't rehydrated from the DB on restart**:
   a killed/restarted process still loses in-flight/live run state. History no
   longer disappears, though — every `trace_events` row is now persisted per

@@ -333,3 +333,24 @@ startup check that refuses to boot when a rotated key can't read stored
 credentials covers it too. `set_notification_settings(keep_existing_secret=)`
 exists because the API never returns the secret -- an update that omits it must
 keep it rather than wipe it.
+
+## `org_retention_settings` + `runs.content_purged_at` (email Phase 3b)
+
+`org_retention_settings` is one row per org: `run_retention_days` (NULL = keep
+forever, the default, so an upgrade deletes nothing), plus `last_swept_at` and
+`last_purged_count`. Those two are not decoration -- a retention policy whose
+job silently stopped is indistinguishable from one that is working, until an
+audit, so the UI shows when it last ran and what it took.
+
+`set_retention_days(db, org_id, None)` turns the policy off but **keeps the
+row**: the sweep history outlives any one policy value.
+
+`runs.content_purged_at` is what marks a run purged -- never the emptiness of
+`input`/`output`, since a genuinely empty output is possible. A purge deletes
+that run's `trace_events` rows and empties each `automation_item_results.payload`,
+but never touches `usage_records` (non-nullable `run_id`, and it carries the
+org's cost history) nor an item result's `status`/`source_key` (those exclude
+already-drafted UIDs from a retry -- see `ui/backend/CLAUDE.md`).
+`inbox_events` is deliberately never purged: a UID plus the customer's own
+mailbox address is not data-subject content, and deleting it would break
+`resolve_retry_events`.

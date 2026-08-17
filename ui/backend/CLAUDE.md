@@ -241,6 +241,45 @@ secret expires, keyed on an **admin-entered** date (`oauth_secret_expires_at`).
 It is not read from Entra on purpose -- that needs `Application.Read.All`, a
 directory-wide read over every app registration in the tenant.
 
+**Phase 3b: retention, deletion and export**
+
+`retention.py` is the engine; policy lives in `org_retention_settings`
+(`db/retention.py`), NULL = keep forever, which is the default so an upgrade
+deletes nothing. `retention_default_days()` (`BESTTEAM_RUN_RETENTION_DAYS`) is
+applied by `db/orgs.py::create_org` to **newly created** orgs only.
+
+The rule that is easy to break by "simplifying": **a purge clears content and
+keeps accounting.** Content is `runs.input`/`output`, the run's `trace_events`,
+and `automation_item_results.payload`. Accounting is the `runs` row itself
+(deleting it would orphan `usage_records`, which is non-nullable and backs
+`run_analytics_api.py`), `usage_records`, `trigger_context`, and an item
+result's `status`/`source_key` -- those two are what
+`automation_results.CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted
+UIDs from a retry, so clearing them would make a retention sweep cause
+duplicate drafts. `runs.content_purged_at`, not an empty field, is what marks a
+run purged. `purge_run` refuses a `running` run (its worker is mid-write) and
+is idempotent, because the sweep re-selects rows on overlapping cycles.
+
+Retention covers **all** of an org's runs, not only `trigger_context`-bearing
+ones: a user who opens their email team and clicks Run produces a manual run
+with the same customer content in it, so filtering to the autonomous half would
+be more code and less protection.
+
+`export_org_runs` emits exactly what a purge removes -- that is what makes
+enabling deletion safe. `PURGED_FIELDS` declares the surface once and
+`tests/test_retention.py::test_export_covers_everything_purge_clears` fails if
+the export stops covering it. `purgeable_run_count` and `purge_org_runs` share
+`_purgeable_query` so the preview can never disagree with the purge.
+
+Scheduling: `run_maintenance(db)` (secret expiry + retention sweep + webhook
+dispatch) is the poller's tail, and `poll_forever`'s
+`BESTTEAM_TRIGGERS_DISABLED` branch calls `maintenance_once()` rather than
+skipping the cycle -- a platform-wide pause of *automation* is not a pause of
+*data deletion*. Routes: `GET/PUT /api/org/retention`,
+`POST /api/org/retention/purge` (`older_than_days` is **required**; a
+destructive button must state what it removes), `GET /api/org/export`, and
+`POST /api/runs/{id}/purge` (cross-org 404, `running` 409).
+
 **Phase 2: Microsoft 365 mailboxes**
 
 Exchange Online no longer accepts basic auth, so an M365 org could not connect
