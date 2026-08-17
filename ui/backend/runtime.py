@@ -22,6 +22,7 @@ from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
 from .automation_results import (
+    CONFIRMED_DRAFT_OUTCOMES,
     RESULT_TYPE_BATCH_MARKER,
     already_drafted_uids,
     normalize_run_result,
@@ -594,7 +595,7 @@ def run_in_background(
                     and isinstance(event.data, dict)
                     and event.data.get("tool") == "email_draft_reply"
                     and event.data.get("success")
-                    and event.data.get("outcome") == "draft_created"
+                    and event.data.get("outcome") in CONFIRMED_DRAFT_OUTCOMES
                 ):
                     # Ground truth for automation_results.py's normalization:
                     # a model's envelope can CLAIM action.draft_created for any

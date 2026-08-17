@@ -275,6 +275,16 @@ def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result:
             "message_id": message_id,
             "outcome": "draft_created",
         }
+    # The idempotency guard found this message's source key already in Drafts
+    # and skipped the APPEND. A draft exists, so this counts as confirmed for
+    # retry exclusion exactly like `draft_created` -- but it is reported
+    # distinctly so the trace never claims a write that did not happen.
+    if text.startswith("A draft reply for this message already exists"):
+        return {
+            "summary": f"Draft reply already existed for message '{message_id}'.",
+            "message_id": message_id,
+            "outcome": "draft_exists",
+        }
     return {
         "summary": f"Draft reply attempt for message '{message_id}' did not complete.",
         "message_id": message_id,

@@ -194,6 +194,12 @@ def _source_key(mailbox_credential_id: Any, uidvalidity: Any, uid: str) -> str:
     return f"mailbox:{mailbox_credential_id}:uidvalidity:{uidvalidity}:uid:{uid}"
 
 
+# A draft exists in the mailbox either because this run wrote it
+# (`draft_created`) or because the idempotency guard found the same source
+# key already there and skipped the APPEND (`draft_exists`). Both confirm
+# the draft for retry exclusion; only the first claims a write.
+CONFIRMED_DRAFT_OUTCOMES = frozenset({"draft_created", "draft_exists"})
+
 _UNCONFIRMED_DRAFT_REASON = (
     "The automation's output claimed a draft was created, but no successful "
     "draft action was recorded for this message -- treat as not drafted."
@@ -440,7 +446,7 @@ def _trace_confirmed_uids(db: Session, run_ids, allowed_uids: set) -> set:
             continue
         if not isinstance(data, dict):
             continue
-        if data.get("tool") != "email_draft_reply" or data.get("outcome") != "draft_created":
+        if data.get("tool") != "email_draft_reply" or data.get("outcome") not in CONFIRMED_DRAFT_OUTCOMES:
             continue
         message_id = data.get("message_id")
         if isinstance(message_id, str) and message_id.strip() in allowed_uids:
