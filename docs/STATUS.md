@@ -1127,6 +1127,90 @@
   *data deletion*. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-3b-retention-export-design.md`.
 
+- **Email automation Phase 4a — pre-LLM filtering and real budgets.** Two holes
+  that both cost a customer money they never agreed to spend. *Every* message
+  reached the model: a newsletter, a delivery receipt and a "do not reply"
+  notification each cost the same as a real enquiry. And the only ceiling
+  counted the wrong thing — `BESTTEAM_TRIGGER_DAILY_CAP` caps *runs* per day,
+  and a run processes up to 20 messages, so the customer-visible promise was
+  "at most 1,000 messages a day, at an unknown price", which is not a budget.
+
+  A **header-only, rule-based filter** (`ui/backend/email_filter.py`, pure —
+  no I/O, no clock, no DB, the same shape as `trigger_health.py`) now decides
+  before any model is involved whether a message is worth processing, and
+  records why. **Rules and not a classifier**, for three reasons: a cheap
+  gatekeeper model still bills per message (paying less for junk is a discount,
+  not a fix); it reads attacker-controlled text, and a model that decides
+  *whether a message is processed* is one an attacker has a direct incentive to
+  talk past, which widens the injection surface the draft-only bound exists to
+  contain; and an admin cannot audit it — "the sender matches
+  `*@newsletter.example.com`" is a rule someone can read and change, "the
+  classifier scored it 0.31" is not. Headers suffice for the junk that actually
+  dominates an inbox, because bulk mail identifies itself: RFC 3834
+  `Auto-Submitted`, RFC 2919 `List-Id`, RFC 8058 `List-Unsubscribe` and the
+  de-facto `Precedence` exist precisely so automated agents recognise it.
+
+  **Filtering changes an `inbox_events` row's *status*, never whether the row
+  is inserted.** Phase 1's durability guarantee — the commit that consumes the
+  mail is the commit that records it — is untouched, and `claim_events` already
+  selects `pending` only, so the claim, dispatch, retry and completion paths
+  change not at all. Release is one `filtered` → `pending` flip. That is why
+  "record, show, allow release" beat "drop and count": a rule-based filter
+  *will* have false positives, and the cost of one has to be "an admin clicks
+  Release", not "the enquiry was silently lost and nobody ever knew". The
+  evaluation order is fixed and is the behaviour (blocked sender → not
+  allowlisted → blocked subject → bulk), the blocklist outranks the allowlist,
+  and **the allowlist deliberately does not exempt a sender from the bulk
+  check** — an allowlisted domain that starts sending a newsletter is still
+  sending a newsletter. Patterns are two forms only (a full address,
+  `*@domain`), matched against the parsed address and never the attacker-chosen
+  display name; there are **no regular expressions**, because a customer-supplied
+  regex brings catastrophic backtracking into the poll loop and no admin can be
+  told why theirs did not match.
+
+  **`skip_bulk` defaults to on** — the one deliberate behaviour change on
+  upgrade. A safety feature nobody switches on protects nobody, and the default
+  is recoverable: one checkbox turns it off, and every filtered message stays
+  visible and releasable. Both budget caps default to NULL, because an upgrade
+  must not start refusing a customer's mail over a limit they never set.
+
+  **Two real per-org budgets** (`org_email_budget_settings`): a daily message
+  cap enforced at claim (`limit=min(batch_size(), remaining)`, and no run
+  dispatched at all when nothing remains), and a monthly spend cap checked
+  inside `_dispatch_lock` beside the existing run-cap re-check. Spend is
+  *queried* (`SUM(cost_estimate)` over `usage_records` for the UTC month), never
+  counted into a column that would need its own reset, backfill and drift bug.
+  Three limits, two audiences: `BESTTEAM_TRIGGER_DAILY_CAP` stays as the
+  operator's deployment-wide rail (it measures the wrong thing for a customer
+  promise, which is why the other two exist, but it bounds a runaway poller
+  regardless of what any org configured); the message and spend caps are the
+  customer's. Hitting one stops dispatch, alerts once, and resumes
+  automatically — not a hard disable, because a budget reached on a Saturday
+  must not need a human on Monday, and a self-disabled trigger is
+  indistinguishable in the UI from one the customer turned off.
+
+  **Budget alerts bypass `trigger_health.evaluate` deliberately**: a ceiling is
+  a normal operating state, not a fault, and routing it through the fault
+  evaluator would corrupt `consecutive_faults` and compete with real faults for
+  `alerted_fingerprint`. Their fingerprints are period-scoped
+  (`budget_messages:<UTC date>`, `budget_cost:<UTC month>`) following
+  `_expiry_fingerprint`'s precedent, because `has_fingerprint` searches an org's
+  *entire* history — a bare name alerts once ever and every later period is
+  silent. Unpriced models are handled in three parts rather than by refusing to
+  run (one missing catalogue row would wedge a customer's automation) or by
+  silence: the budget API names them, NULL contributes 0 at runtime so the cap
+  is a floor on reality rather than a phantom ceiling, and the UI states how
+  many runs this month were unpriced.
+
+  Cost, stated plainly: `summaries_for` now fetches the four bulk headers, so
+  detection costs **one extra IMAP login per poll cycle that finds new mail**
+  (`BODY.PEEK` preserved — the draft-only toolkit never marks mail seen and
+  this must not become the thing that does). A UID whose headers cannot be
+  fetched is recorded `pending`, not `filtered`: **fail open**, since the worst
+  case of failing open is one junk message processed and the worst case of
+  failing closed is a customer's mail silently discarded. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-4a-filtering-budgets-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -1173,9 +1257,13 @@
   tool call opens its own IMAP connection (a 20-message batch is ~41 logins);
   multi-tenant connection is IMAP username/password only (the Graph backend is
   unreachable outside the process-env single-mailbox path, which multi-org
-  deployments refuse); there is no pre-LLM filtering, so spam is billed at
-  model rates; the daily cap counts runs, not messages or spend; attachments
-  are invisible; and one org gets exactly one mailbox, one trigger, one team.
+  deployments refuse); **pre-LLM filtering is header-only**, so a human-written
+  but entirely irrelevant email is not filtered and is still billed at model
+  rates — that is the acknowledged ceiling of the rule approach, and the reason
+  a classifier stays on the table for a later phase if a customer's inbox
+  actually demands it; **attachments are still invisible** (Phase 4b); and one
+  org gets exactly one mailbox, one trigger, one team. Phase 4a's header fetch
+  also adds one more login to any cycle that finds new mail.
 - **Erasure by data subject is not possible** — a customer asking to delete
   everything about `alice@example.com` cannot be served. The address is not
   stored anywhere indexed; it exists only inside `runs.output` free text the
@@ -1190,6 +1278,43 @@
   an IMAP UID, the customer's own mailbox address and a status, so there is no
   data-subject content in it and deleting it would break `resolve_retry_events`
   for no privacy gain. It is still an unbounded table on a busy mailbox.
+  **Phase 4a's filtered rows are never purged either**; they are rows the mail
+  would have produced anyway, so filtering changes the rate at which this table
+  grows, not the property.
+- **A spend cap bounds an estimate, not a bill.** `usage_records.cost_estimate`
+  derives from `model_catalog` prices that an operator maintains by hand and
+  that no provider invoice is ever reconciled against, and a model with no
+  catalogue row contributes NULL, i.e. 0. The budget API and UI name the
+  unpriced models and count the unpriced runs so the blind spot is visible
+  rather than inferred — but `unpriced_models_for_org` scopes to
+  `status="deployed"` workflows, so an undeployed team's models are not warned
+  about. Anyone quoting the figure to a customer should say "at least".
+- **The spend cap is enforced between runs, not within one.** A single run that
+  blows through a customer's monthly cap is not interrupted; the cap stops the
+  *next* dispatch. Interrupting mid-run would mean cancelling a partly-drafted
+  batch, which costs the money already spent and delivers nothing for it.
+- **The daily message counter over-counts on a submit failure.** The CAS
+  advances `messages_today` by the claimed batch and commits; the submit-failure
+  branch then hands those messages back to `pending` via `release_events`, so a
+  later cycle claims and charges them a second time. `runs_today` has had
+  identical semantics on that branch since it existed. Decrementing was
+  rejected deliberately: it would add a second write site outside the CAS to
+  correct an over-count bounded at one batch, on a branch that only fires while
+  the executor is shutting down. Separately, **`retry_triggered_run` enforces
+  neither new cap** and does not advance `messages_today`, so a human-initiated
+  retry of one failed batch can put an org past its daily message cap —
+  arguably right (a human asking to redo one batch is not autonomous spend),
+  but it is a real hole in the number the customer is shown.
+- **The Filtered ("Mail we skipped") UI section renders only when a trigger
+  with a `workflow_name` is configured**, because it lives inside
+  `EmailTriggerActivity` after its two early returns. Correct today — filtered
+  rows cannot exist before a trigger has polled — but a customer who later
+  disconnects their mailbox loses the only route to their historical filtered
+  rows, and to the Release button on them. The section also identifies a
+  skipped message by **UID rather than sender and subject**, which the design
+  sketched: `inbox_events` deliberately holds no message content (that is why
+  it needs no retention purge), so an admin decides whether to release on the
+  strength of the rule that fired rather than of the message itself.
 - **Retention is per-org and opt-in, so the default deployment still keeps
   everything forever** — `run_retention_days` defaults to NULL by design (an
   upgrade must delete nothing), and `BESTTEAM_RUN_RETENTION_DAYS` only supplies

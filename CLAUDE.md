@@ -98,6 +98,28 @@ implemented** — don't assume they exist:
   is that there is no send verb in the process), no per-user preferences, no
   digests. A trigger raises a notification on a health *transition*
   (`ui/backend/trigger_health.py`), never per occurrence.
+- **Inbound mail is filtered by header rules only, and the two per-org budgets
+  bound an estimate.** A pure evaluator (`ui/backend/email_filter.py`) decides
+  before any model is involved whether a detected message is worth processing —
+  a sender blocklist/allowlist, a subject blocklist, and a `skip_bulk` check
+  over the standard bulk headers, in that fixed order, with the allowlist
+  deliberately *not* exempting a sender from the bulk check. Two pattern forms
+  (a full address, `*@domain`), no regular expressions, no classifier model —
+  a gatekeeper model would still bill per message, still read
+  attacker-controlled text, and could not be audited by the admin whose mail it
+  dropped. Filtering only changes an `inbox_events` row's *status*: every
+  detected message is still recorded in the commit that consumes it, and a
+  false positive is released with one `filtered` → `pending` flip.
+  **`skip_bulk` is on by default** (the one behaviour change on upgrade); both
+  budget caps default to NULL. `org_email_budget_settings` adds a per-org daily
+  *message* cap and monthly *spend* cap that pause dispatch, alert once per
+  period and resume automatically, alongside — not replacing —
+  `BESTTEAM_TRIGGER_DAILY_CAP`, the operator's deployment-wide runs/day rail.
+  What does **not** exist: any inspection beyond headers (a human-written but
+  irrelevant email is still billed), attachments (Phase 4b), and reconciliation
+  of `model_catalog` prices against a provider bill — the spend cap bounds an
+  estimate. See `ui/backend/CLAUDE.md` and `docs/STATUS.md` for the rest,
+  including the caps `retry_triggered_run` does not enforce.
 - **Run history has retention, but erasure by data subject does not exist.**
   Each org sets a period (`org_retention_settings`, NULL = keep forever by
   default) and a purge clears *content* — `runs.input`/`output`, the run's
