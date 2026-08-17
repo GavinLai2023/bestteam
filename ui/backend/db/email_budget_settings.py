@@ -9,14 +9,19 @@ Nothing here commits: callers own the transaction boundary.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..email_budget import BudgetCaps
-from .models import OrgEmailBudgetSetting, UsageRecord
+from .email_triggers import get_email_trigger
+from .model_catalog import list_entries
+from .models import OrgEmailBudgetSetting, UsageRecord, WorkflowRecord
+
+_logger = logging.getLogger(__name__)
 
 
 def _month_start(now: datetime) -> datetime:
@@ -76,6 +81,54 @@ def spent_this_month(db: Session, org_id: int, now: datetime) -> Optional[float]
             UsageRecord.created_at >= _month_start(now),
         )
     ).scalar()
+
+
+def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
+    """The models this org's automation runs that have no `model_catalog` row.
+
+    Such a model contributes nothing to `spent_this_month`, so a monthly cap is
+    a floor on reality rather than a ceiling. Naming the models is what turns
+    that from a silent inaccuracy into something an admin can act on -- by
+    pricing the model, or by knowing the cap does not cover it.
+
+    Resolved from the org's trigger: its `workflow_name` against the same
+    deployed `WorkflowRecord` the poller itself builds from, then each agent's
+    `model` exactly as `deploy_validation.validate_agent_models` reads it. Only
+    a deployed record can run automatically, so only its models can cost
+    anything.
+
+    Deliberately total: no trigger, no deployed team, no models, or any failure
+    at all yields `[]`. This is advisory copy on a settings page and must never
+    be able to stop an admin saving a cap.
+    """
+    try:
+        trigger = get_email_trigger(db, org_id)
+        if trigger is None or not trigger.workflow_name:
+            return []
+        record = (
+            db.query(WorkflowRecord)
+            .filter_by(name=trigger.workflow_name, org_id=org_id, status="deployed")
+            .one_or_none()
+        )
+        if record is None:
+            return []
+        specs = {
+            agent.get("model")
+            for agent in (record.config or {}).get("agents") or []
+            if isinstance(agent, dict) and isinstance(agent.get("model"), str)
+            and agent.get("model")
+        }
+        if not specs:
+            return []
+        priced = {entry.spec for entry in list_entries(db)}
+        # Sorted and de-duplicated so the response -- and the test pinning it --
+        # cannot depend on dict ordering.
+        return sorted(specs - priced)
+    except Exception:  # noqa: BLE001 -- advisory only, never a failed save
+        _logger.warning(
+            "Could not resolve unpriced models for org %s", org_id, exc_info=True
+        )
+        return []
 
 
 def unpriced_run_count(db: Session, org_id: int, now: datetime) -> int:

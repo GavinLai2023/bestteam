@@ -11,17 +11,18 @@ import logging
 from datetime import timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from bestteam.tools.email_client import _ImapBackend
 
-from . import secret_store
+from . import email_filter, secret_store
 from .auth_api import get_current_org
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger, upsert_email_trigger
-from .db.models import EmailTrigger, Organization, Run, WorkflowRecord
+from .db.inbox_events import list_filtered_events, release_filtered_event
+from .db.models import EmailTrigger, Organization, Run, WorkflowRecord, iso_utc
 from .db_session import get_db
 from .email_tools import spec_uses_email
 from .email_trigger import daily_cap, mailbox_state, triggers_disabled, TRIGGER_USERNAME, _today
@@ -177,3 +178,45 @@ def trigger_activity(
             for r in rows
         ]
     }
+
+
+@router.get("/email-trigger/filtered")
+def list_filtered(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Mail the pre-LLM filter skipped, newest first.
+
+    Shown rather than silently dropped because a rule-based filter will have
+    false positives, and the cost of one has to be "an admin clicks Release",
+    not "the enquiry vanished and nobody knew".
+    """
+    rows = list_filtered_events(db, org_id=org.id, limit=limit)
+    return {
+        "filtered": [
+            {
+                "id": row.id,
+                "external_id": row.external_id,
+                "decision": row.decision,
+                "reason": email_filter.describe(row.decision or ""),
+                "detected_at": iso_utc(row.detected_at) if row.detected_at else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/email-trigger/filtered/{event_id}/release")
+def release_filtered(
+    event_id: int,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Hand one skipped message back for normal processing on the next cycle."""
+    # 404 rather than 403 for another org's row, and for one already released:
+    # the two are indistinguishable to a caller, so probing learns nothing.
+    if not release_filtered_event(db, org_id=org.id, event_id=event_id):
+        raise HTTPException(status_code=404, detail="No such filtered message.")
+    db.commit()
+    return {"released": True}
