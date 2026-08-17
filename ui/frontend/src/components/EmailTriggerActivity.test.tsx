@@ -189,6 +189,11 @@ describe('EmailTriggerActivity', () => {
 
       expect(await screen.findByText('Skipped: bulk mail (mailing list)')).toBeInTheDocument()
       expect(screen.getByText('Skipped: the sender is not on your allowed list')).toBeInTheDocument()
+      // `detected_at` above carries no timezone designator on purpose, so it
+      // is parsed as local time and `formatDateTime` (which formats in local
+      // time) renders the same wall clock everywhere. Do not "fix" it by
+      // appending a Z -- that makes this assertion depend on the runner's
+      // timezone.
       expect(screen.getByText(/16 AUG 2026, 9:30 AM/)).toBeInTheDocument()
       expect(screen.getByText(/4021/)).toBeInTheDocument()
     })
@@ -226,6 +231,43 @@ describe('EmailTriggerActivity', () => {
       // No refetch: the row went because we removed it, not because the server
       // was asked again.
       expect(mockedApi.listFilteredMessages).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps a released row gone when a later poll still reports it', async () => {
+      // The section re-polls every 30s, and a response prepared before the
+      // release lands afterwards still carries the row. Without the guard the
+      // released message silently reappears -- the very defect the test above
+      // exists to prevent, merely deferred by one poll cycle.
+      mockedApi.listFilteredMessages.mockResolvedValue({ filtered: FILTERED })
+      vi.useFakeTimers()
+      try {
+        render(<EmailTriggerActivity />)
+        // Flush the mount fetches without letting the interval fire.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0)
+        })
+
+        await act(async () => {
+          fireEvent.click(screen.getAllByRole('button', { name: /release/i })[0])
+        })
+        expect(screen.queryByText('Skipped: bulk mail (mailing list)')).not.toBeInTheDocument()
+
+        // One full poll cycle, the endpoint still returning both rows.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_000)
+        })
+
+        // The poll really did happen -- otherwise this test would pass for the
+        // wrong reason.
+        expect(mockedApi.listFilteredMessages).toHaveBeenCalledTimes(2)
+        expect(screen.queryByText('Skipped: bulk mail (mailing list)')).not.toBeInTheDocument()
+        // The sibling row is still there: the guard drops one id, not the list.
+        expect(
+          screen.getByText('Skipped: the sender is not on your allowed list'),
+        ).toBeInTheDocument()
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('keeps the row and says why when the release fails', async () => {

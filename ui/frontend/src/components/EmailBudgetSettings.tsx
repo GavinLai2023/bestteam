@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import { parseCap } from '../lib/budgetCaps'
 import type { EmailBudget } from '../lib/types'
-
-// An empty box means "no cap" and must send null. 0 is a real, different
-// setting -- a cap of zero, i.e. automation switched off -- so the two can
-// never be collapsed into one another.
-function parseCap(raw: string): number | null {
-  const trimmed = raw.trim()
-  return trimmed === '' ? null : Number(trimmed)
-}
 
 function capField(cap: number | null): string {
   return cap === null ? '' : String(cap)
@@ -83,14 +76,24 @@ export default function EmailBudgetSettings() {
   }, [])
 
   const save = async () => {
+    const dailyCap = parseCap(daily)
+    const monthlyCap = parseCap(monthly)
+    // Refused here rather than sent: an unreadable figure must not reach the
+    // API as null, which would mean "no limit" and remove a real cap.
+    if (dailyCap === undefined || monthlyCap === undefined) {
+      setSaved(false)
+      setError('Please enter a number, or leave a box empty for no limit.')
+      return
+    }
+
     setBusy(true)
     setError(null)
     setSaved(false)
     try {
       apply(
         await api.setEmailBudget({
-          daily_message_cap: parseCap(daily),
-          monthly_cost_cap: parseCap(monthly),
+          daily_message_cap: dailyCap,
+          monthly_cost_cap: monthlyCap,
         }),
       )
       setSaved(true)

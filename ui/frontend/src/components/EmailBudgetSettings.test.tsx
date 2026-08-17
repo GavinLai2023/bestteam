@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import EmailBudgetSettings from './EmailBudgetSettings'
 import { api } from '../lib/api'
+import { parseCap } from '../lib/budgetCaps'
 import type { EmailBudget } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
@@ -10,6 +11,14 @@ vi.mock('../lib/api', () => ({
     setEmailBudget: vi.fn(),
   },
 }))
+
+// Spied, not replaced: every test below wants the real reading of the boxes.
+// The one exception needs `parseCap` to report "not a number", which a
+// `type="number"` input cannot produce -- see budgetCaps.test.ts.
+vi.mock('../lib/budgetCaps', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/budgetCaps')>()
+  return { parseCap: vi.fn(actual.parseCap) }
+})
 
 const mockedApi = vi.mocked(api)
 
@@ -122,6 +131,20 @@ describe('EmailBudgetSettings', () => {
     fireEvent.click(await screen.findByRole('button', { name: /save/i }))
 
     expect(await screen.findByText(/greater than or equal to 1/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^Saved\.$/)).not.toBeInTheDocument()
+  })
+
+  it('refuses to save a figure it cannot read, rather than removing the cap', async () => {
+    // A cap it cannot read must not reach the API as null: `JSON.stringify`
+    // turns NaN into null, and null means "no limit", so an unreadable figure
+    // would silently delete a customer's spend limit.
+    vi.mocked(parseCap).mockReturnValueOnce(undefined)
+    render(<EmailBudgetSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /save/i }))
+
+    expect(await screen.findByText(/please enter a number/i)).toBeInTheDocument()
+    expect(mockedApi.setEmailBudget).not.toHaveBeenCalled()
     expect(screen.queryByText(/^Saved\.$/)).not.toBeInTheDocument()
   })
 
