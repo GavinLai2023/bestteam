@@ -16,6 +16,13 @@ from sqlalchemy.orm import Session
 from .. import secret_store
 from .models import OrgEmailCredential
 
+# How a stored mailbox authenticates.
+AUTH_PASSWORD = "password"
+AUTH_MICROSOFT_OAUTH = "microsoft_oauth"
+# Exchange Online's IMAP endpoint. Fixed, never customer-supplied: the OAuth
+# scope is bound to this host, so accepting another could only ever fail.
+MICROSOFT_IMAP_HOST = "outlook.office365.com"
+
 
 def get_email_credentials(db: Session, org_id: int) -> Optional[OrgEmailCredential]:
     return db.query(OrgEmailCredential).filter_by(org_id=org_id).one_or_none()
@@ -31,12 +38,20 @@ def set_email_credentials(
     port: int = 993,
     drafts_folder: Optional[str] = None,
     backend: str = "imap",
+    auth_type: str = AUTH_PASSWORD,
+    oauth_tenant_id: Optional[str] = None,
+    oauth_client_id: Optional[str] = None,
 ) -> OrgEmailCredential:
     """Create or replace an org's mailbox credentials (upsert on `org_id`).
 
-    `password` is plaintext in; it is encrypted before storage. Raises
+    `password` is plaintext in; it is encrypted before storage. For
+    `auth_type=AUTH_MICROSOFT_OAUTH` it is the Entra **client secret** rather
+    than a mailbox password -- the same encrypted column either way. Raises
     `secret_store.SecretsKeyError` if `BESTTEAM_SECRETS_KEY` is unset/invalid,
     or if it collides with the JWT signing key.
+
+    Every field is assigned unconditionally, so switching a mailbox between
+    auth types can't leave the previous type's fields behind.
     """
     secret_store.ensure_key_separation()
     token = secret_store.encrypt(password)
@@ -50,6 +65,9 @@ def set_email_credentials(
     row.username = username
     row.password_encrypted = token
     row.drafts_folder = drafts_folder
+    row.auth_type = auth_type
+    row.oauth_tenant_id = oauth_tenant_id
+    row.oauth_client_id = oauth_client_id
     db.commit()
     db.refresh(row)
     return row
