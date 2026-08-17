@@ -5,7 +5,7 @@ interesting cases (no cap, a NULL cost estimate, a month boundary) are
 miserable to reach through a mailbox and trivial to reach here.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -69,3 +69,12 @@ def test_a_naive_datetime_is_read_as_utc():
     moment = datetime(2026, 12, 31, 22, 0)
     assert month_key(moment) == "2026-12"
     assert day_key(moment) == "2026-12-31"
+
+
+def test_a_non_utc_moment_is_converted_before_the_key_is_taken():
+    # 01:00 on 1 September in UTC+8 is 17:00 on 31 August in UTC. The keys are
+    # notification fingerprints, so landing in the wrong month would either
+    # alert twice or stay silent for one.
+    moment = datetime(2026, 9, 1, 1, 0, tzinfo=timezone(timedelta(hours=8)))
+    assert month_key(moment) == "2026-08"
+    assert day_key(moment) == "2026-08-31"
