@@ -649,8 +649,11 @@ The first vertical solution template (Release 1A of
 `docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`):
 a two-agent SEQUENTIAL Workflow template
 (`workflows/property_maintenance_inbox_demo.yaml`) built from three platform
-Skills (`email_input_security_core_v1`, `property_maintenance_intake_v1`,
-`property_maintenance_response_v1`, seeded in `skills.py`) on top of the
+Skills (`email_input_security_core_v1`, `property_maintenance_intake_v2`,
+`property_maintenance_response_v1`, seeded in `skills.py`; `_intake_v1` is
+still seeded but no longer referenced by the template — Phase 4b added
+attachment reading as a new version rather than editing the old one, so a
+team already pinned to `_v1` keeps the behaviour it deployed with) on top of the
 existing email-trigger/draft-only toolkit above. `email_input_security_core_v1`
 is attached to BOTH agents, not just the Intake Analyst: the Response
 Coordinator never calls `email_find`/`email_read` itself, but it drafts from

@@ -279,6 +279,14 @@ def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result:
         # unsupported type, a parser that gave up) is reported in a sentence
         # that embeds that same filename, and matching on those sentences
         # would hand the sender a say in which outcome gets recorded.
+        # One caveat this does not escape: the shared out-of-batch and
+        # "No message found" checks above run before this branch and match on
+        # the result text too, so an attachment whose extracted text starts
+        # with either sentinel is recorded under that outcome instead. The
+        # direction is safe -- both force needs_attention downstream, so a
+        # sender can add noise, never suppress an escalation -- but the
+        # outcome is not derived from the arguments alone the way the comment
+        # at the top of this function describes.
         return {
             "summary": f"Read an attachment on message '{message_id}'.",
             "message_id": message_id,
