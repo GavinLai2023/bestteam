@@ -224,3 +224,108 @@ def test_a_non_triggered_run_never_touches_trigger_health(tmp_path):
     with Session() as s:
         trigger = get_email_trigger(s, org_id)
         assert trigger.last_error == "an earlier failure"
+
+
+# --- durable inbox events: terminal outcomes ---------------------------------
+
+
+def _claimed_events(session, org_id, run_id, uids):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(session, org_id=org_id, mailbox_identity="m",
+                        mailbox_generation="3", external_ids=uids)
+    session.commit()
+    store.claim_events(session, org_id=org_id, run_id=run_id, limit=len(uids))
+    session.commit()
+
+
+def test_a_completed_run_marks_its_events_done(tmp_path):
+    from ui.backend.db.models import InboxEvent
+    from ui.backend import runtime
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+        row = _triggered_run_row("run-done", org_id)
+        row.trigger_context = {"trigger_type": "email", "uids": [11, 12], "uidvalidity": 3}
+        row.status = "completed"
+        s.add(row)
+        s.commit()
+        _claimed_events(s, org_id, "run-done", ["11", "12"])
+
+        runtime._safe_complete_inbox_events(s, row)
+        assert {e.status for e in s.query(InboxEvent)} == {"done"}
+
+
+def test_a_failed_run_keeps_drafted_messages_done_and_fails_the_rest(tmp_path):
+    from ui.backend.db.models import InboxEvent, TraceEventRecord
+    from ui.backend import runtime
+    import json
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+        row = _triggered_run_row("run-part", org_id)
+        row.trigger_context = {"trigger_type": "email", "uids": [11, 12], "uidvalidity": 3}
+        row.status = "failed"
+        s.add(row)
+        s.commit()
+        _claimed_events(s, org_id, "run-part", ["11", "12"])
+        # Phase 0's evidence layer is what decides: a draft demonstrably exists
+        # for 11, so reprocessing it would create a second draft.
+        s.add(TraceEventRecord(
+            run_id="run-part", seq=1, type="tool_completed",
+            data=json.dumps({"tool": "email_draft_reply", "outcome": "draft_created",
+                             "message_id": "11"}),
+        ))
+        s.commit()
+
+        runtime._safe_complete_inbox_events(s, row)
+        rows = {e.external_id: e.status for e in s.query(InboxEvent)}
+        assert rows == {"11": "done", "12": "failed"}
+
+
+def test_a_completion_failure_never_breaks_the_run(tmp_path, monkeypatch):
+    from ui.backend import runtime
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        row = _triggered_run_row("run-boom", org.id)
+        row.status = "completed"
+        s.add(row)
+        s.commit()
+
+        def _explode(*a, **k):
+            raise RuntimeError("db gone")
+
+        monkeypatch.setattr(runtime, "complete_events", _explode)
+        runtime._safe_complete_inbox_events(s, row)  # must not raise
+
+
+def test_a_real_triggered_run_completes_its_events_end_to_end(tmp_path):
+    from ui.backend.db.models import InboxEvent
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+    run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        s.add(_triggered_run_row(run.id, org_id))
+        s.commit()
+        _claimed_events(s, org_id, run.id, ["42"])
+
+    run_in_background(
+        run.id, _workflow(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+
+    with Session() as s:
+        assert s.query(InboxEvent).one().status == "done"
