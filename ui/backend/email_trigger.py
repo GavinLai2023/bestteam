@@ -1001,10 +1001,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         )
     try:
         password = secret_store.decrypt(cred.password_encrypted)
-        backend = _ImapBackend(
-            host=cred.host, user=cred.username, password=password,
-            port=cred.port, drafts=cred.drafts_folder, restrict_to_public=True,
-        )
+        backend = _make_backend(cred, password)
         uidvalidity, _max_uid = mailbox_state(backend)
     except (InvalidToken, secret_store.SecretsKeyError) as exc:
         raise RetryError("The mailbox connection can't be read right now -- reconnect it and try again.") from exc

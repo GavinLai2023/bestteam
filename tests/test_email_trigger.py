@@ -118,6 +118,28 @@ def db(monkeypatch):
     session.close()
 
 
+class _OfflineBackend:
+    """A backend that reaches no network, for the tests that don't care.
+
+    `_org_with_trigger` stores credentials for `imap.acme.com`, so without this
+    the real `_ImapBackend` the poller builds would resolve that host for real
+    the moment Phase 4a's filter asks it for headers -- a DNS lookup per test,
+    and behind a wildcard-NXDOMAIN resolver a live TLS connect that hangs the
+    suite instead of failing it. `summaries_for` returns nothing, so these
+    tests filter nothing and behave exactly as they did before the filter
+    existed; a test that wants filtering supplies its own backend.
+    """
+
+    def summaries_for(self, uids):
+        return []
+
+
+@pytest.fixture(autouse=True)
+def offline_backend(monkeypatch):
+    monkeypatch.setattr(email_trigger, "_make_backend",
+                        lambda cred, password: _OfflineBackend())
+
+
 def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="imap.acme.com", username="u@acme.com",
@@ -1669,7 +1691,7 @@ def test_a_failing_mailbox_scan_never_blocks_a_legitimate_retry(db, monkeypatch)
             raise OSError("SEARCH not supported")
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: _ScanFails())
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: _ScanFails())
     calls = []
     monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
@@ -1737,7 +1759,7 @@ def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
         email_trigger.registry, "request_cancel", lambda rid: cancelled.append(rid)
     )
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda backend, last_uid: (3, 45, [42]))
-    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: object())
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: object())
     calls = []
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
