@@ -1010,11 +1010,59 @@
   `_active_kb_dir`'s `max(st_mtime)` version resolution is theoretically
   ambiguous on Windows.
 
+- Email automation Phase 0 hardening (`feat/email-phase-0-hardening`):
+  the joint output of an internal and an external architecture review of the
+  email monitoring/reply capability, scoped to defects reachable on ordinary
+  paths today. Seven items: draft idempotency no longer depends on the
+  property-maintenance template (trace-event evidence + an
+  `X-BestTeam-Source-Key` mailbox marker, closing a duplicate-draft bug that
+  needed no crash to fire); a stuck-run watchdog
+  (`BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS`) so a hung run stops wedging an
+  org's trigger silently forever; run outcomes now reach trigger health so a
+  team failing every run no longer reports "Active"; deploy refuses email +
+  `http_get`/`web_search` on one agent (an injected email's exfiltration route
+  around the draft-only bound); mailbox save validates login *and* drafts
+  writability before storing; and a regression guard pinning the SDK-layer
+  email trace redaction as contract-independent. Two review items were
+  **re-scoped during design** rather than implemented as proposed -- see the
+  spec's "Judgement calls". Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-0-hardening-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
+
+- **Email automation is not horizontally scalable, and its data model is not
+  platformised** — the joint review's Phases 1-5, none of which Phase 0
+  touched. The poller, `_dispatch_lock` and `RunRegistry` are all in-process,
+  so a second ASGI worker or replica would double-process mail; there is no
+  durable `InboxEvent`/outbox (state is committed and *then* handed to a
+  thread pool, so a process killed in that window advances the UID baseline
+  without running anything); polling is serial across orgs and every email
+  tool call opens its own IMAP connection (a 20-message batch is ~41 logins);
+  multi-tenant connection is IMAP username/password only (the Graph backend is
+  unreachable outside the process-env single-mailbox path, which multi-org
+  deployments refuse); there is no pre-LLM filtering, so spam is billed at
+  model rates; the daily cap counts runs, not messages or spend; attachments
+  are invisible; and one org gets exactly one mailbox, one trigger, one team.
+- **Generic email runs have no retention policy for their output** — a
+  non-property-maintenance email team's model output (names, subjects, body
+  excerpts) persists indefinitely in `runs.output`/`trace_events`. Deliberately
+  NOT fixed by extending the property-maintenance redaction: that output is the
+  entire product result a generic team produces, so redacting it would delete
+  the feature. Raw email bodies are already redacted for every run at the
+  adapter layer (`_redacted_email_tool_data`, pinned by
+  `tests/test_trace_granularity.py`). The real remedy is tenant-level retention
+  /deletion/export, which is the joint programme's Phase 3.
+- **No alerting on trigger health** — Phase 0 makes a failing workflow visible
+  on the trigger row (`last_error`), but nothing notifies anyone; a customer
+  still has to look. Consecutive-failure counting and delivery are Phase 3.
+- **Draft outcomes are never observed** — nothing records whether a human sent,
+  edited or discarded a generated draft, so there is no quality signal and no
+  ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a
+  future Sent-folder reconciliation would key on.
 
 - **Deleting a knowledge base has no interlock with an in-flight ingestion
   job.** `crud.py`'s delete calls `delete_kb_ingestion_data` + `rmtree`, but
