@@ -486,12 +486,21 @@ class _ImapBackend:
                 "subject": str(msg.get("Subject", "")),
                 "date": str(msg.get("Date", "")),
                 "body": _extract_text_body(msg),
+                # The manifest rides along on the message already fetched.
+                # `BODY.PEEK[]` pulled the whole message, attachments included,
+                # so re-fetching it to list them would double the logins of
+                # every read -- and the poller reads every message in a batch.
+                "attachments": _attachment_records(msg),
             }
         finally:
             _imap_logout(conn)
 
     def attachments(self, message_id: str) -> Optional[List[Dict[str, Any]]]:
         """List the message's attachments, or None if there is no such message.
+
+        `read()` already returns this list under its "attachments" key, which
+        is what the agent-facing manifest renders from; this stands alone for
+        a caller that wants only the list.
 
         Nothing is written to disk -- sizes come from the decoded payload held
         in memory, and the fetch is the same read-only `BODY.PEEK[]` as `read`.
@@ -502,14 +511,7 @@ class _ImapBackend:
             msg = self._fetch_message(conn, message_id)
             if msg is None:
                 return None
-            return [
-                {
-                    "filename": part.get_filename(),
-                    "content_type": part.get_content_type(),
-                    "size": len(part.get_payload(decode=True) or b""),
-                }
-                for part in _attachment_parts(msg)
-            ]
+            return _attachment_records(msg)
         finally:
             _imap_logout(conn)
 
@@ -737,6 +739,23 @@ def _attachment_parts(msg: EmailMessage) -> List[EmailMessage]:
     return [p for p in msg.iter_attachments() if p.get_filename()]
 
 
+def _attachment_records(msg: EmailMessage) -> List[Dict[str, Any]]:
+    """Name/type/size for each attachment, built off `_attachment_parts`.
+
+    The single source of the manifest: `read()` embeds it and `attachments()`
+    returns it, so the two can never disagree about what counts as an
+    attachment.
+    """
+    return [
+        {
+            "filename": part.get_filename(),
+            "content_type": part.get_content_type(),
+            "size": len(part.get_payload(decode=True) or b""),
+        }
+        for part in _attachment_parts(msg)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The agent-facing tools (draft-only: there is deliberately no send verb)
 # ---------------------------------------------------------------------------
@@ -779,9 +798,10 @@ def _read_impl(backend, message_id: str) -> str:
             body[:_MAX_BODY_CHARS]
             + f"\n\n[... truncated: message body exceeded {_MAX_BODY_CHARS} characters]"
         )
-    # A backend without `attachments` (the Graph backend) simply has no
-    # manifest to show -- listing them must not break reading the message.
-    items = backend.attachments(message_id.strip()) if hasattr(backend, "attachments") else []
+    # The manifest comes from the record `read()` already returned -- one
+    # fetch serves both. A backend whose read() has no "attachments" key (the
+    # Graph backend) renders nothing, exactly like a message that has none.
+    items = record.get("attachments") or []
     manifest = ""
     if items:
         lines = "\n".join(

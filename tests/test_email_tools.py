@@ -655,6 +655,24 @@ def test_read_lists_the_attachments_it_found(imap_env):
     assert "%PDF" not in result
 
 
+def test_read_builds_the_manifest_from_a_single_fetch(imap_env):
+    # The manifest must ride along on the message `read()` already fetched.
+    # Listing attachments with a second `attachments()` call would connect,
+    # log in and re-fetch the whole message again -- and the poller reads
+    # every message in every batch, where login churn is already a known
+    # weakness (docs/STATUS.md: a 20-message batch is ~41 logins).
+    conn = _conn_returning(_multipart_raw())
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        result = email_read("7")
+
+    assert "quote.pdf" in result  # the manifest really was rendered
+    assert conn.uid.call_count == 1
+    assert conn.login.call_count == 1
+    # ...and it is still the read-only peek that never marks mail seen.
+    assert "BODY.PEEK" in conn.uid.call_args_list[0].args[2]
+    conn.select.assert_called_once_with("INBOX", readonly=True)
+
+
 def test_read_says_nothing_about_attachments_when_there_are_none(imap_env):
     conn = _conn_returning(_RAW_MESSAGE)
     with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
