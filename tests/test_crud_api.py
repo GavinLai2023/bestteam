@@ -2163,3 +2163,56 @@ def test_list_workflows_includes_workflow_ids(client):
     body = resp.json()
     assert "idtest" in body["workflows"]
     assert body["workflow_ids"]["idtest"] == expected_id
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.6): deploy refuses email + egress on one agent.
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_put_rejects_email_combined_with_an_egress_tool(client):
+    # An injected email could otherwise direct the same agent to put mailbox
+    # content into a URL it fetches -- exfiltration without ever sending mail,
+    # which is what the draft-only design is supposed to make impossible.
+    bad = {
+        **_VALID_WORKFLOW_CONFIG,
+        "agents": [{
+            **_VALID_WORKFLOW_CONFIG["agents"][0],
+            "tools": ["email_read", "http_get"],
+        }],
+    }
+    resp = client.put("/api/config/workflows/leaky_wf?org=default", json=bad)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "http_get" in detail and "support_agent" in detail
+    assert "leaky_wf" not in client.get(
+        "/api/workflows", headers=_org_user_headers(client)
+    ).json()["workflows"]
+
+
+def test_workflow_put_allows_email_and_egress_on_separate_agents(client):
+    ok = {
+        "knowledge_bases": [],
+        "agents": [
+            {"name": "mailer", "role": "Triage", "goal": "read mail",
+             "model": "fake:hello", "tools": ["email_read"]},
+            {"name": "researcher", "role": "Research", "goal": "look things up",
+             "model": "fake:hello", "tools": ["http_get"]},
+        ],
+        "teams": [{"name": "t", "agents": ["mailer", "researcher"], "mode": "sequential"}],
+        "workflow": {"steps": ["t"]},
+    }
+    resp = client.put("/api/config/workflows/split_wf?org=default", json=ok)
+    assert resp.status_code in (200, 201), resp.text
+
+
+def test_workflow_put_still_allows_email_only_agents(client):
+    ok = {
+        **_VALID_WORKFLOW_CONFIG,
+        "agents": [{
+            **_VALID_WORKFLOW_CONFIG["agents"][0],
+            "tools": ["email_read", "email_draft_reply"],
+        }],
+    }
+    resp = client.put("/api/config/workflows/mail_only_wf?org=default", json=ok)
+    assert resp.status_code in (200, 201), resp.text

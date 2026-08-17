@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
-from .db.models import AutomationItemResult, Run
+from .db.models import AutomationItemResult, Run, TraceEventRecord
 
 _logger = logging.getLogger(__name__)
 
@@ -372,9 +372,21 @@ def already_drafted_uids(db: Session, run_row: Run) -> frozenset:
     run again (not that first retry) rather than waiting: that second retry
     must still exclude both 5 (drafted by the original) and 6 (drafted by
     the sibling first retry), even though neither is in the original run's
-    own results alone (Codex review finding). Requires every run in the
-    family to already be normalized (see
-    `normalize_run_result`), which now happens on every terminal path.
+    own results alone (Codex review finding).
+
+    Two independent sources of evidence are unioned, because normalized
+    results alone only ever covered ONE workflow template:
+
+    - `automation_item_results` rows, which `normalize_run_result` writes
+      exclusively for the property-maintenance contract; and
+    - the run's own persisted `tool_completed` trace events, which every run
+      records regardless of template (`_trace_confirmed_uids`).
+
+    Relying on the first alone meant a generic email team (e.g.
+    `email_triage_reply`) had no evidence at all, so a retry resubmitted an
+    entire partially-drafted batch and created a duplicate draft for every
+    message the original run had already replied to -- with no crash needed,
+    just an ordinary mid-run failure (Phase 0, item 0.2).
     """
     trigger_context = run_row.trigger_context or {}
     uids = [str(u) for u in trigger_context.get("uids") or []]
@@ -383,17 +395,57 @@ def already_drafted_uids(db: Session, run_row: Run) -> frozenset:
     mailbox_credential_id = trigger_context.get("mailbox_credential_id")
     uidvalidity = trigger_context.get("uidvalidity")
     key_to_uid = {_source_key(mailbox_credential_id, uidvalidity, uid): uid for uid in uids}
+    family = _retry_family_run_ids(db, run_row)
     rows = (
         db.query(AutomationItemResult.source_key, AutomationItemResult.payload)
-        .filter(AutomationItemResult.run_id.in_(_retry_family_run_ids(db, run_row)))
+        .filter(AutomationItemResult.run_id.in_(family))
         .filter(AutomationItemResult.source_key.in_(key_to_uid.keys()))
         .all()
     )
-    return frozenset(
+    from_results = {
         key_to_uid[source_key]
         for source_key, payload in rows
         if (payload.get("action") or {}).get("draft_created")
+    }
+    return frozenset(from_results | _trace_confirmed_uids(db, family, set(uids)))
+
+
+def _trace_confirmed_uids(db: Session, run_ids, allowed_uids: set) -> set:
+    """Message ids in `allowed_uids` that `run_ids`' persisted trace events
+    prove a real draft was created for.
+
+    Ground truth, not a model claim: `adapters/langgraph_adapter.py` only
+    labels a `tool_completed` event `outcome="draft_created"` when the
+    `email_draft_reply` call actually returned the backend's success text, and
+    `runtime.py` persists every such event. Restricting to `allowed_uids` keeps
+    a message id the trace mentions but the server never assigned to this batch
+    from widening what a retry treats as handled.
+
+    Malformed/absent `data` is skipped rather than raised: this guard's whole
+    job is to make a retry safer, so it must never itself break the retry path.
+    """
+    confirmed = set()
+    rows = (
+        db.query(TraceEventRecord.data)
+        .filter(TraceEventRecord.run_id.in_(run_ids))
+        .filter(TraceEventRecord.type == "tool_completed")
+        .all()
     )
+    for (raw,) in rows:
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("tool") != "email_draft_reply" or data.get("outcome") != "draft_created":
+            continue
+        message_id = data.get("message_id")
+        if isinstance(message_id, str) and message_id.strip() in allowed_uids:
+            confirmed.add(message_id.strip())
+    return confirmed
 
 
 def _normalize(

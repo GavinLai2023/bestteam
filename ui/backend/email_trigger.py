@@ -121,6 +121,89 @@ def _at_daily_cap(db: Session, trigger: EmailTrigger, today) -> bool:
     return fresh_runs_today >= daily_cap()
 
 
+def draft_marker_prefix(mailbox_credential_id, uidvalidity) -> str:
+    """The per-mailbox/per-generation prefix stamped on drafts this platform
+    creates. Deliberately the same shape as
+    `automation_results._source_key`, so a key written into the mailbox and a
+    key stored in `automation_item_results` agree by construction rather than
+    by convention."""
+    return f"mailbox:{mailbox_credential_id}:uidvalidity:{uidvalidity}:uid:"
+
+
+def _mailbox_drafted_uids(backend, trigger_context, uids) -> set:
+    """UIDs the MAILBOX itself still shows a platform-written draft for.
+
+    Defence in depth behind the run's own trace evidence
+    (`automation_results.already_drafted_uids`): only the mailbox can reveal a
+    draft that was really APPENDed but whose confirming trace event never got
+    persisted, because the process was killed between the two.
+
+    Best-effort by contract. Not every IMAP server searches custom headers
+    well, and this runs on the retry path -- a scan failure must degrade to
+    trace evidence alone, never block a legitimate retry.
+    """
+    prefix = draft_marker_prefix(
+        trigger_context.get("mailbox_credential_id"), trigger_context.get("uidvalidity")
+    )
+    key_to_uid = {f"{prefix}{uid}": str(uid) for uid in uids}
+    if not key_to_uid:
+        return set()
+    try:
+        found = backend.drafts_with_source_keys(list(key_to_uid))
+    except Exception as exc:  # noqa: BLE001 -- advisory; must never block a retry
+        _logger.warning("email trigger: drafts reconciliation scan failed: %s", exc)
+        return set()
+    return {key_to_uid[key] for key in found or () if key in key_to_uid}
+
+
+def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
+    """True if `run_id` has outlived `run_timeout_seconds()` and has now been
+    released, so the overlap guard should stop honouring it.
+
+    A run cannot be forcibly killed -- a node already executing inside
+    `workflow.stream()` can't be safely interrupted, which is why
+    `registry.request_cancel` is cooperative (see registry.py). So this makes a
+    timed-out run non-blocking rather than trying to stop it: request
+    cancellation, mark the durable row failed, and record the fault on the
+    trigger. Without it, a single hung run closed an org's overlap guard
+    permanently and silently -- automation stopped forever with `last_error`
+    empty, so nothing in the UI reported a fault (Phase 0, item 0.4).
+    """
+    run_row = db.get(Run, run_id)
+    if run_row is None or run_row.created_at is None:
+        return False
+    created_at = run_row.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if (_utcnow() - created_at).total_seconds() <= run_timeout_seconds():
+        return False
+
+    _logger.warning(
+        "email trigger: run %s for org %s exceeded the run timeout; releasing the overlap guard",
+        run_id, trigger.org_id,
+    )
+    try:
+        registry.request_cancel(run_id)
+    except Exception:  # noqa: BLE001 -- releasing the guard matters more
+        _logger.exception("email trigger: cancel request failed for stale run %s", run_id)
+    message = (
+        "The previous automatic run didn't finish in time and was stopped. "
+        "Automatic runs have resumed."
+    )
+    if run_row.status == "running":
+        run_row.status = "failed"
+        run_row.output = message
+    trigger.last_error = message
+    trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+    db.commit()
+    # The worker never reached a terminal event, so it never normalized this
+    # run either -- without this a declared batch would be marked failed with
+    # zero automation_item_results rows and vanish from Needs-attention, the
+    # same gap the dispatch-failure branches close.
+    normalize_run_result(db, run_row)
+    return True
+
+
 def _parse_status(data) -> Tuple[int, int]:
     """Parse `(uidvalidity, max_uid)` out of a STATUS response line.
 
@@ -184,6 +267,7 @@ POLL_SECONDS_ENV = "BESTTEAM_TRIGGER_POLL_SECONDS"
 DAILY_CAP_ENV = "BESTTEAM_TRIGGER_DAILY_CAP"
 DISABLED_ENV = "BESTTEAM_TRIGGERS_DISABLED"
 BATCH_SIZE_ENV = "BESTTEAM_TRIGGER_BATCH_SIZE"
+RUN_TIMEOUT_ENV = "BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS"
 
 
 def poll_seconds() -> float:
@@ -202,7 +286,16 @@ def batch_size() -> int:
     return int(os.environ.get(BATCH_SIZE_ENV, "").strip() or 20)
 
 
+def run_timeout_seconds() -> float:
+    """How long a triggered run may stay `running` before the overlap guard
+    stops honouring it. Default 30 minutes -- comfortably longer than any
+    realistic multi-agent email batch, short enough that a hung run doesn't
+    cost an org a day of automation."""
+    return float(os.environ.get(RUN_TIMEOUT_ENV, "").strip() or 1800)
+
+
 _MIN_POLL_SECONDS = 5
+_MIN_RUN_TIMEOUT_SECONDS = 60
 
 
 def validate_trigger_env() -> None:
@@ -223,6 +316,7 @@ def validate_trigger_env() -> None:
         (POLL_SECONDS_ENV, poll_seconds, _MIN_POLL_SECONDS),
         (DAILY_CAP_ENV, daily_cap, 1),
         (BATCH_SIZE_ENV, batch_size, 1),
+        (RUN_TIMEOUT_ENV, run_timeout_seconds, _MIN_RUN_TIMEOUT_SECONDS),
     ):
         raw = os.environ.get(env_name, "").strip()
         if not raw:
@@ -290,7 +384,19 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
         raise ValueError(f"Deployed team '{name}' for org {org_id} no longer uses email")
     source = _WORKFLOWS_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
-    email_tools = make_email_tools(backend, allowed_uids=allowed_uids)
+    # Stamp every draft this run creates with a deterministic source key, so a
+    # later retry can reconcile against the mailbox itself and recognise a
+    # draft that was really written even if the run died before recording it.
+    cred = get_email_credentials(db, org_id)
+    trigger = get_email_trigger(db, org_id)
+    marker_prefix = (
+        None
+        if cred is None or trigger is None
+        else draft_marker_prefix(cred.id, trigger.uidvalidity)
+    )
+    email_tools = make_email_tools(
+        backend, allowed_uids=allowed_uids, draft_marker_prefix=marker_prefix
+    )
     skills = load_skills(
         db, org_id, workflow_version_id=record.current_version_id
     )
@@ -427,8 +533,11 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         if last_run_id:
             prev = registry.get(last_run_id)
             if prev is not None and prev.status == "running":
-                db.commit()
-                return
+                # ...unless it has hung past the run timeout, in which case it
+                # is released rather than allowed to wedge this org forever.
+                if not _release_stale_run(db, trigger, last_run_id):
+                    db.commit()
+                    return
 
         try:
             cred = get_email_credentials(db, trigger.org_id)
@@ -752,10 +861,13 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         if last_run_id:
             prev = registry.get(last_run_id)
             if prev is not None and prev.status == "running":
-                db.commit()
-                raise RetryError(
-                    "A run against this mailbox is already in progress -- try again once it finishes."
-                )
+                # Same watchdog as poll_org's guard: a run hung past the
+                # timeout must not make manual retry permanently unavailable.
+                if not _release_stale_run(db, trigger, last_run_id):
+                    db.commit()
+                    raise RetryError(
+                        "A run against this mailbox is already in progress -- try again once it finishes."
+                    )
 
         if _at_daily_cap(db, trigger, today):
             # The check further up is only a fast-path (skip mailbox/workflow
@@ -785,7 +897,13 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
             db.commit()
             raise RetryError("A retry of this run is already in progress.")
 
-        already_drafted = already_drafted_uids(db, run_row)
+        # Union of both evidence sources: the run family's own records (result
+        # rows plus persisted trace events) and, as defence in depth, the
+        # mailbox itself -- the only place a draft that was APPENDed but never
+        # recorded can still be seen (Phase 0, items 0.1/0.2).
+        already_drafted = set(already_drafted_uids(db, run_row))
+        candidate_uids = [u for u in (trigger_context.get("uids") or []) if str(u) not in already_drafted]
+        already_drafted |= _mailbox_drafted_uids(backend, trigger_context, candidate_uids)
         retry_uids = [u for u in (trigger_context.get("uids") or []) if str(u) not in already_drafted]
         if not retry_uids:
             db.commit()

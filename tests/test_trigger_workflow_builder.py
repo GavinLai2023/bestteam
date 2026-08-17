@@ -51,7 +51,7 @@ def test_build_trigger_workflow_scopes_email_tools(db, monkeypatch):
     org_id = _seed(db)
     captured = {}
 
-    def fake_make(backend, allowed_uids=None):
+    def fake_make(backend, allowed_uids=None, draft_marker_prefix=None):
         captured["allowed"] = allowed_uids
         return {"email_find": lambda q="": "", "email_read": lambda m: "",
                 "email_draft_reply": lambda m, b: ""}
@@ -92,7 +92,7 @@ def test_build_trigger_workflow_uses_deployed_skill_pin_after_admin_edit(db, mon
     monkeypatch.setattr(
         email_trigger,
         "make_email_tools",
-        lambda backend, allowed_uids=None: {
+        lambda backend, allowed_uids=None, draft_marker_prefix=None: {
             "email_find": lambda q="": "",
             "email_read": lambda m: "",
             "email_draft_reply": lambda m, b: "",
@@ -132,7 +132,7 @@ def test_build_trigger_workflow_refuses_non_deployed_team(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(
         email_trigger, "make_email_tools",
-        lambda backend, allowed_uids=None: {"email_find": lambda q="": "",
+        lambda backend, allowed_uids=None, draft_marker_prefix=None: {"email_find": lambda q="": "",
                                             "email_read": lambda m: "",
                                             "email_draft_reply": lambda m, b: ""},
     )

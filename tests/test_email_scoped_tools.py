@@ -65,3 +65,51 @@ def test_unscoped_mode_is_unchanged():
     out = tools["email_find"]("")
     assert "99" in out  # uses backend.find(), today's behavior
     assert "hi" in tools["email_read"]("99")
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.1): deterministic draft marker header.
+#
+# `email_draft_reply` APPENDs unconditionally, so a draft that was written to
+# the mailbox but whose confirming trace event never got persisted (process
+# killed between the two) is invisible to the trace-based retry guard. Stamping
+# a deterministic source key on the draft itself lets a retry reconcile against
+# the mailbox and spot exactly that case.
+# ---------------------------------------------------------------------------
+
+
+class _MarkerRecordingBackend(_FakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.source_keys = []
+
+    def draft_reply(self, message_id, body, source_key=None):
+        self.draft_calls.append((message_id, body))
+        self.source_keys.append(source_key)
+        return f"Draft reply saved (reply to message {message_id})."
+
+
+def test_draft_marker_prefix_is_passed_through_as_a_per_message_source_key():
+    b = _MarkerRecordingBackend()
+    tools = make_email_tools(
+        b, allowed_uids={42}, draft_marker_prefix="mailbox:7:uidvalidity:3:uid:"
+    )
+    tools["email_draft_reply"]("42", "hello")
+    assert b.source_keys == ["mailbox:7:uidvalidity:3:uid:42"]
+
+
+def test_without_a_marker_prefix_the_backend_is_called_the_old_way():
+    # Backwards compatibility: a backend whose draft_reply takes only
+    # (message_id, body) -- including the Graph backend, whose createReply
+    # builds the draft server-side -- must keep working untouched.
+    b = _FakeBackend()
+    tools = make_email_tools(b, allowed_uids={42})
+    assert "Draft reply saved" in tools["email_draft_reply"]("42", "hello")
+    assert b.draft_calls == [("42", "hello")]
+
+
+def test_marker_uses_the_stripped_message_id():
+    b = _MarkerRecordingBackend()
+    tools = make_email_tools(b, allowed_uids={42}, draft_marker_prefix="p:")
+    tools["email_draft_reply"]("  42  ", "hello")
+    assert b.source_keys == ["p:42"]

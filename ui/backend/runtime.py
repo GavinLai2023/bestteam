@@ -114,6 +114,61 @@ def _safe_record_usage(db: Session, **kwargs: Any) -> None:
             pass
 
 
+_TRIGGER_RUN_FAILED_MESSAGE = (
+    "The last automatic run didn't finish successfully. Automatic runs will keep "
+    "trying when new mail arrives -- open the run for details."
+)
+
+
+def _safe_record_trigger_health(db: Session, run_row) -> None:
+    """Reflect an autonomous email run's outcome on its org's `EmailTrigger`.
+
+    Before this, nothing ever wrote a *workflow* fault back from the run side:
+    `_start_triggered_run` clears `last_error` when it dispatches, and only the
+    poller's own mailbox check could set one. So an org whose team failed on
+    every single run kept showing a healthy, "Active" trigger indefinitely,
+    with the failures visible only to someone who opened the run list
+    (Phase 0, item 0.5).
+
+    A `workflow`-kind fault is sticky by existing convention -- it persists
+    across empty polls and clears only on a real success -- so a successful run
+    clears it here, while a `mailbox`-kind fault is left strictly alone: it is
+    owned by the connectivity check, and a workflow outcome says nothing about
+    whether the mailbox is reachable.
+
+    Isolated like `_safe_record_usage`: a health write must never flip an
+    otherwise-successful run to failed.
+    """
+    trigger_context = getattr(run_row, "trigger_context", None) or {}
+    if trigger_context.get("trigger_type") != "email" or run_row.org_id is None:
+        return
+    try:
+        # Late import: email_trigger imports this module, so a module-level
+        # import here would be circular.
+        from .db.email_triggers import get_email_trigger
+
+        trigger = get_email_trigger(db, run_row.org_id)
+        if trigger is None:
+            return
+        if run_row.status in ("failed", "cancelled"):
+            trigger.last_error = _TRIGGER_RUN_FAILED_MESSAGE
+            trigger.last_error_kind = "workflow"
+        elif run_row.status == "completed" and trigger.last_error_kind == "workflow":
+            trigger.last_error = None
+            trigger.last_error_kind = None
+        else:
+            return
+        db.commit()
+    except Exception:  # noqa: BLE001 -- health reporting must never break a run
+        _logger.warning(
+            "Trigger health update failed for run %s; run unaffected", run_row.id, exc_info=True
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: TraceEvent) -> None:
     """Persist one TraceEvent as a `trace_events` row, isolating failures from
     run status -- same rationale as `_safe_record_usage`. `data` is always
@@ -381,6 +436,9 @@ def run_in_background(
                 failed_tool_message_ids=failed_tool_message_ids,
                 raw_output_override=raw_output_override,
             )
+            # Same set of terminal paths, same ordering guarantee: the run's
+            # own status is already committed by the time this runs.
+            _safe_record_trigger_health(db, run_row)
 
     def _maybe_record_share_reply(output: Optional[str]) -> None:
         # Share-chat turns (share_chat.py) are regular runs stamped with

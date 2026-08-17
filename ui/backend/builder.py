@@ -27,7 +27,7 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_entries, to_prompt_text
-from .deploy_validation import validate_agent_models
+from .deploy_validation import find_email_egress_conflicts, validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
 from .db.workflows import publish_workflow_version
 from .db_session import get_db
@@ -41,7 +41,7 @@ from .knowledge_bases import (
     resolve_knowledge_base,
 )
 from .db.email_credentials import get_email_credentials
-from .email_tools import load_email_tools, spec_uses_email
+from .email_tools import load_email_tools, resolve_agent_tool_sets, spec_uses_email
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 
@@ -660,6 +660,16 @@ def deploy_session(
                     "This team can't be deployed: "
                     + "; ".join(model_problems)
                     + ". Pick a model from the catalog."
+                ),
+            )
+        egress_problems = find_email_egress_conflicts(resolve_agent_tool_sets(db, raw, org.id))
+        if egress_problems:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This team can't be deployed: "
+                    + "; ".join(egress_problems)
+                    + ". Split the mail-reading and web-access work into separate agents."
                 ),
             )
         # spec.to_raw() deliberately omits display_name/friendly_description

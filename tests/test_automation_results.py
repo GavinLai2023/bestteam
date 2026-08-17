@@ -18,7 +18,7 @@ from ui.backend.automation_results import (
     summary_for_date,
 )
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import AutomationItemResult, Run
+from ui.backend.db.models import AutomationItemResult, Run, TraceEventRecord
 from ui.backend.db.orgs import get_or_create_org
 
 
@@ -520,3 +520,116 @@ def test_already_drafted_uids_sees_a_sibling_retrys_confirmed_draft(db):
     # both confirmed drafts -- 5 from the original itself, 6 from the
     # sibling branch.
     assert already_drafted_uids(db, original) == frozenset({"5", "6"})
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 (0.2): confirmed-draft evidence from persisted trace events.
+#
+# `already_drafted_uids` used to read AutomationItemResult rows only, which
+# `normalize_run_result` writes exclusively for the property-maintenance
+# contract. Every OTHER email-trigger run (e.g. a generic email_triage_reply
+# team) therefore had zero evidence, so `retry_triggered_run` resubmitted an
+# entire partially-drafted batch and `email_draft_reply` -- which has no dedup
+# -- created a second draft for each message the original run had already
+# replied to. That needed no crash: an ordinary mid-run failure was enough.
+# ---------------------------------------------------------------------------
+
+
+def _draft_trace_event(db, run_id, message_id, *, seq=0, outcome="draft_created", tool="email_draft_reply"):
+    """One persisted `tool_completed` trace row, shaped exactly as
+    runtime.py writes it from the adapter's redacted email-tool data."""
+    db.add(
+        TraceEventRecord(
+            run_id=run_id,
+            seq=seq,
+            type="tool_completed",
+            agent="Triage Agent",
+            data=json.dumps(
+                {
+                    "tool": tool,
+                    "success": True,
+                    "duration_ms": 12,
+                    "summary": f"Draft reply saved for message '{message_id}'.",
+                    "message_id": message_id,
+                    "outcome": outcome,
+                }
+            ),
+        )
+    )
+    db.commit()
+
+
+def test_already_drafted_uids_uses_trace_evidence_for_a_generic_email_run(db):
+    # A generic (non-property-maintenance) email team: normalization never
+    # writes AutomationItemResult rows for it, so the trace is the only
+    # record that a draft really was created.
+    org = get_or_create_org(db, "acme")
+    run = _make_run(db, org_id=org.id, output="Triaged 2 messages.", uids=[5, 6])
+    _draft_trace_event(db, run.id, "5")
+
+    assert already_drafted_uids(db, run) == frozenset({"5"})
+
+
+def test_trace_evidence_ignores_unsuccessful_and_unrelated_tool_calls(db):
+    org = get_or_create_org(db, "acme")
+    run = _make_run(db, org_id=org.id, output="", uids=[5, 6, 7])
+    # A read is not a draft; a rejected draft is not a draft.
+    _draft_trace_event(db, run.id, "5", seq=0, tool="email_read", outcome="read")
+    _draft_trace_event(db, run.id, "6", seq=1, outcome="out_of_batch")
+
+    assert already_drafted_uids(db, run) == frozenset()
+
+
+def test_trace_evidence_is_confined_to_this_runs_own_uid_batch(db):
+    # A message id in the trace that isn't in this run's server-recorded
+    # batch must never widen what the retry considers already handled.
+    org = get_or_create_org(db, "acme")
+    run = _make_run(db, org_id=org.id, output="", uids=[5])
+    _draft_trace_event(db, run.id, "5", seq=0)
+    _draft_trace_event(db, run.id, "999", seq=1)
+
+    assert already_drafted_uids(db, run) == frozenset({"5"})
+
+
+def test_trace_evidence_spans_the_whole_retry_family(db):
+    org = get_or_create_org(db, "acme")
+    original = _make_run(db, org_id=org.id, output="", uids=[5, 6], run_id="run-original")
+    sibling = Run(
+        id="run-sibling",
+        workflow="email_triage",
+        input="triage",
+        output="",
+        status="failed",
+        org_id=org.id,
+        username="email-trigger",
+        trigger_context={**original.trigger_context, "uids": [6]},
+        retry_of_run_id=original.id,
+    )
+    db.add(sibling)
+    db.commit()
+    _draft_trace_event(db, original.id, "5")
+    _draft_trace_event(db, sibling.id, "6")
+
+    # Retrying the ORIGINAL must still exclude 6, drafted by the sibling branch.
+    assert already_drafted_uids(db, original) == frozenset({"5", "6"})
+
+
+def test_trace_evidence_unions_with_automation_item_results(db):
+    org = get_or_create_org(db, "acme")
+    items = [_valid_item("42", action={"draft_created": True, "draft_type": "ack"})]
+    run = _make_run(db, org_id=org.id, output=_envelope(items), uids=[42, 43])
+    normalize_run_result(db, run, confirmed_draft_message_ids=frozenset({"42"}))
+    _draft_trace_event(db, run.id, "43", seq=9)
+
+    assert already_drafted_uids(db, run) == frozenset({"42", "43"})
+
+
+def test_malformed_trace_data_never_breaks_the_retry_guard(db):
+    org = get_or_create_org(db, "acme")
+    run = _make_run(db, org_id=org.id, output="", uids=[5])
+    db.add(TraceEventRecord(run_id=run.id, seq=0, type="tool_completed", data="not json"))
+    db.add(TraceEventRecord(run_id=run.id, seq=1, type="tool_completed", data=None))
+    db.commit()
+    _draft_trace_event(db, run.id, "5", seq=2)
+
+    assert already_drafted_uids(db, run) == frozenset({"5"})

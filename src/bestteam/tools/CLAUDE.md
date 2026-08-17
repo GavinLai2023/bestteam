@@ -113,6 +113,17 @@ backend still refuses to start (`ensure_email_single_org`, CR-031) — the env
 path is process-wide/single-mailbox by design; multi-tenant email uses the
 per-org store instead.
 
+`make_email_tools(backend, allowed_uids=, draft_marker_prefix=)` also
+stamps `X-BestTeam-Source-Key: <prefix><message_id>` on each draft when a
+prefix is given, so a retry can reconcile against the mailbox
+(`_ImapBackend.drafts_with_source_keys`) and recognise a draft that was really
+APPENDed but never recorded. `_draft_impl` only passes the key when one was
+asked for, so a two-argument `draft_reply` (the Graph backend, whose
+`createReply` builds the draft server-side, and any custom backend) is
+unaffected -- Graph therefore has no marker, recorded as a connector-capability
+gap. `_ImapBackend.check_drafts_writable()` resolves and SELECTs the drafts
+folder without writing, backing the mailbox-connection check.
+
 Ambient run-on-new-mail triggering exists at the UI-backend layer (an opt-in
 per-org poller -- see `ui/backend/email_trigger.py` and `ui/backend/CLAUDE.md`),
 not in this SDK layer. Tier 2 tools (SQL executor, Python sandbox) and real

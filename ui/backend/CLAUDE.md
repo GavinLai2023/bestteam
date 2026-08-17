@@ -109,6 +109,50 @@ the update matches no row and the built run is discarded
 (`registry.discard`) rather than dispatched against a just-disconnected mailbox.
 Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
 
+**Phase 0 hardening** (`docs/superpowers/specs/2026-08-17-email-phase-0-hardening-design.md`).
+Five changes to the above:
+
+1. **Draft idempotency no longer depends on the property-maintenance
+   template.** `already_drafted_uids` now unions its `automation_item_results`
+   lookup with `_trace_confirmed_uids`, which reads the retry family's
+   persisted `tool_completed` trace events (`outcome == "draft_created"`) --
+   evidence *every* run records. Previously a generic `email_triage_reply`
+   team had no result rows at all, so a retry resubmitted a partially-drafted
+   batch and created a second draft for every message already replied to, with
+   no crash needed. `retry_triggered_run` additionally unions
+   `_mailbox_drafted_uids`, a best-effort Drafts search on the
+   `X-BestTeam-Source-Key` header that `build_trigger_workflow` now stamps on
+   every draft (`make_email_tools(..., draft_marker_prefix=)`, prefix shape
+   identical to `automation_results._source_key`) -- the only way to see a
+   draft that was APPENDed but whose trace event never got persisted. A scan
+   failure is logged and ignored; it must never block a legitimate retry.
+2. **Stuck-run watchdog.** `_release_stale_run` (both overlap guards) releases
+   a run still `running` past `BESTTEAM_TRIGGER_RUN_TIMEOUT_SECONDS` (default
+   1800, validated at startup, minimum 60): cooperative cancel, mark the row
+   failed, normalize, record the fault. A run cannot be forcibly killed, so
+   this makes it non-blocking rather than stopping it. Previously one hung run
+   closed an org's guard permanently and silently.
+3. **Run outcomes reach trigger health.** `runtime._safe_record_trigger_health`
+   (called from `_maybe_normalize`, so every terminal path) sets a sticky
+   `workflow`-kind `last_error` when a triggered run fails/cancels and clears
+   it on success. A `mailbox`-kind fault is left alone -- it is owned by the
+   connectivity check. Before this, `runtime.py` never referenced
+   `EmailTrigger` at all, so a team failing every run still showed "Active".
+4. **Deploy refuses email + egress on one agent**
+   (`deploy_validation.find_email_egress_conflicts` over
+   `email_tools.resolve_agent_tool_sets`, wired into `builder.deploy_session`
+   and `crud.upsert_workflow_config`). The draft-only bound ("worst case is a
+   bad draft") only holds while the agent reading attacker-controlled mail has
+   no other route out; `http_get`/`web_search` is such a route. Deploy-time
+   only, matching `validate_agent_models`.
+5. **A mailbox is only "connected" if it is usable.** `PUT /api/org/email` now
+   validates before storing, and both it and `POST /api/org/email/test` go
+   through `_mailbox_problem`, which checks login *and*
+   `_ImapBackend.check_drafts_writable()` (resolve the folder, SELECT it
+   read-write, reject `[READ-ONLY]`; writes nothing). Every reply is an APPEND
+   to that folder, so a login-only test passed mailboxes that failed on the
+   first real draft.
+
 Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
 resolves the IMAP backend once per cycle and threads it into
 `build_trigger_workflow` instead of letting it re-fetch credentials
