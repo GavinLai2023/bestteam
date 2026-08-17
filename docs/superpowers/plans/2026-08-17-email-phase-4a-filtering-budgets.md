@@ -681,6 +681,11 @@ git commit -m "feat(email): pure per-org message and spend budget arithmetic"
 
 Create `tests/test_email_filter_settings_db.py`:
 
+This is a new file, so it owns its fixture. Copy the `db` fixture shape from
+`tests/test_inbox_events.py` verbatim — an in-memory engine seeded with
+`Organization(id=1, name="acme")`. There is no shared `db_session`/`org`
+fixture in `tests/conftest.py`; do not look for one.
+
 ```python
 """Row CRUD for the Phase 4a settings tables, plus the monthly-spend query."""
 
@@ -688,6 +693,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_budget_settings import (
     get_budget_caps,
     set_budget_caps,
@@ -695,70 +701,92 @@ from ui.backend.db.email_budget_settings import (
     unpriced_run_count,
 )
 from ui.backend.db.email_filter_settings import get_filter_settings, set_filter_settings
-from ui.backend.db.models import Run, UsageRecord
+from ui.backend.db.models import Organization, Run, UsageRecord
 
 pytestmark = pytest.mark.unit
 
+ORG = 1
+OTHER = 2
 
-def test_an_org_with_no_row_gets_the_defaults(db_session, org):
-    settings = get_filter_settings(db_session, org.id)
+
+@pytest.fixture
+def db():
+    engine = make_engine(":memory:")
+    init_db(engine)
+    TestSession = session_factory(engine)
+    session = TestSession()
+    session.add(Organization(id=ORG, name="acme"))
+    session.add(Organization(id=OTHER, name="other"))
+    session.commit()
+    yield session
+    session.close()
+
+
+def test_an_org_with_no_row_gets_the_defaults(db):
+    settings = get_filter_settings(db, ORG)
     assert settings.skip_bulk is True
     assert settings.sender_blocklist == ()
     assert settings.sender_allowlist == ()
     assert settings.subject_blocklist == ()
 
 
-def test_settings_round_trip(db_session, org):
+def test_settings_round_trip(db):
     set_filter_settings(
-        db_session, org.id,
+        db, ORG,
         skip_bulk=False,
         sender_blocklist=["a@x.test"],
         sender_allowlist=[],
         subject_blocklist=["out of office"],
     )
-    db_session.commit()
-    settings = get_filter_settings(db_session, org.id)
+    db.commit()
+    settings = get_filter_settings(db, ORG)
     assert settings.skip_bulk is False
     assert settings.sender_blocklist == ("a@x.test",)
     assert settings.subject_blocklist == ("out of office",)
 
 
-def test_saving_twice_updates_the_same_row(db_session, org):
-    set_filter_settings(
-        db_session, org.id, skip_bulk=True,
-        sender_blocklist=["a@x.test"], sender_allowlist=[], subject_blocklist=[],
-    )
-    set_filter_settings(
-        db_session, org.id, skip_bulk=True,
-        sender_blocklist=["b@x.test"], sender_allowlist=[], subject_blocklist=[],
-    )
-    db_session.commit()
-    assert get_filter_settings(db_session, org.id).sender_blocklist == ("b@x.test",)
+def test_saving_twice_updates_the_same_row(db):
+    set_filter_settings(db, ORG, skip_bulk=True, sender_blocklist=["a@x.test"],
+                        sender_allowlist=[], subject_blocklist=[])
+    set_filter_settings(db, ORG, skip_bulk=True, sender_blocklist=["b@x.test"],
+                        sender_allowlist=[], subject_blocklist=[])
+    db.commit()
+    assert get_filter_settings(db, ORG).sender_blocklist == ("b@x.test",)
+    assert db.query(OrgEmailFilterSetting).count() == 1
 
 
-def test_an_org_with_no_budget_row_has_no_caps(db_session, org):
-    caps = get_budget_caps(db_session, org.id)
+def test_blank_and_duplicate_patterns_are_dropped(db):
+    # An admin reads back the list they meant, not the one they typed twice.
+    set_filter_settings(db, ORG, skip_bulk=True,
+                        sender_blocklist=[" a@x.test ", "A@X.test", "", "  "],
+                        sender_allowlist=[], subject_blocklist=[])
+    db.commit()
+    assert get_filter_settings(db, ORG).sender_blocklist == ("a@x.test",)
+
+
+def test_an_org_with_no_budget_row_has_no_caps(db):
+    caps = get_budget_caps(db, ORG)
     assert caps.daily_message_cap is None
     assert caps.monthly_cost_cap is None
 
 
-def test_budget_caps_round_trip_and_clear(db_session, org):
-    set_budget_caps(db_session, org.id, daily_message_cap=30, monthly_cost_cap=12.5)
-    db_session.commit()
-    caps = get_budget_caps(db_session, org.id)
+def test_budget_caps_round_trip_and_clear(db):
+    set_budget_caps(db, ORG, daily_message_cap=30, monthly_cost_cap=12.5)
+    db.commit()
+    caps = get_budget_caps(db, ORG)
     assert caps.daily_message_cap == 30
     assert caps.monthly_cost_cap == 12.5
 
-    set_budget_caps(db_session, org.id, daily_message_cap=None, monthly_cost_cap=None)
-    db_session.commit()
-    caps = get_budget_caps(db_session, org.id)
+    set_budget_caps(db, ORG, daily_message_cap=None, monthly_cost_cap=None)
+    db.commit()
+    caps = get_budget_caps(db, ORG)
     assert caps.daily_message_cap is None
     assert caps.monthly_cost_cap is None
 
 
-def _usage(db_session, org_id, *, cost, created_at, run_id):
-    db_session.add(Run(id=run_id, workflow="w", input="", status="completed", org_id=org_id))
-    db_session.add(
+def _usage(db, org_id, *, cost, created_at, run_id):
+    db.add(Run(id=run_id, workflow="w", input="", status="completed", org_id=org_id))
+    db.add(
         UsageRecord(
             run_id=run_id, org_id=org_id, model="openai:gpt-4o-mini",
             input_tokens=10, output_tokens=10, cost_estimate=cost,
@@ -767,35 +795,43 @@ def _usage(db_session, org_id, *, cost, created_at, run_id):
     )
 
 
-def test_spend_sums_only_this_month_and_only_this_org(db_session, org, other_org):
+def test_spend_sums_only_this_month_and_only_this_org(db):
     now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
-    _usage(db_session, org.id, cost=1.5, created_at=now - timedelta(days=1), run_id="r1")
-    _usage(db_session, org.id, cost=2.0, created_at=now - timedelta(days=40), run_id="r2")
-    _usage(db_session, other_org.id, cost=99.0, created_at=now, run_id="r3")
-    db_session.commit()
-    assert spent_this_month(db_session, org.id, now) == pytest.approx(1.5)
+    _usage(db, ORG, cost=1.5, created_at=now - timedelta(days=1), run_id="r1")
+    _usage(db, ORG, cost=2.0, created_at=now - timedelta(days=40), run_id="r2")
+    _usage(db, OTHER, cost=99.0, created_at=now, run_id="r3")
+    db.commit()
+    assert spent_this_month(db, ORG, now) == pytest.approx(1.5)
 
 
-def test_spend_is_none_when_nothing_is_priced(db_session, org):
+def test_spend_is_none_when_nothing_is_priced(db):
+    # NULL is "nothing priced", which is not the same as "nothing spent" and
+    # very much not "over budget" -- the caller has to be able to tell.
     now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
-    _usage(db_session, org.id, cost=None, created_at=now, run_id="r1")
-    db_session.commit()
-    assert spent_this_month(db_session, org.id, now) is None
+    _usage(db, ORG, cost=None, created_at=now, run_id="r1")
+    db.commit()
+    assert spent_this_month(db, ORG, now) is None
 
 
-def test_unpriced_runs_are_counted_so_the_blind_spot_is_visible(db_session, org):
+def test_unpriced_runs_are_counted_so_the_blind_spot_is_visible(db):
     now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
-    _usage(db_session, org.id, cost=None, created_at=now, run_id="r1")
-    _usage(db_session, org.id, cost=1.0, created_at=now, run_id="r2")
-    db_session.commit()
-    assert unpriced_run_count(db_session, org.id, now) == 1
+    _usage(db, ORG, cost=None, created_at=now, run_id="r1")
+    _usage(db, ORG, cost=1.0, created_at=now, run_id="r2")
+    db.commit()
+    assert unpriced_run_count(db, ORG, now) == 1
+
+
+def test_the_message_counter_column_starts_at_zero(db):
+    # The migration's server_default must agree with the ORM default, or an
+    # upgraded row reads NULL and every comparison against it is false.
+    from ui.backend.db.email_triggers import upsert_email_trigger
+
+    trigger = upsert_email_trigger(db, ORG, workflow_name="triage", enabled=False)
+    db.commit()
+    assert trigger.messages_today == 0
 ```
 
-**Fixtures:** `db_session`, `org` and `other_org` already exist in
-`tests/conftest.py` — read it before writing this file and use them exactly as
-`tests/test_retention.py` does. If `other_org` does not exist under that name,
-create a second organisation inline the way `tests/test_retention.py` does and
-drop the fixture argument.
+Add `OrgEmailFilterSetting` to the `ui.backend.db.models` import.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1201,103 +1237,121 @@ git commit -m "feat(email): per-org filter rules and budget caps, and their sche
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_inbox_events.py` (keep the file's existing fixtures and
-helpers; do not restructure it):
+Append to `tests/test_inbox_events.py`. That file has its own `db` fixture
+(which seeds `Organization(id=1, name="acme")`), imports the module as
+`from ui.backend.db import inbox_events as store` inside each test, and adds a
+second org inline as `Organization(id=2, name="other")`. Follow all three
+conventions exactly — do not restructure the file, and do not add a
+module-level import of the store.
 
 ```python
-def test_a_decision_records_the_row_filtered_not_pending(db_session, org):
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10", "11"], decisions={"11": "bulk:list-id"},
-    )
-    db_session.commit()
-    rows = {r.external_id: r for r in db_session.query(InboxEvent).all()}
+def test_a_decision_records_the_row_filtered_not_pending(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"], decisions={"11": "bulk:list-id"})
+    db.commit()
+    rows = {r.external_id: r for r in db.query(InboxEvent).all()}
     assert rows["10"].status == "pending" and rows["10"].decision is None
     assert rows["11"].status == "filtered" and rows["11"].decision == "bulk:list-id"
 
 
-def test_a_filtered_row_is_never_claimed(db_session, org):
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10", "11"], decisions={"10": "not_allowlisted"},
-    )
-    db_session.commit()
-    claimed = claim_events(db_session, org_id=org.id, run_id="run-1", limit=10)
+def test_a_filtered_row_is_never_claimed(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"], decisions={"10": "not_allowlisted"})
+    db.commit()
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
     assert [e.external_id for e in claimed] == ["11"]
 
 
-def test_releasing_a_filtered_row_makes_it_claimable(db_session, org):
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10"], decisions={"10": "bulk:precedence"},
-    )
-    db_session.commit()
-    row = db_session.query(InboxEvent).one()
+def test_releasing_a_filtered_row_makes_it_claimable(db):
+    from ui.backend.db import inbox_events as store
 
-    assert release_filtered_event(db_session, org_id=org.id, event_id=row.id) is True
-    db_session.commit()
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
 
-    db_session.refresh(row)
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is True
+    db.commit()
+
+    db.refresh(row)
     assert row.status == "pending"
     assert row.decision is None
-    claimed = claim_events(db_session, org_id=org.id, run_id="run-1", limit=10)
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
     assert [e.external_id for e in claimed] == ["10"]
 
 
-def test_releasing_is_idempotent_and_never_resurrects_a_done_row(db_session, org):
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10"], decisions={"10": "bulk:precedence"},
-    )
-    db_session.commit()
-    row = db_session.query(InboxEvent).one()
-    assert release_filtered_event(db_session, org_id=org.id, event_id=row.id) is True
-    db_session.commit()
-    # Already pending -- a second release changes nothing and says so.
-    assert release_filtered_event(db_session, org_id=org.id, event_id=row.id) is False
+def test_releasing_twice_reports_the_second_as_nothing_to_do(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is True
+    db.commit()
+    # Already pending -- a second release changes nothing and says so, which is
+    # what lets the route answer 404 without a separate existence query.
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
 
 
-def test_releasing_another_orgs_row_does_nothing(db_session, org, other_org):
-    record_events(
-        db_session, org_id=other_org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10"], decisions={"10": "bulk:precedence"},
-    )
-    db_session.commit()
-    row = db_session.query(InboxEvent).one()
-    assert release_filtered_event(db_session, org_id=org.id, event_id=row.id) is False
-    db_session.refresh(row)
+def test_releasing_never_resurrects_a_row_that_already_ran(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10"])
+    db.commit()
+    row = db.query(InboxEvent).one()
+    row.status = "done"
+    db.commit()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
+    db.refresh(row)
+    assert row.status == "done"
+
+
+def test_releasing_another_orgs_row_does_nothing(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
+                        external_ids=["10"], decisions={"10": "bulk:precedence"})
+    db.commit()
+    row = db.query(InboxEvent).one()
+    assert store.release_filtered_event(db, org_id=1, event_id=row.id) is False
+    db.refresh(row)
     assert row.status == "filtered"
 
 
-def test_filtered_events_list_newest_first_and_only_this_org(db_session, org, other_org):
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10", "11"], decisions={"10": "bulk:list-id", "11": "not_allowlisted"},
-    )
-    record_events(
-        db_session, org_id=other_org.id, mailbox_identity="h2:u2", mailbox_generation="1",
-        external_ids=["99"], decisions={"99": "bulk:list-id"},
-    )
-    db_session.commit()
-    rows = list_filtered_events(db_session, org_id=org.id, limit=10)
+def test_filtered_events_list_newest_first_and_only_this_org(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"],
+                        decisions={"10": "bulk:list-id", "11": "not_allowlisted"})
+    store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
+                        external_ids=["99"], decisions={"99": "bulk:list-id"})
+    db.commit()
+    rows = store.list_filtered_events(db, org_id=1, limit=10)
     assert [r.external_id for r in rows] == ["11", "10"]
 
 
-def test_recording_with_no_decisions_is_unchanged(db_session, org):
+def test_recording_with_no_decisions_is_unchanged(db):
     # The existing call site passes no `decisions` at all; that path must stay
-    # byte-for-byte equivalent to today's behaviour.
-    record_events(
-        db_session, org_id=org.id, mailbox_identity="h:u", mailbox_generation="1",
-        external_ids=["10", "11"],
-    )
-    db_session.commit()
-    assert {r.status for r in db_session.query(InboxEvent).all()} == {"pending"}
-```
+    # exactly equivalent to today's behaviour.
+    from ui.backend.db import inbox_events as store
 
-Add `release_filtered_event`, `list_filtered_events` and `EVENT_FILTERED` to the
-file's existing import from `ui.backend.db.inbox_events`. If `other_org` is not
-an existing fixture, create a second organisation inline as
-`tests/test_retention.py` does.
+    store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
+                        external_ids=["10", "11"])
+    db.commit()
+    assert {r.status for r in db.query(InboxEvent).all()} == {"pending"}
+    assert all(r.decision is None for r in db.query(InboxEvent).all())
+```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1420,10 +1474,15 @@ git commit -m "feat(email): the inbox ledger learns filtered, and how to release
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/test_email_tools.py`, alongside the existing fake-IMAP tests:
+Add to `tests/test_email_tools.py`, next to `test_imap_find_unseen_lists_messages`.
+That file's harness is a `unittest.mock` connection from `_mock_imap_conn()`,
+driven through `patch("bestteam.tools.email_client.imaplib.IMAP4_SSL",
+return_value=conn)`, with the fetch string inspected via
+`conn.uid.call_args_list[N].args[2]`. Use exactly that — do not introduce a
+second fake.
 
 ```python
-def test_summaries_carry_the_bulk_headers_for_the_pre_llm_filter():
+def test_summaries_carry_the_bulk_headers_for_the_pre_llm_filter(imap_env):
     # Phase 4a filters on headers, so the summary fetch has to return them.
     # BODY.PEEK is asserted too: the draft-only toolkit never marks mail seen,
     # and this must not become the thing that does.
@@ -1434,24 +1493,31 @@ def test_summaries_carry_the_bulk_headers_for_the_pre_llm_filter():
         b"List-Id: <news.example.com>\r\n"
         b"Precedence: bulk\r\n\r\n"
     )
-    conn = _FakeConn(fetch_bytes=raw)
-    backend = _backend_with(conn)
+    conn = _mock_imap_conn()
+    conn.uid.return_value = ("OK", [(b"7 (BODY[HEADER.FIELDS (...)] {120}", raw), b")"])
 
-    summaries = backend.summaries_for(["7"])
+    with patch("bestteam.tools.email_client.imaplib.IMAP4_SSL", return_value=conn):
+        backend = _ImapBackend.from_env()
+        summaries = backend.summaries_for(["7"])
 
     assert summaries[0]["list-id"] == "<news.example.com>"
     assert summaries[0]["precedence"] == "bulk"
     assert summaries[0]["auto-submitted"] == ""
     assert summaries[0]["subject"] == "Weekly"
-    assert "BODY.PEEK" in conn.last_fetch_spec
-    for header in ("AUTO-SUBMITTED", "PRECEDENCE", "LIST-ID", "LIST-UNSUBSCRIBE"):
-        assert header in conn.last_fetch_spec
+
+    fetch_call = conn.uid.call_args_list[0]
+    spec = fetch_call.args[2]
+    assert "BODY.PEEK" in spec
+    for header in ("FROM", "SUBJECT", "DATE",
+                   "AUTO-SUBMITTED", "PRECEDENCE", "LIST-ID", "LIST-UNSUBSCRIBE"):
+        assert header in spec
 ```
 
-`_FakeConn` / `_backend_with` are illustrative names — **read
-`tests/test_email_tools.py` first and use whatever fake-connection helper it
-already provides**, extending it with a `last_fetch_spec` capture if it does
-not record the fetch string. Do not introduce a second fake.
+`imap_env` is the existing fixture the other IMAP tests take. If
+`_ImapBackend` is not already imported in that file, import it from
+`bestteam.tools.email_client`; if `from_env()` is not the right constructor
+for a test that has `imap_env` set, use whatever the file's other backend tests
+use.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1792,7 +1858,9 @@ def test_the_message_cap_truncates_the_claim(db, monkeypatch):
 
     assert len(recorder.calls) == 1
     _, args, _kwargs = recorder.calls[0]
-    assert args[2].count(",") == 2  # three uids in the input text
+    # `_trigger_input` renders the claimed uids as "message ids: 42, 43, 44";
+    # count the ids, not commas -- the surrounding sentence has one of its own.
+    assert "message ids: 42, 43, 44)" in args[2]
     assert trigger.messages_today == 3
 
 
@@ -2047,15 +2115,19 @@ git commit -m "feat(email): a real daily message cap and monthly spend cap"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_email_filter_api.py`, modelled on the retention route tests
-in `tests/test_retention_api.py` (read it first for the auth-client fixture):
+Create `tests/test_email_filter_api.py`, modelled on
+`tests/test_retention_api.py`. **Read that file first and copy its `client`
+fixture verbatim** — it builds a `TestClient` over a temp database with an
+authenticated org, and is the only working pattern for these routes. Note its
+marker is `integration`, not `unit`: these tests drive a real app and a real
+database.
 
 ```python
 """Filter and budget settings routes (email automation Phase 4a)."""
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 def test_an_org_with_no_row_reads_the_defaults(client):
@@ -2111,27 +2183,40 @@ def test_a_negative_cap_is_rejected(client):
     }).status_code == 422
 
 
-def test_saving_a_spend_cap_names_the_models_it_cannot_cover(client, unpriced_workflow_org):
-    # The cap still saves -- the admin may be about to add the catalogue row --
-    # but they are told which models the limit does not see.
+def test_saving_a_spend_cap_names_the_models_it_cannot_cover(client):
+    # Publish a workflow for this org whose agent uses a model with no
+    # model_catalog row, enable the trigger on it, then set a cap. The cap
+    # still saves -- the admin may be about to add the catalogue row -- but
+    # they are told which models the limit does not see. Build this setup the
+    # way tests/test_retention_api.py's `seeded_runs` fixture reaches the
+    # database behind the client.
+    ...
     body = client.put("/api/org/email-budget", json={
         "daily_message_cap": None, "monthly_cost_cap": 10.0,
     }).json()
     assert "fake:demo" in body["unpriced_models"]
 
 
-def test_the_routes_are_org_scoped(client, second_org_client):
-    client.put("/api/org/email-filter", json={
-        "skip_bulk": False, "sender_blocklist": ["a@x.test"],
-        "sender_allowlist": [], "subject_blocklist": [],
-    })
-    assert second_org_client.get("/api/org/email-filter").json()["skip_bulk"] is True
+def test_a_spend_cap_saves_even_when_a_model_is_unpriced(client):
+    # Advisory, never blocking: refusing to save would let one missing
+    # catalogue row stop an admin from capping their spend at all.
+    assert client.put("/api/org/email-budget", json={
+        "daily_message_cap": None, "monthly_cost_cap": 10.0,
+    }).status_code == 200
+
+
+def test_an_org_sees_only_its_own_rules(client):
+    # Write rules for the client's org, then read them back through a second
+    # org's session. Construct the second org the way test_retention_api.py's
+    # `other_org_run` fixture does.
+    ...
 ```
 
-Fixture names (`client`, `second_org_client`, `unpriced_workflow_org`) are
-illustrative — **read `tests/test_retention_api.py` and `tests/conftest.py`
-first and use the fixtures that already exist**, constructing the unpriced-model
-case inline if no fixture fits.
+The two `...` blocks above are setup you must build from
+`tests/test_retention_api.py`'s own fixtures (`seeded_runs`, `other_org_run`)
+— they show exactly how that file reaches the database behind the client and
+how it creates a second org. Read them and follow; do not invent a new
+fixture layer. Every other test in this file is complete as written.
 
 Extend `tests/test_email_trigger_api.py`:
 
