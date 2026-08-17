@@ -48,6 +48,7 @@ export default function NotificationsPanel({ onUnreadChange }: NotificationsPane
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount and on filter change
     void load(unreadOnly)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unreadOnly])
