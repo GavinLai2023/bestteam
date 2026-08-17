@@ -910,9 +910,19 @@ def _start_triggered_run(
             # cursor and re-detect (harmlessly, but pointlessly) the remainder.
             runs_today=EmailTrigger.runs_today + 1,
             # The customer's message counter advances in exactly this statement
-            # and nowhere else, so it is guarded by the same enabled/active
-            # predicate: every path that releases the claim (build failure,
-            # disabled mid-build, submit failure) leaves it alone for free.
+            # and nowhere else, under the same enabled/active predicate. That
+            # covers two of the three release paths for free -- a build failure
+            # returns before this runs, and a trigger disabled mid-build makes
+            # this match no row -- so neither charges for messages it handed
+            # back. It does NOT cover the third: the submit-failure branch runs
+            # after this has committed, so those messages are charged here and
+            # then released to `pending`, and a later cycle claims and charges
+            # them again. Same semantics `runs_today` has always had on that
+            # path ("The cap was already consumed by the commit above", below),
+            # and deliberately not fixed by decrementing: a second write site
+            # outside the CAS would cost more in reasoning than an over-count
+            # bounded at one batch, on a branch that only fires when the
+            # executor is shutting down and the poller is stopping anyway.
             messages_today=EmailTrigger.messages_today + len(claimed),
             last_run_id=run.id,
             last_error=None,  # a run is going out: clear any prior fault

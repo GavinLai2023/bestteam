@@ -2556,6 +2556,14 @@ def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
     # A budget ceiling is a normal operating state, not a fault. Routing it
     # through trigger_health.evaluate would corrupt consecutive_faults and
     # compete with real faults for alerted_fingerprint.
+    #
+    # `_no_workflow` is load-bearing here, and this is the exact INVERSE of the
+    # two tests above, which need a getter that WOULD succeed: these assertions
+    # are all absences, so with the spend cap removed a succeeding getter would
+    # dispatch, the CAS would clear `last_error`, and all three would still
+    # hold -- the test would pass with the feature gone. A getter that raises
+    # is what makes the build-failure branch write `last_error` and fail this.
+    # Do not "harmonise" it with its siblings.
     from ui.backend.db.email_budget_settings import set_budget_caps
 
     org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
