@@ -2213,3 +2213,125 @@ def test_a_replacement_secret_is_warned_about_in_its_own_right(db):
     assert {n.fingerprint for n in _notifications(db, org.id)} == {
         "secret_expiry_30:2026-09-11", "secret_expiry_30:2028-08-17",
     }
+
+
+# --- Phase 4a: the poller filters --------------------------------------------
+
+
+class _SummaryBackend:
+    """FakeBackend plus the header summaries the Phase 4a filter reads."""
+
+    def __init__(self, summaries, raises=False):
+        self._summaries = summaries
+        self.raises = raises
+        self.calls = []
+
+    def _connect(self):
+        raise AssertionError("check_mailbox is monkeypatched in these tests")
+
+    def summaries_for(self, uids):
+        self.calls.append(list(uids))
+        if self.raises:
+            raise OSError("imap went away")
+        return [s for s in self._summaries if s["id"] in {str(u) for u in uids}]
+
+
+def _filtering_org(db, monkeypatch, backend, *, new_uids=(42, 43)):
+    """One org whose next poll cycle detects `new_uids` through `backend`."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger, "check_mailbox",
+        lambda b, u: (3, max(new_uids), list(new_uids)),
+    )
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: backend)
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    return org, trigger
+
+
+def _events_by_id(db, org_id):
+    from ui.backend.db.models import InboxEvent
+    return {
+        e.external_id: e
+        for e in db.query(InboxEvent).filter(InboxEvent.org_id == org_id).all()
+    }
+
+
+def test_bulk_mail_is_recorded_filtered_and_never_reaches_a_run(db, monkeypatch):
+    backend = _SummaryBackend([
+        {"id": "42", "from": "alice@client.test", "subject": "Quote"},
+        {"id": "43", "from": "news@x.test", "subject": "Weekly", "list-id": "<n.x.test>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert rows["43"].status == "filtered"
+    assert rows["43"].decision == "bulk:list-id"
+    assert rows["42"].status in ("pending", "claimed")
+    assert rows["42"].decision is None
+
+
+def test_filtering_still_advances_the_cursor_over_every_detected_uid(db, monkeypatch):
+    # Filtering must never become a second way to consume mail unrecorded:
+    # every detected UID gets a row, and last_uid moves past all of them, in
+    # the one commit Phase 1's durability guarantee rests on.
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "precedence": "bulk"},
+        {"id": "43", "from": "n@x.test", "subject": "b", "precedence": "bulk"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _no_workflow)  # nothing claimable -> never builds
+
+    assert trigger.last_uid == 43
+    assert len(_events_by_id(db, org.id)) == 2
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"filtered"}
+
+
+def test_a_header_fetch_failure_fails_open(db, monkeypatch):
+    # A transient IMAP hiccup must not silently discard a customer's mail. The
+    # worst case of failing open is that one junk message is billed.
+    backend = _SummaryBackend([], raises=True)
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert {e.status for e in rows.values()} <= {"pending", "claimed"}
+    assert all(e.decision is None for e in rows.values())
+
+
+def test_a_uid_with_no_summary_returned_is_processed(db, monkeypatch):
+    # summaries_for skips UIDs it cannot fetch; those default to pending.
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "list-id": "<n>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert rows["42"].status == "filtered"
+    assert rows["43"].status in ("pending", "claimed")
+
+
+def test_an_org_that_turned_the_bulk_rule_off_keeps_its_bulk_mail(db, monkeypatch):
+    from ui.backend.db.email_filter_settings import set_filter_settings
+
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "precedence": "bulk"},
+        {"id": "43", "from": "n@x.test", "subject": "b", "precedence": "bulk"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+    set_filter_settings(db, org.id, skip_bulk=False, sender_blocklist=[],
+                        sender_allowlist=[], subject_blocklist=[])
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert all(e.status != "filtered" for e in _events_by_id(db, org.id).values())

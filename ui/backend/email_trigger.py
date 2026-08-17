@@ -24,7 +24,7 @@ import re
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select, update
@@ -35,9 +35,10 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
-from . import secret_store, trigger_health
+from . import email_filter, secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
+from .db.email_filter_settings import get_filter_settings
 from .db.email_triggers import get_email_trigger
 from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
@@ -581,6 +582,53 @@ def _friendly_poll_error(exc: Exception) -> str:
     return "Couldn't check the mailbox. We'll keep retrying automatically."
 
 
+def _make_backend(cred: OrgEmailCredential, password: str) -> _ImapBackend:
+    """The IMAP backend for one org's stored password credentials.
+
+    `restrict_to_public` stays on: the host is customer-supplied, so it must be
+    validated and pinned to a public IP on every connect.
+    """
+    return _ImapBackend(
+        host=cred.host,
+        user=cred.username,
+        password=password,
+        port=cred.port,
+        drafts=cred.drafts_folder,
+        restrict_to_public=True,  # customer-supplied host
+    )
+
+
+def _filter_decisions(backend, settings, uids) -> Dict[str, str]:
+    """Which of `uids` the pre-LLM filter rejects, and why.
+
+    Fails open, twice over: a UID the mailbox will not hand us a header for is
+    absent from `summaries`, and a fetch that raises returns `{}`. Either way
+    the message is recorded `pending` and processed. A transient IMAP hiccup
+    must not silently discard a customer's mail; the worst case of failing open
+    is that one junk message is billed.
+
+    Keys are `str`, matching `record_events`'s `str(external_id) in decisions`
+    lookup -- an int key here would silently leave every message `pending`, with
+    no error anywhere to show the filter had stopped working.
+    """
+    if not uids:
+        return {}
+    try:
+        summaries = backend.summaries_for([str(u) for u in uids])
+    except Exception:  # noqa: BLE001 -- filtering is an optimisation, not a gate
+        _logger.warning(
+            "email trigger: header fetch failed; processing this batch unfiltered",
+            exc_info=True,
+        )
+        return {}
+    decisions = {}
+    for summary in summaries:
+        decision = email_filter.evaluate(summary, settings)
+        if decision is not None:
+            decisions[str(summary.get("id"))] = decision
+    return decisions
+
+
 def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None:
     """One org's poll cycle. Never raises; all state changes committed here.
 
@@ -627,14 +675,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
                     "No mailbox is connected -- reconnect it to resume automatic runs."
                 )
             password = secret_store.decrypt(cred.password_encrypted)
-            backend = _ImapBackend(
-                host=cred.host,
-                user=cred.username,
-                password=password,
-                port=cred.port,
-                drafts=cred.drafts_folder,
-                restrict_to_public=True,  # customer-supplied host
-            )
+            backend = _make_backend(cred, password)
             uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
         except (InvalidToken, secret_store.SecretsKeyError) as exc:
             _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
@@ -687,12 +728,20 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
         # and only then handed the workflow to a thread pool, and a kill in
         # between lost the batch for good.
         detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
+        # The pre-LLM filter chooses each row's STATUS, never whether the row is
+        # inserted, so it belongs here, before the durability point: every
+        # detected UID still gets a row, and the record_events / last_uid /
+        # commit trio below stays one unit.
+        decisions = _filter_decisions(
+            backend, get_filter_settings(db, trigger.org_id), detected
+        )
         record_events(
             db,
             org_id=trigger.org_id,
             mailbox_identity=mailbox_identity(cred.host, cred.username),
             mailbox_generation=str(trigger.uidvalidity),
             external_ids=[str(u) for u in detected],
+            decisions=decisions,
         )
         trigger.last_uid = max(detected)
         db.commit()
