@@ -156,6 +156,16 @@ def _safe_record_trigger_health(db: Session, run_row) -> None:
         trigger = get_email_trigger(db, run_row.org_id)
         if trigger is None:
             return
+        # A finishing run is not necessarily the run this trigger is waiting
+        # on. The stale-run watchdog releases a wedged run's overlap guard and
+        # lets a new run start while the old one is still executing, so the
+        # old one's outcome arrives late and stale -- applying it would let an
+        # abandoned run's failure overwrite health the current run just
+        # established, or an old success clear a current failure. `None` means
+        # no run is being tracked (a pre-watchdog or freshly-enabled trigger),
+        # which stays permissive.
+        if trigger.last_run_id is not None and trigger.last_run_id != run_row.id:
+            return
         if run_row.status in ("failed", "cancelled"):
             trigger.last_error = _TRIGGER_RUN_FAILED_MESSAGE
             trigger.last_error_kind = "workflow"

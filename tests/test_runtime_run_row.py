@@ -201,6 +201,62 @@ def test_a_successful_triggered_run_leaves_a_mailbox_fault_alone(tmp_path):
         assert trigger.last_error_kind == "mailbox"
 
 
+def test_a_superseded_run_never_touches_trigger_health(tmp_path):
+    # The stale-run watchdog can release a wedged run's overlap guard and let a
+    # new run start while the old one is still executing. When the old one
+    # finally finishes, its outcome is stale: applying it would let a failure
+    # from the abandoned run overwrite health the new run just established.
+    from ui.backend.db.email_triggers import get_email_trigger
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, trigger = _org_with_trigger(s)
+        org_id = org.id
+        trigger.last_run_id = "the-run-we-are-waiting-on"
+        s.commit()
+    run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        s.add(_triggered_run_row(run.id, org_id))
+        s.commit()
+
+    run_in_background(
+        run.id, _failing_workflow(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+
+    with Session() as s:
+        trigger = get_email_trigger(s, org_id)
+        assert trigger.last_error is None
+        assert trigger.last_error_kind is None
+
+
+def test_the_run_the_trigger_is_waiting_on_still_updates_health(tmp_path):
+    from ui.backend.db.email_triggers import get_email_trigger
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, trigger = _org_with_trigger(s)
+        org_id = org.id
+        s.commit()
+    run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        trigger = get_email_trigger(s, org_id)
+        trigger.last_run_id = run.id
+        s.add(_triggered_run_row(run.id, org_id))
+        s.commit()
+
+    run_in_background(
+        run.id, _failing_workflow(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+
+    with Session() as s:
+        trigger = get_email_trigger(s, org_id)
+        assert trigger.last_error_kind == "workflow"
+
+
 def test_a_non_triggered_run_never_touches_trigger_health(tmp_path):
     from ui.backend.db.email_triggers import get_email_trigger
 
