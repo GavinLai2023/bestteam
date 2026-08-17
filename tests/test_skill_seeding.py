@@ -43,6 +43,27 @@ def test_triage_playbook_uses_only_agent_visible_signals(db_session):
     assert "no-reply" in instructions.lower()
 
 
+def test_triage_playbook_says_when_to_read_an_attachment(db_session):
+    # A tool granted but absent from a numbered playbook is a tool the model
+    # uses by accident or not at all -- and this is the generic email skill,
+    # where most customers meet the capability.
+    seed_default_skills(db_session)
+    instructions = load_skills(db_session)["email_triage_reply"].instructions
+    lowered = instructions.lower()
+
+    assert "email_read_attachment" in instructions
+    # Conditional, never blanket: reading every attachment on every message is
+    # exactly the cost Phase 4a's filtering and budgets exist to control.
+    assert "only makes sense with one" in lowered
+    assert "not every attachment on every message" in lowered
+    # The refusal path is stated, and the same never-overclaim discipline as
+    # property_maintenance_intake_v1 carries over.
+    assert "unsupported type" in lowered
+    assert "never describe contents beyond what" in lowered
+    # The step is ordered before drafting, or it cannot inform the draft.
+    assert lowered.index("email_read_attachment") < lowered.index("email_draft_reply with")
+
+
 def test_seed_is_idempotent(db_session):
     seed_default_skills(db_session)
     seed_default_skills(db_session)
