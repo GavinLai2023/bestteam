@@ -1864,3 +1864,47 @@ def test_a_dispatch_failure_dead_letters_at_the_attempt_limit(db, monkeypatch):
     assert _events(db)[0].status == "failed"
     # A dead-lettered message must not be invisible to the customer.
     assert trigger.last_error is not None
+
+
+def _hung_run(db, org, trigger, *, uids, age_seconds=4000):
+    """A triggered run stuck `running`, with its inbox events claimed."""
+    from datetime import timedelta
+
+    from ui.backend.db import inbox_events as store
+    from ui.backend.db.models import Run as _R
+
+    run_id = "hung-run"
+    db.add(_R(
+        id=run_id, workflow="triage", input="x", status="running", org_id=org.id,
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        trigger_context={"trigger_type": "email", "uids": [int(u) for u in uids]},
+    ))
+    store.record_events(db, org_id=org.id, mailbox_identity="m",
+                        mailbox_generation="3", external_ids=uids)
+    db.commit()
+    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids))
+    store.mark_dispatched(db, run_id)
+    trigger.last_run_id = run_id
+    db.commit()
+    return run_id
+
+
+def test_the_watchdog_releases_a_hung_runs_events(db):
+    # Phase 0's watchdog frees the trigger from a hung run; its messages must
+    # come back too, or they are consumed with nothing having processed them.
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_id = _hung_run(db, org, trigger, uids=["11", "12"])
+    assert email_trigger._release_stale_run(db, trigger, run_id) is True
+    rows = _events(db)
+    assert {r.status for r in rows} == {"pending"}
+    assert all(r.run_id is None for r in rows)
+
+
+def test_the_watchdog_dead_letters_at_the_attempt_limit(db, monkeypatch):
+    monkeypatch.setenv(email_trigger.MAX_EVENT_ATTEMPTS_ENV, "1")
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    run_id = _hung_run(db, org, trigger, uids=["11"])
+    email_trigger._release_stale_run(db, trigger, run_id)
+    assert _events(db)[0].status == "failed"
+    # A dead-lettered message must not be invisible to the customer.
+    assert trigger.last_error is not None

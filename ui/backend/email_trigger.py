@@ -211,6 +211,12 @@ def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
         run_row.output = message
     trigger.last_error = message
     trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+    # Infrastructure-class: the run hung, the messages are innocent. Hand them
+    # back so they are reprocessed rather than consumed by a wedged run. This
+    # path never reaches runtime's completion hook (the worker produced no
+    # terminal event), so releasing here is the only thing that frees them.
+    if release_events(db, run_id, max_attempts=max_event_attempts(), error=message):
+        trigger.last_error = _DEAD_LETTER_MESSAGE
     db.commit()
     # The worker never reached a terminal event, so it never normalized this
     # run either -- without this a declared batch would be marked failed with
