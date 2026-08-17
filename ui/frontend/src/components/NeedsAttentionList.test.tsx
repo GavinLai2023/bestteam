@@ -76,6 +76,21 @@ describe('NeedsAttentionList', () => {
     expect(onOpenRun).toHaveBeenCalledWith('run-42')
   })
 
+  it('says the content was removed for a purged item, instead of blank fields', async () => {
+    // A retention cleanup empties the payload but keeps the row (its status
+    // and source_key are what stop a retry re-drafting the same message), so
+    // the item stays on the list with nothing left to show.
+    mockedApi.listAutomationResults.mockResolvedValue({
+      results: [{ ...RESULT, payload: {} }],
+    })
+
+    render(<NeedsAttentionList />)
+
+    expect(await screen.findByText('Content removed.')).toBeInTheDocument()
+    expect(screen.queryByText('(no summary)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Address not identified')).not.toBeInTheDocument()
+  })
+
   it('shows an error banner when the list fails to load', async () => {
     mockedApi.listAutomationResults.mockRejectedValue(new Error('boom'))
 

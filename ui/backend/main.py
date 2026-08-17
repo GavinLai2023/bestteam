@@ -653,6 +653,13 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
             }
             for row in usage_rows
         ],
+        # Phase 3b: a purged run has no trace events left, which is
+        # indistinguishable from a run that never recorded any. Without this
+        # the UI can only show an empty timeline, which reads as a bug rather
+        # than as the deletion the customer asked for.
+        "content_purged_at": (
+            iso_utc(run.content_purged_at) if run.content_purged_at else None
+        ),
     }
 
 

@@ -173,3 +173,21 @@ def test_purge_another_orgs_run_is_404(client, other_org_run):
 
 def test_purge_a_running_run_is_409(client, running_run):
     assert client.post(f"/api/runs/{running_run}/purge").status_code == 409
+
+
+# --- GET /api/runs/{run_id}/trace ---------------------------------------------
+
+
+def test_trace_reports_a_purged_run(client, seeded_runs):
+    # Without this the run renders as an empty timeline, which reads as a bug
+    # rather than as something the customer asked for.
+    client.post(f"/api/runs/{seeded_runs['old']}/purge")
+    body = client.get(f"/api/runs/{seeded_runs['old']}/trace").json()
+    assert body["events"] == []
+    assert body["content_purged_at"] is not None
+
+
+def test_trace_of_an_unpurged_run_reports_no_purge(client, seeded_runs):
+    body = client.get(f"/api/runs/{seeded_runs['new']}/trace").json()
+    assert body["content_purged_at"] is None
+    assert len(body["events"]) == 1

@@ -58,20 +58,30 @@ export default function NeedsAttentionList({ onOpenRun }: NeedsAttentionListProp
         {results.map((result) => {
           const payload = result.payload || {}
           const address = payload.extracted?.property_address || 'Address not identified'
+          // A retention cleanup empties the payload and keeps the row -- its
+          // status and source_key are what stop a retry re-drafting the same
+          // message. Say the content was removed rather than render every
+          // field as a blank or an "unknown", which reads as a failed triage.
+          const purged = Object.keys(payload).length === 0
           return (
             <li key={result.id} className="needs-attention-item">
               <div className="needs-attention-item-header">
-                <span className={`status-badge priority-${payload.priority || 'unknown'}`}>
-                  {PRIORITY_LABELS[payload.priority ?? ''] ?? payload.priority ?? 'Unknown'}
-                </span>
+                {!purged && (
+                  <span className={`status-badge priority-${payload.priority || 'unknown'}`}>
+                    {PRIORITY_LABELS[payload.priority ?? ''] ?? payload.priority ?? 'Unknown'}
+                  </span>
+                )}
                 <span className="hint">{formatDateTime(result.created_at)}</span>
               </div>
-              <p>{payload.summary || '(no summary)'}</p>
-              <p className="hint">{address}</p>
+              {purged && <p className="hint">Content removed.</p>}
+              {!purged && <p>{payload.summary || '(no summary)'}</p>}
+              {!purged && <p className="hint">{address}</p>}
               {payload.human_reason && <p className="hint">Why: {payload.human_reason}</p>}
               <p className="hint">
-                {payload.action?.draft_created ? 'Draft created' : 'No draft created'}
-                {' · '}
+                {/* Whether a draft was created is part of the removed payload,
+                    so a purged item must not claim "No draft created". */}
+                {!purged && (payload.action?.draft_created ? 'Draft created' : 'No draft created')}
+                {!purged && ' · '}
                 <button type="button" className="btn-link" onClick={() => onOpenRun?.(result.run_id)}>
                   View run
                 </button>

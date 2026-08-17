@@ -258,9 +258,13 @@ export const api = {
     )
   },
   getRunTrace: (id: string) =>
-    // usage is optional for the same reason -- always present in the real
-    // response, but pre-existing test mocks predate it.
-    request<{ events: import('./types').TraceEvent[]; usage?: UsageRecord[] }>(`/api/runs/${id}/trace`),
+    // usage and content_purged_at are optional for the same reason -- always
+    // present in the real response, but pre-existing test mocks predate them.
+    request<{
+      events: import('./types').TraceEvent[]
+      usage?: UsageRecord[]
+      content_purged_at?: string | null
+    }>(`/api/runs/${id}/trace`),
 
   // Admin: cross-org workflow-run analytics (Trace page).
   listWorkflowAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
