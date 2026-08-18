@@ -17,7 +17,7 @@ from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 from ui.backend.db.model_catalog import upsert_entry
-from ui.backend.db.models import Run, UsageRecord, WorkflowRecord
+from ui.backend.db.models import KnowledgeBaseRecord, Run, UsageRecord, WorkflowRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 from ui.backend.email_budget import day_key
@@ -164,6 +164,40 @@ def test_saving_a_spend_cap_names_the_models_it_cannot_cover(client, automated_t
     assert "fake:demo" in body["unpriced_models"]
     # ...and a model the catalogue does price is not named.
     assert "openai:gpt-4o-mini" not in body["unpriced_models"]
+
+
+def test_a_knowledge_bases_unpriced_embedding_model_is_named_too(client, automated_team):
+    # A knowledge base spends on its own account: ingestion writes a
+    # `usage_records` row with no `run_id` at all, so an unpriced embedding
+    # model is invisible to `unpriced_run_count` as well as to the monthly sum.
+    org_id = automated_team
+    with open_test_db() as db:
+        db.add(KnowledgeBaseRecord(name="handbook", org_id=org_id, config={
+            "name": "handbook",
+            "path": "/srv/handbook",
+            "type": "hybrid",
+            "embedding_model": "acme:embed-1",
+            "query_expansion_model": "fake:expand",
+        }))
+        record = db.query(WorkflowRecord).filter_by(name="triage", org_id=org_id).one()
+        record.config = {
+            **_TEAM_CONFIG,
+            "agents": [
+                {**_TEAM_CONFIG["agents"][0], "tools": ["handbook"]},
+                _TEAM_CONFIG["agents"][1],
+            ],
+        }
+        db.commit()
+
+        assert "acme:embed-1" in unpriced_models_for_org(db, org_id)
+        # A `fake:` spec is $0 by construction, so it is never a blind spot.
+        assert "fake:expand" not in unpriced_models_for_org(db, org_id)
+
+        # ...and pricing it takes it off the advisory.
+        upsert_entry(db, "acme:embed-1", display_name="Acme Embeddings",
+                     tier="embedding", input_price_per_1k=0.00002,
+                     output_price_per_1k=0.0)
+        assert "acme:embed-1" not in unpriced_models_for_org(db, org_id)
 
 
 def test_an_org_with_no_automation_names_no_models(client):

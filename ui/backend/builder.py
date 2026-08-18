@@ -26,7 +26,7 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
-from .db.model_catalog import list_chat_entries, list_entries, to_prompt_text
+from .db.model_catalog import list_chat_entries, to_prompt_text
 from .deploy_validation import find_email_egress_conflicts, validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
 from .db.workflows import publish_workflow_version
@@ -683,7 +683,7 @@ def deploy_session(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+        model_problems = validate_agent_models(raw, {e.spec for e in list_chat_entries(db)})
         if model_problems:
             raise HTTPException(
                 status_code=400,

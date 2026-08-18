@@ -433,11 +433,22 @@ has no `model_catalog` entry, so a naive `SUM` under-counts and the customer
 believes in a ceiling that does not hold. Three-part answer, chosen over
 "refuse to run" (one missing catalogue row would wedge a customer's automation)
 and over silence: at configuration time `unpriced_models_for_org` resolves the
-org's trigger workflow's agent models against the catalogue and the budget
-routes return a non-blocking `unpriced_models` list (**the cap saves either
+org's trigger workflow's agent models -- **and the billable
+`embedding_model`/`query_expansion_model` of the knowledge bases that team
+searches, plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
+the catalogue, and the budget routes return a non-blocking `unpriced_models`
+list (**the cap saves either
 way** -- the admin may be about to fix the catalogue); at runtime NULL
 contributes 0, so the cap is a floor on reality rather than a phantom ceiling;
-and the UI reports how many runs this month were unpriced. The helper is
+and the UI reports how many runs this month were unpriced. Knowledge bases are
+in that list because they are the one spender the run-shaped half of this
+answer cannot see at all: an *ingestion* row is written with `run_id = NULL`,
+so `unpriced_run_count`'s `count(distinct run_id)` never counts it, and an
+unpriced embedding model would otherwise be silent in both halves. `fake:`
+specs are excluded there (`core/embeddings.py::billable_spec`, the same
+definition the metering uses) even though an agent's `fake:` model is not --
+an unmetered $0 call is not a blind spot. `rerank_model` is absent for the same
+reason: reranking is a local cross-encoder and is never recorded. The helper is
 wrapped in one `except Exception -> []` (advisory copy must never fail a save),
 reads `WorkflowRecord.config` rather than building the workflow, and scopes to
 `status="deployed"` on purpose -- a trigger pointing at a draft cannot run, so
@@ -778,13 +789,16 @@ the envelope; an unsupported version gets the same whole-batch error-row
 treatment as an invalid enum. `draft_type` is length-capped like every other
 free-text payload field (it was the one field that wasn't).
 
-**A knowledge base tool's `tool_completed` no longer carries document text**
-(P0-5). It used to be `_summarize(result)` — the first 200 characters of the
-retrieved excerpts, i.e. an org's own indexed documents, in every
+**A knowledge base tool's `tool_completed` no longer carries document body
+text** (P0-5). It used to be `_summarize(result)` — the first 200 characters of
+the retrieved excerpts, i.e. an org's own indexed documents, in every
 `trace_events` row and every UI that renders one. The adapter now builds that
 event from what the tool reported through `core/tool_context.py`:
-`summary` plus `query` (≤200 chars), `hit_count` and `sources` (filenames,
-with page/section, at most 10). `summary` stays, so `lib/traceEvents.ts`,
+`summary` plus `query` (≤200 chars), `hit_count` and `sources` (at most 10).
+A source is a *citation label*, not an excerpt: the filename, then `, p.<n>`
+for a PDF and ` § <heading>` for Markdown (a heading is document text, capped
+at 80 characters — it is what makes a citation findable, and it is the only
+document text that crosses this boundary). `summary` stays, so `lib/traceEvents.ts`,
 `RunDetail`, `TracePage` and the `trace_events` persistence need no change —
 the three new keys ride alongside in `data`. This is an SDK/adapter-layer
 boundary like `_redacted_email_tool_data`, not a `runtime.py` one.

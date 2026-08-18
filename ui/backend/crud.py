@@ -448,7 +448,7 @@ def upsert_workflow_config(
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        model_problems = validate_agent_models(raw, {e.spec for e in list_entries(db)})
+        model_problems = validate_agent_models(raw, {e.spec for e in list_chat_entries(db)})
         if model_problems:
             raise HTTPException(
                 status_code=400,

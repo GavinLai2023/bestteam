@@ -20,8 +20,9 @@ class TraceEvent:
     truncated, business-safe summary of the tool result, never the raw
     exception on failure; a knowledge base tool's event instead reports what
     was searched, adding {"query": str (≤200 chars), "hit_count": int,
-    "sources": List[str]} and a `summary` built from those, never any of the
-    retrieved document text), "delegation_started"/"delegation_completed"
+    "sources": List[str]} and a `summary` built from those; each source is a
+    filename plus its page/heading citation label, never body text),
+    "delegation_started"/"delegation_completed"
     (`data` = {"to": str, "task_summary"/"summary": str}, emitted on the
     HIERARCHICAL manager), "subagent_started"/"subagent_completed" (emitted
     on the delegated subordinate, `agent` = subordinate name), "agent_completed",

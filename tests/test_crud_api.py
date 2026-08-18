@@ -1334,6 +1334,25 @@ def test_workflow_put_rejects_agent_model_not_in_catalog(client):
     assert "openai:gpt-nope" in resp.json()["detail"]
 
 
+def test_workflow_put_rejects_an_embedding_model_as_an_agent_model(client):
+    """A `tier="embedding"` catalog entry prices a knowledge base's embedding
+    calls; it is not a chat model. Deploy validation resolves the catalog
+    through `list_chat_entries`, so such a spec is as unknown here as one with
+    no row at all -- same 400, same wording."""
+    spec = "openai:text-embedding-3-small"
+    assert client.put(
+        f"/api/config/model-catalog/{spec}",
+        json={"display_name": spec, "tier": "embedding"},
+    ).status_code == 200
+
+    bad_config = {**_VALID_WORKFLOW_CONFIG,
+                  "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "model": spec}]}
+    resp = client.put("/api/config/workflows/embedding_model_wf?org=default", json=bad_config)
+    assert resp.status_code == 400
+    assert spec in resp.json()["detail"]
+    assert "Pick a model from the catalog" in resp.json()["detail"]
+
+
 def test_workflow_put_rejects_agent_with_missing_none_empty_or_nonstring_model(client):
     # The operator CRUD path builds Agent(**spec) directly, bypassing the
     # AgentSpec.model:str check -- so a missing/None/empty/non-string model must
