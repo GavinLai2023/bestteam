@@ -164,7 +164,8 @@ def test_knowledge_base_raises_for_empty_folder(tmp_path):
 def test_knowledge_base_skips_unsupported_files(tmp_path):
     (tmp_path / "doc.txt").write_text("apples and oranges", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
-    kb = LocalFolderKnowledgeBase("kb", tmp_path)
+    with pytest.warns(UserWarning, match="Unsupported file type"):
+        kb = LocalFolderKnowledgeBase("kb", tmp_path)
     assert len(kb._chunks) == 1
     assert kb._chunks[0].source == "doc.txt"
 
