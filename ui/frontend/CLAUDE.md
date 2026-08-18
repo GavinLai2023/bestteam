@@ -204,6 +204,23 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     `components/WizardLayout.css` (cards, fields, buttons, banners, bullet
     editor, team-flow/employee-card, activity feed).
 
+## My documents panel (`components/KnowledgeBasesPanel.tsx`)
+
+The **"My documents"** section at the bottom of **My teams**
+(`pages/wizard/SessionsPage.tsx`), listing the org's own
+knowledge bases from `GET /api/org/knowledge-bases`: one derived status line
+per row (never indexed / processing / ready with a document count and an
+expandable list of skipped files / failed with the job's own error, plus "an
+earlier version is still in use" when `servable`), which teams use it, and
+Delete behind a `window.confirm`. Delete is disabled with an explanatory
+`title` while an upload is processing or a live team depends on it — the
+backend 409s either way, this only saves a pointless click — and a refused
+delete's message renders on the row it belongs to, since the 409 names *that*
+collection's teams. It polls every 3s **only while some row is processing**
+(the Activity page's poll-while-running rule) and hides itself entirely when
+the org has no knowledge bases, so it costs an org that never uploaded
+anything one request.
+
 ## Anonymous team sharing (`/share/:token`)
 
 The one **public, unauthenticated route** in this app (outside `RequireAuth`

@@ -10,6 +10,7 @@ vi.mock('../../lib/api', () => ({
     listSessions: vi.fn(),
     getEmailTrigger: vi.fn(),
     deleteSession: vi.fn(),
+    listOwnKnowledgeBases: vi.fn().mockResolvedValue([]),
   },
 }))
 

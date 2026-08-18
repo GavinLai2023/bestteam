@@ -115,9 +115,18 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   job. Indexed on `ingestion_job_id`.
 - `knowledge_chunks` (`KnowledgeChunk`) — one chunk of a `KnowledgeDocument`'s
   parsed text (`document_id`/`kb_id` FKs, `chunk_index`, `text`, optional
-  `embedding_json`/`embedding_model`). `embedding_json` is a JSON-encoded
+  `page`/`heading`, optional `embedding_json`/`embedding_model`).
+  `embedding_json` is a JSON-encoded
   `List[float]` — same TEXT-column shape as `memories.embedding_json` —
-  populated only for `vector`/`hybrid` KBs. Reconstructed into the matching
+  populated only for `vector`/`hybrid` KBs. `page`/`heading` (migration
+  `m0n1o2p3q4r5`) are where in the document the chunk came from and are what
+  a retrieval result cites beyond the filename: `page` for a PDF (chunked per
+  page, so it is exact), `heading` for Markdown (the section the chunk opens
+  under, approximate). Both nullable, because only those two formats supply
+  them; rows ingested before the columns existed are NULL for both and cite
+  their filename alone, as they always did — there is no backfill, since
+  either value can only be recovered by re-parsing the original documents,
+  which a re-upload already does. Reconstructed into the matching
   `KnowledgeBase` subclass via its `from_chunks(...)` alternate constructor
   at read time (`ui/backend/knowledge_bases.py::resolve_knowledge_base`, see
   `src/bestteam/core/CLAUDE.md`) rather than re-parsing files on every load.
@@ -266,10 +275,30 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
   (Phase 3). Seeded with `DEFAULT_MODEL_CATALOG` (`db/model_catalog.py`) on
   first use of the production engine via `seed_default_catalog()`
-  (idempotent — no-op if the table is non-empty).
-- `usage_records` — per-agent token usage per run, plus a `cost_estimate`
+  (idempotent — no-op if the table is non-empty). A fourth `tier`,
+  `"embedding"` (`EMBEDDING_TIER`), marks an entry as an embedding model:
+  it is here only so `record_usage` can price a knowledge base's embedding
+  spend, and `list_chat_entries()` excludes it from every surface that
+  offers a *chat* model. None is seeded — prices depend on the provider.
+- `usage_records` — one metered LLM/embedding call, plus a `cost_estimate`
   computed from `model_catalog` pricing where the model's spec matches an
-  entry (Phase 3, `db/usage.py::record_usage`).
+  entry (Phase 3, `db/usage.py::record_usage`). One ledger for every kind of
+  spend an org incurs, which is what lets the monthly cap be a single `SUM`
+  over `org_id`. **`run_id` is nullable** (migration `n1o2p3q4r5s6`) and a
+  nullable `ingestion_job_id` FK sits beside it: exactly one of the two is
+  set. Almost every row belongs to a run; a knowledge base's *ingestion*
+  embedding spend belongs to an upload instead and is written as one
+  `agent="kb:ingest"` row per job. A KB's *query-time* spend is an ordinary
+  run row — it rides the calling agent's `agent_completed.usage`. Consumers
+  that key on runs (`run_analytics_api.py`, `GET /api/runs/{id}`,
+  `unpriced_run_count`'s `count(distinct run_id)`) filter or count by run id,
+  so NULL-`run_id` rows drop out of them naturally; the monthly
+  `SUM(cost_estimate) WHERE org_id` deliberately includes them.
+  `ingestion_job_id` is a provenance label rather than a joinable key: both
+  generation pruning and KB deletion delete `knowledge_ingestion_jobs` rows,
+  and the usage row survives them on purpose (the same "keep the accounting"
+  rule a retention purge follows — an org's spend history must not change
+  retroactively because it deleted a knowledge base).
 - `users` — logins (`db/users.py` + `ui/backend/auth.py`/`auth_api.py`).
   `is_admin` (migration `a1b2c3d4e5f6`) gates the Advanced config and
   Memory pages; `org_id` (migration `b7c8d9e0f1a2`, NULL = platform
@@ -366,8 +395,8 @@ row**: the sweep history outlives any one policy value.
 `runs.content_purged_at` is what marks a run purged -- never the emptiness of
 `input`/`output`, since a genuinely empty output is possible. A purge deletes
 that run's `trace_events` rows and empties each `automation_item_results.payload`,
-but never touches `usage_records` (non-nullable `run_id`, and it carries the
-org's cost history) nor an item result's `status`/`source_key` (those exclude
+but never touches `usage_records` (it carries the org's cost history, and its
+rows name the run) nor an item result's `status`/`source_key` (those exclude
 already-drafted UIDs from a retry -- see `ui/backend/CLAUDE.md`).
 `inbox_events` is deliberately never purged: a UID plus the customer's own
 mailbox address is not data-subject content, and deleting it would break

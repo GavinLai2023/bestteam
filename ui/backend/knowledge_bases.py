@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import threading
@@ -29,8 +30,12 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 from bestteam.tools import REGISTRY
 
 from . import ingestion
+from .component_lock import component_mutation_lock
+from .db.dependencies import workflows_referencing
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 from .deploy_validation import find_kb_tool_collisions
+
+_logger = logging.getLogger(__name__)
 
 # --- KB path containment (CR-001) -------------------------------------------
 # A KB `cache_path` is a server-file *write* target (the vector KB's
@@ -135,6 +140,7 @@ def upload_knowledge_base(
     chunk_overlap: int = 100,
     top_k: int = 5,
     kb_type: str = "local_folder",
+    description: Optional[str] = None,
     embedding_model: Optional[str] = None,
     rerank_model: Optional[str] = None,
     query_expansion_model: Optional[str] = None,
@@ -154,6 +160,11 @@ def upload_knowledge_base(
     search" toggle described there, `kb_type`/`embedding_model`/
     `rerank_model`/`query_expansion_model`. `embedding_model` is required
     when `kb_type` is `vector` or `hybrid` and ignored otherwise.
+
+    `description` is the customer's one sentence about what the documents
+    cover. It is stored on the KB's config and becomes the agent tool's own
+    description, so it is what tells a model which of an org's collections
+    answers a question; both routes cap it at 500 characters.
 
     This validates synchronously (name/size limits, `kb_type`, chunk params),
     writes the uploaded files to a fresh version directory, upserts the
@@ -240,6 +251,7 @@ def upload_knowledge_base(
             spec = KnowledgeBaseSpec(
                 name=item_name,
                 path=str(kb_root),
+                description=description,
                 type=kb_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -315,6 +327,76 @@ def upload_knowledge_base(
             ) from exc
 
         return {"name": item_name, "job_id": job.id, "status": "queued"}
+
+
+def delete_knowledge_base(db: Session, org_id: Optional[int], item_name: str) -> None:
+    """Delete a knowledge base: its record, its ingestion rows, its uploads.
+
+    Lives here rather than in `crud.py`'s generic component-delete route
+    because it needs the per-KB `_kb_upload_lock` this module owns, and
+    because it takes `component_mutation_lock` itself -- that lock is NOT
+    reentrant, so the route has to call this *before* entering its own
+    `with component_mutation_lock` block, not inside it.
+
+    Refuses (409) while a `queued`/`running` `IngestionJob` exists for this
+    KB. The ingestion worker runs on its own thread and commits
+    Document/Chunk rows against `kb_id` when it finishes, so deleting the
+    record out from under it left orphan rows behind (FK enforcement is off,
+    so nothing caught them) and, on Windows, leaked the upload directory --
+    `rmtree` fails with `WinError 32` against the handle the worker still
+    holds open. Refusing is what makes "a KB being deleted has no worker"
+    true: uploads and deletes both serialize on `_kb_upload_lock`, and only
+    an upload creates a job. `ingestion.fail_interrupted_jobs` (called at
+    startup) is what stops a killed process making this refusal permanent.
+    """
+    with component_mutation_lock:
+        item = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Unknown knowledge_base '{item_name}'")
+        used_by = workflows_referencing(db, kind="knowledge_base", resource_id=item.id)
+        if used_by:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': it's used by deployed team(s): "
+                    + ", ".join(used_by)
+                    + ". Update or remove those teams first."
+                ),
+            )
+        # Hold the per-KB lock across the in-flight check, delete, commit and
+        # rmtree so a concurrent upload can't dispatch a job (or recreate the
+        # row/files) in a gap and then have them removed here (F1). Commit
+        # before rmtree so a commit failure keeps the files for the
+        # still-present record; a failed rmtree is logged (the record is
+        # already gone), not silently swallowed (F3-prev).
+        with _kb_upload_lock(f"{org_id}/{item_name}"):
+            in_flight = (
+                db.query(IngestionJob)
+                .filter(IngestionJob.kb_id == item.id, IngestionJob.status.in_(("queued", "running")))
+                .first()
+            )
+            if in_flight is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{item_name}' is still processing an upload. "
+                        "Wait for it to finish, then delete it."
+                    ),
+                )
+            ingestion.delete_kb_ingestion_data(db, item.id)
+            db.delete(item)
+            db.commit()
+            upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
+            if upload_dir.is_dir():
+                try:
+                    shutil.rmtree(upload_dir)
+                except OSError as exc:
+                    _logger.warning(
+                        "Knowledge base '%s' (org %s) deleted, but its upload "
+                        "directory couldn't be removed: %s",
+                        item_name, org_id, exc,
+                    )
+    _invalidate_workflow_cache()
 
 
 def resolve_kb_upload_path(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -522,8 +604,27 @@ def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Pat
     # (including the currently-staging one), so scanning it directly would
     # serve un-vetted, possibly-partial, or entirely un-embedded content
     # instead of treating the KB as not yet servable (Codex review finding).
-    has_any_job = db.query(IngestionJob.id).filter_by(kb_id=record.id).first() is not None
-    if has_any_job:
+    latest = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id)
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    if latest is not None:
+        # Distinguish "not ready yet" from "will never be ready". A KB whose
+        # newest attempt failed is stuck until someone re-uploads or deletes
+        # it, so telling the customer to wait was permanently wrong advice --
+        # say what actually went wrong and what to do about it instead.
+        if latest.status == "failed":
+            errors = ingestion.job_status_payload(db, latest)["errors"]
+            detail = errors[0]["error"] if errors else "the documents could not be processed"
+            # A per-document error may already be a full sentence (the
+            # unsupported-type and no-extractable-text messages both are), so
+            # don't append a second full stop onto it.
+            raise ConfigurationError(
+                f"Knowledge base '{record.name}' could not be indexed: "
+                f"{detail.rstrip('.')}. Upload the documents again, or delete it."
+            )
         raise ConfigurationError(
             f"Knowledge base '{record.name}' has no completed ingestion yet. "
             "Wait for the current upload to finish processing and try again."
@@ -558,11 +659,18 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
         .order_by(KnowledgeDocument.filename, KnowledgeChunk.chunk_index)
         .all()
     )
-    chunks = [_Chunk(source=filename, text=chunk.text) for chunk, filename in rows]
+    chunks = [
+        _Chunk(source=filename, text=chunk.text, page=chunk.page, heading=chunk.heading)
+        for chunk, filename in rows
+    ]
 
     config = record.config
     kb_type = job.kb_type or "local_folder"
     common_kwargs: Dict[str, Any] = {
+        # From `config`, not the job: the description is what the agent's
+        # tool says about the collection, so an edited one should take effect
+        # immediately rather than waiting for the next ingestion.
+        "description": config.get("description"),
         "top_k": config.get("top_k", 5),
         "rerank_model": config.get("rerank_model"),
         "candidate_k": config.get("candidate_k"),

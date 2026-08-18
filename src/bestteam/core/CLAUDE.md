@@ -87,6 +87,51 @@ mechanism with no `LangGraphAdapter` changes — `query()` returns the same
 formatted `"...results for: <query>\n\n1. [source: ...]\n<text>..."` / `"No
 results found..."` string shape regardless of type.
 
+**Retrieval and presentation are split** (P0-3). `KnowledgeBase.search(query,
+top_k) -> List[_Chunk]` is the abstract method each subclass implements;
+`query()` is **concrete on the base class** and is just
+`format_results(self.name, query, self.search(...))`. One formatter means the
+citation tags cannot drift between types, and the split is the seam the
+retrieval trace (P0-5) and the eval harness (P0-7) were meant to
+build on — consuming chunks rather than re-parsing a formatted string. The
+**eval harness now exists** (`core/kb_eval.py` + `scripts/kb_eval.py`, P0-7):
+`evaluate(kb, queries, top_k)` drives any KB type through `search()` and
+reports recall@k / MRR / hit@1 **per source document** (one relevant document
+per query, so recall@k == hit@k), plus an optional `expected_substring` hit@k
+over the *text* of the expected document's own chunks (a match in another
+document doesn't count), which catches a chunking regression. The golden set is
+`tests/fixtures/kb_eval/` — 10 documents (5 EN / 5 ZH) and 20 queries split
+16 `lexical` (BM25 must rank the document first) / 4 `paraphrase` (no shared
+significant terms, so BM25 misses them by design; they are the headroom a real
+embedding model should close, and why the guarded thresholds are recall@3 ≥
+0.8 / MRR ≥ 0.7 rather than 1.0). `fake:` embeddings are deterministic noise —
+the hybrid test is a smoke test and asserts no quality. The **retrieval trace
+now exists too** (P0-5): `make_knowledge_base_tool`'s wrapper calls `search()`
+and `format_results()` itself (instead of `query()`, which is exactly those
+two) so it can report the retrieval — `query` (first 200 chars),
+`hit_count`, `sources` (de-duplicated `_citation`s, at most 10) and a
+`summary` — through `core/tool_context.py`, a contextvar-scoped box the
+adapter's tool loop opens around each call (`ToolCallContext(trace, usage)`,
+`report_trace`/`add_usage`, all no-ops when no run is active, so an
+SDK-direct `kb.query()` is unaffected). The wrapper is marked
+`__bestteam_tool_kind__ = "knowledge_base"` (a marker, not a name set — a KB
+tool is named after its KB), and the adapter builds that call's
+`tool_completed` from the report alone: a KB tool's event never carries
+`_summarize(result)`, i.e. never the indexed documents' own text. `usage` is
+the same channel's other half, and is now in use (P0-4): the tool loop drains
+it onto the calling agent's `agent_completed.usage` so a KB's query embedding
+and query-expansion calls are metered -- see "Metering a knowledge base's
+spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
+`page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
+`heading` (Markdown, the section a chunk opens under, an 80-char
+approximation) — which `_citation()` renders as
+`[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
+two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
+and render byte-for-byte as before. All three types also take an
+optional `description` (≤500 chars, `KnowledgeBaseSpec.description`) — one
+sentence about the documents, injected into the tool's own docstring so a
+model can tell an org's collections apart. See `docs/KNOWLEDGE_BASES.md`.
+
 **YAML usage — `local_folder`:**
 ```yaml
 knowledge_bases:
@@ -168,13 +213,49 @@ alternative, and fuses the per-variant ranked results with Reciprocal Rank
 Fusion (`core/fusion.py`, shared with Memory) before slicing to `top_k`.
 Unset (the default) -> `query()` is byte-for-byte unchanged. A bad spec /
 invoke error / unparseable response degrades to searching the literal query
-alone -- a query never fails because expansion failed. **This call's cost is
-unmetered**: KB tools run inside the agent's generic tool-calling loop
-(`adapters/langgraph_adapter.py`), which has no hook to report a nested LLM
-call's token usage back to the backend (unlike Memory's recall, which runs
-at the `Workflow.stream()` orchestration layer) -- the same pre-existing gap
-`VectorKnowledgeBase`'s embedding calls already have. See
+alone -- a query never fails because expansion failed. **This call is
+metered** (P0-4): `_query_variants()` reads the expansion response's
+`usage_metadata` and reports it through `core/tool_context.py::add_usage`,
+from which the adapter's tool loop drains it onto the calling agent's
+`agent_completed.usage` -- the same list a model call's own usage rides, so
+the backend needs no new event field. An unparseable response is still
+metered (the call was still billed); a `fake:` model reports no
+`usage_metadata` and so records nothing, and a `BaseChatModel` instance
+records tokens with `model=None` (cost stays null), mirroring
+`MemoryManager._usage_entry`. See
 `docs/superpowers/specs/2026-08-15-kb-hybrid-retrieval-design.md`.
+
+## Metering a knowledge base's spend (P0-4)
+
+Query-time spend rides the tool call's own context and needs no backend
+change; ingestion spend is recorded by the backend directly. What the SDK
+owns:
+
+- `core/embeddings.py::estimate_embedding_tokens(text)` -- one token per CJK
+  character (via `text_tokenize._CJK_RUN_RE`) plus one per four other
+  characters. Embedding providers report no token usage through LangChain's
+  `Embeddings` interface, so an embedding row *has* to estimate; expect ±30%.
+  Deterministic, no `tiktoken` dependency.
+- `core/embeddings.py::billable_spec(model)` -- the single definition of "is
+  there anything to bill": a non-`fake:` **string** spec, else None. A live
+  `Embeddings`/`BaseChatModel` instance has no spec for `model_catalog` to
+  price, and `fake:` is $0 by construction. Shared with
+  `ui/backend/ingestion.py` so both sides agree.
+- `report_query_embedding_usage()` in the same module, called from
+  `VectorKnowledgeBase._vector_leg`/`HybridKnowledgeBase._vector_leg` right
+  after `embed_query` -- once per query variant, so expansion's extra
+  variants are billed as the extra calls they are. `self._embedding_spec` is
+  the `billable_spec()` result stashed at construction (both the folder
+  constructor and `from_chunks`).
+- Reranking is **not** metered: a cross-encoder runs locally, in-process,
+  with no provider call to bill.
+- **Document embeddings are metered only on the upload/ingestion path**
+  (`ui/backend/ingestion.py`). A `vector`/`hybrid` KB built straight from a
+  folder path — a YAML-configured one via `core/loader.py`, or an uploaded one
+  with no completed `IngestionJob`, which `resolve_knowledge_base()` falls
+  back to building from files — embeds every chunk in its constructor, at load
+  time, outside any run and any job; that spend is not recorded, and without
+  `cache_path` it repeats on every load. Query-time metering is unaffected.
 
 ## Known limitations: knowledge base storage, chunking, and reranking
 
@@ -198,8 +279,32 @@ Suffix support is also shared now: `_SUPPORTED_SUFFIXES` is an alias of
 `file_parser.SUPPORTED_SUFFIXES`, so a suffix added to `parse_bytes` is
 discovered by folder scanning automatically.
 
-**Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by all
-three KB types) now splits on the document's own structure — Markdown heading
+**An unreadable document is reported, not silently skipped** (P0-6).
+`_load_document_chunks` no longer filters unsupported suffixes out of its
+`rglob` before the loop -- it warns per file, naming the type and the
+supported set (`_unsupported_suffix_message`), so a `.png` dropped into a
+knowledge folder is something the operator hears about. It also warns on a
+document that parsed but contributed nothing: `_has_extractable_text` strips
+the parser-generated header lines (`_PARSER_HEADER_RE`, covering `[PDF: …]`,
+`[Word: …]`, `[Excel: …]`, `[Sheet: …]`, `[Table N]`, `[XML: …]`) and checks
+what remains, because a **scanned PDF** parses to its header line alone --
+non-empty, so it used to become a chunk that matched nothing and told nobody
+the pages were never read. Both helpers plus `_NO_TEXT_MESSAGE` are shared
+with `ui/backend/ingestion.py`, which raises them as per-document failures
+instead of warnings; keeping one wording means the SDK and the upload path
+cannot disagree about why a file was rejected.
+
+**Chunking is format-aware, not hierarchical.** `_chunk_document` (shared by
+all three KB types, and by `ui/backend/ingestion.py`) is the per-document
+entry point. A `.pdf` is split on `_PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
+now joins pages with) and each page chunked through `_chunk_text` on its own,
+so a chunk never straddles a page. Every other format goes through
+`_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
+is composed of — so a `.md` chunk's section heading (`_headings_for`) can be
+read off the pieces *before* overlap prefixes each one with the previous
+chunk's tail, which would otherwise shift every heading by one section.
+Per-page PDF chunking costs cross-page overlap — accepted for an exact `p.N`.
+`_chunk_text` splits on the document's own structure — Markdown heading
 boundaries, XML element boundaries (via the renderer's indentation), and a
 generic paragraph/sentence/word fallback (with CJK sentence terminators
 `。！？`) — replacing the old fixed-offset character slicing. This closes the

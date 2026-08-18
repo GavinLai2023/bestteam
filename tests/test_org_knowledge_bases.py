@@ -600,3 +600,200 @@ def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_pat
 
         tools = _all_knowledge_base_tools(db, tmp_path, org_id)
         assert "14 days" in tools["legacy_kb"]("refund policy")
+
+
+# --- P0-2: org-side self-service listing, inspection and deletion -----------
+
+def test_list_own_kbs_shows_latest_job_status_and_never_config_path(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.get("/api/org/knowledge-bases")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [kb["name"] for kb in body] == ["policies"]
+    kb = body[0]
+    assert kb["type"] == "local_folder"
+    assert kb["servable"] is True
+    assert kb["used_by"] == []
+    # `iso_utc`, not the bare column: SQLite round-trips these tz-naive, and a
+    # timestamp with no UTC marker is parsed as local time by the panel.
+    assert kb["updated_at"].endswith("+00:00")
+    assert kb["latest_job"]["status"] == "completed"
+    # `job_status_payload` includes the KB's `config` once a job completes,
+    # and that config carries the server's absolute upload path. The summary
+    # strips it: this list is customer-facing.
+    assert "config" not in kb["latest_job"]
+    assert "knowledge_base_uploads" not in resp.text
+
+    # Single-item fetch reports the same shape.
+    resp = client.get("/api/org/knowledge-bases/policies")
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "policies"
+    assert "config" not in resp.json()["latest_job"]
+
+
+def test_get_own_kb_404_for_other_org(client):
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_files()
+    ).status_code == 200
+
+    other = create_user_and_login(client, username="bob", org="org_b")
+    bob = {"Authorization": f"Bearer {other}"}
+    assert client.get("/api/org/knowledge-bases/policies", headers=bob).status_code == 404
+    assert client.delete("/api/org/knowledge-bases/policies", headers=bob).status_code == 404
+    # Still there for its owner.
+    assert client.get("/api/org/knowledge-bases/policies").status_code == 200
+
+
+def test_delete_own_kb_removes_rows_and_files(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+    upload_dir = backend_knowledge_bases._KB_UPLOADS_DIR / str(org_id) / "policies"
+    assert upload_dir.is_dir()
+
+    assert client.delete("/api/org/knowledge-bases/policies").status_code == 204
+
+    assert not upload_dir.exists()
+    with open_test_db() as db:
+        assert db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one_or_none() is None
+        assert db.query(IngestionJob).count() == 0
+    assert client.get("/api/org/knowledge-bases/policies").status_code == 404
+
+
+def test_delete_own_kb_409_when_used_by_deployed_team(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    # The delete guard reads typed dependency rows, which only exist once a
+    # workflow is deployed for real -- so deploy through the admin CRUD route
+    # rather than inserting a WorkflowRecord directly.
+    admin = create_user_and_login(client, username="op", org=None, admin=True)
+    deploy = client.put(
+        "/api/config/workflows/kb_team?org=default",
+        json={
+            "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["policies"]}],
+            "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
+            "workflow": {"steps": ["team"]},
+        },
+        headers={"Authorization": f"Bearer {admin}"},
+    )
+    assert deploy.status_code == 200
+
+    resp = client.delete("/api/org/knowledge-bases/policies")
+    assert resp.status_code == 409
+    assert "kb_team" in resp.json()["detail"]
+    assert client.get("/api/org/knowledge-bases/policies").status_code == 200
+
+
+def test_delete_own_kb_409_while_processing(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    submitted = []
+    monkeypatch.setattr(
+        backend_ingestion._executor, "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    resp = client.delete("/api/org/knowledge-bases/policies")
+    assert resp.status_code == 409
+    assert "still processing" in resp.json()["detail"]
+
+    # Once the held job resolves, the same delete succeeds.
+    args, kwargs = submitted[0]
+    args[0](*args[1:], **kwargs)
+    assert _wait_for_job_status(job_id) == "completed"
+    assert client.delete("/api/org/knowledge-bases/policies").status_code == 204
+
+
+def test_resolve_failed_kb_reports_the_job_error_not_wait_message(client, tmp_path):
+    """A KB whose only ingestion attempt failed is stuck forever, so the
+    "wait for the current upload" wording was permanently wrong -- it told a
+    customer to wait for something that will never finish instead of naming
+    what went wrong and what to do about it."""
+    from bestteam.exceptions import ConfigurationError
+
+    resp = client.post(
+        "/api/org/knowledge-bases/broken/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = db.query(KnowledgeBaseRecord).filter_by(name="broken", org_id=org_id).one()
+        with pytest.raises(ConfigurationError) as excinfo:
+            backend_knowledge_bases.resolve_knowledge_base(db, record, tmp_path)
+
+    message = str(excinfo.value)
+    assert "could not be indexed" in message
+    # A whitespace-only document has no extractable text, which is the reason
+    # P0-6 reports (it used to be the vaguer "produced no chunks").
+    assert "No text could be extracted" in message
+    assert "Wait for the current upload" not in message
+    assert ".." not in message
+
+    # And the customer-facing summary says the same thing, without a config.
+    body = client.get("/api/org/knowledge-bases/broken").json()
+    assert body["servable"] is False
+    assert body["latest_job"]["status"] == "failed"
+    assert body["latest_job"]["errors"][0]["error"]
+
+
+def test_failed_kb_does_not_block_spec_generation(client, tmp_path):
+    """One customer's unparseable upload used to make `_all_knowledge_base_tools`
+    raise, 4xx-ing spec generation for the whole org."""
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    resp = client.post(
+        "/api/org/knowledge-bases/broken/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert set(tools) == {"policies"}
+
+        # The architect is only told about the knowledge bases that actually
+        # built, so it can't reference one no agent could ever use.
+        catalog_text = _with_knowledge_base_catalog(db, "", org_id, names=set(tools))
+        assert "policies" in catalog_text
+        assert "broken" not in catalog_text
+
+
+def test_upload_description_lands_in_config_and_tool_docstring(client, tmp_path):
+    """The one sentence the wizard asks for is what the agent's tool
+    description says -- it is the only thing telling a model when this
+    collection is the right one to search."""
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"description": "Our refund and shipping policies"},
+        files=_files(),
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["description"] == "Our refund and shipping policies"
+
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "Search the 'policies' knowledge base: Our refund and shipping policies." in (
+            tools["policies"].__doc__
+        )
+
+    # And the customer's own "My documents" panel shows it back.
+    resp = client.get("/api/org/knowledge-bases/policies")
+    assert resp.status_code == 200
+    assert resp.json()["description"] == "Our refund and shipping policies"

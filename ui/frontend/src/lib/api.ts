@@ -3,8 +3,8 @@ import type {
   EmailFilterSettings, EmailTrigger, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
-  OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, RetentionSettings, RunListItem, Requirements,
-  ShareLink, ShareMessage, ShareSessionSummary,
+  OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
+  Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -364,11 +364,20 @@ export const api = {
   // token, unlike the admin uploadKnowledgeBaseFiles above. `smartSearch`
   // is the "Standard"/"Enhanced" toggle -- only meaningful when
   // orgKnowledgeBaseCapabilities().smart_search_available is true.
-  uploadOwnKnowledgeBaseFiles: (name: string, files: File[], replace = false, smartSearch = false) =>
+  // `description` is the customer's one sentence about what the documents
+  // cover; it becomes the agent tool's own description. Left undefined, the
+  // multipart helper omits the field entirely.
+  uploadOwnKnowledgeBaseFiles: (
+    name: string,
+    files: File[],
+    replace = false,
+    smartSearch = false,
+    description?: string,
+  ) =>
     uploadFiles<{ name: string; job_id: number; status: string }>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
       files,
-      { replace, smart_search: smartSearch },
+      { replace, smart_search: smartSearch, description },
     ),
   orgKnowledgeBaseCapabilities: () => request<KnowledgeBaseCapabilities>('/api/org/knowledge-bases/capabilities'),
   // Ingestion now runs in the background -- DocumentsPage polls this after
@@ -377,6 +386,14 @@ export const api = {
     request<IngestionJobStatus>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/ingestion-jobs/${jobId}`,
     ),
+  // The org's own knowledge bases, for the "My documents" panel on My teams.
+  // Deleting is refused (409) while an upload is still processing or while a
+  // live team still uses the collection.
+  listOwnKnowledgeBases: () => request<OrgKnowledgeBase[]>('/api/org/knowledge-bases'),
+  getOwnKnowledgeBase: (name: string) =>
+    request<OrgKnowledgeBase>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`),
+  deleteOwnKnowledgeBase: (name: string) =>
+    request<void>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),

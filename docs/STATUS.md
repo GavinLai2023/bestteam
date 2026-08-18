@@ -1321,6 +1321,86 @@
   known-issues entries below. Spec:
   `docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
 
+- **An org manages its own knowledge bases** (P0-2): `GET /api/org/knowledge-bases`,
+  `GET`/`DELETE /api/org/knowledge-bases/{name}` plus a "My documents" panel on
+  My teams — each collection's latest ingestion attempt (a failed upload's error
+  now reaches the customer, not just a bare status), which teams use it, and a
+  delete that shares the admin route's 409 guards. A knowledge base that can't
+  be resolved no longer fails spec generation for the whole org: the wizard's
+  catalogue skips it and only lists what actually built.
+
+- **An unreadable document fails loudly instead of vanishing** (P0-6): the
+  ingestion job now walks every staged file rather than pre-filtering by
+  suffix, so an unsupported type becomes a `failed` document naming the type
+  and the supported set, and `documents_succeeded + documents_failed ==
+  file_count` always holds. A **scanned PDF** is caught too — it parses to its
+  `[PDF: …]` header line and nothing else, which used to be indexed as a
+  content-free chunk; `_has_extractable_text` strips the parser's own header
+  lines and reports "…needs OCR, which isn't supported yet" instead. The SDK's
+  `_load_document_chunks` warns on both cases rather than skipping silently.
+  No migration, no new document status: `failed` plus a distinguishing message
+  is what the customer sees either way.
+
+- **A citation now says where in the document, and the tool says what the
+  documents are** (P0-3): chunks carry `page`/`heading`
+  (`knowledge_chunks.page`/`heading`, migration `m0n1o2p3q4r5`) — a PDF is
+  chunked per page so `p.N` is exact, a Markdown chunk records the section it
+  opens under — and every retrieval result is rendered by one shared
+  `format_results`, so a hit reads `[source: handbook.pdf, p.3 § Refunds]`.
+  `KnowledgeBase.query()` is now concrete on the base class over a new
+  abstract `search()` returning chunks — the seam the retrieval trace (P0-5)
+  and eval harness (P0-7) are meant to build on; both are written (below). A
+  knowledge base also has an optional `description` (asked for in the wizard,
+  carried into the agent tool's own docstring and the architect's catalogue),
+  so a model can tell an org's collections apart. Existing chunks keep NULL
+  for both columns and cite their filename alone, exactly as before.
+
+- **Retrieval quality is a number now, not an impression** (P0-7):
+  `scripts/kb_eval.py` runs a golden set (`tests/fixtures/kb_eval/` — 10
+  documents, 5 English / 5 Chinese, and 20 graded queries) against any
+  knowledge base type and reports recall@k / MRR / hit@1 **per source
+  document**, plus an `expected_substring` hit@k over chunk text that catches a
+  chunking regression. Metrics live in `core/kb_eval.py` (pure functions over
+  `KnowledgeBase.search()`, never the formatted string), so `tests/test_kb_eval.py`
+  guards the BM25 baseline at recall@3 ≥ 0.8 / MRR ≥ 0.7 in CI. The four
+  `paraphrase` queries share no significant term with their document, so BM25
+  scores exactly 0 on them by construction — that gap is the headroom a real
+  embedding model is supposed to close, and it is why the thresholds are 0.8,
+  not 1.0. `fake:` embeddings are deterministic noise: the hybrid test is smoke
+  only, and a real-model comparison is a manual run
+  (`--type hybrid --embedding-model openai:text-embedding-3-small`).
+
+- **A knowledge base search is traceable without archiving the documents**
+  (P0-5): a KB tool's `tool_completed` event used to be `_summarize(result)` —
+  200 characters of the retrieved excerpts, persisted in `trace_events` and
+  rendered in the dashboard. It now carries `query` (≤200 chars), `hit_count`,
+  `sources` (de-duplicated citations, ≤10) and a `summary` built from those,
+  and never the document text. The tool reports them through a new contextvar
+  side channel (`core/tool_context.py`, whose `usage` half now meters a KB's
+  internal paid calls — P0-4, below), and
+  `make_knowledge_base_tool` marks the wrapper `__bestteam_tool_kind__ =
+  "knowledge_base"` so the adapter never falls back to summarising its result.
+  `summary` is kept, so no frontend or persistence change was needed.
+
+- **A knowledge base's spend is billed instead of absorbed** (P0-4): all three
+  paid KB calls now land in `usage_records`. Query-time spend (the
+  `vector`/`hybrid` query embedding, and the query-expansion LLM call on all
+  three types) rides the **existing** `agent_completed.usage` list — the tool
+  reports it through `core/tool_context.py` and the adapter's tool loop drains
+  it into the node's `usage_sink`, on the failure path too — so `runtime.py`
+  needed no change and no new event field was added. Ingestion writes one
+  best-effort `agent="kb:ingest"` row per completed job (`run_id` NULL,
+  `ingestion_job_id` set), which is why `usage_records.run_id` is now nullable
+  (migration `n1o2p3q4r5s6`) rather than there being a second ledger — the
+  org's monthly spend cap already sums this one. Two limits worth stating:
+  embedding token counts are **estimated** (`estimate_embedding_tokens`, one
+  token per CJK character plus one per four others, ±30%) because no provider
+  reports embedding usage through LangChain, and pricing an embedding model
+  requires an operator to add a `tier="embedding"` `model_catalog` entry by
+  hand (none is seeded) — without one the calls are recorded with a NULL
+  `cost_estimate`. Reranking is a local cross-encoder, $0, and is deliberately
+  not recorded.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -1520,16 +1600,6 @@
   ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a
   future Sent-folder reconciliation would key on.
 
-- **Deleting a knowledge base has no interlock with an in-flight ingestion
-  job.** `crud.py`'s delete calls `delete_kb_ingestion_data` + `rmtree`, but
-  the ingestion worker thread keeps running and afterwards commits
-  `KnowledgeDocument`/`KnowledgeChunk` rows against a `kb_id` /
-  `ingestion_job_id` that no longer exist — orphan rows, silently, since FK
-  enforcement is off. On Windows the same race also leaks the upload directory
-  (`WinError 32`: `rmtree` against the worker's still-open read handle; the
-  route logs and continues by design). Found while fixing the flaky tests
-  (17 Aug 2026) and deliberately left alone there — it is a product
-  concurrency gap, not a test bug.
 - **`_active_kb_dir` (tests/test_crud_api.py) resolves the active KB version
   by `max(st_mtime)`**, which is theoretically ambiguous: Windows file
   timestamps come from a ~15.6 ms-granularity clock, so two version

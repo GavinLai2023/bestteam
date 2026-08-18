@@ -3,7 +3,7 @@ from typing import Any, List
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableLambda
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from bestteam import (
     AgentSpec,
@@ -434,3 +434,14 @@ def test_skill_spec_to_raw_includes_all_non_empty_fields():
         "instructions": "Use web_search.",
         "tools": ["web_search"],
     }
+
+
+def test_kb_spec_description_round_trips_and_is_capped():
+    spec = KnowledgeBaseSpec(name="kb", path="./docs", description="Our refund policies")
+    assert spec.to_raw()["description"] == "Our refund policies"
+
+    # Unset stays absent, so a KB config gains no null key it never had.
+    assert "description" not in KnowledgeBaseSpec(name="kb", path="./docs").to_raw()
+
+    with pytest.raises(ValidationError):
+        KnowledgeBaseSpec(name="kb", path="./docs", description="x" * 501)

@@ -9,6 +9,7 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage
 
 from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam.core.tool_context import add_usage
 
 pytestmark = pytest.mark.integration
 
@@ -69,6 +70,64 @@ def test_hierarchical_usage_aggregates_manager_and_subordinate():
     assert completed[0].agent == "manager"
     assert sum(u["input_tokens"] for u in completed[0].usage) == 1 + 3 + 2
     assert sum(u["output_tokens"] for u in completed[0].usage) == 1 + 4 + 2
+
+
+
+def test_kb_query_usage_rides_agent_completed_usage():
+    """A tool that reports spend through `core/tool_context.py` -- which is how
+    a knowledge base meters its query embedding and its query-expansion call --
+    is billed exactly like a model call: the entry lands on the calling agent's
+    `agent_completed` event, alongside the agent's own usage."""
+
+    def lookup_docs(query: str) -> str:
+        """Search the docs."""
+        add_usage({"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0})
+        return "no results"
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+                usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            ),
+            AIMessage(content="Done", usage_metadata={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+
+    assert {"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0} in completed[0].usage
+
+
+def test_tool_reported_usage_survives_a_failing_tool_call():
+    """The paid call already happened, so a tool that spends and then raises is
+    still billed."""
+
+    def lookup_docs(query: str) -> str:
+        """Search the docs."""
+        add_usage({"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0})
+        raise RuntimeError("index unavailable")
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="Done"),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+
+    assert completed[0].usage == [
+        {"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0}
+    ]
 
 
 pytest.importorskip("sqlalchemy")
@@ -281,3 +340,73 @@ def test_run_in_background_still_publishes_terminal_event_if_run_row_commit_fail
     assert stored.status == "failed"
     terminal = [e["type"] for e in stored.events if e["type"] in ("run_completed", "run_failed")]
     assert terminal == ["run_failed"]
+
+
+def test_record_usage_accepts_null_run_id_with_ingestion_job_id(db_session_factory):
+    """Ingestion spend belongs to no run: `run_id` is NULL and
+    `ingestion_job_id` is what ties the row back to what caused it."""
+    from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, UsageRecord
+
+    _, Session = db_session_factory
+    with Session() as db:
+        upsert_entry(
+            db, "openai:text-embedding-3-small", display_name="Embeddings",
+            tier="embedding", input_price_per_1k=0.00002, output_price_per_1k=0.0,
+        )
+        kb = KnowledgeBaseRecord(name="policies", config={"name": "policies", "type": "vector"})
+        db.add(kb)
+        db.commit()
+        job = IngestionJob(kb_id=kb.id, version="v_test", status="completed", file_count=1)
+        db.add(job)
+        db.commit()
+
+        record = record_usage(
+            db, run_id=None, ingestion_job_id=job.id, agent="kb:ingest",
+            model="openai:text-embedding-3-small", input_tokens=1000, output_tokens=0,
+        )
+
+        assert record.run_id is None
+        assert record.ingestion_job_id == job.id
+        assert record.cost_estimate == pytest.approx(0.00002)
+        assert db.query(UsageRecord).count() == 1
+
+
+def test_run_in_background_persists_kb_query_usage_rows(db_session_factory):
+    """A knowledge base's query-time spend rides the agent's `agent_completed`
+    usage list, so it reaches `usage_records` through the existing metering
+    branch -- priced from the catalog like any other model."""
+    engine, Session = db_session_factory
+    with Session() as db:
+        upsert_entry(
+            db, "openai:text-embedding-3-small", display_name="Embeddings",
+            tier="embedding", input_price_per_1k=0.00002, output_price_per_1k=0.0,
+        )
+
+    def lookup_docs(query: str) -> str:
+        """Search the docs."""
+        add_usage({"model": "openai:text-embedding-3-small", "input_tokens": 1000, "output_tokens": 0})
+        return "no results"
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="Done"),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
+    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    run = registry.create("wf", "go")
+
+    run_in_background(run.id, workflow, "go", engine)
+
+    with Session() as db:
+        records = list_usage_for_run(db, run.id)
+
+    assert len(records) == 1
+    assert records[0].agent == "a"
+    assert records[0].model == "openai:text-embedding-3-small"
+    assert records[0].input_tokens == 1000
+    assert records[0].cost_estimate == pytest.approx(0.00002)

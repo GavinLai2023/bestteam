@@ -499,3 +499,86 @@ def test_every_tool_the_email_toolkit_returns_is_redacted():
         pass
 
     assert set(make_email_tools(_Backend())) <= _EMAIL_TOOLS_NEEDING_REDACTION
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base tools (P0-5): the trace records WHAT was searched and WHERE
+# the hits came from -- never a line of the documents themselves.
+# ---------------------------------------------------------------------------
+
+_CHUNK_SENTINEL = "CONFIDENTIAL-CHUNK-TEXT"
+
+
+def _policies_kb():
+    from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk
+
+    return LocalFolderKnowledgeBase.from_chunks(
+        "policies",
+        [
+            _Chunk(
+                source="refunds.md",
+                text=f"Refunds are allowed within 30 days. {_CHUNK_SENTINEL}",
+                heading="Refunds",
+            ),
+            _Chunk(source="hours.txt", text="Our office hours are 9am to 5pm on weekdays."),
+        ],
+        top_k=2,
+    )
+
+
+def _kb_tool_completed(kb, query):
+    """The `tool_completed` data of one agent turn whose only tool call
+    searches `kb`. `_email_tool_call_workflow` is tool-agnostic despite the
+    name -- it scripts a single tool call and runs the turn."""
+    from bestteam.core.knowledge_base import make_knowledge_base_tool
+
+    tool = make_knowledge_base_tool(kb)
+    events = _email_tool_call_workflow(tool, kb.name, {"query": query})
+    return next(e for e in events if e.type == "tool_completed").data
+
+
+def test_kb_tool_completed_never_contains_chunk_text():
+    data = _kb_tool_completed(_policies_kb(), "refunds")
+
+    assert _CHUNK_SENTINEL not in repr(data)
+
+
+def test_kb_tool_completed_carries_bounded_query_hit_count_and_sources():
+    data = _kb_tool_completed(_policies_kb(), "refunds")
+
+    assert data["success"] is True
+    assert data["query"] == "refunds"
+    assert data["hit_count"] == 1
+    assert data["sources"] == ["refunds.md § Refunds"]
+    assert data["summary"] == "1 result(s) for “refunds” — sources: refunds.md § Refunds"
+
+
+def test_kb_tool_completed_no_results_shape():
+    data = _kb_tool_completed(_policies_kb(), "quantum chromodynamics")
+
+    assert data["success"] is True
+    assert data["hit_count"] == 0
+    assert data["sources"] == []
+    assert data["summary"] == "No results for “quantum chromodynamics”"
+
+
+def test_kb_query_text_is_length_bounded():
+    long_query = "refunds " + "z" * 500
+    data = _kb_tool_completed(_policies_kb(), long_query)
+
+    assert data["query"] == long_query[:200]
+    assert len(data["query"]) == 200
+    assert long_query not in data["summary"]
+
+
+def test_non_kb_tool_summary_unchanged():
+    def some_tool(text: str) -> str:
+        return f"result: {text}"
+
+    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    data = next(e for e in events if e.type == "tool_completed").data
+
+    assert data["summary"] == "result: hello"
+    assert "query" not in data
+    assert "hit_count" not in data
+    assert "sources" not in data

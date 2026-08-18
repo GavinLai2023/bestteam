@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
 import type { BuilderSession, EmailTrigger } from '../../lib/types'
+import KnowledgeBasesPanel from '../../components/KnowledgeBasesPanel'
 import ShareLinksPanel from '../../components/ShareLinksPanel'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
@@ -183,6 +184,10 @@ export default function SessionsPage() {
           </section>
         ))
       )}
+
+      {/* The documents this org uploaded, under the teams that use them --
+          the panel hides itself when there are none. */}
+      <KnowledgeBasesPanel />
     </div>
   )
 }

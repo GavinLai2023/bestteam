@@ -169,3 +169,46 @@ def test_bytes_and_path_agree_for_docx(tmp_path):
     assert result.startswith("[Word: doc.docx]")
     assert "Hello from Word." in result
     assert result == parse_file(str(target))
+
+
+def test_pdf_pages_are_separated_by_form_feed():
+    """Page boundaries survive parsing, so the knowledge base can chunk per
+    page and cite an exact `p.N`. pypdf can write a PDF but not a text-bearing
+    one, so the reader is stubbed -- what's under test is the join, not pypdf.
+    """
+    import types
+    from unittest.mock import patch
+
+    pages = [types.SimpleNamespace(extract_text=lambda text=text: text) for text in ("one", "two")]
+    fake_pypdf = types.SimpleNamespace(PdfReader=lambda _stream: types.SimpleNamespace(pages=pages))
+
+    with patch.dict("sys.modules", {"pypdf": fake_pypdf}):
+        result = parse_bytes(b"%PDF-1.4", "doc.pdf")
+
+    assert result == "[PDF: doc.pdf — 2 page(s)]\none\ftwo"
+
+
+def test_a_form_feed_inside_a_page_does_not_shift_page_numbers():
+    """The form feed is a delimiter now, so a page that contains one of its
+    own must not read as a page break -- that would renumber every page after
+    it and make the `p.N` in a citation quietly wrong."""
+    import types
+    from unittest.mock import patch
+
+    from bestteam.core.knowledge_base import _chunk_document, _citation
+
+    texts = ("Refunds are allowed.\fShipping is free.", "Warranty needs the receipt.")
+    pages = [types.SimpleNamespace(extract_text=lambda text=text: text) for text in texts]
+    fake_pypdf = types.SimpleNamespace(PdfReader=lambda _stream: types.SimpleNamespace(pages=pages))
+
+    with patch.dict("sys.modules", {"pypdf": fake_pypdf}):
+        result = parse_bytes(b"%PDF-1.4", "doc.pdf")
+
+    # One separator for two pages -- the in-page one became a space.
+    assert result.count("\f") == 1
+    assert "Refunds are allowed. Shipping is free." in result
+
+    chunks = _chunk_document("doc.pdf", result, chunk_size=1000, chunk_overlap=0, suffix=".pdf")
+    assert [chunk.page for chunk in chunks] == [1, 2]
+    warranty = next(chunk for chunk in chunks if "Warranty" in chunk.text)
+    assert _citation(warranty) == "doc.pdf, p.2"

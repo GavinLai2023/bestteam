@@ -261,7 +261,8 @@ applied by `db/orgs.py::create_org` to **newly created** orgs only.
 The rule that is easy to break by "simplifying": **a purge clears content and
 keeps accounting.** Content is `runs.input`/`output`, the run's `trace_events`,
 and `automation_item_results.payload`. Accounting is the `runs` row itself
-(deleting it would orphan `usage_records`, which is non-nullable and backs
+(deleting it would orphan every `usage_records` row that names it -- `run_id`
+is nullable only so KB *ingestion* spend can omit it, and those rows back
 `run_analytics_api.py`), `usage_records`, `trigger_context`, and an item
 result's `status`/`source_key` -- those two are what
 `automation_results.CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted
@@ -432,11 +433,22 @@ has no `model_catalog` entry, so a naive `SUM` under-counts and the customer
 believes in a ceiling that does not hold. Three-part answer, chosen over
 "refuse to run" (one missing catalogue row would wedge a customer's automation)
 and over silence: at configuration time `unpriced_models_for_org` resolves the
-org's trigger workflow's agent models against the catalogue and the budget
-routes return a non-blocking `unpriced_models` list (**the cap saves either
+org's trigger workflow's agent models -- **and the billable
+`embedding_model`/`query_expansion_model` of the knowledge bases that team
+searches, plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
+the catalogue, and the budget routes return a non-blocking `unpriced_models`
+list (**the cap saves either
 way** -- the admin may be about to fix the catalogue); at runtime NULL
 contributes 0, so the cap is a floor on reality rather than a phantom ceiling;
-and the UI reports how many runs this month were unpriced. The helper is
+and the UI reports how many runs this month were unpriced. Knowledge bases are
+in that list because they are the one spender the run-shaped half of this
+answer cannot see at all: an *ingestion* row is written with `run_id = NULL`,
+so `unpriced_run_count`'s `count(distinct run_id)` never counts it, and an
+unpriced embedding model would otherwise be silent in both halves. `fake:`
+specs are excluded there (`core/embeddings.py::billable_spec`, the same
+definition the metering uses) even though an agent's `fake:` model is not --
+an unmetered $0 call is not a blind spot. `rerank_model` is absent for the same
+reason: reranking is a local cross-encoder and is never recorded. The helper is
 wrapped in one `except Exception -> []` (advisory copy must never fail a save),
 reads `WorkflowRecord.config` rather than building the workflow, and scopes to
 `status="deployed"` on purpose -- a trigger pointing at a draft cannot run, so
@@ -776,6 +788,20 @@ incompatible schema's unknown fields get silently dropped instead of failing
 the envelope; an unsupported version gets the same whole-batch error-row
 treatment as an invalid enum. `draft_type` is length-capped like every other
 free-text payload field (it was the one field that wasn't).
+
+**A knowledge base tool's `tool_completed` no longer carries document body
+text** (P0-5). It used to be `_summarize(result)` — the first 200 characters of
+the retrieved excerpts, i.e. an org's own indexed documents, in every
+`trace_events` row and every UI that renders one. The adapter now builds that
+event from what the tool reported through `core/tool_context.py`:
+`summary` plus `query` (≤200 chars), `hit_count` and `sources` (at most 10).
+A source is a *citation label*, not an excerpt: the filename, then `, p.<n>`
+for a PDF and ` § <heading>` for Markdown (a heading is document text, capped
+at 80 characters — it is what makes a citation findable, and it is the only
+document text that crosses this boundary). `summary` stays, so `lib/traceEvents.ts`,
+`RunDetail`, `TracePage` and the `trace_events` persistence need no change —
+the three new keys ride alongside in `data`. This is an SDK/adapter-layer
+boundary like `_redacted_email_tool_data`, not a `runtime.py` one.
 
 A property-maintenance run's raw agent output (`agent_completed`'s `data`,
 and `run_completed`'s -- `core/workflow.py`'s `last_output`, the same text)
@@ -1189,10 +1215,36 @@ customer-visible error record. Cache invalidation and both pruning steps are
 isolated in their own `try/except`s so a failure in any of them can never
 retroactively mark an already-committed successful ingestion as failed.
 
-**Per-document partial-failure model.** One bad file (parse error, or zero
-chunks produced) doesn't fail the whole job — it's recorded as a `failed`
-`KnowledgeDocument` row with a capped error message, and the job continues
-processing the rest. The job itself only ends `failed` if every document
+**Chunk location metadata and `description`** (P0-3). The parse loop calls
+`bestteam.core.knowledge_base._chunk_document` rather than `_chunk_text`, so
+each `KnowledgeChunk` row also stores `page` (PDF, chunked per page) and
+`heading` (Markdown section); `_build_knowledge_base_from_job` reads both back
+into the rebuilt `_Chunk`s, and a retrieval result cites
+`[source: handbook.pdf, p.3 § Refunds]`. Both upload routes also accept an
+optional `description` (≤500 chars — `Form(...)` on the self-service route,
+`Query(...)` on the admin one, capped there so a long one is a 422 naming the
+field rather than a 500 from `KnowledgeBaseSpec`'s own validation). It is
+stored on the KB's `config`, so `_build_knowledge_base_from_job` takes it from
+`config` and not from the job — an edited description takes effect at once
+rather than waiting for the next ingestion — and it surfaces in three places:
+the agent tool's own docstring, `builder._with_knowledge_base_catalog`'s
+listing (`- name (type: X): description`), and `_kb_summary`'s
+customer-facing payload.
+
+**Per-document partial-failure model.** One bad file (unsupported file type,
+parse error, no extractable text, or zero chunks produced) doesn't fail the
+whole job — it's recorded as a `failed` `KnowledgeDocument` row with a capped
+error message, and the job continues processing the rest. The parse loop
+walks **every** staged file, not only the ones whose suffix is in
+`_SUPPORTED_SUFFIXES` (P0-6): filtering first meant an unsupported file left
+no row at all, so `documents_succeeded + documents_failed` silently
+disagreed with `file_count` and nothing ever told the customer their `.png`
+was dropped. The suffix check now raises inside the loop's existing
+`except Exception`, as does `_has_extractable_text` (shared with
+`bestteam.core.knowledge_base`, along with both messages) — that second one
+is what stops a **scanned PDF**, which parses to its `[PDF: …]` header line
+and nothing else, from becoming a content-free chunk instead of a reported
+failure. The job itself only ends `failed` if every document
 failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
 itself raises — in which case the job's already-flushed-but-uncommitted
 document/chunk objects are discarded before anything is written (a
@@ -1230,6 +1282,43 @@ the caller's existing delete+commit+rmtree transaction rather than
 committing separately). See `ui/backend/db/CLAUDE.md` for the three tables'
 schema.
 
+**An org manages its own knowledge bases** (`org_knowledge_bases.py`:
+`GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
+all `get_current_org`-scoped). `_kb_summary` reports `used_by`
+(`workflows_referencing`), `servable` and `latest_job` -- the newest attempt of
+*any* status, `config` stripped, since that field carries the server's absolute
+upload path and this list is customer-facing. The DELETE is the same
+`knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
+(deployed dependency, in-flight ingestion) hold here too. Two consequences
+elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only
+asking whether any exists, and reports a `failed` one's own error instead of
+telling the customer to wait for something that will never finish; and
+`builder._all_knowledge_base_tools` skips a KB that won't resolve (logged
+warning) with `_with_knowledge_base_catalog(..., names=)` listing only the ones
+that built -- it runs over every KB in the org, so one unparseable upload used
+to 4xx spec generation for everybody. `load_knowledge_base_tools` still fails
+closed, because there the KB is one an agent actually references.
+
+**Deleting a knowledge base is refused (`409`) while an upload is still
+processing**, and the whole sequence lives in
+`knowledge_bases.py::delete_knowledge_base`, not in `crud.py` — it needs this
+module's per-KB `_kb_upload_lock`, and it takes `component_mutation_lock`
+itself, which is **not reentrant**, so `crud.delete_item`'s `knowledge_bases`
+branch has to return *before* entering its own `with component_mutation_lock`
+block. The in-flight check (a `queued`/`running` `IngestionJob` for this KB)
+runs inside the per-KB lock, alongside the delete, commit and `rmtree` it
+guards. Refusing, rather than cancelling, is what makes "a KB being deleted
+has no worker" true: uploads and deletes both serialize on that lock and only
+an upload creates a job, whereas a cancel flag would still leave the worker
+holding an open file handle — `rmtree` then fails with `WinError 32` and
+silently leaks the directory, and the worker's final commit writes
+Document/Chunk rows against a `kb_id` that no longer exists (FK enforcement is
+off, so nothing catches them). `ingestion.fail_interrupted_jobs(engine)`,
+called from `main.py::_lifespan`, is the other half: the executor is
+per-process, so a job still `queued`/`running` at startup belongs to a dead
+process and is marked `failed` — without it, one killed process would make
+that KB permanently undeletable.
+
 ## Auth, model catalog, and usage metering (Phase 3)
 
 - **`ui/backend/auth.py`** — stdlib-only password hashing (PBKDF2-HMAC-SHA256,
@@ -1258,7 +1347,16 @@ schema.
   authenticates with a single-use `?ticket=` (see the runs section).
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
-  Solution Architect's prompt. `builder.py::_with_model_catalog(db, text)`
+  Solution Architect's prompt. **`tier="embedding"` marks an entry as an
+  embedding model, not a chat model**: it lives in the same table so
+  `record_usage` can price a knowledge base's embedding spend from one
+  catalog, and `list_chat_entries(db)` (not `list_entries`) is what every
+  chat-model surface uses -- the public listing below,
+  `builder.py::_with_model_catalog`, and
+  `org_knowledge_bases.py::_default_chat_model` -- so an embedding model can
+  never be handed to an agent. Admin CRUD still lists everything (somebody
+  maintains those prices), and no embedding entry is seeded into
+  `DEFAULT_MODEL_CATALOG`. `builder.py::_with_model_catalog(db, text)`
   appends this to the requirements text before `generate_specification()` (in
   both `submit_specification` and `submit_solution_feedback`'s `model=`
   paths), so the architect picks `AgentSpec.model` specs by role complexity
@@ -1316,6 +1414,31 @@ schema.
   usage persistence goes through `_safe_record_usage`, which isolates a
   `usage_records` write failure (logs + rolls back) so metering can never
   flip a successful run to `run_failed`.
+- **Knowledge-base spend** (P0-4) reaches the same ledger by two routes, and
+  `runtime.py` needed no change for either:
+  - *Query time* (the query embedding for `vector`/`hybrid`, and the
+    query-expansion LLM call for all three types) rides the **existing**
+    `agent_completed.usage` list. A KB tool reports its spend through
+    `core/tool_context.py::add_usage`, and the adapter's tool loop drains
+    `tool_ctx.usage` into the node's `usage_sink` -- on the failure path too,
+    since the paid call already happened. So these are ordinary run rows,
+    attributed to the agent that searched, with `model` set to the embedding
+    or expansion spec. No new event field, no new metering branch.
+  - *Ingestion* (`ui/backend/ingestion.py::_safe_record_ingestion_usage`)
+    writes **one** row per completed job -- not per chunk -- with
+    `agent="kb:ingest"`, `run_id=None` and `ingestion_job_id` set. It runs
+    after the job's own commit and is best-effort in its own `try/except`,
+    like the cache invalidation and pruning beside it: a metering failure
+    must never turn a completed ingestion into a failed one.
+
+  Two things to keep in mind. **Embedding token counts are estimated**
+  (`core/embeddings.py::estimate_embedding_tokens`, ±30%) because no provider
+  reports embedding usage through LangChain's `Embeddings` interface --
+  expansion tokens are the model's own reported `usage_metadata`, not an
+  estimate. And **nothing billable means nothing recorded**:
+  `core/embeddings.py::billable_spec()` is the one definition of billable (a
+  non-`fake:` string spec), shared by the SDK and `ingestion.py`. Reranking
+  is a local cross-encoder, $0, and is deliberately never recorded.
 
 ## Per-user memory
 

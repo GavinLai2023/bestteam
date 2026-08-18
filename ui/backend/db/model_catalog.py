@@ -47,8 +47,33 @@ DEFAULT_MODEL_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# `tier` value marking an entry as an embedding model rather than a chat
+# model. Embedding entries share this table so `db/usage.py::record_usage` can
+# price a knowledge base's embedding spend from one catalog -- they are
+# deliberately NOT in `DEFAULT_MODEL_CATALOG`, since their prices depend on the
+# provider an operator actually uses.
+EMBEDDING_TIER = "embedding"
+
+
 def list_entries(db: Session) -> List[ModelCatalogEntry]:
     return db.query(ModelCatalogEntry).order_by(ModelCatalogEntry.spec).all()
+
+
+def list_chat_entries(db: Session) -> List[ModelCatalogEntry]:
+    """Every entry except the embedding models.
+
+    Anything that offers a model as an agent's `model` -- the wizard's
+    catalog endpoint, the Solution Architect's prompt, smart search's default
+    chat model -- wants this, not `list_entries`: an embedding model handed to
+    an agent produces a team that cannot answer anything. Admin CRUD still
+    uses `list_entries`, because somebody has to maintain those prices.
+    """
+    return (
+        db.query(ModelCatalogEntry)
+        .filter(ModelCatalogEntry.tier != EMBEDDING_TIER)
+        .order_by(ModelCatalogEntry.spec)
+        .all()
+    )
 
 
 def get_entry(db: Session, spec: str) -> Optional[ModelCatalogEntry]:

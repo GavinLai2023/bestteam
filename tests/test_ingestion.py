@@ -1,5 +1,6 @@
 """Tests for the async knowledge-base ingestion job (ui/backend/ingestion.py)."""
 
+import io
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,100 @@ def test_empty_file_produces_zero_chunks_and_does_not_count_as_servable(db, engi
     # Parsed "successfully" (no exception) but produced zero chunks -- must
     # not resolve to a completed job with nothing to serve.
     assert job.status == "failed"
+
+
+def test_unsupported_file_is_recorded_as_failed_with_reason(db, engine, tmp_path):
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "good.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    (version_dir / "photo.png").write_bytes(b"\x89PNG\r\n")
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    assert job.documents_succeeded == 1
+    assert job.documents_failed == 1
+    # Every staged file is accounted for -- an unsupported one no longer
+    # silently vanishes between the upload's count and the job's totals.
+    assert job.documents_succeeded + job.documents_failed == job.file_count
+    failed_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, status="failed").one()
+    assert failed_doc.filename == "photo.png"
+    assert "Unsupported file type" in failed_doc.error
+    assert ".png" in failed_doc.error
+
+
+def test_scanned_pdf_header_only_is_failed_not_a_content_free_chunk(db, engine, tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "good.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    # A blank page stands in for a scanned one: pypdf extracts no text, so the
+    # parser returns nothing but its own "[PDF: ...]" header line -- non-empty,
+    # and previously chunked as if it were content.
+    buffer = io.BytesIO()
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    (version_dir / "scan.pdf").write_bytes(buffer.getvalue())
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    assert job.documents_succeeded == 1
+    assert job.documents_failed == 1
+    failed_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, status="failed").one()
+    assert failed_doc.filename == "scan.pdf"
+    assert "OCR" in failed_doc.error
+    texts = [c.text for c in db.query(KnowledgeChunk).filter_by(kb_id=kb.id).all()]
+    assert not any("[PDF:" in text for text in texts)
+
+
+def test_only_unsupported_files_fails_the_job_with_per_file_errors(db, engine, tmp_path):
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "photo.png").write_bytes(b"\x89PNG\r\n")
+    (version_dir / "archive.zip").write_bytes(b"PK\x03\x04")
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "failed"
+    assert job.documents_succeeded == 0
+    assert job.documents_failed == 2
+    # The customer sees which files were rejected and why, not just a bare
+    # job-level "no readable documents".
+    payload = ingestion.job_status_payload(db, job)
+    assert {e["filename"] for e in payload["errors"]} == {"photo.png", "archive.zip"}
+    assert all("Unsupported file type" in e["error"] for e in payload["errors"])
 
 
 def test_vector_kb_embeds_all_chunks(db, engine, tmp_path):
@@ -474,3 +569,184 @@ def test_cache_invalidation_failure_does_not_revert_completed_job_status(db, eng
     assert docs[0].status == "chunked"
     chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
     assert len(chunks) == 1
+
+
+def test_fail_interrupted_jobs_marks_queued_and_running_failed_and_leaves_terminal_jobs_alone(db, engine):
+    # A killed process leaves its jobs stuck queued/running forever, and the
+    # delete guard (P0-1) refuses to delete a KB while one exists -- so the
+    # startup sweep is what stops a restart making that refusal permanent.
+    kb = _make_kb(db)
+    queued = _make_job(db, kb, version="v_queued")
+    running = _make_job(db, kb, version="v_running")
+    running.status = "running"
+    completed = _make_job(db, kb, version="v_completed")
+    completed.status = "completed"
+    already_failed = _make_job(db, kb, version="v_failed")
+    already_failed.status = "failed"
+    already_failed.error = "the original diagnosis"
+    db.commit()
+    queued_id, running_id = queued.id, running.id
+    completed_id, already_failed_id = completed.id, already_failed.id
+
+    assert ingestion.fail_interrupted_jobs(engine) == 2
+
+    db.expire_all()
+    for job_id in (queued_id, running_id):
+        job = db.get(IngestionJob, job_id)
+        assert job.status == "failed"
+        assert job.error == (
+            "Processing was interrupted by a server restart. "
+            "Please upload the documents again."
+        )
+        assert job.completed_at is not None
+    # A terminal job is never rewritten -- least of all a failed one, whose
+    # `error` is the customer-visible record of what actually went wrong.
+    assert db.get(IngestionJob, completed_id).status == "completed"
+    stale = db.get(IngestionJob, already_failed_id)
+    assert stale.status == "failed"
+    assert stale.error == "the original diagnosis"
+
+
+def test_chunk_page_and_heading_persist_and_round_trip_into_from_chunks(db, engine, tmp_path, monkeypatch):
+    """Ingestion writes the two new location columns, and the DB-backed read
+    path hands them back to the SDK so a citation survives the round trip."""
+    from ui.backend.knowledge_bases import _build_knowledge_base_from_job
+
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    # pypdf can write a PDF but not a text-bearing one, so the parse result
+    # for the .pdf is stubbed; the .md goes through the real parser.
+    (version_dir / "manual.pdf").write_bytes(b"%PDF-1.4 stub")
+    (version_dir / "guide.md").write_text(
+        "## Refunds\nRefunds are allowed within 30 days.\n", encoding="utf-8"
+    )
+    real_parse_file = ingestion.parse_file
+
+    def fake_parse_file(path):
+        if path.endswith(".pdf"):
+            return "[PDF: manual.pdf — 2 page(s)]\nShipping is free.\fReturns take five days."
+        return real_parse_file(path)
+
+    monkeypatch.setattr(ingestion, "parse_file", fake_parse_file)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    pdf_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, filename="manual.pdf").one()
+    pdf_chunks = (
+        db.query(KnowledgeChunk).filter_by(document_id=pdf_doc.id).order_by(KnowledgeChunk.chunk_index).all()
+    )
+    assert [chunk.page for chunk in pdf_chunks] == [1, 2]
+    md_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, filename="guide.md").one()
+    md_chunks = db.query(KnowledgeChunk).filter_by(document_id=md_doc.id).all()
+    assert [chunk.heading for chunk in md_chunks] == ["Refunds"]
+
+    record = db.get(KnowledgeBaseRecord, kb.id)
+    rebuilt = _build_knowledge_base_from_job(record, job, db)
+    assert {(c.source, c.page) for c in rebuilt._chunks} >= {("manual.pdf", 1), ("manual.pdf", 2)}
+    assert "[source: manual.pdf, p.2]" in rebuilt.query("returns five days")
+    assert "[source: guide.md § Refunds]" in rebuilt.query("refunds 30 days")
+
+
+def _stub_embeddings(monkeypatch):
+    """Let a job run under a *real* provider spec without a provider: only a
+    non-`fake:` string spec is billable, so only that path is metered."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    monkeypatch.setattr(
+        ingestion, "resolve_embedding_model", lambda spec: DeterministicFakeEmbedding(size=4)
+    )
+
+
+def test_vector_ingestion_records_kb_ingest_usage_row(db, engine, tmp_path, monkeypatch):
+    from bestteam.core.embeddings import estimate_embedding_tokens
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    _stub_embeddings(monkeypatch)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="vector", chunk_size=1000, chunk_overlap=100,
+        embedding_model="openai:text-embedding-3-small", engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "completed"
+    chunks = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).all()
+    rows = db.query(UsageRecord).all()
+    assert len(rows) == 1  # one row per job, not per chunk
+    assert rows[0].agent == "kb:ingest"
+    assert rows[0].run_id is None
+    assert rows[0].ingestion_job_id == job.id
+    assert rows[0].org_id == kb.org_id
+    assert rows[0].model == "openai:text-embedding-3-small"
+    assert rows[0].input_tokens == sum(estimate_embedding_tokens(c.text) for c in chunks)
+    assert rows[0].output_tokens == 0
+
+
+def test_local_folder_and_fake_spec_ingestion_record_nothing(db, engine, tmp_path):
+    """A `local_folder` KB embeds nothing and a `fake:` spec is $0 -- neither
+    is spend, so neither gets a row."""
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="mixed_kb")
+    for kb_type, spec, version in (("local_folder", None, "v_plain"), ("vector", "fake:4", "v_fake")):
+        job = _make_job(db, kb, version=version)
+        version_dir = tmp_path / version
+        version_dir.mkdir()
+        (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+        ingestion.run_ingestion_job(
+            job.id, kb.id, kb.org_id, version_dir,
+            kb_type=kb_type, chunk_size=1000, chunk_overlap=100, embedding_model=spec,
+            engine=engine,
+        )
+        db.expire_all()
+        assert db.get(IngestionJob, job.id).status == "completed"
+
+    assert db.query(UsageRecord).count() == 0
+
+
+def test_metering_failure_never_flips_completed_job(db, engine, tmp_path, monkeypatch):
+    """Metering is best-effort cleanup like cache invalidation and pruning: the
+    job's chunks are already durable, so a failed `usage_records` write must
+    not turn a completed ingestion into a failed one."""
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    _stub_embeddings(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated metering failure")
+
+    monkeypatch.setattr(ingestion, "record_usage", _boom)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="vector", chunk_size=1000, chunk_overlap=100,
+        embedding_model="openai:text-embedding-3-small", engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "completed"
+    chunk = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).one()
+    assert chunk.embedding_json is not None
+    assert db.query(UsageRecord).count() == 0

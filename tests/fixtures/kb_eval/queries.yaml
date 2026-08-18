@@ -1,0 +1,120 @@
+# Golden set for the retrieval-quality harness (see docs/KNOWLEDGE_BASES.md,
+# "Evaluating retrieval"). Each query has exactly one right document.
+#
+#   kind: lexical    -- shares wording with its document; every retrieval type
+#                       is expected to rank that document first.
+#   kind: paraphrase -- shares no significant term with its document, so BM25
+#                       misses it by design. These are the headroom a `vector`
+#                       or `hybrid` base with a real embedding model should
+#                       close; they are not expected to pass with `fake:`
+#                       embeddings, which are deterministic noise.
+#
+# expected_substring is a concrete fact that must appear in the text of a
+# retrieved chunk OF expected_source itself -- it catches a chunking change that
+# separates the answer from the words that found it. The same fact quoted by
+# another document does not count.
+
+queries:
+  # --- English, lexical ---------------------------------------------------
+  - query: unopened item return window for a full refund
+    expected_source: refund_policy.md
+    kind: lexical
+    expected_substring: 30 days
+
+  - query: restocking fee for opened items
+    expected_source: refund_policy.md
+    kind: lexical
+    expected_substring: 15%
+
+  - query: how much is standard delivery and when is it free
+    expected_source: shipping.md
+    kind: lexical
+    expected_substring: "£3.95"
+
+  - query: do you ship to Ireland and the Channel Islands
+    expected_source: shipping.md
+    kind: lexical
+    expected_substring: Ireland
+
+  - query: when does live chat close on weekdays
+    expected_source: office_hours.txt
+    kind: lexical
+    expected_substring: "20:00"
+
+  - query: when does the Birmingham showroom open
+    expected_source: office_hours.txt
+    kind: lexical
+    expected_substring: "10:00"
+
+  - query: how long is the password reset link valid
+    expected_source: password_reset.md
+    kind: lexical
+    expected_substring: 60 minutes
+
+  - query: how long is the manufacturer warranty on an appliance
+    expected_source: warranty.md
+    kind: lexical
+    expected_substring: 24 month
+
+  # --- English, paraphrase (no shared significant terms) -------------------
+  - query: I have changed my mind about a purchase and want my money back
+    expected_source: refund_policy.md
+    kind: paraphrase
+    expected_substring: full refund
+
+  - query: I cannot get into my profile any more and have forgotten the secret phrase
+    expected_source: password_reset.md
+    kind: paraphrase
+    expected_substring: 60 minutes
+
+  # --- Chinese, lexical ---------------------------------------------------
+  - query: 未拆封的商品可以在多少天内申请全额退款
+    expected_source: 退款政策.md
+    kind: lexical
+    expected_substring: 三十天
+
+  - query: 已拆封商品的重新上架费是多少
+    expected_source: 退款政策.md
+    kind: lexical
+    expected_substring: 百分之十五
+
+  - query: 标准配送的运费是多少，超过多少钱可以免除运费
+    expected_source: 配送说明.md
+    kind: lexical
+    expected_substring: 三点九五
+
+  - query: 你们向爱尔兰以及海峡群岛发货吗
+    expected_source: 配送说明.md
+    kind: lexical
+    expected_substring: 海峡群岛
+
+  - query: 在线客服在工作日值守到几点
+    expected_source: 营业时间.txt
+    kind: lexical
+    expected_substring: 晚上八点
+
+  - query: 密码重置链接的有效期是多久
+    expected_source: 密码重置.md
+    kind: lexical
+    expected_substring: 六十分钟
+
+  - query: 家用电器的厂商保修涵盖哪些内容
+    expected_source: 保修条款.md
+    kind: lexical
+    expected_substring: 二十四个月
+
+  - query: 登记产品序列号可以把保修期延长到多久
+    expected_source: 保修条款.md
+    kind: lexical
+    expected_substring: 三十六个月
+
+  # --- Chinese, paraphrase (no shared significant terms) -------------------
+  - query: 我进不去自己的后台了，那串口令怎么找回
+    expected_source: 密码重置.md
+    kind: paraphrase
+    expected_substring: 六十分钟
+
+  - query: 买回来的东西用着用着就坏了，你们还管吗
+    expected_source: 保修条款.md
+    kind: paraphrase
+    expected_substring: 二十四个月

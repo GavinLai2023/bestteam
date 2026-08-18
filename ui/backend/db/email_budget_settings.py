@@ -10,16 +10,34 @@ Nothing here commits: callers own the transaction boundary.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from bestteam.core.embeddings import billable_spec
+
 from ..email_budget import BudgetCaps
 from .email_triggers import get_email_trigger
 from .model_catalog import list_entries
-from .models import OrgEmailBudgetSetting, UsageRecord, WorkflowRecord
+from .models import (
+    KnowledgeBaseRecord,
+    OrgEmailBudgetSetting,
+    UsageRecord,
+    WorkflowRecord,
+)
+
+# The operator-wide default a self-service "smart search" knowledge base is
+# created on (`ui/backend/org_knowledge_bases.py`). Named here rather than
+# imported to avoid a db -> API-layer import.
+_ENV_DEFAULT_EMBEDDING_MODEL = "BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"
+
+# The two knowledge-base model fields that cost money. `rerank_model` is
+# deliberately absent: reranking is a local cross-encoder, $0, and is never
+# metered (see `ui/backend/CLAUDE.md`).
+_KB_BILLABLE_FIELDS = ("embedding_model", "query_expansion_model")
 
 _logger = logging.getLogger(__name__)
 
@@ -83,6 +101,69 @@ def spent_this_month(db: Session, org_id: int, now: datetime) -> Optional[float]
     ).scalar()
 
 
+def _kb_config_specs(config: Any) -> Set[str]:
+    """The billable model specs one knowledge base's `config` names.
+
+    `billable_spec` is the same definition of "costs money" the metering
+    itself uses (`core/embeddings.py`), so a `fake:` spec -- $0 by
+    construction -- is never reported as a blind spot.
+    """
+    if not isinstance(config, dict):
+        return set()
+    specs = {billable_spec(config.get(field)) for field in _KB_BILLABLE_FIELDS}
+    return {spec for spec in specs if spec}
+
+
+def _knowledge_base_specs(db: Session, org_id: int, raw: Dict[str, Any]) -> Set[str]:
+    """The billable specs of the knowledge bases this deployed team searches.
+
+    A knowledge base spends on its own account, which is why the agent walk
+    above is not enough: a query embedding rides the searching agent's usage,
+    and an *ingestion* embedding is written with no `run_id` at all -- so an
+    unpriced embedding model is invisible to `unpriced_run_count` as well as
+    to `spent_this_month`.
+
+    An inline `knowledge_bases:` entry shadows a same-named standalone record,
+    matching how `db/dependencies.py::record_version_dependencies` resolves
+    the same two sources.
+    """
+    inline = {
+        kb.get("name"): kb
+        for kb in raw.get("knowledge_bases") or []
+        if isinstance(kb, dict)
+    }
+    specs: Set[str] = set()
+    for kb in inline.values():
+        specs |= _kb_config_specs(kb)
+
+    referenced = {
+        tool
+        for agent in raw.get("agents") or []
+        if isinstance(agent, dict)
+        for tool in agent.get("tools") or []
+        if isinstance(tool, str) and tool not in inline
+    }
+    if referenced:
+        records = (
+            db.query(KnowledgeBaseRecord)
+            .filter(
+                KnowledgeBaseRecord.name.in_(referenced),
+                KnowledgeBaseRecord.org_id == org_id,
+            )
+            .all()
+        )
+        for record in records:
+            specs |= _kb_config_specs(record.config)
+
+    # The operator's smart-search default is what the next knowledge base this
+    # org uploads will embed under, whether or not one exists today, so an
+    # unpriced one is worth naming while the admin is looking at the cap.
+    default = billable_spec(os.environ.get(_ENV_DEFAULT_EMBEDDING_MODEL) or None)
+    if default:
+        specs.add(default)
+    return specs
+
+
 def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     """The models this org's automation runs that have no `model_catalog` row.
 
@@ -93,10 +174,12 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
 
     Resolved from the org's trigger: its `workflow_name` against the same
     deployed `WorkflowRecord` the poller itself builds from, then every agent's
-    non-empty string `model` that has no `model_catalog` entry. Only a deployed
-    record can run automatically, so only its models can cost anything.
+    non-empty string `model` that has no `model_catalog` entry, plus the
+    billable embedding/query-expansion specs of the knowledge bases that team
+    searches (`_knowledge_base_specs`). Only a deployed record can run
+    automatically, so only its models can cost anything.
 
-    That last step is a **narrower** rule than
+    The agent step is a **narrower** rule than
     `deploy_validation.validate_agent_models` applies to the same field: that
     function exempts `fake:`/`fake-architect:` specs, and this one does not.
     So a demo team on a `fake:` model is reported here as unpriced. It is: it
@@ -122,14 +205,18 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
         )
         if record is None:
             return []
+        raw = record.config or {}
         specs = {
             agent.get("model")
-            for agent in (record.config or {}).get("agents") or []
+            for agent in raw.get("agents") or []
             if isinstance(agent, dict) and isinstance(agent.get("model"), str)
             and agent.get("model")
         }
+        specs |= _knowledge_base_specs(db, org_id, raw)
         if not specs:
             return []
+        # `list_entries`, not `list_chat_entries`: an embedding model's row is
+        # exactly what prices a knowledge base's spend.
         priced = {entry.spec for entry in list_entries(db)}
         # Sorted and de-duplicated so the response -- and the test pinning it --
         # cannot depend on dict ordering.

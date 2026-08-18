@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..exceptions import ConfigurationError
-from .embeddings import normalize_rows, resolve_embedding_model
+from .embeddings import (
+    billable_spec,
+    normalize_rows,
+    report_query_embedding_usage,
+    resolve_embedding_model,
+)
 from .knowledge_base import (
     KnowledgeBase,
     _Chunk,
@@ -86,6 +91,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> None:
         # numpy is checked before rank_bm25: rank_bm25 imports numpy
         # internally, so if rank_bm25 hasn't been imported yet in this
@@ -102,8 +108,12 @@ class HybridKnowledgeBase(KnowledgeBase):
                 f"Knowledge base '{name}' has no readable documents in {self.path}"
             )
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-                           query_expansion_model, query_expansion_count)
+                           query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
+        # Kept for metering only: the query-time `embed_query` call below is
+        # billed against this spec, and there is nothing to bill when the
+        # customer handed in a live model or a `"fake:"` spec.
+        self._embedding_spec = billable_spec(embedding_model)
         vectors = self._embed_chunks(embedding_model, cache_path)
         self._set_vectors(name, vectors)
 
@@ -120,6 +130,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> "HybridKnowledgeBase":
         """Build directly from pre-parsed chunks and pre-computed vectors --
         see VectorKnowledgeBase.from_chunks for the embedding_model
@@ -130,14 +141,18 @@ class HybridKnowledgeBase(KnowledgeBase):
         if not chunks:
             raise ConfigurationError(f"Knowledge base '{name}' has no readable documents")
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-                           query_expansion_model, query_expansion_count)
+                           query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
+        # Kept for metering only: the query-time `embed_query` call below is
+        # billed against this spec, and there is nothing to bill when the
+        # customer handed in a live model or a `"fake:"` spec.
+        self._embedding_spec = billable_spec(embedding_model)
         self._set_vectors(name, vectors)
         return self
 
     def _init_common(
         self, name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-        query_expansion_model, query_expansion_count,
+        query_expansion_model, query_expansion_count, description=None,
     ) -> None:
         # numpy is checked before rank_bm25: rank_bm25 imports numpy
         # internally, so if rank_bm25 hasn't been imported yet in this
@@ -148,6 +163,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         BM25Okapi = _require_bm25()
 
         self.name = name
+        self.description = description
         self.default_top_k = top_k
         self.score_threshold = score_threshold
         self.query_expansion_model = query_expansion_model
@@ -232,6 +248,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         import numpy as np
 
         query_vec = np.array(self._embeddings.embed_query(query_text), dtype=np.float64)
+        report_query_embedding_usage(self._embedding_spec, query_text)
         norm = np.linalg.norm(query_vec)
         if norm > 0:
             query_vec = query_vec / norm
@@ -245,7 +262,7 @@ class HybridKnowledgeBase(KnowledgeBase):
             indices = [i for i in indices if scores[i] >= self.score_threshold]
         return indices
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
+    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
         top_k = top_k or self.default_top_k
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
@@ -255,13 +272,4 @@ class HybridKnowledgeBase(KnowledgeBase):
         # rank, and _rerank_candidates only reads candidate order/chunk.text.
         results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
-
-        if not results:
-            return f"No results found in knowledge base '{self.name}' for: {query}"
-
-        lines = [f"Knowledge base '{self.name}' results for: {query}\n"]
-        for i, (_score, chunk) in enumerate(results, 1):
-            lines.append(f"{i}. [source: {chunk.source}]")
-            lines.append(chunk.text.strip())
-            lines.append("")
-        return "\n".join(lines)
+        return [chunk for _score, chunk in results]

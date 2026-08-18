@@ -1,4 +1,5 @@
 """Tests for the local-folder knowledge base."""
+import io
 from unittest.mock import patch
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 from bestteam.core.knowledge_base import (
     LocalFolderKnowledgeBase,
     _chunk_text,
+    _has_extractable_text,
+    _load_document_chunks,
     make_knowledge_base_tool,
 )
 from bestteam.exceptions import ConfigurationError
@@ -161,7 +164,8 @@ def test_knowledge_base_raises_for_empty_folder(tmp_path):
 def test_knowledge_base_skips_unsupported_files(tmp_path):
     (tmp_path / "doc.txt").write_text("apples and oranges", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
-    kb = LocalFolderKnowledgeBase("kb", tmp_path)
+    with pytest.warns(UserWarning, match="Unsupported file type"):
+        kb = LocalFolderKnowledgeBase("kb", tmp_path)
     assert len(kb._chunks) == 1
     assert kb._chunks[0].source == "doc.txt"
 
@@ -219,6 +223,46 @@ def test_skips_a_mis_encoded_document_instead_of_ingesting_mojibake(tmp_path):
     assert "legacy.txt" not in sources
     # And nothing partially-decoded leaked into the index.
     assert not any("�" in chunk.text for chunk in kb._chunks)
+
+
+def test_has_extractable_text_ignores_parser_headers():
+    # Every parser prefixes its output with bracketed header lines we generate
+    # ourselves, so "the parsed string is non-empty" is not the same question
+    # as "the document had any text in it".
+    assert not _has_extractable_text("[PDF: scan.pdf — 3 page(s)]\n")
+    assert not _has_extractable_text("[Word: empty.docx]\n")
+    assert not _has_extractable_text("[Word: tables.docx]\n\n[Table 1]\n")
+    assert not _has_extractable_text("[Excel: book.xlsx]\n\n[Sheet: Sheet1]\n")
+    assert not _has_extractable_text("[XML: empty.xml]")
+    assert not _has_extractable_text("")
+
+    assert _has_extractable_text("[PDF: report.pdf — 1 page(s)]\n\nQ3 revenue rose.")
+    assert _has_extractable_text("[Sheet: Sheet1]\nName,Price\nWidget,10")
+    assert _has_extractable_text("a document with no parser header at all")
+
+
+def test_load_document_chunks_warns_on_unsupported_and_empty_documents(tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+
+    (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "photo.png").write_bytes(b"\x89PNG\r\n")
+    # A blank page stands in for a scanned one: pypdf extracts no text, so the
+    # parser returns nothing but its own "[PDF: ...]" header line.
+    buffer = io.BytesIO()
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    (tmp_path / "scan.pdf").write_bytes(buffer.getvalue())
+
+    with pytest.warns(UserWarning) as recorded:
+        chunks = _load_document_chunks(tmp_path, chunk_size=1000, chunk_overlap=100)
+
+    messages = [str(warning.message) for warning in recorded]
+    assert any("photo.png" in m and "Unsupported file type" in m for m in messages)
+    assert any("scan.pdf" in m and "OCR" in m for m in messages)
+    # Only the readable document is indexed -- in particular the scanned PDF
+    # never becomes a chunk holding nothing but its own header line.
+    assert {chunk.source for chunk in chunks} == {"good.txt"}
 
 
 @pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])
@@ -327,7 +371,7 @@ def test_knowledge_base_ingests_xml_files(tmp_path):
     assert "fruit.md" not in result
 
 
-def test_knowledge_base_passes_file_suffix_to_chunk_text(tmp_path, monkeypatch):
+def test_knowledge_base_passes_file_suffix_to_the_chunker(tmp_path, monkeypatch):
     import bestteam.core.knowledge_base as kb_module
 
     (tmp_path / "guide.md").write_text("# Heading\ncontent", encoding="utf-8")
@@ -335,13 +379,13 @@ def test_knowledge_base_passes_file_suffix_to_chunk_text(tmp_path, monkeypatch):
     (tmp_path / "notes.txt").write_text("plain text", encoding="utf-8")
 
     seen_suffixes = {}
-    real_chunk_text = kb_module._chunk_text
+    real_chunk_document = kb_module._chunk_document
 
-    def spy_chunk_text(text, chunk_size, chunk_overlap, suffix=""):
+    def spy_chunk_document(source, text, chunk_size, chunk_overlap, suffix=""):
         seen_suffixes[suffix] = seen_suffixes.get(suffix, 0) + 1
-        return real_chunk_text(text, chunk_size, chunk_overlap, suffix=suffix)
+        return real_chunk_document(source, text, chunk_size, chunk_overlap, suffix=suffix)
 
-    monkeypatch.setattr(kb_module, "_chunk_text", spy_chunk_text)
+    monkeypatch.setattr(kb_module, "_chunk_document", spy_chunk_document)
 
     LocalFolderKnowledgeBase("docs", tmp_path)
 
@@ -740,3 +784,140 @@ def test_local_folder_kb_bad_query_expansion_spec_degrades_gracefully(tmp_path):
     # Never raises; falls back to the literal query.
     result = kb.query("apples")
     assert "doc0.txt" in result
+
+
+# ---------------------------------------------------------------------------
+# Chunk metadata (page/heading), citations, and the single formatter (P0-3)
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import _chunk_document, _citation, format_results
+
+
+def test_chunk_two_field_construction_still_works():
+    # `page`/`heading` default to None, so every pre-existing two-argument
+    # construction (and every `from_chunks` caller) keeps working untouched.
+    chunk = _Chunk(source="a.txt", text="body")
+    assert chunk.page is None
+    assert chunk.heading is None
+    assert LocalFolderKnowledgeBase.from_chunks("kb", [chunk], top_k=1).query("body")
+
+
+def test_pdf_pages_become_separate_chunks_with_page_numbers():
+    text = (
+        "[PDF: manual.pdf — 3 page(s)]\n"
+        "Refunds are allowed within 30 days.\f"
+        "Shipping is free above fifty pounds.\f"
+        "Warranty claims need the receipt."
+    )
+    chunks = _chunk_document("manual.pdf", text, chunk_size=1000, chunk_overlap=0, suffix=".pdf")
+
+    assert [chunk.page for chunk in chunks] == [1, 2, 3]
+    assert "Refunds" in chunks[0].text
+    assert "Warranty" in chunks[2].text
+    # A chunk never straddles a page boundary, which is what makes `p.N` exact.
+    assert all("\f" not in chunk.text for chunk in chunks)
+
+
+def test_markdown_chunks_carry_section_heading():
+    text = (
+        "## Refunds\n"
+        + "Refunds are issued within seven days of the request. " * 3
+        + "\n\n## Shipping\n"
+        + "Orders ship within two business days of confirmation. " * 3
+    )
+    chunks = _chunk_document("guide.md", text, chunk_size=120, chunk_overlap=0, suffix=".md")
+
+    headings = [chunk.heading for chunk in chunks]
+    assert "Refunds" in headings
+    assert "Shipping" in headings
+    # Heading is a Markdown-only approximation -- nothing else claims one.
+    assert all(chunk.heading is None for chunk in _chunk_document(
+        "notes.txt", "## Refunds\nplain text", chunk_size=1000, chunk_overlap=0, suffix=".txt"
+    ))
+
+
+def test_format_results_unchanged_without_metadata():
+    chunks = [_Chunk(source="a.txt", text="Refunds are allowed."), _Chunk(source="b.txt", text="Office hours.")]
+
+    assert format_results("docs", "refunds", chunks) == (
+        "Knowledge base 'docs' results for: refunds\n\n"
+        "1. [source: a.txt]\n"
+        "Refunds are allowed.\n\n"
+        "2. [source: b.txt]\n"
+        "Office hours.\n"
+    )
+    assert format_results("docs", "refunds", []) == (
+        "No results found in knowledge base 'docs' for: refunds"
+    )
+
+
+def test_format_results_cites_page_and_heading():
+    assert _citation(_Chunk(source="handbook.pdf", text="x", page=3)) == "handbook.pdf, p.3"
+    assert _citation(_Chunk(source="guide.md", text="x", heading="Refunds")) == "guide.md § Refunds"
+    assert _citation(
+        _Chunk(source="handbook.pdf", text="x", page=3, heading="Refunds")
+    ) == "handbook.pdf, p.3 § Refunds"
+
+    rendered = format_results("docs", "refunds", [_Chunk(source="handbook.pdf", text="body", page=3)])
+    assert "1. [source: handbook.pdf, p.3]" in rendered
+
+
+@pytest.mark.parametrize("kb_type", ["local_folder", "vector", "hybrid"])
+def test_search_returns_chunks_and_query_formats_them(tmp_path, kb_type):
+    pytest.importorskip("numpy")
+    from bestteam.core.hybrid_knowledge_base import HybridKnowledgeBase
+    from bestteam.core.vector_knowledge_base import VectorKnowledgeBase
+
+    (tmp_path / "policy.md").write_text(
+        "## Refunds\nRefunds are allowed within 30 days of purchase.", encoding="utf-8"
+    )
+    if kb_type == "local_folder":
+        kb = LocalFolderKnowledgeBase("docs", tmp_path, top_k=1)
+    elif kb_type == "vector":
+        kb = VectorKnowledgeBase("docs", tmp_path, embedding_model="fake:8", top_k=1)
+    else:
+        kb = HybridKnowledgeBase("docs", tmp_path, embedding_model="fake:8", top_k=1)
+
+    chunks = kb.search("refunds")
+    assert chunks and all(isinstance(chunk, _Chunk) for chunk in chunks)
+    # One formatter, three retrieval methods: `query()` is the base class's.
+    assert kb.query("refunds") == format_results("docs", "refunds", chunks)
+    assert "§ Refunds" in kb.query("refunds")
+
+
+def test_tool_docstring_states_description_and_citation_instruction(tmp_path):
+    (tmp_path / "policy.txt").write_text("Refunds are allowed.", encoding="utf-8")
+    kb = LocalFolderKnowledgeBase("docs", tmp_path, description="Our refund and shipping policies")
+
+    doc = make_knowledge_base_tool(kb).__doc__
+    assert "Search the 'docs' knowledge base: Our refund and shipping policies." in doc
+    assert "Use it whenever the question may be answered by these documents." in doc
+    assert '"[source: handbook.pdf, p.3]"' in doc
+    assert "cite it with that same [source: …] tag" in doc
+
+
+def test_tool_docstring_without_description_is_generic(tmp_path):
+    (tmp_path / "policy.txt").write_text("Refunds are allowed.", encoding="utf-8")
+    kb = LocalFolderKnowledgeBase("docs", tmp_path)
+
+    doc = make_knowledge_base_tool(kb).__doc__
+    assert "Search the 'docs' knowledge base. Use it whenever" in doc
+    assert kb.description is None
+
+
+# ---------------------------------------------------------------------------
+# estimate_embedding_tokens
+# ---------------------------------------------------------------------------
+
+def test_estimate_embedding_tokens_counts_cjk_per_char_and_latin_per_4():
+    from bestteam.core.embeddings import estimate_embedding_tokens
+
+    assert estimate_embedding_tokens("") == 0
+    # Latin: one token per four characters, rounded up.
+    assert estimate_embedding_tokens("abcd") == 1
+    assert estimate_embedding_tokens("abcde") == 2
+    # CJK: one token per character, because there are no word boundaries to
+    # merge across.
+    assert estimate_embedding_tokens("退货政策") == 4
+    # Mixed: 4 CJK characters + " refunds" (8 characters -> 2).
+    assert estimate_embedding_tokens("退货政策 refunds") == 6

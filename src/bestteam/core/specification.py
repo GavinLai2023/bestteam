@@ -155,6 +155,10 @@ class KnowledgeBaseSpec(BaseModel):
 
     name: str
     path: str
+    # One sentence saying what these documents cover. It becomes the agent
+    # tool's own description, so it is what tells a model which of an org's
+    # collections answers a question; capped because it is prompt text.
+    description: Optional[str] = Field(default=None, max_length=500)
     type: str = "local_folder"
     chunk_size: int = 1000
     chunk_overlap: int = 100
@@ -184,6 +188,8 @@ class KnowledgeBaseSpec(BaseModel):
             "query_expansion_model": self.query_expansion_model,
             "query_expansion_count": self.query_expansion_count,
         }
+        if self.description is not None:
+            raw["description"] = self.description
         if self.rerank_model is not None:
             raw["rerank_model"] = self.rerank_model
         if self.candidate_k is not None:

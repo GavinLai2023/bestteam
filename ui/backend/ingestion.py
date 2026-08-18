@@ -22,11 +22,22 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from bestteam.core.embeddings import resolve_embedding_model
-from bestteam.core.knowledge_base import _SUPPORTED_SUFFIXES, _chunk_text
+from bestteam.core.embeddings import (
+    billable_spec,
+    estimate_embedding_tokens,
+    resolve_embedding_model,
+)
+from bestteam.core.knowledge_base import (
+    _NO_TEXT_MESSAGE,
+    _SUPPORTED_SUFFIXES,
+    _chunk_document,
+    _has_extractable_text,
+    _unsupported_suffix_message,
+)
 from bestteam.tools import parse_file
 
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
+from .db.usage import record_usage
 
 _logger = logging.getLogger(__name__)
 
@@ -106,10 +117,13 @@ def run_ingestion_job(
         # flush below assigns them.
         pending: List[Tuple[KnowledgeDocument, List[KnowledgeChunk]]] = []
         all_chunks: List[KnowledgeChunk] = []
-        files = sorted(
-            p for p in version_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
-        )
+        # Every staged file, not only the ones with a readable suffix: an
+        # unsupported file filtered out here would leave no Document row at
+        # all, so the customer's upload count and the job's
+        # succeeded+failed totals would silently disagree and nothing would
+        # ever say why. Rejecting it inside the parse loop instead makes it a
+        # `failed` document with a reason, like any other bad file.
+        files = sorted(p for p in version_dir.rglob("*") if p.is_file())
         for file_path in files:
             data = file_path.read_bytes()
             doc = KnowledgeDocument(
@@ -124,8 +138,18 @@ def run_ingestion_job(
             pending.append((doc, doc_chunks))
 
             try:
+                suffix = file_path.suffix.lower()
+                if suffix not in _SUPPORTED_SUFFIXES:
+                    raise ValueError(_unsupported_suffix_message(suffix))
                 text = parse_file(str(file_path))
-                pieces = _chunk_text(text, chunk_size, chunk_overlap, suffix=file_path.suffix.lower())
+                # A scanned PDF parses to its header line and nothing else --
+                # non-empty, so it would chunk into a content-free chunk that
+                # matches no query and reports no problem.
+                if not _has_extractable_text(text):
+                    raise ValueError(_NO_TEXT_MESSAGE)
+                pieces = _chunk_document(
+                    doc.filename, text, chunk_size, chunk_overlap, suffix=suffix
+                )
                 if not pieces:
                     raise ValueError("document produced no chunks (empty or whitespace-only content)")
             except Exception as exc:  # noqa: BLE001 -- one bad file must not abort the batch
@@ -135,12 +159,25 @@ def run_ingestion_job(
                 continue
 
             for i, piece in enumerate(pieces):
-                chunk = KnowledgeChunk(kb_id=kb_id, chunk_index=i, text=piece)
+                # `source` is dropped: the chunk's document row already carries
+                # the filename, and the read path joins it back on.
+                chunk = KnowledgeChunk(
+                    kb_id=kb_id,
+                    chunk_index=i,
+                    text=piece.text,
+                    page=piece.page,
+                    heading=piece.heading,
+                )
                 doc_chunks.append(chunk)
                 all_chunks.append(chunk)
             doc.status = "chunked"
             job.documents_succeeded += 1
 
+        # Estimated tokens the embedding call below is billed for, metered
+        # once the job's own commit has made it a completed job. Computed here,
+        # while the chunks are still plain in-memory objects: after the commit
+        # every `chunk.text` would be an expired attribute and cost a SELECT.
+        embedding_tokens = 0
         if kb_type in ("vector", "hybrid") and all_chunks:
             try:
                 embeddings = resolve_embedding_model(embedding_model)
@@ -167,6 +204,7 @@ def run_ingestion_job(
             for chunk, vector in zip(all_chunks, vectors):
                 chunk.embedding_json = json.dumps(vector)
                 chunk.embedding_model = embedding_model
+            embedding_tokens = sum(estimate_embedding_tokens(c.text) for c in all_chunks)
 
         # The one write transaction: insert the documents, flush to get their
         # ids, point each buffered chunk at its document, and commit the whole
@@ -188,6 +226,11 @@ def run_ingestion_job(
         db.commit()
 
         if job.status == "completed":
+            _safe_record_ingestion_usage(
+                db, job_id=job.id, org_id=org_id,
+                embedding_model=embedding_model, input_tokens=embedding_tokens,
+            )
+
             # A cached workflow may have been compiled against this KB's
             # prior document set (or, for a first upload, may not know the
             # KB is servable yet). This is the point the KB's live content
@@ -252,6 +295,52 @@ def run_ingestion_job(
             _logger.warning("Could not persist failed status for ingestion job %s", job_id)
     finally:
         db.close()
+
+
+def _safe_record_ingestion_usage(
+    db: Session,
+    *,
+    job_id: int,
+    org_id: Optional[int],
+    embedding_model: Optional[str],
+    input_tokens: int,
+) -> None:
+    """Meter this job's document-embedding spend as ONE `usage_records` row.
+
+    One row per job rather than per chunk: the provider bills the batch, and a
+    per-chunk breakdown would bury every run's rows under thousands of
+    ingestion rows. `run_id` is NULL -- an upload belongs to no run -- and
+    `ingestion_job_id` is what ties the spend back to what caused it. The row
+    carries `org_id`, so the org's monthly spend cap
+    (`db/email_budget_settings.py`) covers ingestion without a second query.
+
+    Nothing is recorded when nothing is billable: a `local_folder` KB embeds
+    no documents (`input_tokens` stays 0) and a `"fake:"` spec is $0.
+
+    Best-effort, exactly like the cache invalidation and pruning around it:
+    the job's chunks are already durable and correct, so a metering failure
+    must never be able to turn a completed ingestion into a failed one.
+    """
+    spec = billable_spec(embedding_model)
+    if spec is None or input_tokens <= 0:
+        return
+    try:
+        record_usage(
+            db,
+            run_id=None,
+            ingestion_job_id=job_id,
+            agent="kb:ingest",
+            model=spec,
+            input_tokens=input_tokens,
+            output_tokens=0,
+            org_id=org_id,
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "Could not meter ingestion job %s; the job itself is unaffected",
+            job_id, exc_info=True,
+        )
+        db.rollback()
 
 
 def _now():
@@ -351,6 +440,40 @@ def delete_kb_ingestion_data(db: Session, kb_id: int) -> None:
     db.query(KnowledgeChunk).filter_by(kb_id=kb_id).delete(synchronize_session=False)
     db.query(KnowledgeDocument).filter_by(kb_id=kb_id).delete(synchronize_session=False)
     db.query(IngestionJob).filter_by(kb_id=kb_id).delete(synchronize_session=False)
+
+
+def fail_interrupted_jobs(engine: Engine) -> int:
+    """Resolve every `queued`/`running` job to `failed` and return how many.
+
+    Called once from `main.py::_lifespan`. The executor lives in this
+    process, so a job still queued/running when the app starts belongs to a
+    process that no longer exists -- its worker died mid-flight and nothing
+    will ever resolve it. Left alone they are permanent: the job-status API
+    spins forever, and `knowledge_bases.delete_knowledge_base` refuses to
+    delete the KB for as long as one exists. This is what bounds that
+    refusal to "until the next restart" instead of "forever".
+
+    One bulk UPDATE, no ORM objects loaded: this runs on the startup path,
+    before anything is served.
+    """
+    with Session(engine) as db:
+        updated = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.status.in_(("queued", "running")))
+            .update(
+                {
+                    IngestionJob.status: "failed",
+                    IngestionJob.error: (
+                        "Processing was interrupted by a server restart. "
+                        "Please upload the documents again."
+                    ),
+                    IngestionJob.completed_at: _now(),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+    return updated
 
 
 def job_status_payload(db: Session, job: IngestionJob) -> Dict[str, Any]:

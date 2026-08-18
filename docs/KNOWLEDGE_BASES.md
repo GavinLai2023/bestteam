@@ -44,9 +44,17 @@ base's folder recursively, parses every file with a supported extension via
 - `.xml` — structural rendering of tags, attributes, namespaces, and mixed
   content (via `xml.etree.ElementTree`)
 
-Files with an unsupported extension, or that fail to parse, are skipped with
-a `warnings.warn(...)` — the knowledge base still builds from whatever did
-parse, but you'll see a warning naming the skipped file.
+Files with an unsupported extension, that fail to parse, or that yield **no
+extractable text**, are skipped with a `warnings.warn(...)` naming the file
+and the reason — the knowledge base still builds from whatever did parse.
+"No extractable text" is a real case, not a theoretical one: every parser
+prefixes its output with a bracketed header line (`[PDF: report.pdf — 3
+page(s)]`, `[Sheet: Q3]`, `[Table 1]`, …), so a **scanned PDF** — pages that
+are images, with no text layer — parses to that header and nothing else.
+`_has_extractable_text()` strips the headers the parsers generate and checks
+what is left, so such a document is reported rather than indexed as a chunk
+that matches no query. Reading a scanned document needs OCR, which is not
+supported (see "Known limitations").
 
 **Chunking**: each document's text is split into chunks of up to
 `chunk_size` characters with `chunk_overlap` characters shared between
@@ -64,6 +72,55 @@ together in one chunk instead of being cut mid-paragraph or mid-element.
 still single-level (not "small-to-big" hierarchical/parent-child)
 chunking — see "Known limitations" below.
 
+**Chunk location metadata.** `_chunk_document()` tags each chunk with
+whatever location its format makes exact, which is what a citation is built
+from (see "Citations", below):
+
+- **PDF `page`.** `_parse_pdf_bytes` joins a document's pages with a form
+  feed (`\f`) rather than a blank line, and a `.pdf` is chunked **per page**,
+  so no chunk straddles a page break and its `p.N` is precise. The cost is
+  that a paragraph running across a page boundary loses the overlap it would
+  otherwise borrow — accepted, because a citation an operator can check beats
+  another hundred characters of context.
+- **Markdown `heading`.** A `.md` chunk records the `#`..`####` section it
+  opens under, capped at 80 characters. Approximate by design: nothing here
+  parses Markdown, so a `#` line inside a fenced code block reads as a
+  heading, and a chunk spanning two sections is labelled with the one it
+  starts in.
+
+Every other format supplies neither, and such a chunk cites its filename
+alone.
+
+## Citations
+
+A retrieved chunk is rendered by one shared formatter
+(`knowledge_base.py::format_results`, used by all three types via the base
+class's concrete `query()`), so the string an agent sees cannot drift between
+knowledge base types:
+
+```
+Knowledge base 'product_docs' results for: refund window
+
+1. [source: handbook.pdf, p.3 § Refunds]
+Refunds are issued within 30 days of purchase…
+```
+
+The tag is `[source: <filename>]`, plus `, p.<N>` when the chunk carries a
+page and ` § <heading>` when it carries a section — so a chunk with neither
+renders exactly as it always did. The tool's own description tells the model
+to quote that same tag back when it uses an excerpt, which is what makes a
+model's answer checkable against the document.
+
+**`description`** (optional, all three types, max 500 characters) is one
+sentence saying what the documents cover. It goes into the agent tool's own
+description — `Search the 'product_docs' knowledge base: Refund, delivery and
+warranty policies. Use it whenever…` — so a model can tell an org's
+collections apart, and into the Solution Architect's knowledge base catalogue
+so it assigns the right one to the right agent. Unset, the tool description
+is the generic wording and nothing else changes. The wizard's "Your
+documents" step asks for it ("What's in these documents? (one sentence)"),
+and both upload endpoints accept it as a `description` field.
+
 ## `local_folder`: BM25 keyword search
 
 `LocalFolderKnowledgeBase` indexes every chunk with [BM25](https://en.wikipedia.org/wiki/Okapi_BM25)
@@ -78,8 +135,8 @@ Querying:
    chunks that share zero significant terms with the query are excluded
    entirely, so tiny corpora don't return noise just because BM25's
    statistics are unstable at small scale.
-4. Return the top `top_k` chunks (default `5`), each tagged with its source
-   filename.
+4. Return the top `top_k` chunks (default `5`), each tagged with its
+   citation (see "Citations" above).
 
 If nothing matches, `query()` returns a plain `"No results found in
 knowledge base '<name>' for: <query>"` string rather than raising.
@@ -159,10 +216,58 @@ unparseable response degrades to searching the literal query alone — a
 query never fails because expansion failed. Left unset (the default),
 `query()` is byte-for-byte unchanged.
 
-This call's cost is **unmetered**: knowledge base tools run inside the
-agent's generic tool-calling loop, which has no hook to report a nested
-LLM call's token usage back to the backend — the same pre-existing gap the
-`vector` type's embedding calls already have.
+This call **is metered** — see "What a knowledge base costs, and how it is
+metered", below.
+
+## What a knowledge base costs, and how it is metered
+
+Three things a knowledge base does cost money, and they land in the one
+`usage_records` ledger the org's monthly spend cap already sums over — with
+one gap on the non-upload path, noted under the table:
+
+| Spend | When | How it is recorded |
+| --- | --- | --- |
+| Ingestion embeddings (`vector`/`hybrid`) | Once per upload, ingestion path only | One row per ingestion job: `agent="kb:ingest"`, `run_id` NULL, `ingestion_job_id` set |
+| Query embedding (`vector`/`hybrid`) | Once per query variant, per run | Rides the calling agent's own usage, so it is a normal run row |
+| Query expansion (all three types) | Once per query, when `query_expansion_model` is set | Same: a normal run row under the calling agent |
+
+Reranking costs **$0** and is deliberately not recorded: the cross-encoder
+runs locally, in-process, with no provider call to bill.
+
+**Only the upload/ingestion path's document embeddings are metered.** A
+`vector`/`hybrid` knowledge base constructed directly from a folder path —
+a YAML-configured KB (`core/loader.py`), or an uploaded one with no completed
+ingestion job, which the backend falls back to building from files — embeds
+every chunk at **load** time, outside any run and outside any ingestion job,
+and that spend is **not** recorded. Without `cache_path` it re-embeds on every
+load, so the unrecorded cost repeats. Query-time spend is metered for these
+knowledge bases exactly as for any other.
+
+**Token counts for embeddings are estimated, not reported.** LangChain's
+embeddings interface returns vectors and nothing else — no provider reports
+token usage for an embedding call the way a chat model does — so
+`bestteam.core.embeddings.estimate_embedding_tokens()` counts one token per
+CJK character plus one per four other characters. Expect it to be within
+about **±30%** of the provider's own count: enough to keep a spend cap
+honest, not enough to reconcile against a bill. Query-expansion tokens are
+*not* estimated — that is a chat model, and its reported `usage_metadata` is
+used directly.
+
+**Nothing billable, nothing recorded.** A `"fake:"` spec is $0 by
+construction and an `Embeddings`/`BaseChatModel` instance passed in from code
+has no spec string for the catalog to price, so neither produces a row. A
+`local_folder` KB embeds nothing at all.
+
+**Pricing an embedding model.** Give it a `model_catalog` entry whose `tier`
+is `"embedding"` (`PUT /api/config/model-catalog/<spec>`, admin-only), with
+`input_price_per_1k` set to the provider's price and `output_price_per_1k`
+left at `0`. That tier is what keeps it out of every place a *chat* model is
+offered — the wizard's catalog, the Solution Architect's prompt, smart
+search's default expansion model — so nobody can hand an embedding model to
+an agent. No embedding entry is seeded by default: prices depend on the
+provider you actually use. Without one the calls are still recorded, just
+with a NULL `cost_estimate` (the same "we ran it but cannot price it"
+signal any unlisted model gets).
 
 ## Reranking (opt-in, all three types)
 
@@ -194,6 +299,7 @@ tools.
 knowledge_bases:
   - name: product_docs
     path: ./docs/product   # resolved relative to the workflow YAML's directory
+    description: Refund, delivery and warranty policies   # optional, max 500 chars
     # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
 
 agents:
@@ -248,6 +354,33 @@ tool. At runtime, `adapters/langgraph_adapter.py`'s tool-calling loop binds
 all of an agent's tools to the model and dispatches by name when the model
 calls one.
 
+### What a search looks like in the trace
+
+Every knowledge base search shows up in the run's trace as a `tool_completed`
+event that records **what was asked and where the answer came from, never the
+answer text**:
+
+```json
+{
+  "tool": "product_docs",
+  "success": true,
+  "duration_ms": 12,
+  "summary": "2 result(s) for “refund window” — sources: handbook.pdf, p.3 § Refunds, policies.md",
+  "query": "refund window",
+  "hit_count": 2,
+  "sources": ["handbook.pdf, p.3 § Refunds", "policies.md"]
+}
+```
+
+That is enough to answer the questions an operator actually asks — did the
+agent search at all, what did it search for, did anything match, which
+documents did it draw on — while the excerpts themselves stay out of the
+`trace_events` table, the monitoring dashboard and any log that renders one.
+A query longer than 200 characters is truncated, and at most 10 sources are
+listed. Nothing here is parsed out of the tool's return string: the tool
+reports these fields directly (`core/tool_context.py`), and the adapter knows
+not to fall back to summarising the result text for a knowledge base tool.
+
 ## Managing knowledge bases through the backend API
 
 Beyond YAML files on disk, the backend (`ui/backend/`) lets you manage
@@ -262,13 +395,15 @@ knowledge bases as first-class records in the database, under
   that already exists on the server.
 - `DELETE /api/config/knowledge_bases/{name}` — delete the record (and, if
   it was created via the upload endpoint below, removes its upload
-  directory too).
+  directory too). Refused with `409` while an upload for that knowledge base
+  is still processing — wait for the ingestion job to finish, then delete.
 
 **File upload** (`POST /api/config/knowledge_bases/{name}/upload`,
 `ui/backend/crud.py`) is a `local_folder`-only convenience that lets a
 non-technical user create a knowledge base by uploading files directly,
 with no server filesystem access needed:
-- Accepts a multipart `files` list plus optional `chunk_size`/`chunk_overlap`/`top_k`.
+- Accepts a multipart `files` list plus optional `chunk_size`/`chunk_overlap`/
+  `top_k`/`description`.
 - Limits: 30 files per upload, 30MB per file, ~500MB total.
 - Uploaded filenames are sanitized to their bare basename (stripping any
   directory component) and rejected if empty, `.`, or `..` — closing off a
@@ -289,7 +424,8 @@ by any org member (not just an admin), org-resolved from the caller's own
 bearer token. Tighter limits than the admin route (10 files / 10MB per file /
 50MB total) and a per-org cap on how many self-service knowledge bases can
 exist (20). By default it still creates a `local_folder` KB, exactly like the
-admin upload endpoint — but it also accepts a `smart_search` flag. The
+admin upload endpoint — but it also accepts a `description` (the wizard's
+"What's in these documents?" sentence) and a `smart_search` flag. The
 wizard exposes this as a **"Standard" / "Enhanced" toggle**, deliberately
 with no model names or KB-type jargon shown (the wizard's audience is
 non-technical): `GET /api/org/knowledge-bases/capabilities` tells the
@@ -302,6 +438,35 @@ model from the model catalog, resolved server-side) and, if
 smart search unavailable, or the env var unset despite a stale client sending
 `smart_search=true`) always falls back to plain `local_folder` — the exact
 same shape as before this toggle existed. See `.env.example`.
+
+**Org self-service listing and deletion** (`GET /api/org/knowledge-bases`,
+`GET`/`DELETE /api/org/knowledge-bases/{name}`) is the same org member's view
+of what they uploaded, without an admin having to be involved. Each entry
+carries `name`, `description`, `type`, `updated_at`, `used_by` (the deployed
+teams whose current version depends on it), `servable`, and `latest_job` --
+the newest ingestion attempt of any status, so a *failed* upload's error text
+reaches the person who made it. `latest_job` deliberately omits the `config`
+the per-job route returns: it carries the server's absolute upload path, and
+this is a customer-facing list. `servable` is not "the latest job succeeded" --
+a failed re-upload leaves the previous completed generation live, and a
+knowledge base with no jobs at all is a legacy/manual-path one served from
+disk. `DELETE` returns `204` and shares `knowledge_bases.delete_knowledge_base`
+with the admin route, so it is refused with the same `409` while a deployed
+team still depends on it or an upload is still processing, and a cross-org
+name is a `404`.
+
+A knowledge base whose *newest* ingestion job failed is stuck until someone
+re-uploads or deletes it, so `resolve_knowledge_base` says so
+("could not be indexed: <the job's own error>. Upload the documents again, or
+delete it.") rather than the "wait for the current upload to finish" wording,
+which was permanently wrong advice for that case. The wizard's
+pre-Specification catalogue (`builder.py::_all_knowledge_base_tools`) skips an
+unresolvable knowledge base with a logged warning instead of raising -- it
+builds *every* one of the org's knowledge bases, so one customer's unparseable
+upload used to fail spec generation for the whole org -- and the architect is
+only told about the ones that actually built. The workflow-build path
+(`load_knowledge_base_tools`) still fails closed: there a broken knowledge base
+is one an agent actually references.
 
 **Wiring into a workflow**: a workflow's `_build_workflow()` validation only
 builds the standalone knowledge bases its agents actually reference by name
@@ -344,10 +509,17 @@ per-document failures) has no `KnowledgeDocument` rows to report, so
 `errors` instead holds a single `{"filename": null, "error": "..."}` entry
 carrying the job-level error.
 
-**Per-document partial failure**: one bad file (fails to parse, or produces
-zero chunks) doesn't fail the whole job — it's recorded as a `failed`
-`KnowledgeDocument` row (capped error text) and the job continues with the
-rest. The job itself only fails outright if *every* document failed (so the
+**Per-document partial failure**: one bad file (an unsupported file type,
+fails to parse, no extractable text, or produces zero chunks) doesn't fail
+the whole job — it's recorded as a `failed` `KnowledgeDocument` row (capped
+error text) and the job continues with the rest. Every staged file gets a
+document row, so `documents_succeeded + documents_failed == file_count`
+always holds: a file the ingester cannot read is *reported* to the customer
+in the job's `errors` list ("Unsupported file type '.png'. Supported: …", or
+"No text could be extracted from this file. If it is a scanned PDF it needs
+OCR, which isn't supported yet."), never silently dropped between the upload
+count and the job totals. The job itself only fails outright if *every*
+document failed (so the
 KB would have zero chunks) or, for `vector`/`hybrid`, if the embedding call
 itself fails (in which case the job's buffered document/chunk rows are
 discarded before anything is written — a vector/hybrid KB with no embeddings
@@ -387,7 +559,14 @@ job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
 whichever generation is live.
 
 Deleting a knowledge base cascades to delete its `IngestionJob`/
-`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`).
+`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`),
+and is **refused with `409` while that knowledge base has a `queued` or
+`running` ingestion job** — the worker is still reading the staged files and
+would otherwise commit chunks against a record that no longer exists. The
+refusal lasts only as long as the upload: jobs left `queued`/`running` by a
+killed process are marked `failed` at the next startup, so a crash can never
+leave a knowledge base permanently undeletable.
+
 Older completed ingestion generations are pruned automatically (keeping the
 current one plus one grace-window generation) once a new job completes. A
 `failed` job's on-disk version directory is reclaimed the same way — every
@@ -397,6 +576,112 @@ can't be parsed doesn't accumulate storage.
 
 See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.
+
+## Evaluating retrieval
+
+Retrieval quality is otherwise judged by whoever last tried a query and
+thought the answer looked reasonable. `scripts/kb_eval.py` turns that into a
+number: it runs a fixed set of queries whose right answer is known against a
+knowledge base, and reports how often the expected document came back and how
+highly it ranked.
+
+```powershell
+# The bundled golden set through the default BM25 knowledge base
+.\.venv\Scripts\python.exe scripts/kb_eval.py
+
+# The same questions through hybrid retrieval -- $0, no API key
+.\.venv\Scripts\python.exe scripts/kb_eval.py --type hybrid --embedding-model fake:32
+
+# The same questions with a real embedding model (this one costs money)
+.\.venv\Scripts\python.exe scripts/kb_eval.py --type hybrid `
+    --embedding-model openai:text-embedding-3-small
+```
+
+Other flags: `--rerank-model`, `--expansion-model`, `--chunk-size`,
+`--chunk-overlap`, `--top-k`, `--docs`/`--queries` to point at your own
+corpus, and `--json` for the same report as machine-readable output. The
+defaults (`top_k=3`, `chunk_size=300`, `chunk_overlap=50`) are the bundled
+golden set's smoke configuration, and live in `core/kb_eval.py` so the
+documented numbers and the measured ones cannot drift apart.
+
+**`fake:` specs prove the harness runs, never that retrieval improved.** A
+`fake:<dim>` embedding is deterministic noise, so a hybrid run with one scores
+differently from `local_folder` for no reason worth acting on. Only a real
+embedding/rerank model says anything about quality.
+
+### What it measures
+
+Every metric is computed **per source document**, not per chunk — a knowledge
+base that returns three chunks of the right document has answered the
+question, whichever chunk of it ranked first. Because each query in a golden
+set has exactly one relevant document, recall@k here is the same quantity as
+hit@k.
+
+| Metric | Meaning |
+|---|---|
+| `recall@k` | Fraction of queries whose expected document appeared in the top `k`. |
+| `MRR` | Mean reciprocal rank — 1.0 for a hit at position 1, 0.5 at position 2, 0 for a miss. Rewards ranking it highly, not merely returning it. |
+| `hit@1` | Fraction of queries whose expected document ranked first. |
+| `substring hit@k` | Fraction of queries whose `expected_substring` (a concrete fact) appeared in the *text* of a retrieved chunk **of the expected document** — this is what catches a chunking change that separates the answer from the words that found it. Another document quoting the same fact does not count. |
+
+The report splits every metric by query `kind`, and lists each query that did
+not rank its expected document first, with what came back instead.
+
+`evaluate()` consumes `KnowledgeBase.search()` (structured chunks), never the
+formatted `query()` string, so a change to the citation format cannot quietly
+change a score.
+
+### The golden set
+
+`tests/fixtures/kb_eval/` holds `docs/` — ten short support documents, five
+English and five Chinese (refunds, shipping, opening hours, password reset,
+warranty in each language) — and `queries.yaml`, twenty queries over them.
+Each document is 300–600 characters and carries three to five concrete facts
+(amounts, deadlines, place names) so a query has something exact to hit.
+
+```yaml
+queries:
+  - query: restocking fee for opened items
+    expected_source: refund_policy.md   # folder-relative path, as in a citation
+    kind: lexical                       # or: paraphrase
+    expected_substring: 15%             # optional
+```
+
+`kind` records why a query is in the set:
+
+- **`lexical`** (16 of the 20) shares wording with its document. Keyword
+  search is expected to rank that document first, and
+  `tests/test_kb_eval.py::test_local_folder_baseline_on_golden_set` fails if
+  any of them slips — the guarded thresholds are recall@3 ≥ 0.8 and MRR ≥ 0.7.
+- **`paraphrase`** (4 of the 20) deliberately shares *no* significant term
+  with its document ("I have changed my mind about a purchase and want my
+  money back" for the refund policy). BM25 misses these by construction, so
+  `local_folder` scores exactly 0 on them — they are the headroom a real
+  embedding model is supposed to close, and the reason the whole-set
+  thresholds sit at 0.8 rather than 1.0.
+
+### Extending it
+
+Add a document to `docs/` and at least one query naming it in `queries.yaml`
+— `test_golden_set_is_well_formed` enforces the invariants (ten documents,
+twenty queries, the 16/4 split, every `expected_source` an existing file,
+every `expected_substring` genuinely present in it, every document the answer
+to at least one query), so extending the set means updating those counts in
+the same commit. For a *client's* corpus, leave the fixture alone and pass
+`--docs`/`--queries`; nothing in the harness is specific to the bundled set.
+
+Keep new lexical queries honest against the tokeniser (`core/text_tokenize.py`):
+it lowercases English into alphanumeric tokens with no stemming, so "cost"
+does not match "costs", and it has no Chinese word segmenter, so Chinese
+matches on character bigrams.
+
+### What it does not measure
+
+Retrieval only. Nothing here scores the *answer* an agent then writes, and
+there is no regression baseline stored on disk to compare a run against — the
+numbers are printed, not tracked over time. There is also no fixture for the
+`vector`/`hybrid` types under a *real* embedding model: those runs cost money,
+so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
 
 ## Known limitations
 
@@ -411,6 +696,13 @@ for the full design.
   single-process, small-to-medium corpus.
 - **No DMS connectors.** None of the three types can ingest directly from
   SharePoint, Confluence, Google Drive, etc. — only a local folder of files.
+- **No OCR, and no image understanding at all.** A scanned PDF (or any
+  page that is an image with no text layer) yields no extractable text.
+  Since P0-6 that is *reported* — a warning on the SDK path, a `failed`
+  document with a customer-readable reason on the upload path — rather than
+  quietly indexed as a header-only chunk, but the document still cannot be
+  searched. The same gap as the email toolkit's attachment reading, which
+  is deliberately text-only (`src/bestteam/tools/CLAUDE.md`).
 - **No re-embedding on document changes.** The embedding cache is
   content-addressed (by chunk text) but there's no logic to detect "this
   document changed, drop its stale chunks" beyond the chunk text itself
@@ -418,10 +710,15 @@ for the full design.
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
-- **Citations are filename-only.** A returned chunk is tagged with its
-  source filename, not a chunk id, page number, or heading/section — no
-  precise click-through citation or "which version of which page" audit
-  trail.
+- **Citations locate a chunk, but nothing links to it.** A returned chunk is
+  tagged with its filename plus a page (PDF) or section heading (Markdown) —
+  enough for a person to find the passage — but there is no chunk id in the
+  tag, no click-through to the document, and no "which version of which page"
+  audit trail: a re-upload replaces a collection's chunks wholesale, so a
+  citation names a location in *today's* documents. Every other format
+  (`.docx`, `.xlsx`, `.xml`, plain text) still cites its filename alone, and
+  the Markdown heading is an approximation — see "Chunk location metadata"
+  above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose
   Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,
@@ -447,7 +744,11 @@ for the full design.
 | `hybrid` implementation | `src/bestteam/core/hybrid_knowledge_base.py` |
 | Shared RRF fusion + query expansion helpers | `src/bestteam/core/fusion.py` |
 | Shared reranking helper | `src/bestteam/core/reranking.py` |
+| Per-tool-call trace/usage side channel | `src/bestteam/core/tool_context.py` |
 | YAML loader (`_build_knowledge_base`) | `src/bestteam/core/loader.py` |
+| Retrieval-quality metrics (`evaluate`, `recall_at_k`, `mrr`) | `src/bestteam/core/kb_eval.py` |
+| Evaluation CLI | `scripts/kb_eval.py` |
+| Golden set (documents + graded queries) | `tests/fixtures/kb_eval/` |
 | `KnowledgeBaseSpec` (pydantic model mirroring the YAML schema) | `src/bestteam/core/specification.py` |
 | Document parsing (PDF/Word/Excel/XML/text) | `src/bestteam/tools/file_parser.py` |
 | Backend CRUD + admin upload endpoint | `ui/backend/crud.py` |

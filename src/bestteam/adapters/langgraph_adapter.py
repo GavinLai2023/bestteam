@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
 from ..core.team import CollaborationMode, Team
+from ..core.tool_context import tool_call_context
 from ..core.trace import TraceEvent
 from ..core.workflow import Workflow, WorkflowResult
 from ..exceptions import BestTeamError, ConfigurationError, EngineError
@@ -317,6 +318,25 @@ def _redacted_email_tool_data(tool_name: str, call_args: Dict[str, Any], result:
     }
 
 
+def _kb_tool_trace_data(trace: Dict[str, Any]) -> Dict[str, Any]:
+    """Business-safe `tool_completed` data for a knowledge base tool: the
+    query, how many chunks matched and which documents they came from --
+    never a line of the documents themselves, which `_summarize()` would put
+    straight into the `trace_events` table and any UI rendering it.
+
+    Built from what the tool reported through `core/tool_context.py` rather
+    than parsed out of its return text. A tool that reported nothing (a
+    custom `KnowledgeBase` wrapper that never calls `report_trace`) still
+    gets an event of the same shape, just an uninformative one.
+    """
+    return {
+        "summary": trace.get("summary") or "Knowledge base searched.",
+        "query": trace.get("query", ""),
+        "hit_count": trace.get("hit_count", 0),
+        "sources": list(trace.get("sources") or []),
+    }
+
+
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
     """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
     if usage_sink is None:
@@ -410,7 +430,8 @@ def _run_agent(
                 _emit("tool_started", {"tool": call["name"]})
                 start = time.monotonic()
                 try:
-                    result = tool_fn(**call["args"])
+                    with tool_call_context() as tool_ctx:
+                        result = tool_fn(**call["args"])
                 except Exception as exc:
                     _logger.warning(
                         "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
@@ -432,11 +453,12 @@ def _run_agent(
                         failure_data["message_id"] = _bounded_message_id(call["args"])
                     _emit("tool_completed", failure_data)
                 else:
-                    extra_data = (
-                        _redacted_email_tool_data(call["name"], call["args"], result)
-                        if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION
-                        else {"summary": _summarize(result)}
-                    )
+                    if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION:
+                        extra_data = _redacted_email_tool_data(call["name"], call["args"], result)
+                    elif getattr(tool_fn, "__bestteam_tool_kind__", None) == "knowledge_base":
+                        extra_data = _kb_tool_trace_data(tool_ctx.trace)
+                    else:
+                        extra_data = {"summary": _summarize(result)}
                     _emit(
                         "tool_completed",
                         {
@@ -446,6 +468,14 @@ def _run_agent(
                             **extra_data,
                         },
                     )
+                if usage_sink is not None:
+                    # LLM/embedding calls the tool made internally (a knowledge
+                    # base's query embedding and its query-expansion call) ride
+                    # the agent's own usage list, so they reach `usage_records`
+                    # through the same `agent_completed.usage` path as a model
+                    # call -- no new event field, no backend change. Drained on
+                    # the failure path too: the paid call already happened.
+                    usage_sink.extend(tool_ctx.usage)
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = model.invoke(messages)

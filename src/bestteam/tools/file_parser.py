@@ -120,9 +120,20 @@ def _parse_pdf_bytes(data: bytes, name: str) -> str:
         ) from exc
 
     reader = pypdf.PdfReader(io.BytesIO(data))
-    pages = [page.extract_text() or "" for page in reader.pages]
+    # Pages are joined with a form feed rather than a blank line, so the page
+    # boundary survives into the extracted text and a knowledge base can chunk
+    # per page and cite an exact `p.N` (see `core/knowledge_base.py`'s
+    # `_chunk_document`). That makes the form feed a delimiter, so a page whose
+    # own extracted text contains one has to give it up -- otherwise it reads
+    # as a page break and silently shifts the number of every page after it,
+    # which is the one way the "exact p.N" guarantee could be quietly false.
+    # Replaced with a space, not dropped, so words either side stay separated.
+    # The email attachment path reads the same string; a form feed is
+    # whitespace, so nothing there changes but the separator a model sees
+    # between two pages.
+    pages = [(page.extract_text() or "").replace("\f", " ") for page in reader.pages]
     header = f"[PDF: {name} — {len(pages)} page(s)]\n"
-    return header + "\n\n".join(pages)
+    return header + "\f".join(pages)
 
 
 def _parse_docx_bytes(data: bytes, name: str) -> str:

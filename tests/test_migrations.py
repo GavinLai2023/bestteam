@@ -107,6 +107,11 @@ def test_create_all_then_upgrade_head_is_idempotent(tmp_path, monkeypatch):
     assert "teams" not in tables
     engine = make_engine(db_path)
     try:
+        # create_all already produced these; the migration must not have
+        # rebuilt them into something else on its way past.
+        usage_columns = {c["name"]: c for c in sa.inspect(engine).get_columns("usage_records")}
+        assert usage_columns["run_id"]["nullable"] is True
+        assert "ingestion_job_id" in usage_columns
         assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
         assert _has_fk(
             engine,
@@ -793,5 +798,37 @@ def test_the_secret_expiry_column_upgrades_and_downgrades(tmp_path, monkeypatch)
         with engine.connect() as conn:
             columns = {c["name"] for c in sa.inspect(conn).get_columns("org_email_credentials")}
         assert "oauth_secret_expires_at" not in columns
+    finally:
+        engine.dispose()
+
+
+def test_knowledge_chunks_carry_page_and_heading_columns(tmp_path, monkeypatch):
+    """m0n1o2p3q4r5: the two chunk-location columns citations are built from."""
+    db_path = tmp_path / "chunk_metadata.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        columns = {c["name"] for c in sa.inspect(engine).get_columns("knowledge_chunks")}
+        assert {"page", "heading"} <= columns
+    finally:
+        engine.dispose()
+
+
+def test_usage_records_run_id_is_nullable_with_an_ingestion_job_id(tmp_path, monkeypatch):
+    """n1o2p3q4r5s6: knowledge-base ingestion spend lives in the same ledger,
+    so `run_id` has to be nullable and `ingestion_job_id` has to exist."""
+    db_path = tmp_path / "usage_ingestion.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        inspector = sa.inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("usage_records")}
+        assert "ingestion_job_id" in columns
+        assert columns["run_id"]["nullable"] is True
+        assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
     finally:
         engine.dispose()

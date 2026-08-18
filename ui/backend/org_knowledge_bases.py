@@ -12,13 +12,18 @@ The actual upload/chunk/index/version-swap work is shared with the admin
 exposed here -- this surface is deliberately simpler than the admin one,
 fixed at the SDK's own defaults.
 
-Unlike the admin route (a trusted operator, no caller-count limit), this one
-is reachable by any org member, so it applies three extra guards the admin
-path doesn't need (Codex review findings): a lower per-upload size ceiling, a
-per-org cap on how many distinct self-service knowledge bases can exist --
-this route has no delete counterpart, so without a cap an org could
-accumulate an unbounded number of them -- and a confirmation gate on reusing
-an existing name: the shared `upload_knowledge_base()` treats a same-name
+The org can also list, inspect and delete its own knowledge bases here
+(`GET /knowledge-bases`, `GET`/`DELETE /knowledge-bases/{name}`) -- the
+self-service counterpart to the admin `/api/config/knowledge_bases` routes,
+without an admin having to be involved.
+
+Unlike the admin route (a trusted operator, no caller-count limit), the
+upload is reachable by any org member, so it applies three extra guards the
+admin path doesn't need (Codex review findings): a lower per-upload size
+ceiling, a per-org cap on how many distinct self-service knowledge bases can
+exist (20 -- an org can now free a slot itself with the delete route, but the
+cap still bounds how many one org holds at once), and a confirmation gate on
+reusing an existing name: the shared `upload_knowledge_base()` treats a same-name
 upload as a full in-place replace (by design, for the admin's own
 deliberate re-index workflow), but a customer typing a common label (e.g.
 "policies") in a later wizard session has no way to know that name is
@@ -38,10 +43,11 @@ from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
-from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User
+from .db.dependencies import workflows_referencing
+from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User, iso_utc
 from .db_session import get_db
 from .ingestion import job_status_payload
-from .knowledge_bases import _kb_upload_lock, upload_knowledge_base
+from .knowledge_bases import _kb_upload_lock, delete_knowledge_base, upload_knowledge_base
 
 router = APIRouter(prefix="/api/org", tags=["org-knowledge-bases"])
 
@@ -61,7 +67,7 @@ def _default_chat_model(db: Session) -> Optional[str]:
     wizard's own `pickDefaultModel` (lib/models.ts) uses, resolved
     server-side so smart search's query-expansion model is never trusted
     from the client. `None` only if the catalog is empty."""
-    entries = model_catalog.list_entries(db)
+    entries = model_catalog.list_chat_entries(db)
     if not entries:
         return None
     non_fake = [e for e in entries if not e.spec.startswith("fake:")]
@@ -81,6 +87,71 @@ _MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 _MAX_SELF_SERVICE_KBS_PER_ORG = 20
 
 
+def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
+    """One knowledge base as the customer's own "My documents" panel sees it.
+
+    `latest_job` is the newest ingestion attempt of any status (ordered by
+    `id`, the same monotonic-with-submission ordering `resolve_knowledge_base`
+    uses), so a failed upload's error reaches the person who made it -- with
+    `config` stripped, because it carries the server's absolute upload path
+    and this is a customer-facing surface. (The existing per-job route still
+    returns it; that pre-existing leak is out of scope here.)
+
+    `servable` is deliberately not "the latest job succeeded": a failed
+    re-upload leaves the previous completed generation live, and a KB with no
+    jobs at all is a legacy/manual-path one served from disk.
+    """
+    latest = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id)
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    latest_job: Optional[Dict[str, Any]] = None
+    if latest is not None:
+        latest_job = job_status_payload(db, latest)
+        latest_job.pop("config", None)
+    has_completed = (
+        db.query(IngestionJob.id).filter_by(kb_id=record.id, status="completed").first() is not None
+    )
+    config = record.config or {}
+    return {
+        "name": record.name,
+        # The one sentence the uploader wrote about these documents. Null for
+        # a knowledge base created before the field existed, or by a caller
+        # that omitted it.
+        "description": config.get("description"),
+        "type": config.get("type", "local_folder"),
+        # `iso_utc`, not the bare column: SQLite hands it back tz-naive, and
+        # the panel's `Date` would then read a UTC timestamp as local time.
+        "updated_at": iso_utc(record.updated_at),
+        "used_by": workflows_referencing(db, kind="knowledge_base", resource_id=record.id),
+        "servable": has_completed or latest is None,
+        "latest_job": latest_job,
+    }
+
+
+def _own_kb_or_404(db: Session, org_id: Optional[int], item_name: str) -> KnowledgeBaseRecord:
+    record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+    return record
+
+
+@router.get("/knowledge-bases")
+def list_own_knowledge_bases(
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> list[Dict[str, Any]]:
+    records = (
+        db.query(KnowledgeBaseRecord)
+        .filter_by(org_id=org.id)
+        .order_by(KnowledgeBaseRecord.name)
+        .all()
+    )
+    return [_kb_summary(db, record) for record in records]
+
+
 @router.get("/knowledge-bases/capabilities")
 def get_knowledge_base_capabilities(org: Organization = Depends(get_current_org)) -> Dict[str, bool]:
     """Whether the wizard's "smart search" toggle has anything to turn on.
@@ -98,6 +169,10 @@ def upload_own_knowledge_base(
     files: list[UploadFile] = File(...),
     replace: bool = Form(False),
     smart_search: bool = Form(False),
+    # Optional, and capped here rather than left to pydantic: it becomes the
+    # agent tool's description, and a 422 naming the field beats a 500 from
+    # `KnowledgeBaseSpec`'s own validation deep inside the upload.
+    description: Optional[str] = Form(None, max_length=500),
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
@@ -179,6 +254,7 @@ def upload_own_knowledge_base(
             org.id,
             item_name,
             files,
+            description=description or None,
             kb_type=kb_type,
             embedding_model=embedding_model,
             rerank_model=rerank_model,
@@ -204,3 +280,25 @@ def get_ingestion_job_status(
     if job is None:
         raise HTTPException(status_code=404, detail="Unknown ingestion job")
     return job_status_payload(db, job)
+
+
+@router.get("/knowledge-bases/{item_name}")
+def get_own_knowledge_base(
+    item_name: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    return _kb_summary(db, _own_kb_or_404(db, org.id, item_name))
+
+
+@router.delete("/knowledge-bases/{item_name}", status_code=204)
+def delete_own_knowledge_base(
+    item_name: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> None:
+    # `delete_knowledge_base` owns the whole sequence (dependency guard,
+    # in-flight-ingestion guard, row/file removal, cache invalidation) and
+    # takes both locks itself -- see its docstring for why it can't live in a
+    # route. The only thing this route decides is whose org id it runs for.
+    delete_knowledge_base(db, org.id, item_name)
