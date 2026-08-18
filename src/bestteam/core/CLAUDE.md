@@ -247,6 +247,23 @@ owns:
   variants are billed as the extra calls they are. `self._embedding_spec` is
   the `billable_spec()` result stashed at construction (both the folder
   constructor and `from_chunks`).
+- `core/embeddings.py::embed_documents_in_batches(embeddings, texts)` -- the
+  one way this codebase embeds a *list* of documents (both `_embed_chunks`
+  copies and `ui/backend/ingestion.py`; `memory.py`'s single-record write and
+  every `embed_query` are untouched). It sends `_EMBED_BATCH_SIZE` = 100 texts
+  per provider call and retries a failed batch up to `_EMBED_ATTEMPTS` = 3
+  times, backing off 1s then 2s, re-raising the original exception if the third
+  attempt still fails. **Only the failing batch is retried**, so a hiccup
+  partway through a large corpus no longer discards the chunks already embedded
+  and paid for. Any exception retries -- classifying provider exceptions would
+  mean tracking every provider's taxonomy, so an auth failure waits 3s before
+  surfacing. A batch returning the wrong number of vectors raises immediately,
+  without retrying (a deterministic answer won't change on a second ask); at
+  KB construction that is re-raised as the `ConfigurationError` both
+  constructors have always raised for a mis-sized response. Neither the batch
+  size nor the attempt count is a parameter -- no caller has a reason to differ.
+  Metering is unaffected: ingestion estimates its `kb:ingest` tokens once from
+  the chunk texts, so a retried batch is never billed twice.
 - Reranking is **not** metered: a cross-encoder runs locally, in-process,
   with no provider call to bill.
 - **Document embeddings are metered only on the upload/ingestion path**

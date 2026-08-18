@@ -1249,7 +1249,15 @@ failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
 itself raises — in which case the job's already-flushed-but-uncommitted
 document/chunk objects are discarded before anything is written (a
 vector/hybrid KB with no embeddings can't serve queries, so a total
-embedding failure must leave no partial rows behind). A document's error
+embedding failure must leave no partial rows behind). That embedding call is
+`bestteam.core.embeddings.embed_documents_in_batches` (P1-2): 100 chunks per
+provider call, each batch retried up to three times with a 1s then 2s backoff,
+and **only the failing batch is retried** — a provider hiccup partway through a
+large upload now costs one batch rather than every chunk embedded before it.
+Only an exception that survives all three attempts, or a batch that comes back
+with the wrong number of vectors (rejected immediately, no retry), fails the
+job. Metering is unchanged: the `kb:ingest` token estimate is computed once
+from the chunk texts, so a retried batch is never billed twice. A document's error
 text is scrubbed of the server's absolute upload path before it's stored
 (`ingestion._scrubbed`) — third-party parsers embed the path they were
 handed, and `job_status_payload` returns that text verbatim to a

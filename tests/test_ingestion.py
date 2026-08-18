@@ -1,5 +1,6 @@
 """Tests for the async knowledge-base ingestion job (ui/backend/ingestion.py)."""
 
+import functools
 import io
 from pathlib import Path
 
@@ -10,6 +11,9 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
+from langchain_core.embeddings import Embeddings
+
+from bestteam.core.embeddings import embed_documents_in_batches
 from ui.backend import ingestion
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
@@ -271,6 +275,48 @@ def test_vector_kb_bad_embedding_model_fails_whole_job(db, engine, tmp_path):
     job = db.get(IngestionJob, job.id)
     assert job.status == "failed"
     assert db.query(KnowledgeChunk).filter_by(kb_id=kb.id).count() == 0
+
+
+def test_transient_embedding_failure_is_retried_and_the_job_completes(db, engine, tmp_path, monkeypatch):
+    """A provider hiccup on one batch must not throw away the whole upload."""
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+
+    calls = []
+
+    class _FlakyEmbeddings(Embeddings):
+        def embed_documents(self, texts):
+            calls.append(list(texts))
+            if len(calls) == 1:
+                raise RuntimeError("provider hiccup")
+            return [[float(len(text))] for text in texts]
+
+        def embed_query(self, text):  # pragma: no cover - unused here
+            return [float(len(text))]
+
+    monkeypatch.setattr(ingestion, "resolve_embedding_model", lambda spec: _FlakyEmbeddings())
+    # Stub only the backoff sleep; the real batching/retry logic is under test.
+    monkeypatch.setattr(
+        ingestion,
+        "embed_documents_in_batches",
+        functools.partial(embed_documents_in_batches, sleep=lambda _seconds: None),
+    )
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="vector", chunk_size=1000, chunk_overlap=100, embedding_model="fake-spec:x",
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    assert len(calls) == 2
+    chunks = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).all()
+    assert chunks and all(c.embedding_json for c in chunks)
 
 
 def test_delete_kb_ingestion_data_removes_all_rows(db, engine, tmp_path):

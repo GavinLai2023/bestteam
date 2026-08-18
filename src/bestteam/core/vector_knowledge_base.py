@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from ..exceptions import ConfigurationError
 from .embeddings import (
     billable_spec,
+    embed_documents_in_batches,
     normalize_rows,
     report_query_embedding_usage,
     resolve_embedding_model,
@@ -107,7 +108,14 @@ class VectorKnowledgeBase(KnowledgeBase):
         # billed against this spec, and there is nothing to bill when the
         # customer handed in a live model or a `"fake:"` spec.
         self._embedding_spec = billable_spec(embedding_model)
-        vectors = self._embed_chunks(embedding_model, cache_path)
+        try:
+            vectors = self._embed_chunks(embedding_model, cache_path)
+        except ValueError as exc:
+            # A batch that came back the wrong size: `embed_documents_in_batches`
+            # reports that as a plain ValueError, but this constructor has always
+            # raised ConfigurationError for a mis-sized response (see
+            # `_set_vectors`, which still guards the `from_chunks` path).
+            raise ConfigurationError(f"Knowledge base '{name}': {exc}") from exc
         self._set_vectors(name, vectors)
 
     @classmethod
@@ -185,7 +193,7 @@ class VectorKnowledgeBase(KnowledgeBase):
         texts = [c.text for c in self._chunks]
 
         if cache_path is None:
-            return self._embeddings.embed_documents(texts)
+            return embed_documents_in_batches(self._embeddings, texts)
 
         if not isinstance(embedding_model, str):
             warnings.warn(
@@ -194,7 +202,7 @@ class VectorKnowledgeBase(KnowledgeBase):
                 "cache key — caching is skipped.",
                 stacklevel=3,
             )
-            return self._embeddings.embed_documents(texts)
+            return embed_documents_in_batches(self._embeddings, texts)
 
         cache_path = Path(cache_path)
         model_spec = embedding_model
@@ -204,7 +212,9 @@ class VectorKnowledgeBase(KnowledgeBase):
         missing = [i for i, key in enumerate(keys) if key not in cache]
 
         if missing:
-            new_vectors = self._embeddings.embed_documents([texts[i] for i in missing])
+            new_vectors = embed_documents_in_batches(
+                self._embeddings, [texts[i] for i in missing]
+            )
             for i, vector in zip(missing, new_vectors):
                 cache[keys[i]] = vector
             _save_embedding_cache(cache_path, model_spec, cache)

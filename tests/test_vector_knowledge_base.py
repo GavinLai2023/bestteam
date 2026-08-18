@@ -247,6 +247,32 @@ def test_vector_kb_cache_partial_reembed_on_new_chunk(tmp_path, monkeypatch):
     assert calls[0] == ["Cars need oil changes."]
 
 
+def test_folder_construction_embeds_in_batches(tmp_path, monkeypatch):
+    """A folder big enough to exceed one batch is embedded batch by batch."""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "notes.txt").write_text(
+        "\n\n".join(f"Paragraph {i} about apples." for i in range(120)),
+        encoding="utf-8",
+    )
+
+    batch_sizes = []
+    original = DeterministicFakeEmbedding.embed_documents
+
+    def _tracking(self, texts):
+        batch_sizes.append(len(texts))
+        return original(self, texts)
+
+    monkeypatch.setattr(DeterministicFakeEmbedding, "embed_documents", _tracking)
+
+    kb = VectorKnowledgeBase(
+        "docs", docs_dir, embedding_model="fake:8", chunk_size=50, chunk_overlap=0
+    )
+
+    assert len(kb._chunks) == 120
+    assert batch_sizes == [100, 20]
+
+
 def test_vector_kb_cache_invalidated_on_model_change(tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()

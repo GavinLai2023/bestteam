@@ -271,6 +271,16 @@ honest, not enough to reconcile against a bill. Query-expansion tokens are
 *not* estimated — that is a chat model, and its reported `usage_metadata` is
 used directly.
 
+**A retried batch is not billed twice.** Document embedding goes out 100
+chunks at a time, and a batch that fails is retried up to three times (1s then
+2s apart) on its own — only the failing batch, so a provider hiccup partway
+through a large upload no longer throws away the chunks already embedded and
+paid for. The ingestion row's token estimate is computed once from the chunk
+texts, before any provider call, so a retry adds nothing to it. That cuts the
+other way too: the estimate counts each chunk once even though a retried batch
+was genuinely charged more than once by the provider — one more reason it is an
+estimate, not a bill.
+
 **Nothing billable, nothing recorded.** A `"fake:"` spec is $0 by
 construction and an `Embeddings`/`BaseChatModel` instance passed in from code
 has no spec string for the catalog to price, so neither produces a row. A

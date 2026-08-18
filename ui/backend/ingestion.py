@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from bestteam.core.embeddings import (
     billable_spec,
+    embed_documents_in_batches,
     estimate_embedding_tokens,
     resolve_embedding_model,
 )
@@ -181,11 +182,9 @@ def run_ingestion_job(
         if kb_type in ("vector", "hybrid") and all_chunks:
             try:
                 embeddings = resolve_embedding_model(embedding_model)
-                vectors = embeddings.embed_documents([c.text for c in all_chunks])
-                if len(vectors) != len(all_chunks):
-                    raise ValueError(
-                        f"embedding model returned {len(vectors)} vectors for {len(all_chunks)} chunks"
-                    )
+                # Batched, with a per-batch retry: a provider hiccup partway
+                # through a large upload costs one batch, not the whole job.
+                vectors = embed_documents_in_batches(embeddings, [c.text for c in all_chunks])
             except Exception as exc:  # noqa: BLE001 -- a vector/hybrid KB can't function unembedded
                 # Discard this run's buffered document/chunk objects (never
                 # added to the session) along with the job's own pending
