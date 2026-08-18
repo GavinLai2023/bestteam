@@ -17,6 +17,7 @@ from bestteam.core.kb_eval import (  # noqa: E402
     recall_at_k,
 )
 from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk  # noqa: E402
+from bestteam.exceptions import ConfigurationError  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -168,3 +169,13 @@ def test_hybrid_with_fake_embeddings_runs_and_reports_all_metrics():
     for outcome in report.outcomes:
         assert outcome.sources, outcome.query.query
         assert outcome.substring_hit in (True, False)
+
+
+@pytest.mark.parametrize("top_k", [0, -1])
+def test_evaluate_rejects_non_positive_top_k(top_k):
+    """`top_k=0` would retrieve the KB's default cutoff (`top_k or default`)
+    yet be scored as recall@0 -- a report that is internally inconsistent.
+    Refuse it before any retrieval, for the CLI's `--top-k 0` too."""
+    kb = LocalFolderKnowledgeBase.from_chunks("kb", [_Chunk("a.md", "alpha beta")])
+    with pytest.raises(ConfigurationError, match="top_k"):
+        evaluate(kb, [EvalQuery(query="alpha", expected_source="a.md", kind="lexical")], top_k=top_k)

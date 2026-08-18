@@ -189,6 +189,12 @@ def evaluate(kb, queries: Sequence[EvalQuery], top_k: int = DEFAULT_TOP_K) -> Ev
     `local_folder`, `vector` or `hybrid` base (with or without reranking and
     query expansion) is measured the same way.
     """
+    # Every built-in `search()` treats a falsy cutoff as "use my default", so
+    # `top_k=0` would retrieve five chunks and then be scored as recall@0 --
+    # a report that contradicts itself. Refuse it before any retrieval; the
+    # CLI's `--top-k` reaches here too.
+    if top_k < 1:
+        raise ConfigurationError(f"top_k must be at least 1, got {top_k}.")
     outcomes: List[QueryOutcome] = []
     for query in queries:
         chunks = kb.search(query.query, top_k)
