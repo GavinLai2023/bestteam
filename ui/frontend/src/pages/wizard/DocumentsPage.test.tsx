@@ -108,7 +108,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file], false, false),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file], false, false, undefined),
     )
     // The architect only sees the org's whole KB catalog otherwise, which can
     // leave a fresh upload unattached if the org already has other
@@ -210,7 +210,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, true),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, true, undefined),
     )
   })
 
@@ -231,7 +231,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, false),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, false, undefined),
     )
   })
 
@@ -336,5 +336,33 @@ describe('DocumentsPage', () => {
 
     await screen.findByText(/could not parse|processing failed/i)
     expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
+  })
+
+  it('sends the optional one-sentence description with the upload', async () => {
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    fireEvent.change(screen.getByLabelText(/what's in these documents/i), {
+      target: { value: '  Our refund and shipping policies  ' },
+    })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith(
+        'policies',
+        [file],
+        false,
+        false,
+        'Our refund and shipping policies',
+      ),
+    )
   })
 })

@@ -55,6 +55,9 @@ export default function DocumentsPage() {
   const catalogUnavailable = catalogFailed || (!catalogLoading && entries.length === 0)
 
   const [label, setLabel] = useState('')
+  // Optional. It becomes the agent tool's own description, so it is what
+  // tells the AI team which collection to search for a given question.
+  const [description, setDescription] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
   const [stage, setStage] = useState<Stage>(null)
@@ -104,12 +107,13 @@ export default function DocumentsPage() {
     setBusy(true)
 
     const smartSearchEnabled = smartSearchAvailable && smartSearch
+    const kbDescription = description.trim() || undefined
 
     if (useFiles) {
       setStage('uploading')
       let uploadResult: { job_id: number }
       try {
-        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled)
+        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled, kbDescription)
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
@@ -119,7 +123,7 @@ export default function DocumentsPage() {
             return
           }
           try {
-            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled)
+            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled, kbDescription)
           } catch (e2) {
             setError((e2 as Error).message)
             setBusy(false)
@@ -235,6 +239,21 @@ export default function DocumentsPage() {
           placeholder="e.g. Product policies"
           disabled={busy}
         />
+      </div>
+
+      <div className="field">
+        <label htmlFor="doc-description">
+          What's in these documents? (one sentence) <span className="hint">(optional)</span>
+        </label>
+        <input
+          id="doc-description"
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="e.g. Refund, delivery and warranty policies for our online shop"
+          disabled={busy}
+        />
+        <p className="hint">This helps your AI team know when to look here for an answer.</p>
       </div>
 
       {smartSearchAvailable && (
