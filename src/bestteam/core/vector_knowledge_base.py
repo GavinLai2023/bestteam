@@ -85,6 +85,7 @@ class VectorKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> None:
         _require_numpy()
         _validate_chunk_params(name, chunk_size, chunk_overlap)
@@ -95,7 +96,7 @@ class VectorKnowledgeBase(KnowledgeBase):
                 f"Knowledge base '{name}' has no readable documents in {self.path}"
             )
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-                           query_expansion_model, query_expansion_count)
+                           query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
         vectors = self._embed_chunks(embedding_model, cache_path)
         self._set_vectors(name, vectors)
@@ -113,6 +114,7 @@ class VectorKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> "VectorKnowledgeBase":
         """Build directly from pre-parsed chunks and pre-computed vectors,
         skipping both the file-parsing pipeline and the embedding call for
@@ -126,18 +128,19 @@ class VectorKnowledgeBase(KnowledgeBase):
         if not chunks:
             raise ConfigurationError(f"Knowledge base '{name}' has no readable documents")
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-                           query_expansion_model, query_expansion_count)
+                           query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
         self._set_vectors(name, vectors)
         return self
 
     def _init_common(
         self, name, chunks, top_k, score_threshold, rerank_model, candidate_k,
-        query_expansion_model, query_expansion_count,
+        query_expansion_model, query_expansion_count, description=None,
     ) -> None:
         _require_numpy()
 
         self.name = name
+        self.description = description
         self.default_top_k = top_k
         self.score_threshold = score_threshold
         self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
@@ -214,8 +217,8 @@ class VectorKnowledgeBase(KnowledgeBase):
             indices = [i for i in indices if scores[i] >= self.score_threshold]
         return indices
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
-        # Mirrors LocalFolderKnowledgeBase.query()'s `top_k or self.default_top_k`:
+    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
+        # Mirrors LocalFolderKnowledgeBase.search()'s `top_k or self.default_top_k`:
         # a caller-supplied top_k=0 falls back to default_top_k (intentional parity).
         top_k = top_k or self.default_top_k
 
@@ -227,13 +230,4 @@ class VectorKnowledgeBase(KnowledgeBase):
         # rank, and _rerank_candidates only reads candidate order/chunk.text.
         results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
-
-        if not results:
-            return f"No results found in knowledge base '{self.name}' for: {query}"
-
-        lines = [f"Knowledge base '{self.name}' results for: {query}\n"]
-        for i, (_score, chunk) in enumerate(results, 1):
-            lines.append(f"{i}. [source: {chunk.source}]")
-            lines.append(chunk.text.strip())
-            lines.append("")
-        return "\n".join(lines)
+        return [chunk for _score, chunk in results]

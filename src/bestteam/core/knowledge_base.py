@@ -76,18 +76,70 @@ class KnowledgeBase(ABC):
 
     Implementations are responsible for ingesting documents from wherever
     they live and answering free-text queries with relevant excerpts.
+    Retrieval (`search`) and presentation (`query`) are deliberately split:
+    each subclass ranks chunks its own way, but every one of them is
+    rendered by the single `format_results` below, so the string an agent
+    sees -- and the citation tags it is told to quote -- cannot drift
+    between knowledge base types.
     """
 
     name: str
+    #: One sentence describing what these documents cover, shown to the model
+    #: in the tool's own description. `None` for a knowledge base that was
+    #: never given one.
+    description: Optional[str] = None
 
     @abstractmethod
+    def search(self, query: str, top_k: Optional[int] = None) -> List["_Chunk"]:
+        """Return the chunks most relevant to the query, best first."""
+
     def query(self, query: str, top_k: Optional[int] = None) -> str:
         """Return formatted excerpts most relevant to the query."""
+        return format_results(self.name, query, self.search(query, top_k))
 
 
 class _Chunk(NamedTuple):
+    """One indexed excerpt plus whatever location its format made exact.
+
+    `page`/`heading` default to `None` so every pre-existing two-argument
+    construction (and every `from_chunks` caller) keeps working: a chunk
+    from a format that carries no page or section simply cites its filename,
+    exactly as before.
+    """
+
     source: str
     text: str
+    page: Optional[int] = None
+    heading: Optional[str] = None
+
+
+def _citation(chunk: _Chunk) -> str:
+    """The inside of a chunk's `[source: ...]` tag: its filename, then the
+    page and section that narrow it down when the format supplied them."""
+    citation = chunk.source
+    if chunk.page is not None:
+        citation += f", p.{chunk.page}"
+    if chunk.heading:
+        citation += f" § {chunk.heading}"
+    return citation
+
+
+def format_results(kb_name: str, query: str, chunks: List[_Chunk]) -> str:
+    """Render retrieved chunks as the string an agent's tool call returns.
+
+    The one formatter for all three knowledge base types. Byte-for-byte
+    identical to what each type rendered separately when no chunk carries a
+    page or heading.
+    """
+    if not chunks:
+        return f"No results found in knowledge base '{kb_name}' for: {query}"
+
+    lines = [f"Knowledge base '{kb_name}' results for: {query}\n"]
+    for i, chunk in enumerate(chunks, 1):
+        lines.append(f"{i}. [source: {_citation(chunk)}]")
+        lines.append(chunk.text.strip())
+        lines.append("")
+    return "\n".join(lines)
 
 
 class LocalFolderKnowledgeBase(KnowledgeBase):
@@ -111,6 +163,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> None:
         _require_bm25()
         _validate_chunk_params(name, chunk_size, chunk_overlap)
@@ -122,6 +175,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             candidate_k=candidate_k,
             query_expansion_model=query_expansion_model,
             query_expansion_count=query_expansion_count,
+            description=description,
         )
 
     @classmethod
@@ -134,6 +188,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> "LocalFolderKnowledgeBase":
         """Build directly from pre-parsed chunks, skipping the file-parsing
         pipeline. Used by the backend's DB-backed ingestion path (see
@@ -147,6 +202,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             candidate_k=candidate_k,
             query_expansion_model=query_expansion_model,
             query_expansion_count=query_expansion_count,
+            description=description,
         )
         return self
 
@@ -160,10 +216,12 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         candidate_k: Optional[int] = None,
         query_expansion_model: Any = None,
         query_expansion_count: int = 3,
+        description: Optional[str] = None,
     ) -> None:
         BM25Okapi = _require_bm25()
 
         self.name = name
+        self.description = description
         self.default_top_k = top_k
         self._reranker = resolve_reranker(rerank_model) if rerank_model is not None else None
         if candidate_k is not None and (candidate_k < top_k or candidate_k > _MAX_RERANK_CANDIDATE_K):
@@ -201,7 +259,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
         return [idx for _overlap, _score, idx in matches[:fetch_k]]
 
-    def query(self, query: str, top_k: Optional[int] = None) -> str:
+    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
         top_k = top_k or self.default_top_k
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
@@ -211,16 +269,7 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
         # rank, and _rerank_candidates only reads candidate order/chunk.text.
         results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
         results = _rerank_candidates(query, results, self._reranker, top_k)
-
-        if not results:
-            return f"No results found in knowledge base '{self.name}' for: {query}"
-
-        lines = [f"Knowledge base '{self.name}' results for: {query}\n"]
-        for i, (_score, chunk) in enumerate(results, 1):
-            lines.append(f"{i}. [source: {chunk.source}]")
-            lines.append(chunk.text.strip())
-            lines.append("")
-        return "\n".join(lines)
+        return [chunk for _score, chunk in results]
 
 
 _DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
@@ -323,9 +372,10 @@ def _apply_overlap(pieces: List[str], chunk_overlap: int, chunk_size: int) -> Li
     return result
 
 
-def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = "") -> List[str]:
-    """Split text into chunks, preferring the document's own structure
-    (paragraphs, sentences, words) over blind fixed-size character cuts."""
+def _split_pieces(text: str, chunk_size: int, suffix: str = "") -> List[str]:
+    """The structure-aware split, before any overlap is glued on. Separate
+    from `_chunk_text` so `_chunk_document` can read each piece's Markdown
+    heading off text the previous chunk's borrowed tail hasn't shifted."""
     text = text.strip()
     if not text:
         return []
@@ -334,8 +384,76 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
         pieces = _pack_pieces(sections, chunk_size, _DEFAULT_SEPARATORS)
     else:
         pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
-    pieces = [p for p in pieces if p.strip()]
-    return _apply_overlap(pieces, chunk_overlap, chunk_size)
+    return [p for p in pieces if p.strip()]
+
+
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = "") -> List[str]:
+    """Split text into chunks, preferring the document's own structure
+    (paragraphs, sentences, words) over blind fixed-size character cuts."""
+    return _apply_overlap(_split_pieces(text, chunk_size, suffix), chunk_overlap, chunk_size)
+
+
+# `_parse_pdf_bytes` joins a PDF's pages with this, so a page boundary is
+# still visible in the parsed text (see `tools/file_parser.py`).
+_PAGE_BREAK = "\f"
+
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
+
+# A heading is a citation label, not an excerpt -- a pathological one-line
+# "heading" shouldn't push the actual excerpt off the model's screen.
+_MAX_HEADING_CHARS = 80
+
+
+def _headings_for(pieces: List[str]) -> List[Optional[str]]:
+    """The Markdown heading in effect at the start of each piece.
+
+    Approximate by design, and Markdown-only. A piece the splitter cut at a
+    heading boundary opens with its own heading and takes that; anything else
+    inherits the last heading seen so far. Nothing here parses Markdown, so a
+    `#` line inside a fenced code block reads as a heading, and a chunk that
+    spans two sections is labelled with the one it starts in.
+    """
+    headings: List[Optional[str]] = []
+    current: Optional[str] = None
+    for piece in pieces:
+        matches = list(_MARKDOWN_HEADING_RE.finditer(piece))
+        if matches and not piece[: matches[0].start()].strip():
+            current = matches[0].group(1)[:_MAX_HEADING_CHARS]
+        headings.append(current)
+        if matches:
+            current = matches[-1].group(1)[:_MAX_HEADING_CHARS]
+    return headings
+
+
+def _chunk_document(
+    source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
+) -> List[_Chunk]:
+    """Chunk one parsed document, tagging each chunk with whatever location
+    its format makes exact.
+
+    A PDF is chunked **per page**, so no chunk straddles a page break and its
+    `p.N` is precise. The cost is that a paragraph running across a page
+    boundary loses the overlap it would otherwise borrow -- accepted, because
+    a citation an operator can check beats an extra hundred characters of
+    context. Every other format is chunked exactly as before; `.md` chunks
+    additionally carry the section heading they open under.
+    """
+    if suffix == ".pdf":
+        chunks: List[_Chunk] = []
+        for page, page_text in enumerate(text.split(_PAGE_BREAK), start=1):
+            chunks.extend(
+                _Chunk(source=source, text=piece, page=page)
+                for piece in _chunk_text(page_text, chunk_size, chunk_overlap, suffix=suffix)
+            )
+        return chunks
+
+    pieces = _split_pieces(text, chunk_size, suffix)
+    headings = _headings_for(pieces) if suffix == ".md" else [None] * len(pieces)
+    texts = _apply_overlap(pieces, chunk_overlap, chunk_size)
+    return [
+        _Chunk(source=source, text=piece, heading=heading)
+        for piece, heading in zip(texts, headings)
+    ]
 
 
 def _validate_chunk_params(name: str, chunk_size: int, chunk_overlap: int) -> None:
@@ -374,8 +492,7 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
             warnings.warn(f"Skipping '{file_path}': {_NO_TEXT_MESSAGE}", stacklevel=2)
             continue
         source = file_path.relative_to(path).as_posix()
-        for piece in _chunk_text(text, chunk_size, chunk_overlap, suffix=suffix):
-            chunks.append(_Chunk(source=source, text=piece))
+        chunks.extend(_chunk_document(source, text, chunk_size, chunk_overlap, suffix=suffix))
     return chunks
 
 
@@ -459,10 +576,16 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
         return kb.query(query)
 
     _tool.__name__ = kb.name
+    # The knowledge base's own one-line description, when it has one, is the
+    # only thing telling the model WHICH collection answers a question -- an
+    # org can have several, and their names alone rarely say.
+    described = f": {kb.description}" if getattr(kb, "description", None) else ""
     _tool.__doc__ = (
-        f"Search the '{kb.name}' knowledge base for information relevant to "
-        "the query. Returns the most relevant document excerpts along with "
-        "the source file each excerpt came from.\n\n"
+        f"Search the '{kb.name}' knowledge base{described}. Use it whenever "
+        "the question may be answered by these documents. Returns the most "
+        'relevant excerpts, each tagged like "[source: handbook.pdf, p.3]". '
+        "When you use an excerpt in your answer, cite it with that same "
+        "[source: …] tag.\n\n"
         "Args:\n"
         "    query: The search query string.\n\n"
         "Returns:\n"

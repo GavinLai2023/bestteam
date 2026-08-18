@@ -72,6 +72,55 @@ together in one chunk instead of being cut mid-paragraph or mid-element.
 still single-level (not "small-to-big" hierarchical/parent-child)
 chunking — see "Known limitations" below.
 
+**Chunk location metadata.** `_chunk_document()` tags each chunk with
+whatever location its format makes exact, which is what a citation is built
+from (see "Citations", below):
+
+- **PDF `page`.** `_parse_pdf_bytes` joins a document's pages with a form
+  feed (`\f`) rather than a blank line, and a `.pdf` is chunked **per page**,
+  so no chunk straddles a page break and its `p.N` is precise. The cost is
+  that a paragraph running across a page boundary loses the overlap it would
+  otherwise borrow — accepted, because a citation an operator can check beats
+  another hundred characters of context.
+- **Markdown `heading`.** A `.md` chunk records the `#`..`####` section it
+  opens under, capped at 80 characters. Approximate by design: nothing here
+  parses Markdown, so a `#` line inside a fenced code block reads as a
+  heading, and a chunk spanning two sections is labelled with the one it
+  starts in.
+
+Every other format supplies neither, and such a chunk cites its filename
+alone.
+
+## Citations
+
+A retrieved chunk is rendered by one shared formatter
+(`knowledge_base.py::format_results`, used by all three types via the base
+class's concrete `query()`), so the string an agent sees cannot drift between
+knowledge base types:
+
+```
+Knowledge base 'product_docs' results for: refund window
+
+1. [source: handbook.pdf, p.3 § Refunds]
+Refunds are issued within 30 days of purchase…
+```
+
+The tag is `[source: <filename>]`, plus `, p.<N>` when the chunk carries a
+page and ` § <heading>` when it carries a section — so a chunk with neither
+renders exactly as it always did. The tool's own description tells the model
+to quote that same tag back when it uses an excerpt, which is what makes a
+model's answer checkable against the document.
+
+**`description`** (optional, all three types, max 500 characters) is one
+sentence saying what the documents cover. It goes into the agent tool's own
+description — `Search the 'product_docs' knowledge base: Refund, delivery and
+warranty policies. Use it whenever…` — so a model can tell an org's
+collections apart, and into the Solution Architect's knowledge base catalogue
+so it assigns the right one to the right agent. Unset, the tool description
+is the generic wording and nothing else changes. The wizard's "Your
+documents" step asks for it ("What's in these documents? (one sentence)"),
+and both upload endpoints accept it as a `description` field.
+
 ## `local_folder`: BM25 keyword search
 
 `LocalFolderKnowledgeBase` indexes every chunk with [BM25](https://en.wikipedia.org/wiki/Okapi_BM25)
@@ -86,8 +135,8 @@ Querying:
    chunks that share zero significant terms with the query are excluded
    entirely, so tiny corpora don't return noise just because BM25's
    statistics are unstable at small scale.
-4. Return the top `top_k` chunks (default `5`), each tagged with its source
-   filename.
+4. Return the top `top_k` chunks (default `5`), each tagged with its
+   citation (see "Citations" above).
 
 If nothing matches, `query()` returns a plain `"No results found in
 knowledge base '<name>' for: <query>"` string rather than raising.
@@ -202,6 +251,7 @@ tools.
 knowledge_bases:
   - name: product_docs
     path: ./docs/product   # resolved relative to the workflow YAML's directory
+    description: Refund, delivery and warranty policies   # optional, max 500 chars
     # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
 
 agents:
@@ -277,7 +327,8 @@ knowledge bases as first-class records in the database, under
 `ui/backend/crud.py`) is a `local_folder`-only convenience that lets a
 non-technical user create a knowledge base by uploading files directly,
 with no server filesystem access needed:
-- Accepts a multipart `files` list plus optional `chunk_size`/`chunk_overlap`/`top_k`.
+- Accepts a multipart `files` list plus optional `chunk_size`/`chunk_overlap`/
+  `top_k`/`description`.
 - Limits: 30 files per upload, 30MB per file, ~500MB total.
 - Uploaded filenames are sanitized to their bare basename (stripping any
   directory component) and rejected if empty, `.`, or `..` — closing off a
@@ -298,7 +349,8 @@ by any org member (not just an admin), org-resolved from the caller's own
 bearer token. Tighter limits than the admin route (10 files / 10MB per file /
 50MB total) and a per-org cap on how many self-service knowledge bases can
 exist (20). By default it still creates a `local_folder` KB, exactly like the
-admin upload endpoint — but it also accepts a `smart_search` flag. The
+admin upload endpoint — but it also accepts a `description` (the wizard's
+"What's in these documents?" sentence) and a `smart_search` flag. The
 wizard exposes this as a **"Standard" / "Enhanced" toggle**, deliberately
 with no model names or KB-type jargon shown (the wizard's audience is
 non-technical): `GET /api/org/knowledge-bases/capabilities` tells the
@@ -477,10 +529,15 @@ for the full design.
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
-- **Citations are filename-only.** A returned chunk is tagged with its
-  source filename, not a chunk id, page number, or heading/section — no
-  precise click-through citation or "which version of which page" audit
-  trail.
+- **Citations locate a chunk, but nothing links to it.** A returned chunk is
+  tagged with its filename plus a page (PDF) or section heading (Markdown) —
+  enough for a person to find the passage — but there is no chunk id in the
+  tag, no click-through to the document, and no "which version of which page"
+  audit trail: a re-upload replaces a collection's chunks wholesale, so a
+  citation names a location in *today's* documents. Every other format
+  (`.docx`, `.xlsx`, `.xml`, plain text) still cites its filename alone, and
+  the Markdown heading is an approximation — see "Chunk location metadata"
+  above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose
   Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,

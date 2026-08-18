@@ -769,3 +769,31 @@ def test_failed_kb_does_not_block_spec_generation(client, tmp_path):
         catalog_text = _with_knowledge_base_catalog(db, "", org_id, names=set(tools))
         assert "policies" in catalog_text
         assert "broken" not in catalog_text
+
+
+def test_upload_description_lands_in_config_and_tool_docstring(client, tmp_path):
+    """The one sentence the wizard asks for is what the agent's tool
+    description says -- it is the only thing telling a model when this
+    collection is the right one to search."""
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"description": "Our refund and shipping policies"},
+        files=_files(),
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["description"] == "Our refund and shipping policies"
+
+        tools = _all_knowledge_base_tools(db, tmp_path, org_id)
+        assert "Search the 'policies' knowledge base: Our refund and shipping policies." in (
+            tools["policies"].__doc__
+        )
+
+    # And the customer's own "My documents" panel shows it back.
+    resp = client.get("/api/org/knowledge-bases/policies")
+    assert resp.status_code == 200
+    assert resp.json()["description"] == "Our refund and shipping policies"

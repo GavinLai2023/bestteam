@@ -169,3 +169,20 @@ def test_bytes_and_path_agree_for_docx(tmp_path):
     assert result.startswith("[Word: doc.docx]")
     assert "Hello from Word." in result
     assert result == parse_file(str(target))
+
+
+def test_pdf_pages_are_separated_by_form_feed():
+    """Page boundaries survive parsing, so the knowledge base can chunk per
+    page and cite an exact `p.N`. pypdf can write a PDF but not a text-bearing
+    one, so the reader is stubbed -- what's under test is the join, not pypdf.
+    """
+    import types
+    from unittest.mock import patch
+
+    pages = [types.SimpleNamespace(extract_text=lambda text=text: text) for text in ("one", "two")]
+    fake_pypdf = types.SimpleNamespace(PdfReader=lambda _stream: types.SimpleNamespace(pages=pages))
+
+    with patch.dict("sys.modules", {"pypdf": fake_pypdf}):
+        result = parse_bytes(b"%PDF-1.4", "doc.pdf")
+
+    assert result == "[PDF: doc.pdf — 2 page(s)]\none\ftwo"

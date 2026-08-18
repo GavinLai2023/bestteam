@@ -1341,6 +1341,20 @@
   No migration, no new document status: `failed` plus a distinguishing message
   is what the customer sees either way.
 
+- **A citation now says where in the document, and the tool says what the
+  documents are** (P0-3): chunks carry `page`/`heading`
+  (`knowledge_chunks.page`/`heading`, migration `m0n1o2p3q4r5`) — a PDF is
+  chunked per page so `p.N` is exact, a Markdown chunk records the section it
+  opens under — and every retrieval result is rendered by one shared
+  `format_results`, so a hit reads `[source: handbook.pdf, p.3 § Refunds]`.
+  `KnowledgeBase.query()` is now concrete on the base class over a new
+  abstract `search()` returning chunks, which is what the eval harness and the
+  retrieval trace build on. A knowledge base also has an optional
+  `description` (asked for in the wizard, carried into the agent tool's own
+  docstring and the architect's catalogue), so a model can tell an org's
+  collections apart. Existing chunks keep NULL for both columns and cite their
+  filename alone, exactly as before.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

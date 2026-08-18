@@ -115,9 +115,18 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   job. Indexed on `ingestion_job_id`.
 - `knowledge_chunks` (`KnowledgeChunk`) — one chunk of a `KnowledgeDocument`'s
   parsed text (`document_id`/`kb_id` FKs, `chunk_index`, `text`, optional
-  `embedding_json`/`embedding_model`). `embedding_json` is a JSON-encoded
+  `page`/`heading`, optional `embedding_json`/`embedding_model`).
+  `embedding_json` is a JSON-encoded
   `List[float]` — same TEXT-column shape as `memories.embedding_json` —
-  populated only for `vector`/`hybrid` KBs. Reconstructed into the matching
+  populated only for `vector`/`hybrid` KBs. `page`/`heading` (migration
+  `m0n1o2p3q4r5`) are where in the document the chunk came from and are what
+  a retrieval result cites beyond the filename: `page` for a PDF (chunked per
+  page, so it is exact), `heading` for Markdown (the section the chunk opens
+  under, approximate). Both nullable, because only those two formats supply
+  them; rows ingested before the columns existed are NULL for both and cite
+  their filename alone, as they always did — there is no backfill, since
+  either value can only be recovered by re-parsing the original documents,
+  which a re-upload already does. Reconstructed into the matching
   `KnowledgeBase` subclass via its `from_chunks(...)` alternate constructor
   at read time (`ui/backend/knowledge_bases.py::resolve_knowledge_base`, see
   `src/bestteam/core/CLAUDE.md`) rather than re-parsing files on every load.

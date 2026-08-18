@@ -351,6 +351,7 @@ def upload_knowledge_base_files(
     chunk_size: int = 1000,
     chunk_overlap: int = 100,
     top_k: int = 5,
+    description: Optional[str] = Query(None, max_length=500),
     org: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -359,6 +360,7 @@ def upload_knowledge_base_files(
     return upload_knowledge_base(
         db, org_id, item_name, files,
         chunk_size=chunk_size, chunk_overlap=chunk_overlap, top_k=top_k,
+        description=description or None,
         created_by=admin.username,
     )
 

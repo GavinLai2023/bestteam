@@ -1181,3 +1181,23 @@ def test_session_dict_exposes_workflow_id(client):
 
     client.post(f"/api/builder/sessions/{session_id}/deploy")
     assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is not None
+
+
+def test_with_knowledge_base_catalog_includes_description(db_session):
+    db_session.add(KnowledgeBaseRecord(
+        name="product_info_kb",
+        config={
+            "name": "product_info_kb", "path": "/tmp/does-not-matter-here",
+            "type": "local_folder", "description": "Product manuals and FAQs",
+        },
+    ))
+    db_session.add(KnowledgeBaseRecord(
+        name="undescribed_kb",
+        config={"name": "undescribed_kb", "path": "/tmp/does-not-matter-here", "type": "local_folder"},
+    ))
+    db_session.commit()
+
+    result = _with_knowledge_base_catalog(db_session, "Requirements here.")
+    assert "- product_info_kb (type: local_folder): Product manuals and FAQs" in result
+    # No description -> no trailing colon, rather than an empty one.
+    assert "- undescribed_kb (type: local_folder)\n" in result + "\n"

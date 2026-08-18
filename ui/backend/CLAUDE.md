@@ -1189,6 +1189,22 @@ customer-visible error record. Cache invalidation and both pruning steps are
 isolated in their own `try/except`s so a failure in any of them can never
 retroactively mark an already-committed successful ingestion as failed.
 
+**Chunk location metadata and `description`** (P0-3). The parse loop calls
+`bestteam.core.knowledge_base._chunk_document` rather than `_chunk_text`, so
+each `KnowledgeChunk` row also stores `page` (PDF, chunked per page) and
+`heading` (Markdown section); `_build_knowledge_base_from_job` reads both back
+into the rebuilt `_Chunk`s, and a retrieval result cites
+`[source: handbook.pdf, p.3 § Refunds]`. Both upload routes also accept an
+optional `description` (≤500 chars — `Form(...)` on the self-service route,
+`Query(...)` on the admin one, capped there so a long one is a 422 naming the
+field rather than a 500 from `KnowledgeBaseSpec`'s own validation). It is
+stored on the KB's `config`, so `_build_knowledge_base_from_job` takes it from
+`config` and not from the job — an edited description takes effect at once
+rather than waiting for the next ingestion — and it surfaces in three places:
+the agent tool's own docstring, `builder._with_knowledge_base_catalog`'s
+listing (`- name (type: X): description`), and `_kb_summary`'s
+customer-facing payload.
+
 **Per-document partial-failure model.** One bad file (unsupported file type,
 parse error, no extractable text, or zero chunks produced) doesn't fail the
 whole job — it's recorded as a `failed` `KnowledgeDocument` row with a capped

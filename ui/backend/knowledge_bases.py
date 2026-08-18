@@ -140,6 +140,7 @@ def upload_knowledge_base(
     chunk_overlap: int = 100,
     top_k: int = 5,
     kb_type: str = "local_folder",
+    description: Optional[str] = None,
     embedding_model: Optional[str] = None,
     rerank_model: Optional[str] = None,
     query_expansion_model: Optional[str] = None,
@@ -159,6 +160,11 @@ def upload_knowledge_base(
     search" toggle described there, `kb_type`/`embedding_model`/
     `rerank_model`/`query_expansion_model`. `embedding_model` is required
     when `kb_type` is `vector` or `hybrid` and ignored otherwise.
+
+    `description` is the customer's one sentence about what the documents
+    cover. It is stored on the KB's config and becomes the agent tool's own
+    description, so it is what tells a model which of an org's collections
+    answers a question; both routes cap it at 500 characters.
 
     This validates synchronously (name/size limits, `kb_type`, chunk params),
     writes the uploaded files to a fresh version directory, upserts the
@@ -245,6 +251,7 @@ def upload_knowledge_base(
             spec = KnowledgeBaseSpec(
                 name=item_name,
                 path=str(kb_root),
+                description=description,
                 type=kb_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -652,11 +659,18 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
         .order_by(KnowledgeDocument.filename, KnowledgeChunk.chunk_index)
         .all()
     )
-    chunks = [_Chunk(source=filename, text=chunk.text) for chunk, filename in rows]
+    chunks = [
+        _Chunk(source=filename, text=chunk.text, page=chunk.page, heading=chunk.heading)
+        for chunk, filename in rows
+    ]
 
     config = record.config
     kb_type = job.kb_type or "local_folder"
     common_kwargs: Dict[str, Any] = {
+        # From `config`, not the job: the description is what the agent's
+        # tool says about the collection, so an edited one should take effect
+        # immediately rather than waiting for the next ingestion.
+        "description": config.get("description"),
         "top_k": config.get("top_k", 5),
         "rerank_model": config.get("rerank_model"),
         "candidate_k": config.get("candidate_k"),

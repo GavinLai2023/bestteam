@@ -117,9 +117,9 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
     config = record.config or {}
     return {
         "name": record.name,
-        # `KnowledgeBaseSpec` has no description field today, so this is null
-        # for everything the upload route creates; it's here so the panel
-        # doesn't need a shape change if one is ever added.
+        # The one sentence the uploader wrote about these documents. Null for
+        # a knowledge base created before the field existed, or by a caller
+        # that omitted it.
         "description": config.get("description"),
         "type": config.get("type", "local_folder"),
         # `iso_utc`, not the bare column: SQLite hands it back tz-naive, and
@@ -169,6 +169,10 @@ def upload_own_knowledge_base(
     files: list[UploadFile] = File(...),
     replace: bool = Form(False),
     smart_search: bool = Form(False),
+    # Optional, and capped here rather than left to pydantic: it becomes the
+    # agent tool's description, and a 422 naming the field beats a 500 from
+    # `KnowledgeBaseSpec`'s own validation deep inside the upload.
+    description: Optional[str] = Form(None, max_length=500),
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
@@ -250,6 +254,7 @@ def upload_own_knowledge_base(
             org.id,
             item_name,
             files,
+            description=description or None,
             kb_type=kb_type,
             embedding_model=embedding_model,
             rerank_model=rerank_model,

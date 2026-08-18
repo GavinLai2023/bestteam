@@ -605,3 +605,54 @@ def test_fail_interrupted_jobs_marks_queued_and_running_failed_and_leaves_termin
     stale = db.get(IngestionJob, already_failed_id)
     assert stale.status == "failed"
     assert stale.error == "the original diagnosis"
+
+
+def test_chunk_page_and_heading_persist_and_round_trip_into_from_chunks(db, engine, tmp_path, monkeypatch):
+    """Ingestion writes the two new location columns, and the DB-backed read
+    path hands them back to the SDK so a citation survives the round trip."""
+    from ui.backend.knowledge_bases import _build_knowledge_base_from_job
+
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    # pypdf can write a PDF but not a text-bearing one, so the parse result
+    # for the .pdf is stubbed; the .md goes through the real parser.
+    (version_dir / "manual.pdf").write_bytes(b"%PDF-1.4 stub")
+    (version_dir / "guide.md").write_text(
+        "## Refunds\nRefunds are allowed within 30 days.\n", encoding="utf-8"
+    )
+    real_parse_file = ingestion.parse_file
+
+    def fake_parse_file(path):
+        if path.endswith(".pdf"):
+            return "[PDF: manual.pdf — 2 page(s)]\nShipping is free.\fReturns take five days."
+        return real_parse_file(path)
+
+    monkeypatch.setattr(ingestion, "parse_file", fake_parse_file)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    pdf_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, filename="manual.pdf").one()
+    pdf_chunks = (
+        db.query(KnowledgeChunk).filter_by(document_id=pdf_doc.id).order_by(KnowledgeChunk.chunk_index).all()
+    )
+    assert [chunk.page for chunk in pdf_chunks] == [1, 2]
+    md_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, filename="guide.md").one()
+    md_chunks = db.query(KnowledgeChunk).filter_by(document_id=md_doc.id).all()
+    assert [chunk.heading for chunk in md_chunks] == ["Refunds"]
+
+    record = db.get(KnowledgeBaseRecord, kb.id)
+    rebuilt = _build_knowledge_base_from_job(record, job, db)
+    assert {(c.source, c.page) for c in rebuilt._chunks} >= {("manual.pdf", 1), ("manual.pdf", 2)}
+    assert "[source: manual.pdf, p.2]" in rebuilt.query("returns five days")
+    assert "[source: guide.md § Refunds]" in rebuilt.query("refunds 30 days")

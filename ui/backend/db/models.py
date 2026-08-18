@@ -210,6 +210,13 @@ class KnowledgeChunk(Base):
     `embedding_json` is a JSON-encoded `List[float]` (same TEXT-column
     shape as `memories.embedding_json` in core/memory.py), populated only
     for `vector`/`hybrid` KBs.
+
+    `page`/`heading` are where in the document the chunk came from, and are
+    what a retrieval result cites beyond the filename. Both are nullable
+    because only some formats supply them: `page` for a PDF (chunked per
+    page, so it is exact), `heading` for Markdown (the section the chunk
+    opens under, approximate). Rows ingested before these columns existed
+    have NULL for both and cite their filename alone, as they always did.
     """
 
     __tablename__ = "knowledge_chunks"
@@ -223,6 +230,8 @@ class KnowledgeChunk(Base):
     kb_id: Mapped[int] = mapped_column(ForeignKey("knowledge_bases.id"), nullable=False)
     chunk_index: Mapped[int]
     text: Mapped[str]
+    page: Mapped[Optional[int]] = mapped_column(nullable=True)
+    heading: Mapped[Optional[str]] = mapped_column(nullable=True)
     embedding_json: Mapped[Optional[str]] = mapped_column(nullable=True)
     embedding_model: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)

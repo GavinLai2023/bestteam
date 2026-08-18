@@ -795,3 +795,17 @@ def test_the_secret_expiry_column_upgrades_and_downgrades(tmp_path, monkeypatch)
         assert "oauth_secret_expires_at" not in columns
     finally:
         engine.dispose()
+
+
+def test_knowledge_chunks_carry_page_and_heading_columns(tmp_path, monkeypatch):
+    """m0n1o2p3q4r5: the two chunk-location columns citations are built from."""
+    db_path = tmp_path / "chunk_metadata.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        columns = {c["name"] for c in sa.inspect(engine).get_columns("knowledge_chunks")}
+        assert {"page", "heading"} <= columns
+    finally:
+        engine.dispose()

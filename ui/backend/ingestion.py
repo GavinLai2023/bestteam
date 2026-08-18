@@ -26,7 +26,7 @@ from bestteam.core.embeddings import resolve_embedding_model
 from bestteam.core.knowledge_base import (
     _NO_TEXT_MESSAGE,
     _SUPPORTED_SUFFIXES,
-    _chunk_text,
+    _chunk_document,
     _has_extractable_text,
     _unsupported_suffix_message,
 )
@@ -142,7 +142,9 @@ def run_ingestion_job(
                 # matches no query and reports no problem.
                 if not _has_extractable_text(text):
                     raise ValueError(_NO_TEXT_MESSAGE)
-                pieces = _chunk_text(text, chunk_size, chunk_overlap, suffix=suffix)
+                pieces = _chunk_document(
+                    doc.filename, text, chunk_size, chunk_overlap, suffix=suffix
+                )
                 if not pieces:
                     raise ValueError("document produced no chunks (empty or whitespace-only content)")
             except Exception as exc:  # noqa: BLE001 -- one bad file must not abort the batch
@@ -152,7 +154,15 @@ def run_ingestion_job(
                 continue
 
             for i, piece in enumerate(pieces):
-                chunk = KnowledgeChunk(kb_id=kb_id, chunk_index=i, text=piece)
+                # `source` is dropped: the chunk's document row already carries
+                # the filename, and the read path joins it back on.
+                chunk = KnowledgeChunk(
+                    kb_id=kb_id,
+                    chunk_index=i,
+                    text=piece.text,
+                    page=piece.page,
+                    heading=piece.heading,
+                )
                 doc_chunks.append(chunk)
                 all_chunks.append(chunk)
             doc.status = "chunked"

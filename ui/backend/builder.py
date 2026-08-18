@@ -191,7 +191,13 @@ def _with_knowledge_base_catalog(
     lines = ["", "", "Available knowledge bases (reference by name in an agent's tools, do not redeclare):"]
     for record in records:
         kb_type = record.config.get("type", "local_folder")
-        lines.append(f"- {record.name} (type: {kb_type})")
+        # The uploader's own sentence about the documents -- without it the
+        # architect has only a name to decide which agent needs which
+        # collection. Omitted entirely when there isn't one, rather than
+        # printing a dangling colon.
+        description = record.config.get("description")
+        described = f": {description}" if description else ""
+        lines.append(f"- {record.name} (type: {kb_type}){described}")
     return text + "\n".join(lines)
 
 

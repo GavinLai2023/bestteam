@@ -122,7 +122,13 @@ def _parse_pdf_bytes(data: bytes, name: str) -> str:
     reader = pypdf.PdfReader(io.BytesIO(data))
     pages = [page.extract_text() or "" for page in reader.pages]
     header = f"[PDF: {name} — {len(pages)} page(s)]\n"
-    return header + "\n\n".join(pages)
+    # Pages are joined with a form feed rather than a blank line, so the page
+    # boundary survives into the extracted text and a knowledge base can chunk
+    # per page and cite an exact `p.N` (see `core/knowledge_base.py`'s
+    # `_chunk_document`). The email attachment path reads the same string; a
+    # form feed is whitespace, so nothing there changes but the separator a
+    # model sees between two pages.
+    return header + "\f".join(pages)
 
 
 def _parse_docx_bytes(data: bytes, name: str) -> str:
