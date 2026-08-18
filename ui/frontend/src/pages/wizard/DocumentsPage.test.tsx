@@ -346,7 +346,10 @@ describe('DocumentsPage', () => {
     await screen.findByText('Add your documents')
 
     fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
-    fireEvent.change(screen.getByLabelText(/what's in these documents/i), {
+    const descriptionInput = screen.getByLabelText(/what's in these documents/i)
+    // The server caps the description at 500 characters; the input says so too.
+    expect(descriptionInput).toHaveAttribute('maxlength', '500')
+    fireEvent.change(descriptionInput, {
       target: { value: '  Our refund and shipping policies  ' },
     })
     const file = new File(['x'], 'doc.txt', { type: 'text/plain' })

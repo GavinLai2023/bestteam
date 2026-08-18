@@ -83,6 +83,31 @@ describe('KnowledgeBasesPanel', () => {
     expect(screen.getByText(/no text layer/)).toBeInTheDocument()
   })
 
+  it('counts every skipped file, not just the ones it can name', async () => {
+    // `job_status_payload` caps `errors` at 10, so the list is a sample and
+    // `documents_failed` is the count.
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({
+        latest_job: {
+          job_id: 1, status: 'completed', file_count: 20, documents_succeeded: 5,
+          documents_failed: 15, chunk_count: 4,
+          errors: Array.from({ length: 10 }, (_, i) => ({
+            filename: `bad-${i}.pdf`, error: 'no text layer',
+          })),
+        },
+      }),
+    ])
+    render(<KnowledgeBasesPanel />)
+
+    const toggle = await screen.findByRole('button', { name: /15 files skipped/i })
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+    // The named ones are still all listed.
+    expect(screen.getByText(/bad-0\.pdf/)).toBeInTheDocument()
+    expect(screen.getByText(/bad-9\.pdf/)).toBeInTheDocument()
+  })
+
   it("shows a failed upload's own error, and says the previous version is still live", async () => {
     mockedApi.listOwnKnowledgeBases.mockResolvedValue([
       kb({

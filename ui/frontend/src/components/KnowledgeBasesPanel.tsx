@@ -101,20 +101,23 @@ export default function KnowledgeBasesPanel() {
       <ul className="session-list">
         {items.map((kb) => {
           const job = kb.latest_job
+          // `errors` is a sample -- `job_status_payload` caps it at 10 -- so the
+          // count comes from `documents_failed` and the list stays what we can name.
           const skipped = job?.status === 'completed' ? job.errors : []
+          const skippedCount = job?.status === 'completed' ? job.documents_failed : 0
           const blocked = deleteBlockedReason(kb)
           return (
             <li key={kb.name} className="session-item">
               <h3>{kb.name}</h3>
               <p className="hint">{statusFor(kb)}</p>
               {kb.used_by.length > 0 && <p className="hint">Used by {kb.used_by.join(', ')}</p>}
-              {skipped.length > 0 && (
+              {skippedCount > 0 && (
                 <>
                   <button
                     type="button"
                     onClick={() => setOpenSkipped((n) => (n === kb.name ? null : kb.name))}
                   >
-                    {skipped.length} file{skipped.length === 1 ? '' : 's'} skipped
+                    {skippedCount} file{skippedCount === 1 ? '' : 's'} skipped
                   </button>
                   {openSkipped === kb.name && (
                     <ul>

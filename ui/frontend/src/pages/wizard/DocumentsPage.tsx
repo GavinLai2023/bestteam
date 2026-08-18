@@ -251,6 +251,7 @@ export default function DocumentsPage() {
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="e.g. Refund, delivery and warranty policies for our online shop"
+          maxLength={500}
           disabled={busy}
         />
         <p className="hint">This helps your AI team know when to look here for an answer.</p>
