@@ -656,3 +656,97 @@ def test_chunk_page_and_heading_persist_and_round_trip_into_from_chunks(db, engi
     assert {(c.source, c.page) for c in rebuilt._chunks} >= {("manual.pdf", 1), ("manual.pdf", 2)}
     assert "[source: manual.pdf, p.2]" in rebuilt.query("returns five days")
     assert "[source: guide.md § Refunds]" in rebuilt.query("refunds 30 days")
+
+
+def _stub_embeddings(monkeypatch):
+    """Let a job run under a *real* provider spec without a provider: only a
+    non-`fake:` string spec is billable, so only that path is metered."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    monkeypatch.setattr(
+        ingestion, "resolve_embedding_model", lambda spec: DeterministicFakeEmbedding(size=4)
+    )
+
+
+def test_vector_ingestion_records_kb_ingest_usage_row(db, engine, tmp_path, monkeypatch):
+    from bestteam.core.embeddings import estimate_embedding_tokens
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    _stub_embeddings(monkeypatch)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="vector", chunk_size=1000, chunk_overlap=100,
+        embedding_model="openai:text-embedding-3-small", engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "completed"
+    chunks = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).all()
+    rows = db.query(UsageRecord).all()
+    assert len(rows) == 1  # one row per job, not per chunk
+    assert rows[0].agent == "kb:ingest"
+    assert rows[0].run_id is None
+    assert rows[0].ingestion_job_id == job.id
+    assert rows[0].org_id == kb.org_id
+    assert rows[0].model == "openai:text-embedding-3-small"
+    assert rows[0].input_tokens == sum(estimate_embedding_tokens(c.text) for c in chunks)
+    assert rows[0].output_tokens == 0
+
+
+def test_local_folder_and_fake_spec_ingestion_record_nothing(db, engine, tmp_path):
+    """A `local_folder` KB embeds nothing and a `fake:` spec is $0 -- neither
+    is spend, so neither gets a row."""
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="mixed_kb")
+    for kb_type, spec, version in (("local_folder", None, "v_plain"), ("vector", "fake:4", "v_fake")):
+        job = _make_job(db, kb, version=version)
+        version_dir = tmp_path / version
+        version_dir.mkdir()
+        (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+        ingestion.run_ingestion_job(
+            job.id, kb.id, kb.org_id, version_dir,
+            kb_type=kb_type, chunk_size=1000, chunk_overlap=100, embedding_model=spec,
+            engine=engine,
+        )
+        db.expire_all()
+        assert db.get(IngestionJob, job.id).status == "completed"
+
+    assert db.query(UsageRecord).count() == 0
+
+
+def test_metering_failure_never_flips_completed_job(db, engine, tmp_path, monkeypatch):
+    """Metering is best-effort cleanup like cache invalidation and pruning: the
+    job's chunks are already durable, so a failed `usage_records` write must
+    not turn a completed ingestion into a failed one."""
+    from ui.backend.db.models import UsageRecord
+
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb)
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "doc.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    _stub_embeddings(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated metering failure")
+
+    monkeypatch.setattr(ingestion, "record_usage", _boom)
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="vector", chunk_size=1000, chunk_overlap=100,
+        embedding_model="openai:text-embedding-3-small", engine=engine,
+    )
+
+    db.expire_all()
+    assert db.get(IngestionJob, job.id).status == "completed"
+    chunk = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).one()
+    assert chunk.embedding_json is not None
+    assert db.query(UsageRecord).count() == 0

@@ -34,7 +34,7 @@ from bestteam.exceptions import BestTeamError
 from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin, get_current_user
-from .db.model_catalog import delete_entry, get_entry, list_entries, upsert_entry
+from .db.model_catalog import delete_entry, get_entry, list_chat_entries, list_entries, upsert_entry
 from .deploy_validation import find_email_egress_conflicts, validate_agent_models
 from .db.models import (
     BuilderSession,
@@ -649,4 +649,7 @@ public_router = APIRouter(prefix="/api", tags=["model-catalog"], dependencies=[D
 
 @public_router.get("/model-catalog")
 def list_model_catalog_public(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
-    return [_model_catalog_entry_to_dict(entry) for entry in list_entries(db)]
+    # Chat models only: an embedding entry exists to price a knowledge base's
+    # embedding calls, and offering it as an agent's model would produce a team
+    # that cannot answer anything. The admin listing above still shows them.
+    return [_model_catalog_entry_to_dict(entry) for entry in list_chat_entries(db)]

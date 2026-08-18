@@ -67,7 +67,7 @@ def _default_chat_model(db: Session) -> Optional[str]:
     wizard's own `pickDefaultModel` (lib/models.ts) uses, resolved
     server-side so smart search's query-expansion model is never trusted
     from the client. `None` only if the catalog is empty."""
-    entries = model_catalog.list_entries(db)
+    entries = model_catalog.list_chat_entries(db)
     if not entries:
         return None
     non_fake = [e for e in entries if not e.spec.startswith("fake:")]

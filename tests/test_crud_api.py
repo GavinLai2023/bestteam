@@ -2288,3 +2288,22 @@ def test_workflow_put_still_allows_email_only_agents(client):
     }
     resp = client.put("/api/config/workflows/mail_only_wf?org=default", json=ok)
     assert resp.status_code in (200, 201), resp.text
+
+
+def test_public_model_catalog_hides_embedding_tier(client):
+    """`tier="embedding"` marks a catalog entry as an embedding model: it is
+    there so `record_usage` can price a knowledge base's embedding calls, not
+    for the wizard to hand an agent as its chat model."""
+    for spec, tier in (("openai:gpt-4o-mini", "fast"), ("openai:text-embedding-3-small", "embedding")):
+        assert client.put(
+            f"/api/config/model-catalog/{spec}",
+            json={"display_name": spec, "tier": tier},
+        ).status_code == 200
+
+    public = client.get("/api/model-catalog")
+    assert public.status_code == 200
+    assert [entry["spec"] for entry in public.json()] == ["openai:gpt-4o-mini"]
+
+    # The admin CRUD listing still shows it -- somebody has to maintain its price.
+    admin_specs = [entry["spec"] for entry in client.get("/api/config/model-catalog").json()]
+    assert "openai:text-embedding-3-small" in admin_specs

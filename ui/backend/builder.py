@@ -26,7 +26,7 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
-from .db.model_catalog import list_entries, to_prompt_text
+from .db.model_catalog import list_chat_entries, list_entries, to_prompt_text
 from .deploy_validation import find_email_egress_conflicts, validate_agent_models
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
 from .db.workflows import publish_workflow_version
@@ -145,7 +145,7 @@ def _with_model_catalog(db: Session, text: str) -> str:
     """Append the `model_catalog` (if any) so the Solution Architect picks
     `AgentSpec.model` specs by role complexity, per
     docs/team_builder_methodology.md's Phase 3."""
-    catalog_text = to_prompt_text(list_entries(db))
+    catalog_text = to_prompt_text(list_chat_entries(db))
     return f"{text}\n\n{catalog_text}" if catalog_text else text
 
 

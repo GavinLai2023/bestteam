@@ -1201,3 +1201,20 @@ def test_with_knowledge_base_catalog_includes_description(db_session):
     assert "- product_info_kb (type: local_folder): Product manuals and FAQs" in result
     # No description -> no trailing colon, rather than an empty one.
     assert "- undescribed_kb (type: local_folder)\n" in result + "\n"
+
+
+def test_model_catalog_prompt_hides_embedding_tier():
+    """The Solution Architect picks an agent's chat model from this text; an
+    embedding entry offered there would produce a team that cannot answer."""
+    engine = make_engine(":memory:")
+    init_db(engine)
+    Session = session_factory(engine)
+
+    with Session() as db:
+        upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", tier="fast")
+        upsert_entry(db, "openai:text-embedding-3-small", display_name="Embeddings", tier="embedding")
+
+        with_catalog = _with_model_catalog(db, "Requirements text")
+
+    assert "openai:gpt-4o-mini" in with_catalog
+    assert "text-embedding-3-small" not in with_catalog

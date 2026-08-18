@@ -660,12 +660,30 @@ class TraceEventRecord(Base):
 
 
 class UsageRecord(Base):
-    """Per-agent token usage for a `Run`, for usage-based metering (Phase 3)."""
+    """One metered LLM/embedding call, for usage-based metering (Phase 3).
+
+    One ledger for every kind of spend an org can incur, which is what lets
+    `db/email_budget_settings.py`'s monthly cap be a single `SUM` over
+    `org_id`. Most rows belong to a `Run`, but a knowledge base's *ingestion*
+    embedding spend belongs to an upload rather than a run, so exactly one of
+    `run_id`/`ingestion_job_id` is set (`agent="kb:ingest"` for the latter).
+    A KB's *query-time* spend is a normal run row -- it rides the calling
+    agent's `agent_completed.usage` (see `core/tool_context.py`).
+    """
 
     __tablename__ = "usage_records"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # Set instead of `run_id` for knowledge-base ingestion spend (migration
+    # `n1o2p3q4r5s6`), so a row can be traced back to the upload that caused
+    # it. The id can outlive its job -- generation pruning and KB deletion
+    # both delete `knowledge_ingestion_jobs` rows, and this row deliberately
+    # survives them (same "keep the accounting" rule retention follows), so
+    # treat it as a provenance label, not a joinable key.
+    ingestion_job_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("knowledge_ingestion_jobs.id"), nullable=True
+    )
     agent: Mapped[Optional[str]] = mapped_column(nullable=True)
     model: Mapped[Optional[str]] = mapped_column(nullable=True)
     input_tokens: Mapped[int] = mapped_column(default=0)

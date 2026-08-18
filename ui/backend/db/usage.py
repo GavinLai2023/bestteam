@@ -4,6 +4,9 @@
 usage entry on an `agent_completed` `TraceEvent` (see
 `adapters/langgraph_adapter.py::_record_usage`), converting token counts into
 a `cost_estimate` via the `model_catalog` (when a matching `spec` is found).
+It is also called from `ui/backend/ingestion.py` for a knowledge base's
+document-embedding spend, which belongs to an upload rather than a run and so
+carries a NULL `run_id` and an `ingestion_job_id` instead.
 """
 
 from __future__ import annotations
@@ -19,13 +22,17 @@ from .models import UsageRecord
 def record_usage(
     db: Session,
     *,
-    run_id: str,
+    run_id: Optional[str],
     agent: Optional[str],
     model: Optional[str],
     input_tokens: int = 0,
     output_tokens: int = 0,
     org_id: Optional[int] = None,
+    ingestion_job_id: Optional[int] = None,
 ) -> UsageRecord:
+    """Persist one metered call. `run_id` is None only for spend that belongs
+    to no run -- today, a knowledge base's ingestion embeddings, which pass
+    `ingestion_job_id` instead (see `ui/backend/ingestion.py`)."""
     cost_estimate = None
     if model:
         entry = get_entry(db, model)
@@ -36,6 +43,7 @@ def record_usage(
 
     record = UsageRecord(
         run_id=run_id,
+        ingestion_job_id=ingestion_job_id,
         agent=agent,
         model=model,
         input_tokens=input_tokens,

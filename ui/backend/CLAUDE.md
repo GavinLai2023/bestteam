@@ -261,7 +261,8 @@ applied by `db/orgs.py::create_org` to **newly created** orgs only.
 The rule that is easy to break by "simplifying": **a purge clears content and
 keeps accounting.** Content is `runs.input`/`output`, the run's `trace_events`,
 and `automation_item_results.payload`. Accounting is the `runs` row itself
-(deleting it would orphan `usage_records`, which is non-nullable and backs
+(deleting it would orphan every `usage_records` row that names it -- `run_id`
+is nullable only so KB *ingestion* spend can omit it, and those rows back
 `run_analytics_api.py`), `usage_records`, `trigger_context`, and an item
 result's `status`/`source_key` -- those two are what
 `automation_results.CONFIRMED_DRAFT_OUTCOMES` uses to exclude already-drafted
@@ -1332,7 +1333,16 @@ that KB permanently undeletable.
   authenticates with a single-use `?ticket=` (see the runs section).
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
-  Solution Architect's prompt. `builder.py::_with_model_catalog(db, text)`
+  Solution Architect's prompt. **`tier="embedding"` marks an entry as an
+  embedding model, not a chat model**: it lives in the same table so
+  `record_usage` can price a knowledge base's embedding spend from one
+  catalog, and `list_chat_entries(db)` (not `list_entries`) is what every
+  chat-model surface uses -- the public listing below,
+  `builder.py::_with_model_catalog`, and
+  `org_knowledge_bases.py::_default_chat_model` -- so an embedding model can
+  never be handed to an agent. Admin CRUD still lists everything (somebody
+  maintains those prices), and no embedding entry is seeded into
+  `DEFAULT_MODEL_CATALOG`. `builder.py::_with_model_catalog(db, text)`
   appends this to the requirements text before `generate_specification()` (in
   both `submit_specification` and `submit_solution_feedback`'s `model=`
   paths), so the architect picks `AgentSpec.model` specs by role complexity
@@ -1390,6 +1400,31 @@ that KB permanently undeletable.
   usage persistence goes through `_safe_record_usage`, which isolates a
   `usage_records` write failure (logs + rolls back) so metering can never
   flip a successful run to `run_failed`.
+- **Knowledge-base spend** (P0-4) reaches the same ledger by two routes, and
+  `runtime.py` needed no change for either:
+  - *Query time* (the query embedding for `vector`/`hybrid`, and the
+    query-expansion LLM call for all three types) rides the **existing**
+    `agent_completed.usage` list. A KB tool reports its spend through
+    `core/tool_context.py::add_usage`, and the adapter's tool loop drains
+    `tool_ctx.usage` into the node's `usage_sink` -- on the failure path too,
+    since the paid call already happened. So these are ordinary run rows,
+    attributed to the agent that searched, with `model` set to the embedding
+    or expansion spec. No new event field, no new metering branch.
+  - *Ingestion* (`ui/backend/ingestion.py::_safe_record_ingestion_usage`)
+    writes **one** row per completed job -- not per chunk -- with
+    `agent="kb:ingest"`, `run_id=None` and `ingestion_job_id` set. It runs
+    after the job's own commit and is best-effort in its own `try/except`,
+    like the cache invalidation and pruning beside it: a metering failure
+    must never turn a completed ingestion into a failed one.
+
+  Two things to keep in mind. **Embedding token counts are estimated**
+  (`core/embeddings.py::estimate_embedding_tokens`, ±30%) because no provider
+  reports embedding usage through LangChain's `Embeddings` interface --
+  expansion tokens are the model's own reported `usage_metadata`, not an
+  estimate. And **nothing billable means nothing recorded**:
+  `core/embeddings.py::billable_spec()` is the one definition of billable (a
+  non-`fake:` string spec), shared by the SDK and `ingestion.py`. Reranking
+  is a local cross-encoder, $0, and is deliberately never recorded.
 
 ## Per-user memory
 
