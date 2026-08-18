@@ -1,6 +1,7 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
+import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
@@ -115,12 +116,10 @@ def _await_ingestion(future, deadline_seconds=10):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    # `_KB_UPLOADS_DIR` is defined in knowledge_bases.py (where the actual
-    # upload/delete-on-disk logic lives) and merely re-imported into crud.py's
-    # namespace for the DELETE handler's own read -- patch both bindings so
-    # the two stay pointed at the same tmp directory during a test.
+    # `_KB_UPLOADS_DIR` is defined in knowledge_bases.py, which owns every
+    # read and write of it (upload, and the delete-on-disk in
+    # `delete_knowledge_base`) -- so one binding is the whole surface.
     monkeypatch.setattr(backend_knowledge_bases, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
-    monkeypatch.setattr(backend_crud, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
     backend_main._workflow_cache.clear()
 
     # A file database, not `:memory:`: every upload here dispatches an
@@ -667,7 +666,7 @@ def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
         files=[("files", ("first.txt", b"first content", "text/plain"))],
     )
 
-    lock = backend_crud._kb_upload_lock("1/kb")  # keyed by <org_id>/<name>
+    lock = backend_knowledge_bases._kb_upload_lock("1/kb")  # keyed by <org_id>/<name>
     lock.acquire()
     done = []
 
@@ -888,7 +887,7 @@ def test_ingestion_job_status_404_for_another_orgs_job(client):
 
 
 def test_upload_rejects_name_with_spaces_before_writing_files(client):
-    from ui.backend.crud import _KB_UPLOADS_DIR
+    from ui.backend.knowledge_bases import _KB_UPLOADS_DIR
 
     files = [("files", ("doc1.txt", b"some content here for parsing", "text/plain"))]
     resp = client.post("/api/config/knowledge_bases/bad name/upload?org=default", files=files)
@@ -911,7 +910,7 @@ def test_upload_rejects_oversized_file(client):
 
 
 def test_upload_sanitizes_path_traversal_filename(client):
-    from ui.backend.crud import _KB_UPLOADS_DIR
+    from ui.backend.knowledge_bases import _KB_UPLOADS_DIR
 
     files = [("files", ("../../evil.txt", b"some content here for parsing", "text/plain"))]
     resp = client.post("/api/config/knowledge_bases/traversal_kb/upload?org=default", files=files)
@@ -997,7 +996,7 @@ def test_delete_knowledge_base_removes_uploaded_files(client):
         # race is removed rather than asserted around.
         _await_ingestion(futures.pop())
 
-    from ui.backend.crud import _KB_UPLOADS_DIR
+    from ui.backend.knowledge_bases import _KB_UPLOADS_DIR
 
     upload_dir = _KB_UPLOADS_DIR / "1" / "to_delete"  # org-scoped: <org_id>/<name>
     assert upload_dir.is_dir()
@@ -1039,6 +1038,74 @@ def test_deleting_kb_removes_ingestion_rows(client):
         assert db.query(IngestionJob).filter_by(kb_id=kb_id).count() == 0
         assert db.query(KnowledgeDocument).filter_by(kb_id=kb_id).count() == 0
         assert db.query(KnowledgeChunk).filter_by(kb_id=kb_id).count() == 0
+
+
+def test_delete_kb_refused_409_while_ingestion_job_in_flight(client):
+    # P0-1: the ingestion worker keeps reading the staged files and commits
+    # Document/Chunk rows against `kb_id` when it finishes, so deleting the
+    # record out from under it left orphan rows (and, on Windows, an upload
+    # directory `rmtree` could not remove). The delete is refused instead
+    # while a queued/running job exists for that KB.
+    release = threading.Event()
+    real_parse_file = backend_ingestion.parse_file
+
+    def _blocking_parse_file(path):
+        # Bounded: a regression here must fail the test, not wedge one of the
+        # four ingestion workers for the rest of the session.
+        assert release.wait(timeout=10), "the ingestion worker was never released"
+        return real_parse_file(path)
+
+    files = [("files", ("doc.txt", b"some content here", "text/plain"))]
+    with _ingestion_futures() as futures:
+        with patch.object(backend_ingestion, "parse_file", _blocking_parse_file):
+            assert client.post(
+                "/api/config/knowledge_bases/busy_kb/upload?org=default", files=files
+            ).status_code == 200
+            try:
+                resp = client.delete("/api/config/knowledge_bases/busy_kb?org=default")
+                assert resp.status_code == 409
+                assert "still processing an upload" in resp.json()["detail"]
+                # Refused means untouched -- the record is still there to
+                # delete once the upload it is busy with has resolved.
+                assert client.get(
+                    "/api/config/knowledge_bases/busy_kb?org=default"
+                ).status_code == 200
+            finally:
+                release.set()
+            _await_ingestion(futures.pop())
+
+    # The refusal is temporary, not a permanently undeletable KB.
+    assert client.delete("/api/config/knowledge_bases/busy_kb?org=default").status_code == 204
+
+
+def test_delete_kb_after_job_completes_leaves_no_orphan_rows(client):
+    # The other half of P0-1: refusing an in-flight delete must not make a
+    # resolved one over-refuse. Once the job is terminal the delete proceeds
+    # and takes every ingestion row and the upload directory with it.
+    from ui.backend.db.models import KnowledgeChunk, KnowledgeDocument
+
+    files = [("files", ("doc.txt", b"Refunds are allowed within 30 days.", "text/plain"))]
+    with _ingestion_futures() as futures:
+        assert client.post(
+            "/api/config/knowledge_bases/finished_kb/upload?org=default", files=files
+        ).status_code == 200
+        _await_ingestion(futures.pop())
+
+    with open_test_db() as db:
+        kb_id = db.query(KnowledgeBaseRecord).filter_by(name="finished_kb").one().id
+        # Guard the guard: rows must exist, or "no orphans" below is vacuous.
+        assert db.query(KnowledgeChunk).filter_by(kb_id=kb_id).count() > 0
+
+    upload_dir = backend_knowledge_bases._KB_UPLOADS_DIR / "1" / "finished_kb"
+    assert upload_dir.is_dir()
+
+    assert client.delete("/api/config/knowledge_bases/finished_kb?org=default").status_code == 204
+
+    with open_test_db() as db:
+        assert db.query(IngestionJob).filter_by(kb_id=kb_id).count() == 0
+        assert db.query(KnowledgeDocument).filter_by(kb_id=kb_id).count() == 0
+        assert db.query(KnowledgeChunk).filter_by(kb_id=kb_id).count() == 0
+    assert not upload_dir.exists()
 
 
 _VALID_WORKFLOW_CONFIG = {

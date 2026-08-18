@@ -1230,6 +1230,26 @@ the caller's existing delete+commit+rmtree transaction rather than
 committing separately). See `ui/backend/db/CLAUDE.md` for the three tables'
 schema.
 
+**Deleting a knowledge base is refused (`409`) while an upload is still
+processing**, and the whole sequence lives in
+`knowledge_bases.py::delete_knowledge_base`, not in `crud.py` — it needs this
+module's per-KB `_kb_upload_lock`, and it takes `component_mutation_lock`
+itself, which is **not reentrant**, so `crud.delete_item`'s `knowledge_bases`
+branch has to return *before* entering its own `with component_mutation_lock`
+block. The in-flight check (a `queued`/`running` `IngestionJob` for this KB)
+runs inside the per-KB lock, alongside the delete, commit and `rmtree` it
+guards. Refusing, rather than cancelling, is what makes "a KB being deleted
+has no worker" true: uploads and deletes both serialize on that lock and only
+an upload creates a job, whereas a cancel flag would still leave the worker
+holding an open file handle — `rmtree` then fails with `WinError 32` and
+silently leaks the directory, and the worker's final commit writes
+Document/Chunk rows against a `kb_id` that no longer exists (FK enforcement is
+off, so nothing catches them). `ingestion.fail_interrupted_jobs(engine)`,
+called from `main.py::_lifespan`, is the other half: the executor is
+per-process, so a job still `queued`/`running` at startup belongs to a dead
+process and is marked `failed` — without it, one killed process would make
+that KB permanently undeletable.
+
 ## Auth, model catalog, and usage metering (Phase 3)
 
 - **`ui/backend/auth.py`** — stdlib-only password hashing (PBKDF2-HMAC-SHA256,

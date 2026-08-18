@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import threading
@@ -29,8 +30,12 @@ from bestteam.exceptions import BestTeamError, ConfigurationError
 from bestteam.tools import REGISTRY
 
 from . import ingestion
+from .component_lock import component_mutation_lock
+from .db.dependencies import workflows_referencing
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 from .deploy_validation import find_kb_tool_collisions
+
+_logger = logging.getLogger(__name__)
 
 # --- KB path containment (CR-001) -------------------------------------------
 # A KB `cache_path` is a server-file *write* target (the vector KB's
@@ -315,6 +320,76 @@ def upload_knowledge_base(
             ) from exc
 
         return {"name": item_name, "job_id": job.id, "status": "queued"}
+
+
+def delete_knowledge_base(db: Session, org_id: Optional[int], item_name: str) -> None:
+    """Delete a knowledge base: its record, its ingestion rows, its uploads.
+
+    Lives here rather than in `crud.py`'s generic component-delete route
+    because it needs the per-KB `_kb_upload_lock` this module owns, and
+    because it takes `component_mutation_lock` itself -- that lock is NOT
+    reentrant, so the route has to call this *before* entering its own
+    `with component_mutation_lock` block, not inside it.
+
+    Refuses (409) while a `queued`/`running` `IngestionJob` exists for this
+    KB. The ingestion worker runs on its own thread and commits
+    Document/Chunk rows against `kb_id` when it finishes, so deleting the
+    record out from under it left orphan rows behind (FK enforcement is off,
+    so nothing caught them) and, on Windows, leaked the upload directory --
+    `rmtree` fails with `WinError 32` against the handle the worker still
+    holds open. Refusing is what makes "a KB being deleted has no worker"
+    true: uploads and deletes both serialize on `_kb_upload_lock`, and only
+    an upload creates a job. `ingestion.fail_interrupted_jobs` (called at
+    startup) is what stops a killed process making this refusal permanent.
+    """
+    with component_mutation_lock:
+        item = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Unknown knowledge_base '{item_name}'")
+        used_by = workflows_referencing(db, kind="knowledge_base", resource_id=item.id)
+        if used_by:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Can't delete '{item_name}': it's used by deployed team(s): "
+                    + ", ".join(used_by)
+                    + ". Update or remove those teams first."
+                ),
+            )
+        # Hold the per-KB lock across the in-flight check, delete, commit and
+        # rmtree so a concurrent upload can't dispatch a job (or recreate the
+        # row/files) in a gap and then have them removed here (F1). Commit
+        # before rmtree so a commit failure keeps the files for the
+        # still-present record; a failed rmtree is logged (the record is
+        # already gone), not silently swallowed (F3-prev).
+        with _kb_upload_lock(f"{org_id}/{item_name}"):
+            in_flight = (
+                db.query(IngestionJob)
+                .filter(IngestionJob.kb_id == item.id, IngestionJob.status.in_(("queued", "running")))
+                .first()
+            )
+            if in_flight is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{item_name}' is still processing an upload. "
+                        "Wait for it to finish, then delete it."
+                    ),
+                )
+            ingestion.delete_kb_ingestion_data(db, item.id)
+            db.delete(item)
+            db.commit()
+            upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
+            if upload_dir.is_dir():
+                try:
+                    shutil.rmtree(upload_dir)
+                except OSError as exc:
+                    _logger.warning(
+                        "Knowledge base '%s' (org %s) deleted, but its upload "
+                        "directory couldn't be removed: %s",
+                        item_name, org_id, exc,
+                    )
+    _invalidate_workflow_cache()
 
 
 def resolve_kb_upload_path(config: Dict[str, Any]) -> Dict[str, Any]:

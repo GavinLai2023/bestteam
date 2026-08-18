@@ -474,3 +474,39 @@ def test_cache_invalidation_failure_does_not_revert_completed_job_status(db, eng
     assert docs[0].status == "chunked"
     chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
     assert len(chunks) == 1
+
+
+def test_fail_interrupted_jobs_marks_queued_and_running_failed_and_leaves_terminal_jobs_alone(db, engine):
+    # A killed process leaves its jobs stuck queued/running forever, and the
+    # delete guard (P0-1) refuses to delete a KB while one exists -- so the
+    # startup sweep is what stops a restart making that refusal permanent.
+    kb = _make_kb(db)
+    queued = _make_job(db, kb, version="v_queued")
+    running = _make_job(db, kb, version="v_running")
+    running.status = "running"
+    completed = _make_job(db, kb, version="v_completed")
+    completed.status = "completed"
+    already_failed = _make_job(db, kb, version="v_failed")
+    already_failed.status = "failed"
+    already_failed.error = "the original diagnosis"
+    db.commit()
+    queued_id, running_id = queued.id, running.id
+    completed_id, already_failed_id = completed.id, already_failed.id
+
+    assert ingestion.fail_interrupted_jobs(engine) == 2
+
+    db.expire_all()
+    for job_id in (queued_id, running_id):
+        job = db.get(IngestionJob, job_id)
+        assert job.status == "failed"
+        assert job.error == (
+            "Processing was interrupted by a server restart. "
+            "Please upload the documents again."
+        )
+        assert job.completed_at is not None
+    # A terminal job is never rewritten -- least of all a failed one, whose
+    # `error` is the customer-visible record of what actually went wrong.
+    assert db.get(IngestionJob, completed_id).status == "completed"
+    stale = db.get(IngestionJob, already_failed_id)
+    assert stale.status == "failed"
+    assert stale.error == "the original diagnosis"

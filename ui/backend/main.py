@@ -36,6 +36,7 @@ from bestteam.exceptions import BestTeamError
 from . import auth
 from . import automation_results
 from . import email_trigger
+from . import ingestion
 from . import interview
 from . import retention
 from . import secret_store
@@ -142,13 +143,24 @@ def _enforce_one_member_per_org_or_raise(db) -> None:
 @asynccontextmanager
 async def _lifespan(_app):
     """ASGI startup: refuse to serve while the membership invariant is violated,
-    then run the autonomous email-trigger poller for the app's lifetime.
+    fail any ingestion job a previous process died holding, then run the
+    autonomous email-trigger poller for the app's lifetime.
 
     The membership guard is data-dependent (unlike the config guards below), so
     it runs when the server actually starts serving, not at import."""
     with SessionLocal() as session:
         try:
             _enforce_one_member_per_org_or_raise(session)
+            # The ingestion executor is per-process, so anything still
+            # queued/running now was orphaned by the last shutdown and will
+            # never resolve itself -- and a KB with such a job can't be
+            # deleted (see knowledge_bases.delete_knowledge_base).
+            interrupted = ingestion.fail_interrupted_jobs(session.get_bind())
+            if interrupted:
+                logger.warning(
+                    "Marked %s interrupted knowledge-base ingestion job(s) as failed "
+                    "on startup; those uploads need to be retried", interrupted,
+                )
         except OperationalError:
             pass  # pre-migration schema (no users table yet); nothing to enforce
     stop_polling = asyncio.Event()

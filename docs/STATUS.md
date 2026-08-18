@@ -1520,16 +1520,6 @@
   ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a
   future Sent-folder reconciliation would key on.
 
-- **Deleting a knowledge base has no interlock with an in-flight ingestion
-  job.** `crud.py`'s delete calls `delete_kb_ingestion_data` + `rmtree`, but
-  the ingestion worker thread keeps running and afterwards commits
-  `KnowledgeDocument`/`KnowledgeChunk` rows against a `kb_id` /
-  `ingestion_job_id` that no longer exist — orphan rows, silently, since FK
-  enforcement is off. On Windows the same race also leaks the upload directory
-  (`WinError 32`: `rmtree` against the worker's still-open read handle; the
-  route logs and continues by design). Found while fixing the flaky tests
-  (17 Aug 2026) and deliberately left alone there — it is a product
-  concurrency gap, not a test bug.
 - **`_active_kb_dir` (tests/test_crud_api.py) resolves the active KB version
   by `max(st_mtime)`**, which is theoretically ambiguous: Windows file
   timestamps come from a ~15.6 ms-granularity clock, so two version

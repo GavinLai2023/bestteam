@@ -262,7 +262,8 @@ knowledge bases as first-class records in the database, under
   that already exists on the server.
 - `DELETE /api/config/knowledge_bases/{name}` — delete the record (and, if
   it was created via the upload endpoint below, removes its upload
-  directory too).
+  directory too). Refused with `409` while an upload for that knowledge base
+  is still processing — wait for the ingestion job to finish, then delete.
 
 **File upload** (`POST /api/config/knowledge_bases/{name}/upload`,
 `ui/backend/crud.py`) is a `local_folder`-only convenience that lets a
@@ -387,7 +388,14 @@ job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
 whichever generation is live.
 
 Deleting a knowledge base cascades to delete its `IngestionJob`/
-`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`).
+`KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`),
+and is **refused with `409` while that knowledge base has a `queued` or
+`running` ingestion job** — the worker is still reading the staged files and
+would otherwise commit chunks against a record that no longer exists. The
+refusal lasts only as long as the upload: jobs left `queued`/`running` by a
+killed process are marked `failed` at the next startup, so a crash can never
+leave a knowledge base permanently undeletable.
+
 Older completed ingestion generations are pruned automatically (keeping the
 current one plus one grace-window generation) once a new job completes. A
 `failed` job's on-disk version directory is reclaimed the same way — every

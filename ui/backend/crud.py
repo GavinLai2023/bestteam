@@ -21,8 +21,6 @@ remain in `db/models.py`.
 from __future__ import annotations
 
 import inspect
-import logging
-import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
@@ -62,22 +60,19 @@ from .db.orgs import get_org_by_name, list_orgs
 from .db.workflows import publish_workflow_version
 from .email_tools import load_email_tools, resolve_agent_tool_sets
 from .db_session import get_db
-from .ingestion import delete_kb_ingestion_data, job_status_payload
+from .ingestion import job_status_payload
 from .knowledge_bases import (
-    _KB_UPLOADS_DIR,
     _invalidate_workflow_cache,
-    _kb_upload_lock,
     _reject_builtin_kb_name,
     check_path_traversal,
     checked_contained_cache_path,
+    delete_knowledge_base,
     kb_name_collisions,
     load_knowledge_base_tools,
     upload_knowledge_base,
 )
 from .component_lock import component_mutation_lock
 from .skills import DEFAULT_SKILLS, load_skills
-
-_logger = logging.getLogger(__name__)
 
 # Seeded platform built-in skills can't be deleted -- bundled YAML workflows may
 # depend on them (F4). Names only; the check applies to the platform tier.
@@ -267,6 +262,13 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
     ) -> Response:
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
+        if name == "knowledge_bases":
+            # A KB delete additionally interlocks with in-flight ingestion, so
+            # it owns the whole sequence (see knowledge_bases.py). It takes
+            # `component_mutation_lock` itself and that lock is NOT reentrant,
+            # so this must return before the `with` below -- not run inside it.
+            delete_knowledge_base(db, org_id, item_name)
+            return Response(status_code=204)
         # Serialize the reference scan + delete against concurrent deploys so a
         # deploy can't add a reference between the scan and the commit (F3).
         with component_mutation_lock:
@@ -280,9 +282,8 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                     status_code=409,
                     detail=f"'{item_name}' is a built-in skill and can't be deleted.",
                 )
-            if name in ("skills", "knowledge_bases"):
-                kind = "skill" if name == "skills" else "knowledge_base"
-                used_by = workflows_referencing(db, kind=kind, resource_id=item.id)
+            if name == "skills":
+                used_by = workflows_referencing(db, kind="skill", resource_id=item.id)
                 if used_by:
                     raise HTTPException(
                         status_code=409,
@@ -292,38 +293,16 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                             + ". Update or remove those teams first."
                         ),
                     )
-            if name == "knowledge_bases":
-                # Hold the per-KB lock across delete+commit+rmtree so a concurrent
-                # upload can't recreate the row/files in a gap and then have them
-                # removed here (F1). Commit before rmtree so a commit failure keeps
-                # the files for the still-present record; a failed rmtree is logged
-                # (the record is already gone), not silently swallowed (F3-prev).
-                with _kb_upload_lock(f"{org_id}/{item_name}"):
-                    delete_kb_ingestion_data(db, item.id)
-                    db.delete(item)
-                    db.commit()
-                    upload_dir = _KB_UPLOADS_DIR / str(org_id) / item_name
-                    if upload_dir.is_dir():
-                        try:
-                            shutil.rmtree(upload_dir)
-                        except OSError as exc:
-                            _logger.warning(
-                                "Knowledge base '%s' (org %s) deleted, but its upload "
-                                "directory couldn't be removed: %s",
-                                item_name, org_id, exc,
-                            )
-            else:
-                if name == "skills":
-                    # Retain immutable version snapshots for superseded workflow
-                    # provenance while detaching them from the deleted library head.
-                    db.query(SkillVersion).filter_by(skill_id=item.id).update(
-                        {SkillVersion.skill_id: None}, synchronize_session=False
-                    )
-                    item.current_version_id = None
-                    db.flush()
-                db.delete(item)
-                db.commit()
-        if name in ("knowledge_bases", "skills"):
+                # Retain immutable version snapshots for superseded workflow
+                # provenance while detaching them from the deleted library head.
+                db.query(SkillVersion).filter_by(skill_id=item.id).update(
+                    {SkillVersion.skill_id: None}, synchronize_session=False
+                )
+                item.current_version_id = None
+                db.flush()
+            db.delete(item)
+            db.commit()
+        if name == "skills":
             _invalidate_workflow_cache()
         return Response(status_code=204)
 

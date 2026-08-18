@@ -353,6 +353,40 @@ def delete_kb_ingestion_data(db: Session, kb_id: int) -> None:
     db.query(IngestionJob).filter_by(kb_id=kb_id).delete(synchronize_session=False)
 
 
+def fail_interrupted_jobs(engine: Engine) -> int:
+    """Resolve every `queued`/`running` job to `failed` and return how many.
+
+    Called once from `main.py::_lifespan`. The executor lives in this
+    process, so a job still queued/running when the app starts belongs to a
+    process that no longer exists -- its worker died mid-flight and nothing
+    will ever resolve it. Left alone they are permanent: the job-status API
+    spins forever, and `knowledge_bases.delete_knowledge_base` refuses to
+    delete the KB for as long as one exists. This is what bounds that
+    refusal to "until the next restart" instead of "forever".
+
+    One bulk UPDATE, no ORM objects loaded: this runs on the startup path,
+    before anything is served.
+    """
+    with Session(engine) as db:
+        updated = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.status.in_(("queued", "running")))
+            .update(
+                {
+                    IngestionJob.status: "failed",
+                    IngestionJob.error: (
+                        "Processing was interrupted by a server restart. "
+                        "Please upload the documents again."
+                    ),
+                    IngestionJob.completed_at: _now(),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+    return updated
+
+
 def job_status_payload(db: Session, job: IngestionJob) -> Dict[str, Any]:
     """Format one IngestionJob for the ingestion-jobs read API (shared by
     the admin and org-scoped routes -- see ui/backend/crud.py,
