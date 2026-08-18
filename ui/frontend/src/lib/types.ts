@@ -352,3 +352,44 @@ export interface OrgExportBundle {
   oldest_included: string | null
   runs: unknown[]
 }
+
+// --- pre-LLM mail filter and automation budgets (Phase 4a) ------------------
+
+// Every pattern is a literal, never a regular expression: a sender entry is a
+// full address or `*@domain`, a subject entry is a word or phrase the subject
+// must contain. See ui/backend/email_filter.py.
+export interface EmailFilterSettings {
+  skip_bulk: boolean
+  sender_blocklist: string[]
+  sender_allowlist: string[]
+  subject_blocklist: string[]
+}
+
+// null means no cap -- the default. It is NOT the same as 0, which would be a
+// cap of zero, i.e. automation switched off.
+export interface EmailBudgetInput {
+  daily_message_cap: number | null
+  monthly_cost_cap: number | null
+}
+
+// `spent_this_month` is null when nothing this month could be priced at all --
+// not zero, and it must never be shown as a measured $0.00.
+// `unpriced_models`/`unpriced_runs_this_month` are the spend cap's blind spot:
+// a model with no catalogue price contributes nothing to the total, so the
+// figure is a floor rather than the full amount. Advisory, never an error.
+export interface EmailBudget extends EmailBudgetInput {
+  messages_today: number
+  spent_this_month: number | null
+  unpriced_runs_this_month: number
+  unpriced_models: string[]
+}
+
+// One message the filter skipped before any model read it. `reason` is the
+// sentence to show; `decision` is the raw rule code, for debugging only.
+export interface FilteredMessage {
+  id: number
+  external_id: string
+  decision: string | null
+  reason: string
+  detected_at: string | null
+}

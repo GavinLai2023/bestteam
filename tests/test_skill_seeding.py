@@ -24,7 +24,9 @@ def db_session():
 def test_seed_creates_email_skill(db_session):
     seed_default_skills(db_session)
     record = db_session.query(SkillRecord).filter_by(name="email_triage_reply").one()
-    assert record.config["tools"] == ["email_find", "email_read", "email_draft_reply"]
+    assert record.config["tools"] == [
+        "email_find", "email_read", "email_read_attachment", "email_draft_reply",
+    ]
     assert record.config["instructions"]
 
 
@@ -39,6 +41,27 @@ def test_triage_playbook_uses_only_agent_visible_signals(db_session):
     assert "List-Unsubscribe" not in instructions
     assert "bulk mail is fyi" in instructions.lower()
     assert "no-reply" in instructions.lower()
+
+
+def test_triage_playbook_says_when_to_read_an_attachment(db_session):
+    # A tool granted but absent from a numbered playbook is a tool the model
+    # uses by accident or not at all -- and this is the generic email skill,
+    # where most customers meet the capability.
+    seed_default_skills(db_session)
+    instructions = load_skills(db_session)["email_triage_reply"].instructions
+    lowered = instructions.lower()
+
+    assert "email_read_attachment" in instructions
+    # Conditional, never blanket: reading every attachment on every message is
+    # exactly the cost Phase 4a's filtering and budgets exist to control.
+    assert "only makes sense with one" in lowered
+    assert "not every attachment on every message" in lowered
+    # The refusal path is stated, and the same never-overclaim discipline as
+    # property_maintenance_intake_v2 carries over.
+    assert "unsupported type" in lowered
+    assert "never describe contents beyond what" in lowered
+    # The step is ordered before drafting, or it cannot inform the draft.
+    assert lowered.index("email_read_attachment") < lowered.index("email_draft_reply with")
 
 
 def test_seed_is_idempotent(db_session):
@@ -140,19 +163,72 @@ def test_maintenance_skills_are_seeded(db_session):
     assert {
         "email_input_security_core_v1",
         "property_maintenance_intake_v1",
+        "property_maintenance_intake_v2",
         "property_maintenance_response_v1",
     } <= names
 
 
 def test_intake_skill_grants_only_read_tools_never_draft(db_session):
     """WP1 acceptance (spec section 7): the Intake Analyst must never be able
-    to reach email_draft_reply."""
+    to reach email_draft_reply -- in either version of the skill."""
     seed_default_skills(db_session)
     skills = load_skills(db_session)
-    intake = skills["property_maintenance_intake_v1"]
-    assert set(intake.tools) == {"email_find", "email_read"}
+    assert set(skills["property_maintenance_intake_v1"].tools) == {
+        "email_find", "email_read",
+    }
+    assert set(skills["property_maintenance_intake_v2"].tools) == {
+        "email_find", "email_read", "email_read_attachment",
+    }
     security = skills["email_input_security_core_v1"]
     assert security.tools == []
+
+
+def test_intake_v1_is_frozen_exactly_as_it_shipped(db_session):
+    # The versioning rule (see skills.py's own comment): a new behaviour ships
+    # as `_v2`, never a silent edit of `_v1`, so a team pinned to `_v1` keeps
+    # the behaviour it was deployed with. Phase 4b is the first use of it, and
+    # this is what stops the next change quietly editing `_v1` instead.
+    seed_default_skills(db_session)
+    v1 = load_skills(db_session)["property_maintenance_intake_v1"]
+
+    assert set(v1.tools) == {"email_find", "email_read"}
+    assert "email_read_attachment" not in v1.instructions
+    assert "You cannot read attachments" in v1.instructions
+    assert "Never claim to have seen an attachment." in v1.instructions
+
+
+def test_every_email_reading_skill_grants_attachment_reading(db_session):
+    # Attachment reading is on by default for every email team, with no per-org
+    # switch -- so a seeded skill withholding the tool is the only thing that
+    # could make that false, silently, for the customers who use the templates.
+    # `_v1` is excluded on purpose: it is frozen, and the template points at
+    # `_v2`. The draft-only Response Coordinator is excluded too -- giving it
+    # any read tool would break the "Response never re-reads mail" boundary.
+    seed_default_skills(db_session)
+    skills = load_skills(db_session)
+    for name in ("email_triage_reply", "property_maintenance_intake_v2"):
+        assert "email_read_attachment" in skills[name].tools, name
+    assert "email_read_attachment" not in skills["property_maintenance_response_v1"].tools
+
+
+def test_intake_v2_describes_attachment_reading_without_overclaiming(db_session):
+    # `_v1`'s paragraph stated the capability did not exist. `_v2` must say the
+    # opposite -- while keeping every guarantee `_v1` got right, since a model
+    # that reads a PDF and then embellishes it is exactly the failure that
+    # wording was guarding against.
+    seed_default_skills(db_session)
+    instructions = load_skills(db_session)["property_maintenance_intake_v2"].instructions
+    lowered = instructions.lower()
+
+    assert "cannot read attachments" not in lowered
+    assert "email_read_attachment" in instructions
+    # Still recorded, still escalated, still never claimed.
+    assert "attachment_mentioned=true" in instructions
+    assert "missing_information" in instructions
+    assert "never claim to have seen an attachment you did not read" in lowered
+    assert "never describe contents beyond what" in lowered
+    # Conditional, never blanket -- the same cost control as the triage step.
+    assert "not for every attachment on every message" in lowered
 
 
 def test_response_skill_grants_only_draft_tool_never_read_tools(db_session):
@@ -234,7 +310,7 @@ def test_property_maintenance_inbox_demo_workflow_enforces_tool_boundary(db_sess
     intake_agent, response_agent = workflow.steps[0].agents
     intake_tools = {t.__name__ for t in intake_agent.tools}
     response_tools = {t.__name__ for t in response_agent.tools}
-    assert intake_tools == {"email_find", "email_read"}
+    assert intake_tools == {"email_find", "email_read", "email_read_attachment"}
     assert response_tools == {"email_draft_reply"}
     # The Response Coordinator drafts from the Intake Analyst's write-up,
     # which can itself quote injected instructions from the original email --

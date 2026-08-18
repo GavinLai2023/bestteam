@@ -34,7 +34,7 @@ graph TB
 |---|---|---|
 | `src/bestteam/` | SDK core — `Agent`/`Team`/`Workflow` dataclasses, `EngineAdapter` ABC, `LangGraphAdapter` | `src/bestteam/CLAUDE.md` |
 | `src/bestteam/core/` | `Specification`/`Requirements` structured outputs for the Team Builder, YAML loader, `local_folder`/`vector`/`hybrid` knowledge bases, per-user memory | `src/bestteam/core/CLAUDE.md` |
-| `src/bestteam/tools/` | Built-in tools: `web_search`, `local_business_search`, `parse_file`, `http_get`, `calculator`, and the draft-only email toolkit (`email_find`/`email_read`/`email_draft_reply`) | `src/bestteam/tools/CLAUDE.md` |
+| `src/bestteam/tools/` | Built-in tools: `web_search`, `local_business_search`, `parse_file`, `http_get`, `calculator`, and the draft-only email toolkit (`email_find`/`email_read`/`email_read_attachment`/`email_draft_reply`) | `src/bestteam/tools/CLAUDE.md` |
 | `src/bestteam/cli/` | Typer CLI: `init` / `run` / `graph` | root `CLAUDE.md` |
 | `ui/backend/` | FastAPI + WebSocket API — monitoring, builder wizard state machine, config CRUD, auth, model catalog, usage metering, run history/trace persistence, knowledge-base ingestion jobs, anonymous team sharing, autonomous email triggers, per-org email credentials (encrypted secrets store) | `ui/backend/CLAUDE.md` |
 | `ui/backend/db/` | SQLAlchemy persistence schema (SQLite; org-scoped multi-tenancy) | `ui/backend/db/CLAUDE.md` |

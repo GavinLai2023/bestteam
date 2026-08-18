@@ -9,6 +9,7 @@ from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
+from ..tools.file_parser import SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES
 from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
     _MAX_RERANK_CANDIDATE_K,
@@ -20,10 +21,10 @@ from .text_tokenize import significant_terms, tokenize
 
 _logger = logging.getLogger(__name__)
 
-_SUPPORTED_SUFFIXES = {
-    ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log",
-    ".pdf", ".xlsx", ".xlsm", ".docx", ".xml",
-}
+# Folder scanning discovers exactly what `parse_bytes` can dispatch on -- the
+# same set `parse_file` supports, imported rather than copied so a suffix added
+# to the parser is found here too, instead of silently not being. Re-exported
+# under the old private name because `ui/backend/ingestion.py` imports it.
 
 
 def _require_bm25():

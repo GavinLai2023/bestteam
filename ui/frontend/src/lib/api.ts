@@ -1,5 +1,6 @@
 import type {
-  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailTrigger,
+  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
+  EmailFilterSettings, EmailTrigger, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, RetentionSettings, RunListItem, Requirements,
@@ -467,6 +468,32 @@ export const api = {
   setEmailTrigger: (payload: { workflow_name: string; enabled: boolean }) =>
     request<EmailTrigger>('/api/org/email-trigger', { method: 'PUT', body: JSON.stringify(payload) }),
   emailTriggerActivity: () => request<unknown>('/api/org/email-trigger/activity'),
+
+  // Pre-LLM mail filter and per-org automation budgets (Phase 4a).
+  getEmailFilter: () => request<EmailFilterSettings>('/api/org/email-filter'),
+  setEmailFilter: (payload: EmailFilterSettings) =>
+    request<EmailFilterSettings>('/api/org/email-filter', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  getEmailBudget: () => request<EmailBudget>('/api/org/email-budget'),
+  // A cap of null is "no cap"; 0 would be a cap of zero -- automation off.
+  setEmailBudget: (payload: EmailBudgetInput) =>
+    request<EmailBudget>('/api/org/email-budget', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  // Mail the filter skipped, newest first, and handing one back for the next
+  // poll cycle -- a rule-based filter has false positives, and the cost of one
+  // has to be a click, not a lost enquiry.
+  listFilteredMessages: (limit?: number) =>
+    request<{ filtered: FilteredMessage[] }>(
+      `/api/org/email-trigger/filtered${limit ? `?limit=${limit}` : ''}`,
+    ),
+  releaseFilteredMessage: (id: number) =>
+    request<{ released: boolean }>(`/api/org/email-trigger/filtered/${id}/release`, {
+      method: 'POST',
+    }),
 
   // Interview recording transcription
   transcribeInterview: (file: File, model: string) =>

@@ -185,6 +185,19 @@ workflow load re-embeds all chunks (real embedding APIs incur cost/latency
 on each run). There's no DMS connector (SharePoint/Confluence/Google Drive)
 for any of the three knowledge base types.
 
+**A mis-encoded plain-text document is still skipped, not ingested.** The
+Phase 4b bytes refactor shares `file_parser._decode_text` between knowledge
+bases and email attachments, which pulled in opposite directions: an attachment
+must never fail a customer's run (a sender can name anything `.txt`), while a
+knowledge base is better served by a warning than by chunks full of U+FFFD that
+nobody can search and nobody was told about. The decoder therefore takes
+`lenient`, and only the attachment path turns it on. `parse_file` keeps strict
+decoding, so `_load_document_chunks` still skips a non-UTF-8 document with a
+warning exactly as it did before.
+Suffix support is also shared now: `_SUPPORTED_SUFFIXES` is an alias of
+`file_parser.SUPPORTED_SUFFIXES`, so a suffix added to `parse_bytes` is
+discovered by folder scanning automatically.
+
 **Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by all
 three KB types) now splits on the document's own structure — Markdown heading
 boundaries, XML element boundaries (via the renderer's indentation), and a

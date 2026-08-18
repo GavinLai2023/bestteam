@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
-import type { EmailTrigger } from '../lib/types'
+import type { EmailTrigger, FilteredMessage } from '../lib/types'
 
 interface EmailTriggerActivityProps {
   onViewRuns?: () => void
@@ -27,18 +27,53 @@ const REFRESH_INTERVAL_MS = 30_000
 // configured one. Recent autonomous runs live on the Runs tab (filter:
 // "Automatic only") instead of being duplicated here; `onViewRuns` jumps
 // there pre-filtered.
+//
+// It also carries the mail the pre-LLM filter skipped. That is shown rather
+// than dropped silently because a rule-based filter will have false positives,
+// and the cost of one has to be "an admin clicks Release", not "the enquiry
+// vanished and nobody knew".
 export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivityProps) {
   const [trigger, setTrigger] = useState<EmailTrigger | undefined>(undefined) // undefined = still loading
   const [statusFailed, setStatusFailed] = useState(false)
+  const [filtered, setFiltered] = useState<FilteredMessage[]>([])
+  const [filteredFailed, setFilteredFailed] = useState(false)
+  const [releaseError, setReleaseError] = useState<string | null>(null)
+  // Ids released during this session. The list is re-polled below, and a
+  // response already in flight when Release was clicked would otherwise put
+  // the row straight back on screen.
+  const releasedRef = useRef<Set<number>>(new Set())
 
   useEffect(() => {
     const load = () => {
       api.getEmailTrigger().then(setTrigger).catch(() => setStatusFailed(true))
+      api
+        .listFilteredMessages()
+        .then((data) => {
+          setFiltered(data.filtered.filter((m) => !releasedRef.current.has(m.id)))
+          setFilteredFailed(false)
+        })
+        // Reported, never swallowed: an empty section reads as "nothing was
+        // skipped", which is the one thing a failed load must not claim.
+        .catch(() => setFilteredFailed(true))
     }
     load()
     const id = setInterval(load, REFRESH_INTERVAL_MS)
     return () => clearInterval(id)
   }, [])
+
+  const release = async (id: number) => {
+    setReleaseError(null)
+    try {
+      await api.releaseFilteredMessage(id)
+      // Drop the row here rather than refetching: it is already gone
+      // server-side, and leaving it on screen until the admin reloads is the
+      // exact defect the Phase 3b review found in RunDetail.
+      releasedRef.current.add(id)
+      setFiltered((rows) => rows.filter((row) => row.id !== id))
+    } catch (e) {
+      setReleaseError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   if (statusFailed) {
     return (
@@ -67,30 +102,67 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
   const meta = STATUS_META[trigger.status] ?? { badge: trigger.status, text: '' }
 
   return (
-    <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
-      <div className="trigger-status-header">
-        <h3>Automatic runs — "{trigger.workflow_name}"</h3>
-        <span className="status-badge">{meta.badge}</span>
-      </div>
-      <p className="subtitle">{meta.text}</p>
-      <p className="hint">Triggers when new email arrives in the connected mailbox.</p>
-      {trigger.last_checked_at && (
+    <>
+      <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
+        <div className="trigger-status-header">
+          <h3>Automatic runs — "{trigger.workflow_name}"</h3>
+          <span className="status-badge">{meta.badge}</span>
+        </div>
+        <p className="subtitle">{meta.text}</p>
+        <p className="hint">Triggers when new email arrives in the connected mailbox.</p>
+        {trigger.last_checked_at && (
+          <p className="hint">
+            Last checked: {formatDateTime(trigger.last_checked_at)}
+          </p>
+        )}
+        {trigger.status === 'error' && trigger.last_error && (
+          <p className="banner banner-error">{trigger.last_error}</p>
+        )}
         <p className="hint">
-          Last checked: {formatDateTime(trigger.last_checked_at)}
+          Turn this on, off, or point it at a different team from that team's Deploy page in the
+          Team Builder.
         </p>
-      )}
-      {trigger.status === 'error' && trigger.last_error && (
-        <p className="banner banner-error">{trigger.last_error}</p>
-      )}
-      <p className="hint">
-        Turn this on, off, or point it at a different team from that team's Deploy page in the
-        Team Builder.
-      </p>
-      {onViewRuns && (
-        <button type="button" className="btn-link" onClick={onViewRuns}>
-          View automatic runs
-        </button>
-      )}
-    </div>
+        {onViewRuns && (
+          <button type="button" className="btn-link" onClick={onViewRuns}>
+            View automatic runs
+          </button>
+        )}
+      </div>
+
+      <div className="wizard-card filtered-mail" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
+        <h3>Mail we skipped</h3>
+        <p className="hint">
+          Your filter rules skipped these before any AI model read them, so they cost
+          nothing. A rule can be wrong &mdash; release a message and the next check will
+          process it as normal.
+        </p>
+        {filteredFailed && (
+          <p className="banner banner-error">
+            Couldn't load the skipped mail. Refresh the page to try again.
+          </p>
+        )}
+        {releaseError && <p className="banner banner-error">{releaseError}</p>}
+        {filtered.length === 0 ? (
+          !filteredFailed && <p className="hint">Nothing has been skipped.</p>
+        ) : (
+          <ul className="filtered-list">
+            {filtered.map((message) => (
+              <li key={message.id}>
+                {/* `reason` is the sentence to read; `decision` is the rule that
+                    fired, which is for debugging a rule, not for the admin. */}
+                <p title={message.decision ?? undefined}>{message.reason}</p>
+                <p className="muted">
+                  Message {message.external_id}
+                  {message.detected_at ? ` · ${formatDateTime(message.detected_at)}` : ''}
+                </p>
+                <button type="button" onClick={() => void release(message.id)}>
+                  Release
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
   )
 }

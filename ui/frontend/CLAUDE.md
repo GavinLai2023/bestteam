@@ -76,6 +76,52 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   `autonomous: true`, since every automation result belongs to an autonomous
   run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
   cancellation, and run history", "Property Maintenance Inbox").
+  The Automations tab also carries email Phase 4a's two settings panels,
+  `components/EmailFilterSettings.tsx` (the `skip_bulk` checkbox and the three
+  pattern lists, one entry per line) and `components/EmailBudgetSettings.tsx`
+  (the daily message cap and monthly spend cap, each shown with what has been
+  used against it), both mounted under `EmailTriggerActivity` — which is what
+  makes the filter panel's reference to the skipped-mail section *above* it
+  true. Four things there are deliberate. **Neither panel renders a form when
+  its initial GET failed** (unlike `WebhookSettings`, whose skeleton they
+  otherwise follow): saving an empty form here is a data-loss path, since empty
+  textareas replace real filter rules with none and empty cap boxes send
+  `null`/`null` and remove real caps. **An empty cap box sends `null`, not
+  `0`** — `lib/budgetCaps.ts`'s `parseCap` returns `null` for empty,
+  `undefined` for something that is not a number (which `save()` refuses with
+  an error line rather than letting `NaN` serialise to `null`, i.e. "no
+  limit"), and a literal `0` stays `0`, because a cap of zero is a real
+  setting; it lives in `lib/` with its own tests because exporting a helper
+  from a component file is a `react-refresh/only-export-components` lint
+  error. **`unpriced_models` is advisory, not an error** — rendered as
+  `className="hint"`, never `className="error"`, which is reserved for a failed
+  request — and `unpriced_runs_this_month` gets its own line so the spend
+  figure's blind spot is a stated number rather than something to infer. And a
+  null `spent_this_month` renders as "nothing this month has a price yet",
+  never as `$0.00`, which would be a measured claim about an unmeasured month.
+
+  `EmailTriggerActivity` gained a second card, **"Mail we skipped"**
+  (`GET /api/org/email-trigger/filtered`), listing each filtered message's
+  reason, UID and detection time with a Release button. The reason is the API's
+  `describe()` sentence; the raw `decision` appears only as the element's
+  `title` attribute, since a customer should never be shown `bulk:list-id`.
+  It identifies a message by **UID, not sender and subject** (which the design
+  sketched): `inbox_events` holds an IMAP UID, the customer's own mailbox
+  identity, a status and a decision — and no message content at all, which is
+  exactly why that table needs no retention purge —
+  showing who a skipped message was from would mean storing the sender on it.
+  So an admin releases on the strength of the rule that fired, not of the
+  message.
+  **A release updates local state rather than refetching** — `release()` awaits
+  the API then drops that row from `filtered`, and a `releasedRef` set of ids
+  released this session also filters the results of the component's existing
+  30s poll, so a response already in flight when Release was clicked cannot put
+  the row back on screen. Note the section lives *inside* `EmailTriggerActivity`,
+  after its two early returns, so it renders only when a trigger with a
+  `workflow_name` is configured: right today (filtered rows cannot exist before
+  a trigger has polled), but historical filtered rows become unreachable if a
+  customer later disconnects the mailbox.
+
   A fourth **Alerts** tab (email Phase 3a) holds
   `components/NotificationsPanel.tsx` (the org's alert history, read-only by
   design — these are raised by the system, and a delete verb would only let

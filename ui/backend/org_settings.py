@@ -16,12 +16,12 @@ from __future__ import annotations
 import errno
 import logging
 import socket
-from datetime import date
-from typing import Any, Dict, Literal, Optional
+from datetime import date, datetime, timezone
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy.orm import Session
 
 from bestteam.exceptions import ConfigurationError
@@ -30,6 +30,13 @@ from bestteam.tools.email_client import _ImapBackend
 from bestteam.tools.http_client import check_host_allowed
 
 from .auth_api import get_current_org
+from .db.email_budget_settings import (
+    get_budget_caps,
+    set_budget_caps,
+    spent_this_month,
+    unpriced_models_for_org,
+    unpriced_run_count,
+)
 from .db.email_credentials import (
     AUTH_MICROSOFT_OAUTH,
     AUTH_PASSWORD,
@@ -38,10 +45,13 @@ from .db.email_credentials import (
     get_email_credentials,
     set_email_credentials,
 )
+from .db.email_filter_settings import get_filter_settings, set_filter_settings
+from .db.email_triggers import get_email_trigger
 from .db.models import Organization, iso_utc
 from .db.notifications import get_notification_settings, set_notification_settings
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
+from .email_budget import day_key
 from .email_trigger import disable_trigger, disable_trigger_on_identity_change
 from .notifications import WebhookUrlError, validate_webhook_url
 from .retention import export_org_runs, purge_org_runs, purgeable_run_count
@@ -511,3 +521,111 @@ def export_org(
         content=bundle,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --- pre-LLM mail filter and automation budgets (Phase 4a) --------------------
+
+
+# One stored pattern: a full address, `*@domain`, or a subject term. Bounded
+# per item, not just per list, because the poll loop reads every pattern an org
+# has stored and compares it against every sender address -- a customer-supplied
+# field the hot path reads is not left unbounded, and 200 characters is generous
+# for all three uses.
+FilterPattern = Annotated[str, StringConstraints(max_length=200)]
+
+
+class EmailFilterRequest(BaseModel):
+    """Patterns are literals, never regular expressions -- see
+    `ui/backend/email_filter.py` for why."""
+
+    skip_bulk: bool = True
+    sender_blocklist: List[FilterPattern] = Field(default_factory=list, max_length=200)
+    sender_allowlist: List[FilterPattern] = Field(default_factory=list, max_length=200)
+    subject_blocklist: List[FilterPattern] = Field(default_factory=list, max_length=200)
+
+
+class EmailBudgetRequest(BaseModel):
+    """NULL means no cap -- the default, so an upgrade limits nobody."""
+
+    daily_message_cap: Optional[int] = Field(default=None, ge=1, le=100000)
+    monthly_cost_cap: Optional[float] = Field(default=None, ge=0.01, le=1000000)
+
+
+@router.get("/email-filter")
+def get_email_filter(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    settings = get_filter_settings(db, org.id)
+    return {
+        "skip_bulk": settings.skip_bulk,
+        "sender_blocklist": list(settings.sender_blocklist),
+        "sender_allowlist": list(settings.sender_allowlist),
+        "subject_blocklist": list(settings.subject_blocklist),
+    }
+
+
+@router.put("/email-filter")
+def put_email_filter(
+    req: EmailFilterRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    set_filter_settings(
+        db, org.id,
+        skip_bulk=req.skip_bulk,
+        sender_blocklist=req.sender_blocklist,
+        sender_allowlist=req.sender_allowlist,
+        subject_blocklist=req.subject_blocklist,
+    )
+    db.commit()
+    return get_email_filter(db=db, org=org)
+
+
+@router.get("/email-budget")
+def get_email_budget(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """The caps, this period's usage against them, and the blind spot.
+
+    `unpriced_models` is advisory, never an error: a model with no
+    `model_catalog` row contributes 0 to the spend total, so the cap is a floor
+    on reality rather than a phantom ceiling -- and the admin is told which
+    models it does not cover instead of being left to infer it.
+    """
+    now = datetime.now(timezone.utc)
+    caps = get_budget_caps(db, org.id)
+    trigger = get_email_trigger(db, org.id)
+    return {
+        "daily_message_cap": caps.daily_message_cap,
+        "monthly_cost_cap": caps.monthly_cost_cap,
+        # `messages_today` is only today's count while `runs_date` still is
+        # today -- the poller resets both together on the first cycle of a new
+        # day, so reading the column alone would report yesterday's total until
+        # then (the same guard `email_trigger_api._payload` applies to
+        # `runs_today`).
+        "messages_today": (
+            trigger.messages_today
+            if trigger is not None and trigger.runs_date == day_key(now)
+            else 0
+        ),
+        "spent_this_month": spent_this_month(db, org.id, now),
+        "unpriced_runs_this_month": unpriced_run_count(db, org.id, now),
+        "unpriced_models": unpriced_models_for_org(db, org.id),
+    }
+
+
+@router.put("/email-budget")
+def put_email_budget(
+    req: EmailBudgetRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Save the caps. An unpriced model is reported back, never a refusal:
+    one missing catalogue row must not stop an admin capping their spend."""
+    set_budget_caps(
+        db, org.id,
+        daily_message_cap=req.daily_message_cap,
+        monthly_cost_cap=req.monthly_cost_cap,
+    )
+    db.commit()
+    return get_email_budget(db=db, org=org)

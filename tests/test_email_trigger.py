@@ -118,6 +118,35 @@ def db(monkeypatch):
     session.close()
 
 
+class _OfflineBackend:
+    """A backend that reaches no network, for the tests that don't care.
+
+    `_org_with_trigger` stores credentials for `imap.acme.com`, so without this
+    the real `_ImapBackend` the poller builds would resolve that host for real
+    the moment Phase 4a's filter asks it for headers -- a DNS lookup per test,
+    and behind a wildcard-NXDOMAIN resolver a live TLS connect that hangs the
+    suite instead of failing it. `summaries_for` returns nothing, so these
+    tests filter nothing and behave exactly as they did before the filter
+    existed; a test that wants filtering supplies its own backend.
+    """
+
+    def summaries_for(self, uids):
+        return []
+
+
+# Bound before the autouse fixture below can replace it: that fixture makes the
+# patched `_make_backend` the only one any test would otherwise see, which would
+# leave `restrict_to_public=True` -- the flag enabling SSRF validation against a
+# customer-supplied hostname -- guarded by nothing but its docstring.
+_REAL_MAKE_BACKEND = email_trigger._make_backend
+
+
+@pytest.fixture(autouse=True)
+def offline_backend(monkeypatch):
+    monkeypatch.setattr(email_trigger, "_make_backend",
+                        lambda cred, password: _OfflineBackend())
+
+
 def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="imap.acme.com", username="u@acme.com",
@@ -1669,7 +1698,7 @@ def test_a_failing_mailbox_scan_never_blocks_a_legitimate_retry(db, monkeypatch)
             raise OSError("SEARCH not supported")
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: _ScanFails())
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: _ScanFails())
     calls = []
     monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
@@ -1737,7 +1766,7 @@ def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
         email_trigger.registry, "request_cancel", lambda rid: cancelled.append(rid)
     )
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda backend, last_uid: (3, 45, [42]))
-    monkeypatch.setattr(email_trigger, "_ImapBackend", lambda **kw: object())
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: object())
     calls = []
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
@@ -2213,3 +2242,446 @@ def test_a_replacement_secret_is_warned_about_in_its_own_right(db):
     assert {n.fingerprint for n in _notifications(db, org.id)} == {
         "secret_expiry_30:2026-09-11", "secret_expiry_30:2028-08-17",
     }
+
+
+# --- Phase 4a: the poller filters --------------------------------------------
+
+
+class _SummaryBackend:
+    """FakeBackend plus the header summaries the Phase 4a filter reads."""
+
+    def __init__(self, summaries, raises=False):
+        self._summaries = summaries
+        self.raises = raises
+        self.calls = []
+
+    def summaries_for(self, uids):
+        self.calls.append(list(uids))
+        if self.raises:
+            raise OSError("imap went away")
+        return [s for s in self._summaries if s["id"] in {str(u) for u in uids}]
+
+
+def _filtering_org(db, monkeypatch, backend, *, new_uids=(42, 43)):
+    """One org whose next poll cycle detects `new_uids` through `backend`."""
+    from ui.backend.db.workflows import publish_workflow_version
+
+    org, trigger = _org_with_trigger(db, last_uid=41)
+    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger, "check_mailbox",
+        lambda b, u: (3, max(new_uids), list(new_uids)),
+    )
+    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: backend)
+    monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
+    return org, trigger
+
+
+def _events_by_id(db, org_id):
+    from ui.backend.db.models import InboxEvent
+    return {
+        e.external_id: e
+        for e in db.query(InboxEvent).filter(InboxEvent.org_id == org_id).all()
+    }
+
+
+def test_bulk_mail_is_recorded_filtered_and_never_reaches_a_run(db, monkeypatch):
+    backend = _SummaryBackend([
+        {"id": "42", "from": "alice@client.test", "subject": "Quote"},
+        {"id": "43", "from": "news@x.test", "subject": "Weekly", "list-id": "<n.x.test>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    rows = _events_by_id(db, org.id)
+    assert rows["43"].status == "filtered"
+    assert rows["43"].decision == "bulk:list-id"
+    assert rows["42"].status in ("pending", "claimed")
+    assert rows["42"].decision is None
+    # The second half of this test's name: the filtered UID is not merely
+    # labelled, it never reaches the batch the model is given.
+    assert calls == [("triage", org.id, {42})]
+
+
+def test_filtering_still_advances_the_cursor_over_every_detected_uid(db, monkeypatch):
+    # Filtering must never become a second way to consume mail unrecorded:
+    # every detected UID gets a row, and last_uid moves past all of them, in
+    # the one commit Phase 1's durability guarantee rests on.
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "precedence": "bulk"},
+        {"id": "43", "from": "n@x.test", "subject": "b", "precedence": "bulk"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _no_workflow)  # nothing claimable -> never builds
+
+    assert trigger.last_uid == 43
+    assert len(_events_by_id(db, org.id)) == 2
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"filtered"}
+
+
+def test_a_header_fetch_failure_fails_open(db, monkeypatch):
+    # A transient IMAP hiccup must not silently discard a customer's mail. The
+    # worst case of failing open is that one junk message is billed.
+    backend = _SummaryBackend([], raises=True)
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert {e.status for e in rows.values()} <= {"pending", "claimed"}
+    assert all(e.decision is None for e in rows.values())
+    assert backend.calls == [["42", "43"]]  # attempted once, then gave up open
+
+
+def test_a_uid_with_no_summary_returned_is_processed(db, monkeypatch):
+    # summaries_for skips UIDs it cannot fetch; those default to pending.
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "list-id": "<n>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert rows["42"].status == "filtered"
+    assert rows["43"].status in ("pending", "claimed")
+
+
+def test_an_org_that_turned_the_bulk_rule_off_keeps_its_bulk_mail(db, monkeypatch):
+    from ui.backend.db.email_filter_settings import set_filter_settings
+
+    backend = _SummaryBackend([
+        {"id": "42", "from": "n@x.test", "subject": "a", "precedence": "bulk"},
+        {"id": "43", "from": "n@x.test", "subject": "b", "precedence": "bulk"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend)
+    set_filter_settings(db, org.id, skip_bulk=False, sender_blocklist=[],
+                        sender_allowlist=[], subject_blocklist=[])
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert all(e.status != "filtered" for e in _events_by_id(db, org.id).values())
+def test_a_backend_without_summaries_for_at_all_fails_open(db, monkeypatch):
+    # `_filter_decisions` catches Exception, not OSError: a backend that has no
+    # header-fetch verb at all raises AttributeError, and narrowing that handler
+    # would turn a backend quirk into silently discarded customer mail. Nothing
+    # else in this file pins that, so a later `except OSError` would go green.
+    class _NoSummaries:
+        pass
+
+    org, trigger = _filtering_org(db, monkeypatch, _NoSummaries())
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    rows = _events_by_id(db, org.id)
+    assert set(rows) == {"42", "43"}
+    assert {e.status for e in rows.values()} <= {"pending", "claimed"}
+    assert all(e.decision is None for e in rows.values())
+
+
+def test_make_backend_keeps_ssrf_validation_on(db, monkeypatch):
+    # The autouse `offline_backend` fixture replaces `_make_backend` everywhere,
+    # so without this nothing could catch `restrict_to_public` being dropped --
+    # and that flag is what validates and pins a customer-supplied hostname.
+    # `_REAL_MAKE_BACKEND` is the unpatched function, captured at import.
+    built = []
+    monkeypatch.setattr(email_trigger, "_ImapBackend",
+                        lambda **kw: built.append(kw))  # never opens a socket
+
+    org, _trigger = _org_with_trigger(db)
+    from ui.backend.db.email_credentials import get_email_credentials
+    cred = get_email_credentials(db, org.id)
+
+    _REAL_MAKE_BACKEND(cred, "pw")
+
+    assert built == [{
+        "host": cred.host,
+        "user": cred.username,
+        "password": "pw",
+        "port": cred.port,
+        "drafts": cred.drafts_folder,
+        "restrict_to_public": True,
+    }]
+
+
+# --- Phase 4a: the poller enforces both budgets ------------------------------
+
+
+def _budget_org(db, monkeypatch, *, new_uids):
+    """An org whose cycle detects `new_uids` and whose filter passes them all."""
+    summaries = [
+        {"id": str(u), "from": "alice@client.test", "subject": "Quote"}
+        for u in new_uids
+    ]
+    backend = _SummaryBackend(summaries)
+    recorder = _SubmitRecorder()
+    org, trigger = _filtering_org(db, monkeypatch, backend, new_uids=new_uids)
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    return org, trigger, recorder
+
+
+def _spend(db, org_id, amount, when):
+    from ui.backend.db.models import Run, UsageRecord
+    db.add(Run(id=f"spent-{amount}-{when.isoformat()}", workflow="w", input="",
+               status="completed", org_id=org_id))
+    db.add(UsageRecord(run_id=f"spent-{amount}-{when.isoformat()}", org_id=org_id,
+                       model="openai:gpt-4o-mini", input_tokens=1, output_tokens=1,
+                       cost_estimate=amount, created_at=when))
+    db.commit()
+
+
+def test_the_message_cap_truncates_the_claim(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44, 45, 46))
+    set_budget_caps(db, org.id, daily_message_cap=3, monthly_cost_cap=None)
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert len(recorder.calls) == 1
+    _, args, _kwargs = recorder.calls[0]
+    # `_trigger_input` renders the claimed uids as "message ids: 42, 43, 44";
+    # count the ids, not commas -- the surrounding sentence has one of its own.
+    assert "message ids: 42, 43, 44)" in args[2]
+    assert trigger.messages_today == 3
+
+
+def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
+    # Deliberately given a workflow getter that WOULD succeed if it were
+    # reached: with `_no_workflow` the build-failure branch produces the same
+    # observable outcome as the cap working (no run, no Run row, events handed
+    # back pending), so the test would pass with the cap removed. The
+    # notification is the other half -- truncating the claim to zero would also
+    # dispatch nothing, so only the alert distinguishes "the cap stopped this"
+    # from "there was nothing to claim".
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Notification, Run
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43))
+    set_budget_caps(db, org.id, daily_message_cap=2, monthly_cost_cap=None)
+    trigger.messages_today = 2
+    trigger.runs_date = email_trigger._today()
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 0
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"pending"}
+    alerts = db.query(Notification).filter_by(org_id=org.id, kind="budget").all()
+    assert [n.fingerprint for n in alerts] == [
+        f"budget_messages:{email_trigger._today()}"
+    ]
+
+
+def test_the_message_counter_resets_with_the_date(db, monkeypatch):
+    # messages_today shares runs_date on purpose: one rollover check resets
+    # both, so the two counters can never disagree about which day it is.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=5, monthly_cost_cap=None)
+    trigger.messages_today = 5
+    trigger.runs_today = 5
+    trigger.runs_date = "2020-01-01"
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert trigger.messages_today == 1  # reset to 0, then this cycle's one
+    assert trigger.runs_today == 1
+
+
+def test_a_reached_spend_cap_blocks_dispatch(db, monkeypatch):
+    # Same reasoning as the message-cap test above: the getter must be one that
+    # WOULD dispatch if it were reached, or a build failure would satisfy every
+    # assertion here and the test would pass with the spend cap removed.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Run
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 1  # only the spend fixture's own row
+    assert {e.status for e in _events_by_id(db, org.id).values()} == {"pending"}
+
+
+def test_a_budget_alert_is_raised_once_per_period(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Notification
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_workflow)
+
+    assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 1
+
+
+def test_a_new_month_alerts_again(db, monkeypatch):
+    # A month-scoped fingerprint is what makes "once per period" mean per
+    # period rather than once ever -- the _expiry_fingerprint lesson, applied
+    # before it can bite a second time.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+    from ui.backend.db.models import Notification
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
+    _spend(db, org.id, 10.0, datetime(2026, 7, 15, tzinfo=timezone.utc))
+    _spend(db, org.id, 10.0, datetime(2026, 8, 15, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(email_trigger, "_utcnow",
+                        lambda: datetime(2026, 7, 20, tzinfo=timezone.utc))
+    poll_org(db, trigger, _no_workflow)
+    monkeypatch.setattr(email_trigger, "_utcnow",
+                        lambda: datetime(2026, 8, 20, tzinfo=timezone.utc))
+    poll_org(db, trigger, _no_workflow)
+
+    assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 2
+
+
+def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
+    # A budget ceiling is a normal operating state, not a fault. Routing it
+    # through trigger_health.evaluate would corrupt consecutive_faults and
+    # compete with real faults for alerted_fingerprint.
+    #
+    # `_no_workflow` is load-bearing here, and this is the exact INVERSE of the
+    # two tests above, which need a getter that WOULD succeed: these assertions
+    # are all absences, so with the spend cap removed a succeeding getter would
+    # dispatch, the CAS would clear `last_error`, and all three would still
+    # hold -- the test would pass with the feature gone. A getter that raises
+    # is what makes the build-failure branch write `last_error` and fail this.
+    # Do not "harmonise" it with its siblings.
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, _ = _budget_org(db, monkeypatch, new_uids=(42,))
+    set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=1.0)
+    _spend(db, org.id, 5.0, datetime.now(timezone.utc))
+
+    poll_org(db, trigger, _no_workflow)
+
+    assert trigger.consecutive_faults == 0
+    assert trigger.alerted_fingerprint is None
+    assert trigger.last_error is None
+
+
+def test_an_org_with_no_caps_behaves_exactly_as_before(db, monkeypatch):
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44))
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+
+    assert len(recorder.calls) == 1
+    assert trigger.messages_today == 3
+    assert trigger.runs_today == 1
+
+
+# --- Phase 4a: a quiet mailbox must still drain the ledger --------------------
+#
+# Both of this phase's new customer-facing features produce `pending` rows for
+# a reason other than "mail just arrived" -- an admin releasing a filtered
+# false positive, and a backlog a cap declined to dispatch -- and both promise,
+# in the UI and in the alert body, that the next check picks the work up.
+# `poll_org` used to return the moment detection found no new UIDs, so neither
+# promise held on a mailbox that then went quiet.
+
+
+def _finish_registered_run(run_id):
+    """Mark the previous cycle's run terminal in the registry.
+
+    `_SubmitRecorder` never actually runs the worker, so nothing else ever
+    moves the entry off `running` -- and the overlap guard honours a `running`
+    entry, which would stop the *next* cycle for a reason that has nothing to
+    do with what these tests are about.
+    """
+    from ui.backend.runtime import registry
+
+    registry.get(run_id).status = "completed"
+
+
+def test_a_released_message_is_processed_on_the_next_quiet_cycle(db, monkeypatch):
+    from ui.backend.db.inbox_events import release_filtered_event
+
+    backend = _SummaryBackend([
+        {"id": "42", "from": "supplier@client.test", "subject": "Quote",
+         "list-id": "<newsletter.client.test>"},
+    ])
+    org, trigger = _filtering_org(db, monkeypatch, backend, new_uids=(42,))
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert _events_by_id(db, org.id)["42"].status == "filtered"
+    assert recorder.calls == []
+
+    # An admin decides the rule was wrong -- and no further mail ever arrives.
+    event_id = _events_by_id(db, org.id)["42"].id
+    assert release_filtered_event(db, org_id=org.id, event_id=event_id) is True
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, []))
+
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    assert calls == [("triage", org.id, {42})]
+    assert len(recorder.calls) == 1
+    assert _events_by_id(db, org.id)["42"].status == "claimed"
+
+
+def test_a_capped_backlog_drains_on_a_quiet_cycle_once_the_cap_allows(db, monkeypatch):
+    from ui.backend.db.email_budget_settings import set_budget_caps
+
+    org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44))
+    set_budget_caps(db, org.id, daily_message_cap=1, monthly_cost_cap=None)
+    db.commit()
+
+    poll_org(db, trigger, _fake_workflow_getter([]))
+    assert trigger.messages_today == 1
+    assert sorted(e.status for e in _events_by_id(db, org.id).values()) == [
+        "claimed", "pending", "pending",
+    ]
+    _finish_registered_run(trigger.last_run_id)
+
+    # The cap is raised (a rollover would do just as well) and the mailbox
+    # stays silent from here on.
+    set_budget_caps(db, org.id, daily_message_cap=3, monthly_cost_cap=None)
+    db.commit()
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 44, []))
+
+    calls = []
+    poll_org(db, trigger, _fake_workflow_getter(calls))
+
+    assert calls == [("triage", org.id, {43, 44})]
+    assert trigger.messages_today == 3
+    assert all(e.status == "claimed" for e in _events_by_id(db, org.id).values())
+
+
+def test_a_quiet_cycle_with_nothing_pending_still_dispatches_nothing(db, monkeypatch):
+    # The other half of the change: proceeding past an empty detection is
+    # conditional on there being something claimable. Without the condition an
+    # idle mailbox -- the overwhelmingly common case -- would build a workflow
+    # and create-then-discard a registry entry on every single cycle.
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+
+    poll_org(db, trigger, _no_workflow)  # _no_workflow raises if it is reached
+
+    from ui.backend.db.models import Run
+
+    assert recorder.calls == []
+    assert db.query(Run).count() == 0
+    assert trigger.last_run_id is None
+    assert trigger.last_checked_at is not None  # the health write is unchanged

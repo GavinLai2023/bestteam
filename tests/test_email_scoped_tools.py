@@ -18,6 +18,7 @@ class _FakeBackend:
     def __init__(self):
         self.read_calls = []
         self.draft_calls = []
+        self.attachment_calls = []
 
     def find(self, query):
         # The unscoped path -- returns "everything" so a scoping bug is visible.
@@ -30,6 +31,11 @@ class _FakeBackend:
     def read(self, message_id):
         self.read_calls.append(message_id)
         return {"id": message_id, "from": "a@b", "to": "", "subject": "s", "date": "d", "body": "hi"}
+
+    def read_attachment(self, message_id, filename):
+        self.attachment_calls.append((message_id, filename))
+        return {"filename": filename, "content_type": "text/plain",
+                "size": 5, "data": b"hello"}
 
     def draft_reply(self, message_id, body):
         self.draft_calls.append((message_id, body))
@@ -68,6 +74,26 @@ def test_unscoped_mode_is_unchanged():
     out = tools["email_find"]("")
     assert "99" in out  # uses backend.find(), today's behavior
     assert "hi" in tools["email_read"]("99")
+
+
+def test_attachment_reading_is_confined_to_the_batch():
+    # Same containment as email_read: a run may only touch the messages the
+    # poller detected for it.
+    b = _FakeBackend()
+    tools = make_email_tools(b, allowed_uids={"42", "43"})
+    assert tools["email_read_attachment"]("44", "quote.pdf") == _OUT_OF_BATCH
+    assert b.attachment_calls == []  # backend never touched
+    # ...and an in-batch id really reaches the backend, so a closure that
+    # refused everything would not pass this.
+    assert "hello" in tools["email_read_attachment"]("42", "notes.txt")
+    assert b.attachment_calls == [("42", "notes.txt")]
+
+
+def test_the_toolkit_exposes_exactly_four_tools():
+    tools = make_email_tools(_FakeBackend())
+    assert set(tools) == {
+        "email_find", "email_read", "email_draft_reply", "email_read_attachment",
+    }
 
 
 # ---------------------------------------------------------------------------

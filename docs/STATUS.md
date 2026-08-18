@@ -11,7 +11,8 @@
 - CLI: `init` / `run` / `graph`.
 - YAML loader, including `local_folder` (BM25) and `vector` knowledge bases.
 - Built-in tools: `web_search`, `parse_file`, `http_get`, `calculator`, and
-  the draft-only email toolkit (`email_find`/`email_read`/`email_draft_reply`).
+  the draft-only email toolkit (`email_find`/`email_read`/
+  `email_read_attachment`/`email_draft_reply`).
 - UI backend: monitoring API, 6-stage builder session state machine, config
   CRUD ("advanced view"), model catalog, usage metering.
 - UI frontend: monitoring dashboard, 4-stage Team Builder wizard, login UI.
@@ -1127,6 +1128,199 @@
   *data deletion*. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-3b-retention-export-design.md`.
 
+- **Email automation Phase 4a — pre-LLM filtering and real budgets.** Two holes
+  that both cost a customer money they never agreed to spend. *Every* message
+  reached the model: a newsletter, a delivery receipt and a "do not reply"
+  notification each cost the same as a real enquiry. And the only ceiling
+  counted the wrong thing — `BESTTEAM_TRIGGER_DAILY_CAP` caps *runs* per day,
+  and a run processes up to 20 messages, so the customer-visible promise was
+  "at most 1,000 messages a day, at an unknown price", which is not a budget.
+
+  A **header-only, rule-based filter** (`ui/backend/email_filter.py`, pure —
+  no I/O, no clock, no DB, the same shape as `trigger_health.py`) now decides
+  before any model is involved whether a message is worth processing, and
+  records why. **Rules and not a classifier**, for three reasons: a cheap
+  gatekeeper model still bills per message (paying less for junk is a discount,
+  not a fix); it reads attacker-controlled text, and a model that decides
+  *whether a message is processed* is one an attacker has a direct incentive to
+  talk past, which widens the injection surface the draft-only bound exists to
+  contain; and an admin cannot audit it — "the sender matches
+  `*@newsletter.example.com`" is a rule someone can read and change, "the
+  classifier scored it 0.31" is not. Headers suffice for the junk that actually
+  dominates an inbox, because bulk mail identifies itself: RFC 3834
+  `Auto-Submitted`, RFC 2919 `List-Id`, RFC 8058 `List-Unsubscribe` and the
+  de-facto `Precedence` exist precisely so automated agents recognise it.
+
+  **Filtering changes an `inbox_events` row's *status*, never whether the row
+  is inserted.** Phase 1's durability guarantee — the commit that consumes the
+  mail is the commit that records it — is untouched, and `claim_events` already
+  selects `pending` only, so the claim, dispatch, retry and completion paths
+  change not at all. Release is one `filtered` → `pending` flip. That is why
+  "record, show, allow release" beat "drop and count": a rule-based filter
+  *will* have false positives, and the cost of one has to be "an admin clicks
+  Release", not "the enquiry was silently lost and nobody ever knew". The
+  evaluation order is fixed and is the behaviour (blocked sender → not
+  allowlisted → blocked subject → bulk), the blocklist outranks the allowlist,
+  and **the allowlist deliberately does not exempt a sender from the bulk
+  check** — an allowlisted domain that starts sending a newsletter is still
+  sending a newsletter. Patterns are two forms only (a full address,
+  `*@domain`), matched against the parsed address and never the attacker-chosen
+  display name; there are **no regular expressions**, because a customer-supplied
+  regex brings catastrophic backtracking into the poll loop and no admin can be
+  told why theirs did not match.
+
+  **`skip_bulk` defaults to on** — the one deliberate behaviour change on
+  upgrade. A safety feature nobody switches on protects nobody, and the default
+  is recoverable: one checkbox turns it off, and every filtered message stays
+  visible and releasable. Both budget caps default to NULL, because an upgrade
+  must not start refusing a customer's mail over a limit they never set.
+
+  **Two real per-org budgets** (`org_email_budget_settings`): a daily message
+  cap enforced at claim (`limit=min(batch_size(), remaining)`, and no run
+  dispatched at all when nothing remains), and a monthly spend cap checked
+  inside `_dispatch_lock` beside the existing run-cap re-check. Spend is
+  *queried* (`SUM(cost_estimate)` over `usage_records` for the UTC month), never
+  counted into a column that would need its own reset, backfill and drift bug.
+  Three limits, two audiences: `BESTTEAM_TRIGGER_DAILY_CAP` stays as the
+  operator's deployment-wide rail (it measures the wrong thing for a customer
+  promise, which is why the other two exist, but it bounds a runaway poller
+  regardless of what any org configured); the message and spend caps are the
+  customer's. Hitting one stops dispatch, alerts once, and resumes
+  automatically — not a hard disable, because a budget reached on a Saturday
+  must not need a human on Monday, and a self-disabled trigger is
+  indistinguishable in the UI from one the customer turned off.
+
+  **Budget alerts bypass `trigger_health.evaluate` deliberately**: a ceiling is
+  a normal operating state, not a fault, and routing it through the fault
+  evaluator would corrupt `consecutive_faults` and compete with real faults for
+  `alerted_fingerprint`. Their fingerprints are period-scoped
+  (`budget_messages:<UTC date>`, `budget_cost:<UTC month>`) following
+  `_expiry_fingerprint`'s precedent, because `has_fingerprint` searches an org's
+  *entire* history — a bare name alerts once ever and every later period is
+  silent. Unpriced models are handled in three parts rather than by refusing to
+  run (one missing catalogue row would wedge a customer's automation) or by
+  silence: the budget API names them, NULL contributes 0 at runtime so the cap
+  is a floor on reality rather than a phantom ceiling, and the UI states how
+  many runs this month were unpriced.
+
+  Cost, stated plainly: `summaries_for` now fetches the four bulk headers, so
+  detection costs **one extra IMAP login per poll cycle that finds new mail**
+  (`BODY.PEEK` preserved — the draft-only toolkit never marks mail seen and
+  this must not become the thing that does). A UID whose headers cannot be
+  fetched is recorded `pending`, not `filtered`: **fail open**, since the worst
+  case of failing open is one junk message processed and the worst case of
+  failing closed is a customer's mail silently discarded. Spec:
+  `docs/superpowers/specs/2026-08-17-email-phase-4a-filtering-budgets-design.md`.
+
+- **Email automation Phase 4b — attachments.** The model could not see them at
+  all: `_extract_text_body` calls `get_body(preferencelist=("plain", "html"))`,
+  which by construction returns the body part and nothing else. A supplier's
+  quote, a spreadsheet of line items, a contractor's invoice — the team drafted
+  a reply having read the covering sentence, or worse, "please see attached".
+  Two tools now: `email_read` ends with a manifest (each attachment's filename,
+  type and size), and `email_read_attachment(message_id, filename)` extracts
+  one on demand.
+
+  **The decision the phase is built around is "no path, no disk".** `parse_file`
+  already parses PDF/XLSX/DOCX/XML and would have been the obvious thing to
+  reuse — and reusing it as it stood was the mistake this phase exists to
+  avoid. Its own docstring says it reads whatever local path it is given with
+  no sandboxing. That is fine for a knowledge base, where an *operator* chose
+  the paths; it is exactly wrong for email, where **the filename is chosen by
+  whoever sent the message**, in a process holding the org's mailbox
+  credentials and its Fernet secrets key. So the tool takes a message id
+  (already confined to the run's batch by `allowed_uids`) and a name matched
+  against that message's own MIME parts, and parsing runs on `io.BytesIO` —
+  nothing is written to disk, so there is no temp-file lifetime to get wrong
+  and no second copy for Phase 3b's sweep to miss. Path traversal is not
+  defended against; it is made **structurally impossible**, because there is no
+  path. `file_parser.py` grew `*_bytes` parsers behind `parse_bytes`;
+  `parse_file(path)` kept its signature and became a thin wrapper, so the
+  knowledge-base path is unchanged.
+
+  **Two tools rather than one enriched one**, for three reasons. Cost: Phase 4a
+  exists because customers were billed for content they did not need, and
+  inlining every attachment would put a 40-page PDF into the context of a
+  message the model only had to acknowledge — on demand, the model pays for
+  what it decides to read. Auditability: each extraction is its own
+  `tool_completed` event, so the trace shows exactly which attachments were
+  opened. Bounded output: `email_read` is already truncated at 8,000
+  characters, and an inlined attachment would push the real body out of that
+  window. The manifest itself is free — `_fetch_message` already issued
+  `BODY.PEEK[]` for the *whole* message and threw the attachments away, and
+  `read()` now builds the manifest from that same fetch, so `email_read` still
+  costs exactly one login and one fetch (an intermediate version cost two, on
+  top of a login profile already flagged below as a weakness).
+
+  **Three limits, checked before any parser sees the bytes**: 10 MB per
+  attachment (a parser is a decompressor and an unbounded one is a
+  denial-of-service surface), 25 MB per message in total (the fifty-small-files
+  case the first limit does not bound), and 8,000 characters of extracted text
+  — `_MAX_BODY_CHARS` exactly, so a 500-page PDF cannot become two million
+  tokens of context. Breaching one returns a plain sentence, never an exception
+  that fails the run: an attachment too large to read is a fact about the
+  message, not a fault in the automation. Readable types are exactly the set
+  `parse_file` already supported; **archives are refused, not expanded**,
+  because recursive extraction of an attacker-supplied archive is a zip-bomb
+  surface; and dispatch is by filename suffix, so a text file named `.pdf`
+  fails at the parser and is reported as unreadable, which needs no separate
+  content-sniffing layer.
+
+  **The trust boundary is unchanged in class.** Attachment text is
+  attacker-controlled input to the LLM exactly as the body already is — this
+  widens the *volume* of such input, not its kind — and the containment
+  argument still holds: no send verb, no SMTP anywhere in the process, worst
+  case a strange draft a human sees before anything leaves the building. Two
+  sender-controlled channels were closed on the way. A filename can carry a
+  **literal newline** via RFC 2231 percent-encoding or an RFC 2047
+  encoded-word, which would have let a sender forge extra lines into the
+  manifest; the stdlib refuses to *build* such a header but does not guard the
+  read path, so "the library would have stopped it" was not an argument
+  available here, and the filename is now flattened. And without its own branch
+  in `_redacted_email_tool_data`, attachment text beginning "Draft reply saved…"
+  would have fallen through to the draft prefix matching and been recorded as
+  `outcome: "draft_created"` — a **sender-forgeable draft confirmation**. The
+  branch records the outcome and a bounded message id, and never the extracted
+  text or the sender-chosen filename.
+
+  **A new email tool is six registrations, five of which fail silently and
+  open**: `deploy_validation.EMAIL_TOOL_NAMES` (the egress-conflict boundary —
+  a miss lets a workflow pair attachment reading with `http_get`, so an
+  injected attachment could direct mailbox content into a fetched URL),
+  `ui/backend/email_tools.py`'s own `EMAIL_TOOL_NAMES` and
+  `_fixed_message_tools` (a miss made an attachment-only team resolve as "does
+  not use email", so no per-org tools were built and the run fell through to
+  the process-env mailbox — **a cross-tenant read**),
+  `_EMAIL_TOOLS_NEEDING_REDACTION`, the SDK re-export, and `make_email_tools`'
+  returned dict; only `tools.REGISTRY` fails loudly. Four structural tests now
+  assert that every key `make_email_tools` returns is a member of the
+  corresponding list, so the next email tool cannot repeat this.
+
+  **On by default, with no per-org switch**, and that was argued rather than
+  assumed: cost is already governed by the model's own choice (a message with
+  no attachments produces no call), and the spend it does incur is metered like
+  any other token usage, so Phase 4a's monthly cost cap sees it with no new
+  accounting — though that cap is evaluated at **dispatch**, so it stops the
+  *following* run and cannot interrupt the one currently reading a 40-page PDF,
+  which is a real overshoot given how much attachment reading raises per-run
+  variance; the injection surface is the class the product accepts one
+  paragraph earlier. A flag would have added a column, a route, a panel and a
+  migration for nothing. The
+  capability reaches teams through the seeded skills, which had to be told
+  about it: `property_maintenance_intake_v1` positively *denied* the capability
+  ("You cannot read attachments"), so registering the tool everywhere would
+  have left the one vertical whose job is reading contractor quotes recording
+  every one of them as unreviewed. It ships as
+  `property_maintenance_intake_v2` — a new row, not an edit of `_v1`, per
+  `skills.py`'s own versioning rule — and `email_triage_reply` gained a
+  playbook step placed *before* drafting, conditional rather than blanket
+  ("not every attachment on every message"), because opening everything is the
+  per-message cost Phase 4a exists to bound. Both keep the discipline the old
+  paragraph got right and add one it lacked: never describe contents beyond
+  what the tool actually returned. That leaves one adoption caveat — see the
+  known-issues entries below. Spec:
+  `docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
@@ -1152,6 +1346,23 @@
   than editing code that phase otherwise did not touch. The per-org OAuth
   provider (`tools/_oauth.py`) does *not* have this bug; it refreshes 60
   seconds before expiry.
+- **The Graph backend cannot read attachments at all, and a seeded skill now
+  says it can.** `_GraphBackend.read()` returns no `attachments` key and the
+  class has no `read_attachment`, so on `BESTTEAM_EMAIL_BACKEND=graph`
+  `email_read` renders no manifest and `email_read_attachment` answers "This
+  mailbox connection cannot read attachments." That is safe and non-raising —
+  `_attachment_impl` checks `hasattr` before calling — but `email_triage_reply`
+  gained a playbook step in Phase 4b that tells the model it *can* read them,
+  so a Graph-backed deployment promises a capability its mailbox never
+  delivers, and the model has to discover that from a tool result. Bounded by
+  who can reach it: the Graph path exists only in the process-env
+  single-mailbox configuration (multi-org deployments refuse it, and the
+  per-org store is IMAP-only), and the M365 customers who would use it are
+  better served by per-org IMAP-with-OAuth, which *does* read attachments.
+  Implementing it means `/messages/{id}/attachments` plus base64 payload
+  decoding against a backend no test tenant has ever exercised (see the entry
+  above) — deliberately not started; recorded so it is not discovered by a
+  customer.
 - **Horizontal scale-out of the email poller is blocked on a Postgres
   migration, not on the poller.** `make_engine` hardcodes SQLite and takes a
   *file path*, not a URL (`ui/backend/db/database.py:41`), and there is no
@@ -1173,9 +1384,63 @@
   tool call opens its own IMAP connection (a 20-message batch is ~41 logins);
   multi-tenant connection is IMAP username/password only (the Graph backend is
   unreachable outside the process-env single-mailbox path, which multi-org
-  deployments refuse); there is no pre-LLM filtering, so spam is billed at
-  model rates; the daily cap counts runs, not messages or spend; attachments
-  are invisible; and one org gets exactly one mailbox, one trigger, one team.
+  deployments refuse); **pre-LLM filtering is header-only**, so a human-written
+  but entirely irrelevant email is not filtered and is still billed at model
+  rates — that is the acknowledged ceiling of the rule approach, and the reason
+  a classifier stays on the table for a later phase if a customer's inbox
+  actually demands it; **attachments are readable but only as text** (Phase 4b
+  — see the two entries below for what that still cannot do, and who has it);
+  and one org gets exactly one mailbox, one trigger, one team. Phase 4a's
+  header fetch also adds one more login to any cycle that finds new mail.
+- **Attachment reading is text extraction and nothing more.** There is **no OCR
+  and no image understanding**, so a photographed invoice or a tenant's photo
+  of a broken boiler is still invisible — the most likely next request, and
+  deliberately not started. **Archives are refused rather than expanded** (a
+  zip-bomb surface not worth taking on speculatively). **Extraction is
+  text-only**: a spreadsheet becomes rows and a Word table becomes text, while
+  layout, formulas and images inside a document are lost. **Dispatch trusts the
+  filename suffix**, so a mislabelled file fails at the parser rather than
+  being detected up front. **The whole message is still fetched** —
+  `_fetch_message` issues `BODY.PEEK[]`, so a 25 MB attachment is pulled into
+  the poller process even when nothing reads it; that is pre-existing, and
+  Phase 4b bounds what is *parsed*, not what is fetched. Fetching individual
+  MIME parts (`BODY.PEEK[2]`) would fix it and would reshape the one function
+  every email tool depends on, for a benefit this phase did not need.
+  A related consequence of parsing from bytes: **peak memory for a parsed file
+  is now the whole file**, where `openpyxl(read_only=True)` previously streamed
+  from disk — bounded at 10 MB for attachments, unbounded for a knowledge-base
+  workbook. Plain-text decoding is
+  **strict by default and lenient only for attachments**: `parse_bytes` takes
+  `lenient_text`, off unless the attachment path asks for it, so `parse_file`
+  still raises `UnicodeDecodeError` on a mis-encoded document and a knowledge
+  base still skips it with a warning rather than indexing mojibake. The
+  leniency exists because a sender can name anything `.txt` and one bad
+  attachment must not fail a customer's whole run.
+  Finally, **a refused or unparseable attachment is traced as
+  `outcome: "attachment_read"`** like a successful one, so it does not force
+  `needs_attention` the way a raised call does. Distinguishing it would mean
+  string-matching sentences that embed a sender-chosen filename — fragile, and
+  an outcome the sender could steer — so it is deliberately not done. A raised
+  call, an out-of-batch id and "no message found" *do* still escalate.
+- **Attachment reading reaches every deployment, but not every already-deployed
+  team.** Phase 4b ships `property_maintenance_intake_v2` as a new platform
+  skill rather than editing `_v1`, and `seed_default_skills` inserts *absent*
+  rows — so `_v2` appears on every deployment, new or existing, and any team
+  deployed from the shipped Property Maintenance template picks it up with no
+  operator action. `email_triage_reply` carries no version suffix and was
+  updated in place, so on an **already-seeded** deployment that skill keeps its
+  old three-tool definition (seeding never overwrites a row that is present).
+  A team **already deployed** against `property_maintenance_intake_v1` keeps
+  `_v1` — the versioning rule working as intended, not a gap: a running team's
+  behaviour must not change underneath it, and its `workflow_dependencies` row
+  pins the exact version it deployed with. To move such a team onto attachment
+  reading, edit its skills list to `_v2` and redeploy; to adopt the updated
+  `email_triage_reply` on an existing deployment, an admin saves the new skill
+  JSON through the Advanced Skills page (appending a version) and then
+  redeploys each affected team so its pinned dependency advances. **No
+  migration overwrites platform skill rows**, deliberately: an admin may have
+  customised one, and destroying that is a far worse failure than a capability
+  that needs one explicit adoption step.
 - **Erasure by data subject is not possible** — a customer asking to delete
   everything about `alice@example.com` cannot be served. The address is not
   stored anywhere indexed; it exists only inside `runs.output` free text the
@@ -1190,6 +1455,43 @@
   an IMAP UID, the customer's own mailbox address and a status, so there is no
   data-subject content in it and deleting it would break `resolve_retry_events`
   for no privacy gain. It is still an unbounded table on a busy mailbox.
+  **Phase 4a's filtered rows are never purged either**; they are rows the mail
+  would have produced anyway, so filtering changes the rate at which this table
+  grows, not the property.
+- **A spend cap bounds an estimate, not a bill.** `usage_records.cost_estimate`
+  derives from `model_catalog` prices that an operator maintains by hand and
+  that no provider invoice is ever reconciled against, and a model with no
+  catalogue row contributes NULL, i.e. 0. The budget API and UI name the
+  unpriced models and count the unpriced runs so the blind spot is visible
+  rather than inferred — but `unpriced_models_for_org` scopes to
+  `status="deployed"` workflows, so an undeployed team's models are not warned
+  about. Anyone quoting the figure to a customer should say "at least".
+- **The spend cap is enforced between runs, not within one.** A single run that
+  blows through a customer's monthly cap is not interrupted; the cap stops the
+  *next* dispatch. Interrupting mid-run would mean cancelling a partly-drafted
+  batch, which costs the money already spent and delivers nothing for it.
+- **The daily message counter over-counts on a submit failure.** The CAS
+  advances `messages_today` by the claimed batch and commits; the submit-failure
+  branch then hands those messages back to `pending` via `release_events`, so a
+  later cycle claims and charges them a second time. `runs_today` has had
+  identical semantics on that branch since it existed. Decrementing was
+  rejected deliberately: it would add a second write site outside the CAS to
+  correct an over-count bounded at one batch, on a branch that only fires while
+  the executor is shutting down. Separately, **`retry_triggered_run` enforces
+  neither new cap** and does not advance `messages_today`, so a human-initiated
+  retry of one failed batch can put an org past its daily message cap —
+  arguably right (a human asking to redo one batch is not autonomous spend),
+  but it is a real hole in the number the customer is shown.
+- **The Filtered ("Mail we skipped") UI section renders only when a trigger
+  with a `workflow_name` is configured**, because it lives inside
+  `EmailTriggerActivity` after its two early returns. Correct today — filtered
+  rows cannot exist before a trigger has polled — but a customer who later
+  disconnects their mailbox loses the only route to their historical filtered
+  rows, and to the Release button on them. The section also identifies a
+  skipped message by **UID rather than sender and subject**, which the design
+  sketched: `inbox_events` deliberately holds no message content (that is why
+  it needs no retention purge), so an admin decides whether to release on the
+  strength of the rule that fired rather than of the message itself.
 - **Retention is per-org and opt-in, so the default deployment still keeps
   everything forever** — `run_retention_days` defaults to NULL by design (an
   upgrade must delete nothing), and `BESTTEAM_RUN_RETENTION_DAYS` only supplies

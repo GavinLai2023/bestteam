@@ -3,7 +3,9 @@
 Detection records a `pending` row per new message in the SAME transaction that
 advances the mailbox cursor, so mail can never be consumed without a durable
 record of the work. A run then claims rows; the claimed rows' `external_id`s
-are the batch it processes.
+are the batch it processes. Status is `pending | claimed | done | failed |
+filtered` -- `filtered` (Phase 4a's pre-LLM filter) still records the row,
+just with a status the claim query never selects.
 
 None of these helpers commit. Callers own the transaction boundary -- that is
 the entire point of the design, since the durability guarantee comes from
@@ -15,7 +17,7 @@ See docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -27,6 +29,7 @@ EVENT_PENDING = "pending"
 EVENT_CLAIMED = "claimed"
 EVENT_DONE = "done"
 EVENT_FAILED = "failed"
+EVENT_FILTERED = "filtered"
 
 DEFAULT_CONNECTOR = "imap"
 
@@ -59,8 +62,16 @@ def record_events(
     mailbox_generation: str,
     external_ids: Sequence,
     connector_type: str = DEFAULT_CONNECTOR,
+    decisions: Optional[Mapping[str, str]] = None,
 ) -> int:
-    """Record each id as a `pending` event, ignoring ones already known.
+    """Record each id, ignoring ones already known.
+
+    `decisions` maps an `external_id` to a pre-LLM filter decision (Phase 4a);
+    those ids are recorded `filtered` with the reason, the rest `pending`.
+    Filtering changes a row's status, never whether the row exists -- Phase 1's
+    durability guarantee is that the commit consuming the mail is the commit
+    recording the work, and a filter that skipped the insert would become a
+    second way to consume mail with no record of it.
 
     Idempotent by the table's unique key, which is what lets the mailbox cursor
     degrade from a correctness requirement to a performance optimisation:
@@ -80,7 +91,11 @@ def record_events(
             "mailbox_identity": mailbox_identity,
             "mailbox_generation": mailbox_generation,
             "external_id": str(external_id),
-            "status": EVENT_PENDING,
+            "status": (
+                EVENT_FILTERED if decisions and str(external_id) in decisions
+                else EVENT_PENDING
+            ),
+            "decision": (decisions or {}).get(str(external_id)),
             "attempts": 0,
             "detected_at": now,
         }
@@ -125,6 +140,30 @@ def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[I
             .where(InboxEvent.run_id == run_id, InboxEvent.status == EVENT_CLAIMED)
             .order_by(InboxEvent.id)
         ).scalars()
+    )
+
+
+def has_pending_events(db: Session, *, org_id: int) -> bool:
+    """Whether this org has anything `claim_events` could claim right now.
+
+    A `pending` row can exist for reasons other than "mail just arrived": an
+    admin released a filtered false positive, or a budget cap left a backlog
+    behind. `poll_org` uses this to decide whether a cycle that found no new
+    UIDs should still go on to dispatch -- without it, both of those wait for
+    unrelated mail to land before anything claims them, on a quiet mailbox
+    possibly for days.
+
+    Deliberately an existence check (`LIMIT 1`) scoped exactly as
+    `claim_events` scopes its own selection, rather than a speculative claim:
+    an idle mailbox is the common case and the empty poll must stay cheap.
+    """
+    return (
+        db.execute(
+            select(InboxEvent.id)
+            .where(InboxEvent.org_id == org_id, InboxEvent.status == EVENT_PENDING)
+            .limit(1)
+        ).first()
+        is not None
     )
 
 
@@ -255,3 +294,37 @@ def resolve_retry_events(
             event.last_error = None
             moved += 1
     return moved
+
+
+def list_filtered_events(db: Session, *, org_id: int, limit: int) -> List[InboxEvent]:
+    """This org's filtered messages, newest first -- what the activity view
+    shows so a false positive is discoverable rather than silently lost."""
+    return list(
+        db.execute(
+            select(InboxEvent)
+            .where(InboxEvent.org_id == org_id, InboxEvent.status == EVENT_FILTERED)
+            .order_by(InboxEvent.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+
+
+def release_filtered_event(db: Session, *, org_id: int, event_id: int) -> bool:
+    """Hand one filtered message back for normal processing.
+
+    A single status flip is the whole feature: the next poll cycle claims it
+    like any other pending row, so there is no second dispatch path to keep
+    correct. Scoped by `org_id` and by `status == filtered`, so it can neither
+    touch another org's row nor resurrect one that already ran.
+    """
+    updated = db.execute(
+        update(InboxEvent)
+        .where(
+            InboxEvent.id == event_id,
+            InboxEvent.org_id == org_id,
+            InboxEvent.status == EVENT_FILTERED,
+        )
+        .values(status=EVENT_PENDING, decision=None, run_id=None)
+        .execution_options(synchronize_session="fetch")
+    ).rowcount
+    return bool(updated)

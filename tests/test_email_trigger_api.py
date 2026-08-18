@@ -18,7 +18,8 @@ from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.email_triggers import get_email_trigger
-from ui.backend.db.models import Run, WorkflowRecord
+from ui.backend.db.inbox_events import mailbox_identity, record_events
+from ui.backend.db.models import InboxEvent, Run, WorkflowRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 from ui.backend.skills import seed_default_skills
@@ -249,3 +250,78 @@ def test_activity_is_org_scoped(client):
     _add_run(theirs, "r-theirs", "email-trigger", minutes_ago=1)
     ids = [r["id"] for r in client.get("/api/org/email-trigger/activity").json()["runs"]]
     assert ids == ["r-mine"]
+
+
+# --- filtered messages --------------------------------------------------------
+
+
+def _seed_filtered(org_id, external_id="101", decision="bulk:list-id"):
+    """One message the pre-LLM filter skipped, recorded the way the poller
+    records it."""
+    with open_test_db() as db:
+        record_events(
+            db, org_id=org_id,
+            mailbox_identity=mailbox_identity("imap.acme.com", "u@acme.com"),
+            mailbox_generation="3", external_ids=[external_id],
+            decisions={external_id: decision},
+        )
+        db.commit()
+        return (
+            db.query(InboxEvent)
+            .filter_by(org_id=org_id, external_id=external_id)
+            .one()
+            .id
+        )
+
+
+@pytest.fixture
+def filtered_event_id(client):
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+    return _seed_filtered(org_id)
+
+
+@pytest.fixture
+def other_org_event_id(client):
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "org_b").id
+    return _seed_filtered(org_id, external_id="202")
+
+
+def test_filtered_messages_are_listed_with_a_readable_reason(client, filtered_event_id):
+    body = client.get("/api/org/email-trigger/filtered").json()
+    assert body["filtered"][0]["reason"].startswith("Skipped:")
+    assert body["filtered"][0]["decision"] == "bulk:list-id"
+    assert body["filtered"][0]["external_id"] == "101"
+
+
+def test_filtered_list_is_org_scoped(client, filtered_event_id, other_org_event_id):
+    ids = [row["id"] for row in client.get("/api/org/email-trigger/filtered").json()["filtered"]]
+    assert ids == [filtered_event_id]
+
+
+def test_releasing_a_filtered_message_makes_it_pending(client, filtered_event_id):
+    assert client.post(
+        f"/api/org/email-trigger/filtered/{filtered_event_id}/release"
+    ).status_code == 200
+    with open_test_db() as db:
+        assert db.get(InboxEvent, filtered_event_id).status == "pending"
+
+
+def test_releasing_the_same_message_twice_is_404(client, filtered_event_id):
+    # Indistinguishable from another org's row on purpose -- see below.
+    client.post(f"/api/org/email-trigger/filtered/{filtered_event_id}/release")
+    assert client.post(
+        f"/api/org/email-trigger/filtered/{filtered_event_id}/release"
+    ).status_code == 404
+
+
+def test_releasing_an_unknown_id_is_404(client):
+    assert client.post("/api/org/email-trigger/filtered/999999/release").status_code == 404
+
+
+def test_releasing_another_orgs_message_is_404_not_403(client, other_org_event_id):
+    # 403 would confirm the row exists; 404 tells a cross-org prober nothing.
+    assert client.post(
+        f"/api/org/email-trigger/filtered/{other_org_event_id}/release"
+    ).status_code == 404

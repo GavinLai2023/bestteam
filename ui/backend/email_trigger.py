@@ -24,7 +24,7 @@ import re
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select, update
@@ -35,13 +35,16 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
 
-from . import secret_store, trigger_health
+from . import email_budget, email_filter, secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
+from .db.email_budget_settings import get_budget_caps, spent_this_month
 from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
+from .db.email_filter_settings import get_filter_settings
 from .db.email_triggers import get_email_trigger
 from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
     claim_events,
+    has_pending_events,
     mailbox_identity,
     mark_dispatched,
     record_events,
@@ -581,6 +584,53 @@ def _friendly_poll_error(exc: Exception) -> str:
     return "Couldn't check the mailbox. We'll keep retrying automatically."
 
 
+def _make_backend(cred: OrgEmailCredential, password: str) -> _ImapBackend:
+    """The IMAP backend for one org's stored password credentials.
+
+    `restrict_to_public` stays on: the host is customer-supplied, so it must be
+    validated and pinned to a public IP on every connect.
+    """
+    return _ImapBackend(
+        host=cred.host,
+        user=cred.username,
+        password=password,
+        port=cred.port,
+        drafts=cred.drafts_folder,
+        restrict_to_public=True,  # customer-supplied host
+    )
+
+
+def _filter_decisions(backend, settings, uids) -> Dict[str, str]:
+    """Which of `uids` the pre-LLM filter rejects, and why.
+
+    Fails open, twice over: a UID the mailbox will not hand us a header for is
+    absent from `summaries`, and a fetch that raises returns `{}`. Either way
+    the message is recorded `pending` and processed. A transient IMAP hiccup
+    must not silently discard a customer's mail; the worst case of failing open
+    is that one junk message is billed.
+
+    Keys are `str`, matching `record_events`'s `str(external_id) in decisions`
+    lookup -- an int key here would silently leave every message `pending`, with
+    no error anywhere to show the filter had stopped working.
+    """
+    if not uids:
+        return {}
+    try:
+        summaries = backend.summaries_for([str(u) for u in uids])
+    except Exception:  # noqa: BLE001 -- filtering is an optimisation, not a gate
+        _logger.warning(
+            "email trigger: header fetch failed; processing this batch unfiltered",
+            exc_info=True,
+        )
+        return {}
+    decisions = {}
+    for summary in summaries:
+        decision = email_filter.evaluate(summary, settings)
+        if decision is not None:
+            decisions[str(summary.get("id"))] = decision
+    return decisions
+
+
 def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None:
     """One org's poll cycle. Never raises; all state changes committed here.
 
@@ -592,6 +642,13 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
     today = _today()
     if trigger.runs_date != today:
         trigger.runs_today = 0
+        # The customer's daily MESSAGE cap shares `runs_date` on purpose: one
+        # rollover check resets both counters, so they can never disagree about
+        # which day it is. `retry_triggered_run` rolls the same date over and so
+        # resets both here too -- a site that rolled `runs_date` but not this
+        # would carry a stale message count into the new day, and no later check
+        # would ever clear it.
+        trigger.messages_today = 0
         trigger.runs_date = today
     if trigger.runs_today >= daily_cap():
         db.commit()
@@ -627,14 +684,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
                     "No mailbox is connected -- reconnect it to resume automatic runs."
                 )
             password = secret_store.decrypt(cred.password_encrypted)
-            backend = _ImapBackend(
-                host=cred.host,
-                user=cred.username,
-                password=password,
-                port=cred.port,
-                drafts=cred.drafts_folder,
-                restrict_to_public=True,  # customer-supplied host
-            )
+            backend = _make_backend(cred, password)
             uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
         except (InvalidToken, secret_store.SecretsKeyError) as exc:
             _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
@@ -677,25 +727,46 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             db.commit()
             return
 
-        if not new_uids:
+        if new_uids:
+            # THE durability point. Recording the work and advancing the cursor
+            # in ONE commit is what stops a process kill from consuming mail
+            # that nothing ran: before this, `_start_triggered_run` advanced
+            # `last_uid` and only then handed the workflow to a thread pool, and
+            # a kill in between lost the batch for good.
+            detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
+            # The pre-LLM filter chooses each row's STATUS, never whether the row
+            # is inserted, so it belongs here, before the durability point: every
+            # detected UID still gets a row, and the record_events / last_uid /
+            # commit trio below stays one unit.
+            decisions = _filter_decisions(
+                backend, get_filter_settings(db, trigger.org_id), detected
+            )
+            record_events(
+                db,
+                org_id=trigger.org_id,
+                mailbox_identity=mailbox_identity(cred.host, cred.username),
+                mailbox_generation=str(trigger.uidvalidity),
+                external_ids=[str(u) for u in detected],
+                decisions=decisions,
+            )
+            trigger.last_uid = max(detected)
+            db.commit()
+        elif has_pending_events(db, org_id=trigger.org_id):
+            # No new mail, but this org already has claimable work in the
+            # ledger. A `pending` row does not only come from mail arriving:
+            # an admin releasing a filtered false positive makes one, and so
+            # does a backlog a budget cap declined to dispatch. Both are
+            # promised to be picked up "on the next check" -- by the release
+            # UI, by the budget alert's own wording, and by the design spec --
+            # and returning here made that promise false on a quiet mailbox,
+            # because only a cycle that detected NEW mail ever reached the
+            # claim. Nothing about the durability sequence above moves: this
+            # branch records nothing and advances no cursor, it only declines
+            # to stop early.
+            db.commit()  # persist last_checked_at / the error clearing above
+        else:
             db.commit()
             return
-
-        # THE durability point. Recording the work and advancing the cursor in
-        # ONE commit is what stops a process kill from consuming mail that
-        # nothing ran: before this, `_start_triggered_run` advanced `last_uid`
-        # and only then handed the workflow to a thread pool, and a kill in
-        # between lost the batch for good.
-        detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
-        record_events(
-            db,
-            org_id=trigger.org_id,
-            mailbox_identity=mailbox_identity(cred.host, cred.username),
-            mailbox_generation=str(trigger.uidvalidity),
-            external_ids=[str(u) for u in detected],
-        )
-        trigger.last_uid = max(detected)
-        db.commit()
 
         if _at_daily_cap(db, trigger, today):
             db.commit()  # persist last_checked_at / error-clearing above; no dispatch
@@ -747,7 +818,47 @@ def _start_triggered_run(
     run = registry.create(
         trigger.workflow_name, "", org_id=trigger.org_id, username=TRIGGER_USERNAME,
     )
-    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=batch_size())
+    # The customer's two budgets (the operator's `daily_cap()` runs-per-day rail
+    # is separate and unchanged, checked by the caller). Both are read here,
+    # inside the caller's `_dispatch_lock`, immediately before the claim -- same
+    # staleness rationale as `_at_daily_cap`.
+    caps = get_budget_caps(db, trigger.org_id)
+    now = _utcnow()
+
+    if email_budget.cost_exceeded(caps, spent_this_month(db, trigger.org_id, now)):
+        registry.discard(run.id)
+        _raise_budget_alert(
+            db, trigger.org_id, "cost", email_budget.month_key(now),
+            "This organisation has reached its monthly spend limit for automatic "
+            "email runs. New mail is still being collected and will be processed "
+            "when the new month begins, or sooner if you raise the limit.",
+        )
+        db.commit()
+        return
+
+    # Read off the ORM object, deliberately unlike `_at_daily_cap`'s fresh
+    # column SELECT: `runs_today` needs one because a pre-lock fast-path check
+    # can already have passed on a stale value and because `retry_triggered_run`
+    # advances it from another session, whereas `messages_today` is checked here
+    # and nowhere else and is written only by this function's own CAS below,
+    # under the caller's `_dispatch_lock`. It also already carries the caller's
+    # date rollover, which a raw column read would have to re-derive.
+    remaining = email_budget.remaining_messages(caps, trigger.messages_today)
+    if remaining == 0:
+        registry.discard(run.id)
+        _raise_budget_alert(
+            db, trigger.org_id, "messages", email_budget.day_key(now),
+            "This organisation has reached its daily limit for automatically "
+            "processed emails. New mail is still being collected and will be "
+            "processed tomorrow, or sooner if you raise the limit.",
+        )
+        db.commit()
+        return
+
+    # The message cap truncates the claim rather than rejecting the cycle: the
+    # messages it leaves behind stay `pending` and are claimed by a later cycle.
+    limit = batch_size() if remaining is None else min(batch_size(), remaining)
+    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=limit)
     if not claimed:
         registry.discard(run.id)
         db.commit()
@@ -819,6 +930,21 @@ def _start_triggered_run(
             # this run's claimed batch, so writing max(batch) would regress the
             # cursor and re-detect (harmlessly, but pointlessly) the remainder.
             runs_today=EmailTrigger.runs_today + 1,
+            # The customer's message counter advances in exactly this statement
+            # and nowhere else, under the same enabled/active predicate. That
+            # covers two of the three release paths for free -- a build failure
+            # returns before this runs, and a trigger disabled mid-build makes
+            # this match no row -- so neither charges for messages it handed
+            # back. It does NOT cover the third: the submit-failure branch runs
+            # after this has committed, so those messages are charged here and
+            # then released to `pending`, and a later cycle claims and charges
+            # them again. Same semantics `runs_today` has always had on that
+            # path ("The cap was already consumed by the commit above", below),
+            # and deliberately not fixed by decrementing: a second write site
+            # outside the CAS would cost more in reasoning than an over-count
+            # bounded at one batch, on a branch that only fires when the
+            # executor is shutting down and the poller is stopping anyway.
+            messages_today=EmailTrigger.messages_today + len(claimed),
             last_run_id=run.id,
             last_error=None,  # a run is going out: clear any prior fault
             last_error_kind=None,
@@ -952,10 +1078,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         )
     try:
         password = secret_store.decrypt(cred.password_encrypted)
-        backend = _ImapBackend(
-            host=cred.host, user=cred.username, password=password,
-            port=cred.port, drafts=cred.drafts_folder, restrict_to_public=True,
-        )
+        backend = _make_backend(cred, password)
         uidvalidity, _max_uid = mailbox_state(backend)
     except (InvalidToken, secret_store.SecretsKeyError) as exc:
         raise RetryError("The mailbox connection can't be read right now -- reconnect it and try again.") from exc
@@ -974,6 +1097,10 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     today = _today()
     if trigger.runs_date != today:
         trigger.runs_today = 0
+        # Same rollover, same reason as poll_org's: `messages_today` shares
+        # `runs_date`, so every place that rolls the date over must roll both
+        # counters or a stale message count would survive into the new day.
+        trigger.messages_today = 0
         trigger.runs_date = today
     if trigger.runs_today >= daily_cap():
         db.commit()
@@ -1149,6 +1276,37 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
                 TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
             ))
         return new_run.id
+
+
+_BUDGET_KIND = "budget"
+
+
+def _budget_fingerprint(which: str, period: str) -> str:
+    """Scope a budget alert to the period it is about.
+
+    `has_fingerprint` searches an org's entire notification history, so a bare
+    name would alert once ever and every later month would be silent -- the
+    same trap `_expiry_fingerprint` exists to avoid.
+    """
+    return f"budget_{which}:{period}"
+
+
+def _raise_budget_alert(db: Session, org_id: int, which: str, period: str, body: str) -> None:
+    """Alert once per period that automation has paused on a budget.
+
+    Deliberately NOT routed through `trigger_health.evaluate`: a budget
+    ceiling is a normal operating state, not a fault, and feeding it into the
+    fault evaluator would corrupt `consecutive_faults` and compete with real
+    faults for `alerted_fingerprint`.
+    """
+    fingerprint = _budget_fingerprint(which, period)
+    if has_fingerprint(db, org_id, fingerprint):
+        return
+    create_notification(
+        db, org_id=org_id, kind=_BUDGET_KIND, severity="warning",
+        title="Automatic email runs have paused -- budget reached",
+        body=body, fingerprint=fingerprint,
+    )
 
 
 # Warn this far ahead of a Microsoft 365 client secret expiring. Entra secrets

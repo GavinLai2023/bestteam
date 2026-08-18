@@ -60,7 +60,8 @@ relevant file below the first time it reads a file in that directory:
 - `src/bestteam/tools/CLAUDE.md` — built-in tools (`web_search`,
   `local_business_search`, `parse_file`,
   `http_get`, `calculator`, and the draft-only `email_find`/`email_read`/
-  `email_draft_reply` toolkit) and their trust boundaries.
+  `email_read_attachment`/`email_draft_reply` toolkit) and their trust
+  boundaries.
 - `ui/backend/CLAUDE.md` — FastAPI backend: builder/config APIs, auth, model
   catalog, usage metering, sync-to-async streaming bridge.
 - `ui/backend/db/CLAUDE.md` — SQLAlchemy persistence schema.
@@ -98,6 +99,47 @@ implemented** — don't assume they exist:
   is that there is no send verb in the process), no per-user preferences, no
   digests. A trigger raises a notification on a health *transition*
   (`ui/backend/trigger_health.py`), never per occurrence.
+- **Inbound mail is filtered by header rules only, and the two per-org budgets
+  bound an estimate.** A pure evaluator (`ui/backend/email_filter.py`) decides
+  before any model is involved whether a detected message is worth processing —
+  a sender blocklist/allowlist, a subject blocklist, and a `skip_bulk` check
+  over the standard bulk headers, in that fixed order, with the allowlist
+  deliberately *not* exempting a sender from the bulk check. Two pattern forms
+  (a full address, `*@domain`), no regular expressions, no classifier model —
+  a gatekeeper model would still bill per message, still read
+  attacker-controlled text, and could not be audited by the admin whose mail it
+  dropped. Filtering only changes an `inbox_events` row's *status*: every
+  detected message is still recorded in the commit that consumes it, and a
+  false positive is released with one `filtered` → `pending` flip.
+  **`skip_bulk` is on by default** (the one behaviour change on upgrade); both
+  budget caps default to NULL. `org_email_budget_settings` adds a per-org daily
+  *message* cap and monthly *spend* cap that pause dispatch, alert once per
+  period and resume automatically, alongside — not replacing —
+  `BESTTEAM_TRIGGER_DAILY_CAP`, the operator's deployment-wide runs/day rail.
+  What does **not** exist: any inspection beyond headers (a human-written but
+  irrelevant email is still billed) and reconciliation of `model_catalog`
+  prices against a provider bill — the spend cap bounds an estimate. See
+  `ui/backend/CLAUDE.md` and `docs/STATUS.md` for the rest, including the caps
+  `retry_triggered_run` does not enforce.
+- **Attachments are readable, as text only, and never from disk.**
+  `email_read` lists a message's attachments and
+  `email_read_attachment(message_id, filename)` extracts one on demand — two
+  tools rather than one, so the model pays only for what it decides to read and
+  each extraction is its own trace event. The tool takes **no path**: a message
+  id confined to the run's batch plus a name matched against that message's own
+  MIME parts, parsed from `io.BytesIO`. `parse_file`'s no-sandboxing contract is
+  why — the filename is chosen by whoever sent the message, so traversal is not
+  defended against but made structurally impossible. Three limits, all checked
+  before parsing: 10 MB per attachment, 25 MB per message, 8,000 characters of
+  extracted text; breaching one returns a sentence, never an exception.
+  Readable types are exactly `parse_file`'s (`.pdf`, `.xlsx`, `.xlsm`, `.docx`,
+  `.xml`, plain text). What does **not** exist: OCR or any image understanding
+  (a photographed invoice is invisible), archive expansion (refused as a
+  zip-bomb surface), any layout/formula/embedded-image fidelity, and fetching
+  of individual MIME parts — `BODY.PEEK[]` still pulls the whole message, so a
+  large attachment costs memory even when nothing reads it. The tool is in both
+  `EMAIL_TOOL_NAMES` sets, so pairing it with an egress tool is refused at
+  deploy validation. See `src/bestteam/tools/CLAUDE.md`.
 - **Run history has retention, but erasure by data subject does not exist.**
   Each org sets a period (`org_retention_settings`, NULL = keep forever by
   default) and a purge clears *content* — `runs.input`/`output`, the run's

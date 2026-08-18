@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
@@ -7,6 +8,10 @@ from xml.sax.saxutils import escape, quoteattr
 from ..exceptions import ConfigurationError
 
 _TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"}
+
+SUPPORTED_SUFFIXES = frozenset(
+    {".pdf", ".xlsx", ".xlsm", ".docx", ".xml"} | _TEXT_SUFFIXES
+)
 
 
 def parse_file(path: str) -> str:
@@ -35,18 +40,52 @@ def parse_file(path: str) -> str:
     if not file_path.exists():
         raise ConfigurationError(f"File not found: {path}")
 
-    suffix = file_path.suffix.lower()
+    # `lenient_text` deliberately left at its strict default: a mis-encoded
+    # file here is an operator's own document, and a knowledge base is better
+    # served by skipping it with a warning than by silently ingesting mojibake
+    # chunks nobody can search. Attachments make the opposite trade -- see
+    # `parse_bytes`.
+    return parse_bytes(file_path.read_bytes(), file_path.name)
+
+
+def parse_bytes(data: bytes, filename: str, *, lenient_text: bool = False) -> str:
+    """Extract text from a file's bytes, dispatching on `filename`'s suffix.
+
+    The byte-based entry point exists because email attachments are named by
+    whoever sent the message. `parse_file` reads whatever path it is given,
+    with no sandboxing -- a contract that is fine for knowledge bases, where an
+    operator chooses the paths, and exactly wrong for mail. Parsing from bytes
+    means there is no path for an attacker-chosen name to become.
+
+    `filename` is used for dispatch and for the rendered header only; it is
+    never resolved, opened, or joined to anything.
+
+    Args:
+        data: The file's raw bytes.
+        filename: The file's name, used only for suffix dispatch and headers.
+        lenient_text: Replace undecodable bytes in a plain-text file instead of
+            raising. Off by default, so this entry point and `parse_file` agree
+            and a mis-encoded document is reported rather than silently
+            mangled. The email attachment path turns it on: a sender can name
+            anything `.txt`, and one bad attachment must not fail a customer's
+            whole run. Affects only plain text -- the binary parsers raise
+            either way.
+
+    Returns:
+        Extracted text content as a single string.
+    """
+    suffix = Path(filename).suffix.lower()
 
     if suffix == ".pdf":
-        return _parse_pdf(file_path)
+        return _parse_pdf_bytes(data, filename)
     if suffix in (".xlsx", ".xlsm"):
-        return _parse_excel(file_path)
+        return _parse_excel_bytes(data, filename)
     if suffix == ".docx":
-        return _parse_docx(file_path)
+        return _parse_docx_bytes(data, filename)
     if suffix == ".xml":
-        return _parse_xml(file_path)
+        return _parse_xml_bytes(data, filename)
     if suffix in _TEXT_SUFFIXES:
-        return file_path.read_text(encoding="utf-8")
+        return _decode_text(data, lenient=lenient_text)
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
@@ -54,7 +93,24 @@ def parse_file(path: str) -> str:
     )
 
 
-def _parse_pdf(path: Path) -> str:
+def _decode_text(data: bytes, *, lenient: bool = False) -> str:
+    """Decode plain-text bytes the way `Path.read_text` would.
+
+    Strict by default, which is what `Path.read_text(encoding="utf-8")` did: a
+    mis-encoded document should be reported to whoever owns it, not stored as
+    mojibake. `lenient` swaps in `errors="replace"` for the attachment path,
+    where a sender can name anything `.txt` and a UnicodeDecodeError escaping
+    into the poller would fail a whole run over one bad file.
+
+    Line endings are translated either way, because the path-based reader this
+    replaces opened files in text mode (universal newlines) and its output must
+    not change.
+    """
+    errors = "replace" if lenient else "strict"
+    decoded = data.decode("utf-8", errors=errors)
+    return decoded.replace("\r\n", "\n").replace("\r", "\n")
+
+def _parse_pdf_bytes(data: bytes, name: str) -> str:
     try:
         import pypdf
     except ImportError as exc:
@@ -63,13 +119,13 @@ def _parse_pdf(path: Path) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
-    reader = pypdf.PdfReader(str(path))
+    reader = pypdf.PdfReader(io.BytesIO(data))
     pages = [page.extract_text() or "" for page in reader.pages]
-    header = f"[PDF: {path.name} — {len(pages)} page(s)]\n"
+    header = f"[PDF: {name} — {len(pages)} page(s)]\n"
     return header + "\n\n".join(pages)
 
 
-def _parse_docx(path: Path) -> str:
+def _parse_docx_bytes(data: bytes, name: str) -> str:
     try:
         import docx
     except ImportError as exc:
@@ -78,7 +134,7 @@ def _parse_docx(path: Path) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
-    document = docx.Document(str(path))
+    document = docx.Document(io.BytesIO(data))
     paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
 
     table_parts = []
@@ -89,27 +145,32 @@ def _parse_docx(path: Path) -> str:
         ]
         table_parts.append(f"[Table {i}]\n" + "\n".join(rows))
 
-    header = f"[Word: {path.name}]\n"
+    header = f"[Word: {name}]\n"
     body = "\n".join(paragraphs)
     if table_parts:
         body += "\n\n" + "\n\n".join(table_parts)
     return header + body
 
 
-def _parse_xml(path: Path) -> str:
+def _parse_xml_bytes(data: bytes, name: str) -> str:
     try:
+        # A separate pass collects the document's own namespace declarations;
+        # the element tree itself only carries Clark-notation `{uri}local`
+        # names, so the prefixes have to come from these start-ns events.
         ns_prefixes = {
             uri: prefix
-            for _, (prefix, uri) in ET.iterparse(str(path), events=("start-ns",))
+            for _, (prefix, uri) in ET.iterparse(
+                io.BytesIO(data), events=("start-ns",)
+            )
         }
-        tree = ET.parse(str(path))
+        root = ET.fromstring(data)
     except ET.ParseError as exc:
         raise ConfigurationError(
-            f"Failed to parse XML file '{path.name}': {exc}"
+            f"Failed to parse XML file '{name}': {exc}"
         ) from exc
 
-    lines = [f"[XML: {path.name}]"]
-    _render_xml_tree(tree.getroot(), lines, ns_prefixes)
+    lines = [f"[XML: {name}]"]
+    _render_xml_tree(root, lines, ns_prefixes)
     return "\n".join(lines)
 
 
@@ -168,7 +229,7 @@ def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
         stack.extend(reversed(items))
 
 
-def _parse_excel(path: Path) -> str:
+def _parse_excel_bytes(data: bytes, name: str) -> str:
     try:
         import openpyxl
     except ImportError as exc:
@@ -177,7 +238,7 @@ def _parse_excel(path: Path) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
-    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts = []
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -186,4 +247,4 @@ def _parse_excel(path: Path) -> str:
             rows.append(",".join("" if v is None else str(v) for v in row))
         parts.append(f"[Sheet: {sheet_name}]\n" + "\n".join(rows))
     wb.close()
-    return f"[Excel: {path.name}]\n\n" + "\n\n".join(parts)
+    return f"[Excel: {name}]\n\n" + "\n\n".join(parts)

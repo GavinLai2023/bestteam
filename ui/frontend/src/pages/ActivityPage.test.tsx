@@ -16,6 +16,12 @@ vi.mock('../lib/api', () => ({
     listAutomationResults: vi.fn(),
     retryRun: vi.fn(),
     listNotifications: vi.fn(),
+    listFilteredMessages: vi.fn(),
+    releaseFilteredMessage: vi.fn(),
+    getEmailFilter: vi.fn(),
+    setEmailFilter: vi.fn(),
+    getEmailBudget: vi.fn(),
+    setEmailBudget: vi.fn(),
   },
 }))
 
@@ -41,6 +47,21 @@ describe('ActivityPage', () => {
     })
     mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
     mockedApi.listNotifications.mockResolvedValue({ notifications: [], unread: 0 })
+    mockedApi.listFilteredMessages.mockResolvedValue({ filtered: [] })
+    mockedApi.getEmailFilter.mockResolvedValue({
+      skip_bulk: true,
+      sender_blocklist: [],
+      sender_allowlist: [],
+      subject_blocklist: [],
+    })
+    mockedApi.getEmailBudget.mockResolvedValue({
+      daily_message_cap: null,
+      monthly_cost_cap: null,
+      messages_today: 0,
+      spent_this_month: null,
+      unpriced_runs_this_month: 0,
+      unpriced_models: [],
+    })
   })
 
   it('shows the unread alert badge before the Alerts tab has ever been opened', async () => {
