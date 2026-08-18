@@ -258,9 +258,10 @@ owns:
   and paid for. Any exception retries -- classifying provider exceptions would
   mean tracking every provider's taxonomy, so an auth failure waits 3s before
   surfacing. A batch returning the wrong number of vectors raises immediately,
-  without retrying (a deterministic answer won't change on a second ask); at
-  KB construction that is re-raised as the `ConfigurationError` both
-  constructors have always raised for a mis-sized response. Neither the batch
+  without retrying (a deterministic answer won't change on a second ask) --
+  as `ConfigurationError`, the same type `resolve_embedding_model` raises for
+  every other provider-shape problem, and the type both KB constructors have
+  always raised for a mis-sized response. Neither the batch
   size nor the attempt count is a parameter -- no caller has a reason to differ.
   Metering is unaffected: ingestion estimates its `kb:ingest` tokens once from
   the chunk texts, so a retried batch is never billed twice.

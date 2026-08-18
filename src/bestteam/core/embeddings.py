@@ -89,8 +89,9 @@ def embed_documents_in_batches(
     acceptable price for not silently giving up on a rate limit.
 
     A batch that comes back with the wrong number of vectors raises
-    `ValueError` immediately, without retrying -- a deterministic answer will
-    not change on a second ask.
+    `ConfigurationError` immediately, without retrying -- a deterministic
+    answer will not change on a second ask, and a model whose response is the
+    wrong shape is a misconfiguration like any other in this module.
 
     `sleep` is injectable so tests need not actually wait. Empty input makes
     no provider call at all.
@@ -108,7 +109,7 @@ def embed_documents_in_batches(
             else:
                 break
         if len(result) != len(batch):
-            raise ValueError(
+            raise ConfigurationError(
                 f"embedding model returned {len(result)} vectors for {len(batch)} texts"
             )
         vectors.extend(result)

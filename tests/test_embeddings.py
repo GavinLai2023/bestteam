@@ -6,6 +6,7 @@ import pytest
 from langchain_core.embeddings import Embeddings
 
 from bestteam.core.embeddings import _EMBED_BATCH_SIZE, embed_documents_in_batches
+from bestteam.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.unit
 
@@ -97,7 +98,7 @@ def test_short_batch_result_is_rejected_without_retry():
     fake = _RecordingEmbeddings(short_by=1)
     sleeps: List[float] = []
 
-    with pytest.raises(ValueError, match="returned 2 vectors for 3 texts"):
+    with pytest.raises(ConfigurationError, match="returned 2 vectors for 3 texts"):
         embed_documents_in_batches(fake, texts, sleep=sleeps.append)
 
     assert len(fake.calls) == 1
