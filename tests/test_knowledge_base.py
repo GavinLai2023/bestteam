@@ -940,3 +940,126 @@ def test_estimate_embedding_tokens_counts_cjk_per_char_and_latin_per_4():
     assert estimate_embedding_tokens("退货政策") == 4
     # Mixed: 4 CJK characters + " refunds" (8 characters -> 2).
     assert estimate_embedding_tokens("退货政策 refunds") == 6
+
+
+# ---------------------------------------------------------------------------
+# Tabular chunking: .xlsx/.xlsm sheets and .docx tables (P1-5)
+# ---------------------------------------------------------------------------
+
+def _sheet_rows(count: int) -> str:
+    """CSV-style body rows shaped the way `_parse_excel_bytes` renders them."""
+    return "\n".join(f"north,widget-{i:03d},{i}" for i in range(count))
+
+
+def test_xlsx_long_sheet_repeats_sheet_marker_and_header_row_in_every_chunk():
+    text = "[Excel: sales.xlsx]\n\n[Sheet: Q1]\nregion,product,units\n" + _sheet_rows(40)
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=200, chunk_overlap=0, suffix=".xlsx")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.text.startswith("[Sheet: Q1]\nregion,product,units\n")
+        assert chunk.heading == "Sheet: Q1"
+    # No body row is lost or duplicated across the chunks.
+    bodies = [chunk.text.split("\n", 2)[2] for chunk in chunks]
+    assert "north,widget-039,39" in bodies[-1]
+    assert "north,widget-000,0" in bodies[0]
+
+
+def test_xlsx_small_sheet_is_a_single_chunk_without_duplication():
+    text = "[Excel: sales.xlsx]\n\n[Sheet: Q1]\nregion,product,units\n" + _sheet_rows(3)
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=1000, chunk_overlap=0, suffix=".xlsx")
+
+    assert len(chunks) == 1
+    assert chunks[0].heading == "Sheet: Q1"
+    assert chunks[0].text.count("[Sheet: Q1]") == 1
+    assert chunks[0].text.count("region,product,units") == 1
+
+
+def test_xlsx_multiple_sheets_each_carry_their_own_heading():
+    text = (
+        "[Excel: sales.xlsx]\n\n"
+        "[Sheet: Q1]\nregion,product,units\n" + _sheet_rows(30) + "\n\n"
+        "[Sheet: Q2]\nregion,product,units\n" + _sheet_rows(30)
+    )
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=200, chunk_overlap=0, suffix=".xlsx")
+
+    headings = {chunk.heading for chunk in chunks}
+    assert headings == {"Sheet: Q1", "Sheet: Q2"}
+    # A sheet's chunks carry that sheet's marker and nobody else's.
+    for chunk in chunks:
+        marker = f"[{chunk.heading}]"
+        assert chunk.text.startswith(marker)
+        assert chunk.text.count("[Sheet: ") == 1
+
+
+def test_docx_body_chunks_normally_and_table_chunks_repeat_the_header():
+    text = (
+        "[Word: report.docx]\n"
+        + "Quarterly trading was steady across every region. " * 6
+        + "\n\n[Table 1]\nname,role\n"
+        + "\n".join(f"person-{i:03d},analyst" for i in range(40))
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=200, chunk_overlap=0, suffix=".docx")
+
+    body_chunks = [chunk for chunk in chunks if chunk.heading is None]
+    table_chunks = [chunk for chunk in chunks if chunk.heading == "Table 1"]
+    assert body_chunks and len(table_chunks) > 1
+    assert any("Quarterly trading" in chunk.text for chunk in body_chunks)
+    assert all("[Table 1]" not in chunk.text for chunk in body_chunks)
+    for chunk in table_chunks:
+        assert chunk.text.startswith("[Table 1]\nname,role\n")
+
+
+def test_header_row_longer_than_chunk_size_does_not_crash_and_still_sets_heading():
+    header_row = ",".join(f"column-{i:03d}" for i in range(12))
+    assert len(header_row) > 60
+    text = "[Excel: wide.xlsx]\n\n[Sheet: Q1]\n" + header_row + "\n" + _sheet_rows(20)
+
+    chunks = _chunk_document("wide.xlsx", text, chunk_size=60, chunk_overlap=0, suffix=".xlsx")
+
+    assert len(chunks) > 1
+    assert all(chunk.heading == "Sheet: Q1" for chunk in chunks)
+    assert all(len(chunk.text) <= 60 for chunk in chunks)
+
+
+def test_table_heading_is_capped_at_80_chars():
+    from bestteam.core.knowledge_base import _MAX_HEADING_CHARS
+
+    sheet_name = "Q" * 120
+    text = f"[Excel: wide.xlsx]\n\n[Sheet: {sheet_name}]\nregion,units\n" + _sheet_rows(30)
+
+    chunks = _chunk_document("wide.xlsx", text, chunk_size=200, chunk_overlap=0, suffix=".xlsx")
+
+    assert chunks
+    for chunk in chunks:
+        assert len(chunk.heading) == _MAX_HEADING_CHARS
+        assert chunk.heading == f"Sheet: {sheet_name}"[:_MAX_HEADING_CHARS]
+
+
+@pytest.mark.parametrize("chunk_size", [60, 120, 200, 500])
+@pytest.mark.parametrize("chunk_overlap", [0, 30])
+def test_table_chunks_never_exceed_chunk_size(chunk_size, chunk_overlap):
+    text = (
+        "[Excel: sales.xlsx]\n\n[Sheet: Q1]\nregion,product,units\n"
+        + _sheet_rows(60)
+        + "\n\n[Sheet: Q2]\nregion,product,units\n"
+        + _sheet_rows(60)
+    )
+
+    chunks = _chunk_document(
+        "sales.xlsx", text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, suffix=".xlsx"
+    )
+
+    assert chunks
+    assert all(len(chunk.text) <= chunk_size for chunk in chunks)
+
+
+def test_format_results_cites_sheet_heading():
+    chunk = _Chunk(source="sales.xlsx", text="[Sheet: Q1]\nregion,units\nnorth,12", heading="Sheet: Q1")
+
+    assert _citation(chunk) == "sales.xlsx § Sheet: Q1"
+    assert "1. [source: sales.xlsx § Sheet: Q1]" in format_results("docs", "units", [chunk])

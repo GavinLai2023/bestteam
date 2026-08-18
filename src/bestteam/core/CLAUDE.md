@@ -123,8 +123,8 @@ it onto the calling agent's `agent_completed.usage` so a KB's query embedding
 and query-expansion calls are metered -- see "Metering a knowledge base's
 spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
-`heading` (Markdown, the section a chunk opens under, an 80-char
-approximation) — which `_citation()` renders as
+`heading` (a Markdown section, or a spreadsheet sheet / Word table, that a
+chunk opens under — an 80-char approximation) — which `_citation()` renders as
 `[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
 two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
 and render byte-for-byte as before. All three types also take an
@@ -296,9 +296,22 @@ cannot disagree about why a file was rejected.
 
 **Chunking is format-aware, not hierarchical.** `_chunk_document` (shared by
 all three KB types, and by `ui/backend/ingestion.py`) is the per-document
-entry point. A `.pdf` is split on `_PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
-now joins pages with) and each page chunked through `_chunk_text` on its own,
-so a chunk never straddles a page. Every other format goes through
+entry point. A `.pdf` is split on `PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
+now joins pages with -- the constant lives in `tools/file_parser.py`, with the
+producer that writes it, and is imported here) and each page chunked through
+`_chunk_text` on its own, so a chunk never straddles a page. An
+`.xlsx`/`.xlsm`/`.docx` goes through `_chunk_tabular_document`, which splits on
+the parser's own `[Sheet: ...]`/`[Table N]` marker lines and, for a block too
+long to fit one chunk, repeats the marker and the first body row (**assumed**
+to be the column header) at the top of every chunk of that block -- otherwise
+the second chunk on has neither the sheet name nor the columns, and cites the
+filename alone. The marker also becomes the chunk's `heading`, under the same
+`_MAX_HEADING_CHARS` cap, so a long sheet name can't bypass it into a citation.
+The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
+for the body), so overlap shrinks and can reach zero; a prefix that would leave
+no room at all falls back to the ordinary path, still tagged with the heading.
+A `.docx`'s body paragraphs (before its first table) chunk normally. Every other
+format goes through
 `_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
 is composed of — so a `.md` chunk's section heading (`_headings_for`) can be
 read off the pieces *before* overlap prefixes each one with the previous

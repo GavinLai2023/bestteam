@@ -87,6 +87,21 @@ from (see "Citations", below):
   parses Markdown, so a `#` line inside a fenced code block reads as a
   heading, and a chunk spanning two sections is labelled with the one it
   starts in.
+- **Table `heading`, plus a repeated header row.** `.xlsx`/`.xlsm`/`.docx`
+  are chunked table block by table block, splitting on the marker lines the
+  parser itself writes (`[Sheet: Q1]`, `[Table 2]`). A block that fits inside
+  `chunk_size` stays one chunk; a longer one has its marker line **and its
+  first body row repeated at the top of every chunk**, so a row in the tenth
+  chunk still says which sheet it came from and what its columns mean. The
+  marker also becomes the chunk's `heading` (`Sheet: Q1`, `Table 2`), capped
+  at the same 80 characters, so the chunk cites `sales.xlsx § Sheet: Q1`
+  rather than the filename alone. Two caveats: the first body row is
+  *assumed* to be the column header — a table whose first row is already data
+  simply gets that row repeated — and the repeated prefix comes out of the
+  chunk's budget, so the body of each chunk is smaller and the overlap
+  borrowed from the previous chunk shrinks (to zero if the prefix is long).
+  A `.docx`'s body paragraphs, before its first table, chunk the ordinary way
+  and carry no heading.
 
 Every other format supplies neither, and such a chunk cites its filename
 alone.
@@ -106,8 +121,9 @@ Refunds are issued within 30 days of purchase…
 ```
 
 The tag is `[source: <filename>]`, plus `, p.<N>` when the chunk carries a
-page and ` § <heading>` when it carries a section — so a chunk with neither
-renders exactly as it always did. The tool's own description tells the model
+page and ` § <heading>` when it carries a section — a Markdown heading, or a
+spreadsheet sheet / Word table (`[source: sales.xlsx § Sheet: Q1]`). A chunk
+with neither renders exactly as it always did. The tool's own description tells the model
 to quote that same tag back when it uses an excerpt, which is what makes a
 model's answer checkable against the document.
 
@@ -716,9 +732,9 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   enough for a person to find the passage — but there is no chunk id in the
   tag, no click-through to the document, and no "which version of which page"
   audit trail: a re-upload replaces a collection's chunks wholesale, so a
-  citation names a location in *today's* documents. Every other format
-  (`.docx`, `.xlsx`, `.xml`, plain text) still cites its filename alone, and
-  the Markdown heading is an approximation — see "Chunk location metadata"
+  citation names a location in *today's* documents. `.xml` and plain text
+  still cite their filename alone, and both the Markdown heading and the
+  spreadsheet/table one are approximations — see "Chunk location metadata"
   above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose

@@ -287,6 +287,12 @@ attachment path passes it. `parse_file` therefore still raises
 with a warning. The switch is scoped to plain text; the binary parsers raise
 either way.
 
+`file_parser.py` also owns `PAGE_BREAK` (`\f`), the delimiter
+`_parse_pdf_bytes` joins a PDF's pages with. It is public and lives with the
+producer that writes it, because the consumer -- `core/knowledge_base.py`,
+which chunks a PDF per page to cite an exact `p.N` -- has to split on exactly
+what was written; a bare literal on each side could drift.
+
 **Two tools, not one enriched one.** `email_read` lists; it never inlines
 attachment text. Cost — Phase 4a exists because customers were billed for
 content they did not need, and inlining would put a 40-page PDF into the
