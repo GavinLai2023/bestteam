@@ -735,8 +735,11 @@ def test_resolve_failed_kb_reports_the_job_error_not_wait_message(client, tmp_pa
 
     message = str(excinfo.value)
     assert "could not be indexed" in message
-    assert "no chunks" in message
+    # A whitespace-only document has no extractable text, which is the reason
+    # P0-6 reports (it used to be the vaguer "produced no chunks").
+    assert "No text could be extracted" in message
     assert "Wait for the current upload" not in message
+    assert ".." not in message
 
     # And the customer-facing summary says the same thing, without a config.
     body = client.get("/api/org/knowledge-bases/broken").json()

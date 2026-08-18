@@ -1,4 +1,5 @@
 """Tests for the local-folder knowledge base."""
+import io
 from unittest.mock import patch
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 from bestteam.core.knowledge_base import (
     LocalFolderKnowledgeBase,
     _chunk_text,
+    _has_extractable_text,
+    _load_document_chunks,
     make_knowledge_base_tool,
 )
 from bestteam.exceptions import ConfigurationError
@@ -219,6 +222,46 @@ def test_skips_a_mis_encoded_document_instead_of_ingesting_mojibake(tmp_path):
     assert "legacy.txt" not in sources
     # And nothing partially-decoded leaked into the index.
     assert not any("�" in chunk.text for chunk in kb._chunks)
+
+
+def test_has_extractable_text_ignores_parser_headers():
+    # Every parser prefixes its output with bracketed header lines we generate
+    # ourselves, so "the parsed string is non-empty" is not the same question
+    # as "the document had any text in it".
+    assert not _has_extractable_text("[PDF: scan.pdf — 3 page(s)]\n")
+    assert not _has_extractable_text("[Word: empty.docx]\n")
+    assert not _has_extractable_text("[Word: tables.docx]\n\n[Table 1]\n")
+    assert not _has_extractable_text("[Excel: book.xlsx]\n\n[Sheet: Sheet1]\n")
+    assert not _has_extractable_text("[XML: empty.xml]")
+    assert not _has_extractable_text("")
+
+    assert _has_extractable_text("[PDF: report.pdf — 1 page(s)]\n\nQ3 revenue rose.")
+    assert _has_extractable_text("[Sheet: Sheet1]\nName,Price\nWidget,10")
+    assert _has_extractable_text("a document with no parser header at all")
+
+
+def test_load_document_chunks_warns_on_unsupported_and_empty_documents(tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+
+    (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "photo.png").write_bytes(b"\x89PNG\r\n")
+    # A blank page stands in for a scanned one: pypdf extracts no text, so the
+    # parser returns nothing but its own "[PDF: ...]" header line.
+    buffer = io.BytesIO()
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    (tmp_path / "scan.pdf").write_bytes(buffer.getvalue())
+
+    with pytest.warns(UserWarning) as recorded:
+        chunks = _load_document_chunks(tmp_path, chunk_size=1000, chunk_overlap=100)
+
+    messages = [str(warning.message) for warning in recorded]
+    assert any("photo.png" in m and "Unsupported file type" in m for m in messages)
+    assert any("scan.pdf" in m and "OCR" in m for m in messages)
+    # Only the readable document is indexed -- in particular the scanned PDF
+    # never becomes a chunk holding nothing but its own header line.
+    assert {chunk.source for chunk in chunks} == {"good.txt"}
 
 
 @pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])

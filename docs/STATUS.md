@@ -1329,6 +1329,18 @@
   be resolved no longer fails spec generation for the whole org: the wizard's
   catalogue skips it and only lists what actually built.
 
+- **An unreadable document fails loudly instead of vanishing** (P0-6): the
+  ingestion job now walks every staged file rather than pre-filtering by
+  suffix, so an unsupported type becomes a `failed` document naming the type
+  and the supported set, and `documents_succeeded + documents_failed ==
+  file_count` always holds. A **scanned PDF** is caught too — it parses to its
+  `[PDF: …]` header line and nothing else, which used to be indexed as a
+  content-free chunk; `_has_extractable_text` strips the parser's own header
+  lines and reports "…needs OCR, which isn't supported yet" instead. The SDK's
+  `_load_document_chunks` warns on both cases rather than skipping silently.
+  No migration, no new document status: `failed` plus a distinguishing message
+  is what the customer sees either way.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

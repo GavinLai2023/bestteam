@@ -44,9 +44,17 @@ base's folder recursively, parses every file with a supported extension via
 - `.xml` — structural rendering of tags, attributes, namespaces, and mixed
   content (via `xml.etree.ElementTree`)
 
-Files with an unsupported extension, or that fail to parse, are skipped with
-a `warnings.warn(...)` — the knowledge base still builds from whatever did
-parse, but you'll see a warning naming the skipped file.
+Files with an unsupported extension, that fail to parse, or that yield **no
+extractable text**, are skipped with a `warnings.warn(...)` naming the file
+and the reason — the knowledge base still builds from whatever did parse.
+"No extractable text" is a real case, not a theoretical one: every parser
+prefixes its output with a bracketed header line (`[PDF: report.pdf — 3
+page(s)]`, `[Sheet: Q3]`, `[Table 1]`, …), so a **scanned PDF** — pages that
+are images, with no text layer — parses to that header and nothing else.
+`_has_extractable_text()` strips the headers the parsers generate and checks
+what is left, so such a document is reported rather than indexed as a chunk
+that matches no query. Reading a scanned document needs OCR, which is not
+supported (see "Known limitations").
 
 **Chunking**: each document's text is split into chunks of up to
 `chunk_size` characters with `chunk_overlap` characters shared between
@@ -374,10 +382,17 @@ per-document failures) has no `KnowledgeDocument` rows to report, so
 `errors` instead holds a single `{"filename": null, "error": "..."}` entry
 carrying the job-level error.
 
-**Per-document partial failure**: one bad file (fails to parse, or produces
-zero chunks) doesn't fail the whole job — it's recorded as a `failed`
-`KnowledgeDocument` row (capped error text) and the job continues with the
-rest. The job itself only fails outright if *every* document failed (so the
+**Per-document partial failure**: one bad file (an unsupported file type,
+fails to parse, no extractable text, or produces zero chunks) doesn't fail
+the whole job — it's recorded as a `failed` `KnowledgeDocument` row (capped
+error text) and the job continues with the rest. Every staged file gets a
+document row, so `documents_succeeded + documents_failed == file_count`
+always holds: a file the ingester cannot read is *reported* to the customer
+in the job's `errors` list ("Unsupported file type '.png'. Supported: …", or
+"No text could be extracted from this file. If it is a scanned PDF it needs
+OCR, which isn't supported yet."), never silently dropped between the upload
+count and the job totals. The job itself only fails outright if *every*
+document failed (so the
 KB would have zero chunks) or, for `vector`/`hybrid`, if the embedding call
 itself fails (in which case the job's buffered document/chunk rows are
 discarded before anything is written — a vector/hybrid KB with no embeddings
@@ -448,6 +463,13 @@ for the full design.
   single-process, small-to-medium corpus.
 - **No DMS connectors.** None of the three types can ingest directly from
   SharePoint, Confluence, Google Drive, etc. — only a local folder of files.
+- **No OCR, and no image understanding at all.** A scanned PDF (or any
+  page that is an image with no text layer) yields no extractable text.
+  Since P0-6 that is *reported* — a warning on the SDK path, a `failed`
+  document with a customer-readable reason on the upload path — rather than
+  quietly indexed as a header-only chunk, but the document still cannot be
+  searched. The same gap as the email toolkit's attachment reading, which
+  is deliberately text-only (`src/bestteam/tools/CLAUDE.md`).
 - **No re-embedding on document changes.** The embedding cache is
   content-addressed (by chunk text) but there's no logic to detect "this
   document changed, drop its stale chunks" beyond the chunk text itself

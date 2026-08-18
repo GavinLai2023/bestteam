@@ -198,6 +198,21 @@ Suffix support is also shared now: `_SUPPORTED_SUFFIXES` is an alias of
 `file_parser.SUPPORTED_SUFFIXES`, so a suffix added to `parse_bytes` is
 discovered by folder scanning automatically.
 
+**An unreadable document is reported, not silently skipped** (P0-6).
+`_load_document_chunks` no longer filters unsupported suffixes out of its
+`rglob` before the loop -- it warns per file, naming the type and the
+supported set (`_unsupported_suffix_message`), so a `.png` dropped into a
+knowledge folder is something the operator hears about. It also warns on a
+document that parsed but contributed nothing: `_has_extractable_text` strips
+the parser-generated header lines (`_PARSER_HEADER_RE`, covering `[PDF: …]`,
+`[Word: …]`, `[Excel: …]`, `[Sheet: …]`, `[Table N]`, `[XML: …]`) and checks
+what remains, because a **scanned PDF** parses to its header line alone --
+non-empty, so it used to become a chunk that matched nothing and told nobody
+the pages were never read. Both helpers plus `_NO_TEXT_MESSAGE` are shared
+with `ui/backend/ingestion.py`, which raises them as per-document failures
+instead of warnings; keeping one wording means the SDK and the upload path
+cannot disagree about why a file was rejected.
+
 **Chunking is format-aware, not hierarchical.** `_chunk_text` (shared by all
 three KB types) now splits on the document's own structure — Markdown heading
 boundaries, XML element boundaries (via the renderer's indentation), and a

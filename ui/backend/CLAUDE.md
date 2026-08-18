@@ -1189,10 +1189,20 @@ customer-visible error record. Cache invalidation and both pruning steps are
 isolated in their own `try/except`s so a failure in any of them can never
 retroactively mark an already-committed successful ingestion as failed.
 
-**Per-document partial-failure model.** One bad file (parse error, or zero
-chunks produced) doesn't fail the whole job — it's recorded as a `failed`
-`KnowledgeDocument` row with a capped error message, and the job continues
-processing the rest. The job itself only ends `failed` if every document
+**Per-document partial-failure model.** One bad file (unsupported file type,
+parse error, no extractable text, or zero chunks produced) doesn't fail the
+whole job — it's recorded as a `failed` `KnowledgeDocument` row with a capped
+error message, and the job continues processing the rest. The parse loop
+walks **every** staged file, not only the ones whose suffix is in
+`_SUPPORTED_SUFFIXES` (P0-6): filtering first meant an unsupported file left
+no row at all, so `documents_succeeded + documents_failed` silently
+disagreed with `file_count` and nothing ever told the customer their `.png`
+was dropped. The suffix check now raises inside the loop's existing
+`except Exception`, as does `_has_extractable_text` (shared with
+`bestteam.core.knowledge_base`, along with both messages) — that second one
+is what stops a **scanned PDF**, which parses to its `[PDF: …]` header line
+and nothing else, from becoming a content-free chunk instead of a reported
+failure. The job itself only ends `failed` if every document
 failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
 itself raises — in which case the job's already-flushed-but-uncommitted
 document/chunk objects are discarded before anything is written (a

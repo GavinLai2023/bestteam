@@ -1,5 +1,6 @@
 """Tests for the async knowledge-base ingestion job (ui/backend/ingestion.py)."""
 
+import io
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,100 @@ def test_empty_file_produces_zero_chunks_and_does_not_count_as_servable(db, engi
     # Parsed "successfully" (no exception) but produced zero chunks -- must
     # not resolve to a completed job with nothing to serve.
     assert job.status == "failed"
+
+
+def test_unsupported_file_is_recorded_as_failed_with_reason(db, engine, tmp_path):
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "good.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    (version_dir / "photo.png").write_bytes(b"\x89PNG\r\n")
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    assert job.documents_succeeded == 1
+    assert job.documents_failed == 1
+    # Every staged file is accounted for -- an unsupported one no longer
+    # silently vanishes between the upload's count and the job's totals.
+    assert job.documents_succeeded + job.documents_failed == job.file_count
+    failed_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, status="failed").one()
+    assert failed_doc.filename == "photo.png"
+    assert "Unsupported file type" in failed_doc.error
+    assert ".png" in failed_doc.error
+
+
+def test_scanned_pdf_header_only_is_failed_not_a_content_free_chunk(db, engine, tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "good.txt").write_text("Refunds within 30 days.", encoding="utf-8")
+    # A blank page stands in for a scanned one: pypdf extracts no text, so the
+    # parser returns nothing but its own "[PDF: ...]" header line -- non-empty,
+    # and previously chunked as if it were content.
+    buffer = io.BytesIO()
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    (version_dir / "scan.pdf").write_bytes(buffer.getvalue())
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "completed"
+    assert job.documents_succeeded == 1
+    assert job.documents_failed == 1
+    failed_doc = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id, status="failed").one()
+    assert failed_doc.filename == "scan.pdf"
+    assert "OCR" in failed_doc.error
+    texts = [c.text for c in db.query(KnowledgeChunk).filter_by(kb_id=kb.id).all()]
+    assert not any("[PDF:" in text for text in texts)
+
+
+def test_only_unsupported_files_fails_the_job_with_per_file_errors(db, engine, tmp_path):
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job.file_count = 2
+    db.commit()
+    version_dir = tmp_path / "v_test"
+    version_dir.mkdir()
+    (version_dir / "photo.png").write_bytes(b"\x89PNG\r\n")
+    (version_dir / "archive.zip").write_bytes(b"PK\x03\x04")
+
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100, embedding_model=None,
+        engine=engine,
+    )
+
+    db.expire_all()
+    job = db.get(IngestionJob, job.id)
+    assert job.status == "failed"
+    assert job.documents_succeeded == 0
+    assert job.documents_failed == 2
+    # The customer sees which files were rejected and why, not just a bare
+    # job-level "no readable documents".
+    payload = ingestion.job_status_payload(db, job)
+    assert {e["filename"] for e in payload["errors"]} == {"photo.png", "archive.zip"}
+    assert all("Unsupported file type" in e["error"] for e in payload["errors"])
 
 
 def test_vector_kb_embeds_all_chunks(db, engine, tmp_path):

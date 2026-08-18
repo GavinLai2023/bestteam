@@ -23,7 +23,13 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from bestteam.core.embeddings import resolve_embedding_model
-from bestteam.core.knowledge_base import _SUPPORTED_SUFFIXES, _chunk_text
+from bestteam.core.knowledge_base import (
+    _NO_TEXT_MESSAGE,
+    _SUPPORTED_SUFFIXES,
+    _chunk_text,
+    _has_extractable_text,
+    _unsupported_suffix_message,
+)
 from bestteam.tools import parse_file
 
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
@@ -106,10 +112,13 @@ def run_ingestion_job(
         # flush below assigns them.
         pending: List[Tuple[KnowledgeDocument, List[KnowledgeChunk]]] = []
         all_chunks: List[KnowledgeChunk] = []
-        files = sorted(
-            p for p in version_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
-        )
+        # Every staged file, not only the ones with a readable suffix: an
+        # unsupported file filtered out here would leave no Document row at
+        # all, so the customer's upload count and the job's
+        # succeeded+failed totals would silently disagree and nothing would
+        # ever say why. Rejecting it inside the parse loop instead makes it a
+        # `failed` document with a reason, like any other bad file.
+        files = sorted(p for p in version_dir.rglob("*") if p.is_file())
         for file_path in files:
             data = file_path.read_bytes()
             doc = KnowledgeDocument(
@@ -124,8 +133,16 @@ def run_ingestion_job(
             pending.append((doc, doc_chunks))
 
             try:
+                suffix = file_path.suffix.lower()
+                if suffix not in _SUPPORTED_SUFFIXES:
+                    raise ValueError(_unsupported_suffix_message(suffix))
                 text = parse_file(str(file_path))
-                pieces = _chunk_text(text, chunk_size, chunk_overlap, suffix=file_path.suffix.lower())
+                # A scanned PDF parses to its header line and nothing else --
+                # non-empty, so it would chunk into a content-free chunk that
+                # matches no query and reports no problem.
+                if not _has_extractable_text(text):
+                    raise ValueError(_NO_TEXT_MESSAGE)
+                pieces = _chunk_text(text, chunk_size, chunk_overlap, suffix=suffix)
                 if not pieces:
                     raise ValueError("document produced no chunks (empty or whitespace-only content)")
             except Exception as exc:  # noqa: BLE001 -- one bad file must not abort the batch

@@ -611,9 +611,12 @@ def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Pat
         if latest.status == "failed":
             errors = ingestion.job_status_payload(db, latest)["errors"]
             detail = errors[0]["error"] if errors else "the documents could not be processed"
+            # A per-document error may already be a full sentence (the
+            # unsupported-type and no-extractable-text messages both are), so
+            # don't append a second full stop onto it.
             raise ConfigurationError(
-                f"Knowledge base '{record.name}' could not be indexed: {detail}. "
-                "Upload the documents again, or delete it."
+                f"Knowledge base '{record.name}' could not be indexed: "
+                f"{detail.rstrip('.')}. Upload the documents again, or delete it."
             )
         raise ConfigurationError(
             f"Knowledge base '{record.name}' has no completed ingestion yet. "
