@@ -98,7 +98,8 @@ build on — consuming chunks rather than re-parsing a formatted string. The
 `evaluate(kb, queries, top_k)` drives any KB type through `search()` and
 reports recall@k / MRR / hit@1 **per source document** (one relevant document
 per query, so recall@k == hit@k), plus an optional `expected_substring` hit@k
-over chunk *text* that catches a chunking regression. The golden set is
+over the *text* of the expected document's own chunks (a match in another
+document doesn't count), which catches a chunking regression. The golden set is
 `tests/fixtures/kb_eval/` — 10 documents (5 EN / 5 ZH) and 20 queries split
 16 `lexical` (BM25 must rank the document first) / 4 `paraphrase` (no shared
 significant terms, so BM25 misses them by design; they are the headroom a real

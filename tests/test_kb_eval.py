@@ -9,13 +9,14 @@ from bestteam.core.kb_eval import (  # noqa: E402
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_TOP_K,
+    EvalQuery,
     evaluate,
     load_queries,
     mrr,
     rank_of,
     recall_at_k,
 )
-from bestteam.core.knowledge_base import LocalFolderKnowledgeBase  # noqa: E402
+from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -61,6 +62,44 @@ def test_metric_math_on_synthetic_results():
     # No queries at all is 0.0, not a ZeroDivisionError.
     assert recall_at_k([], 3) == pytest.approx(0.0)
     assert mrr([]) == pytest.approx(0.0)
+
+
+class _StubKB:
+    """Returns a fixed chunk list, so a metric can be checked against an
+    exact retrieval result without indexing anything."""
+
+    def __init__(self, *chunks):
+        self._chunks = list(chunks)
+
+    def search(self, query, top_k=None):
+        return self._chunks[:top_k] if top_k else self._chunks
+
+
+def test_substring_hit_only_counts_inside_the_expected_document():
+    """The substring check exists to catch a chunking change that separates
+    an answer from the words that found it, so it is scoped to the expected
+    document. Another document that happens to quote the same fact is a
+    retrieval miss, not partial credit."""
+    query = EvalQuery(
+        query="refund window",
+        expected_source="refund_policy.md",
+        expected_substring="30 days",
+    )
+
+    elsewhere = _StubKB(
+        _Chunk(source="warranty.md", text="A repair takes 30 days."),
+        _Chunk(source="refund_policy.md", text="See the returns page."),
+    )
+    outcome = evaluate(elsewhere, [query], top_k=3).outcomes[0]
+    assert outcome.rank == 2, "the expected document WAS retrieved"
+    assert outcome.substring_hit is False
+
+    # The same substring in the expected document's own chunk does count.
+    here = _StubKB(
+        _Chunk(source="warranty.md", text="A repair takes 30 days."),
+        _Chunk(source="refund_policy.md", text="Returns are refunded in 30 days."),
+    )
+    assert evaluate(here, [query], top_k=3).outcomes[0].substring_hit is True
 
 
 # ---------------------------------------------------------------------------

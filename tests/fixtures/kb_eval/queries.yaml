@@ -9,9 +9,10 @@
 #                       close; they are not expected to pass with `fake:`
 #                       embeddings, which are deterministic noise.
 #
-# expected_substring is a concrete fact that must appear in the retrieved chunk
-# text -- it catches a chunking change that separates the answer from the words
-# that found it.
+# expected_substring is a concrete fact that must appear in the text of a
+# retrieved chunk OF expected_source itself -- it catches a chunking change that
+# separates the answer from the words that found it. The same fact quoted by
+# another document does not count.
 
 queries:
   # --- English, lexical ---------------------------------------------------

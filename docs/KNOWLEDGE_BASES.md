@@ -547,7 +547,7 @@ hit@k.
 | `recall@k` | Fraction of queries whose expected document appeared in the top `k`. |
 | `MRR` | Mean reciprocal rank — 1.0 for a hit at position 1, 0.5 at position 2, 0 for a miss. Rewards ranking it highly, not merely returning it. |
 | `hit@1` | Fraction of queries whose expected document ranked first. |
-| `substring hit@k` | Fraction of queries whose `expected_substring` (a concrete fact) appeared in the retrieved chunk *text* — this is what catches a chunking change that separates the answer from the words that found it. |
+| `substring hit@k` | Fraction of queries whose `expected_substring` (a concrete fact) appeared in the *text* of a retrieved chunk **of the expected document** — this is what catches a chunking change that separates the answer from the words that found it. Another document quoting the same fact does not count. |
 
 The report splits every metric by query `kind`, and lists each query that did
 not rank its expected document first, with what came back instead.

@@ -24,6 +24,7 @@ docs/KNOWLEDGE_BASES.md, "Evaluating retrieval", for the query-set format.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -38,7 +39,7 @@ from bestteam.core.kb_eval import (
     report_for,
 )
 from bestteam.core.loader import _KNOWLEDGE_BASE_TYPES
-from bestteam.exceptions import BestTeamError
+from bestteam.exceptions import BestTeamError, ConfigurationError
 
 _GOLDEN_SET = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "kb_eval"
 
@@ -67,6 +68,31 @@ def _parse_args(argv):
     parser.add_argument("--json", action="store_true",
                         help="print the report as JSON instead of a table")
     return parser.parse_args(argv)
+
+
+def _check_embedding_flag(args) -> None:
+    """Reject a --type/--embedding-model combination the constructor would
+    only reject as a raw TypeError. Asked of the constructor itself rather
+    than a hard-coded list of types, so a knowledge base type added later
+    cannot quietly reintroduce the traceback."""
+    parameters = inspect.signature(_KNOWLEDGE_BASE_TYPES[args.type]).parameters
+    accepted = "embedding_model" in parameters
+    required = accepted and parameters["embedding_model"].default is inspect.Parameter.empty
+
+    if required and not args.embedding_model:
+        raise ConfigurationError(
+            f"--type {args.type} requires --embedding-model "
+            "(e.g. fake:32 for a $0 dry run, or openai:text-embedding-3-small)."
+        )
+    if args.embedding_model and not accepted:
+        embedding_types = sorted(
+            name for name, cls in _KNOWLEDGE_BASE_TYPES.items()
+            if "embedding_model" in inspect.signature(cls).parameters
+        )
+        raise ConfigurationError(
+            f"--embedding-model is not used by --type {args.type}; it is only "
+            f"valid with --type {' or '.join(embedding_types)}."
+        )
 
 
 def _build_kb(args):
@@ -173,6 +199,7 @@ def _as_json(args, report: EvalReport, by_kind) -> str:
 def main(argv=None) -> int:
     args = _parse_args(argv)
     try:
+        _check_embedding_flag(args)
         queries = load_queries(args.queries)
         report = evaluate(_build_kb(args), queries, args.top_k)
     except BestTeamError as exc:

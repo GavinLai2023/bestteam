@@ -52,9 +52,9 @@ class EvalQuery:
     with its document (keyword search is expected to find it), `paraphrase`
     deliberately shares none (BM25 alone is expected to miss it, so the set
     can show what embeddings add). `expected_substring` is an optional
-    stricter check: a concrete fact that must appear in the returned chunk
-    text, which catches a chunking regression that splits the answer away
-    from the words that retrieved it.
+    stricter check: a concrete fact that must appear in a retrieved chunk of
+    `expected_source` itself, which catches a chunking regression that splits
+    the answer away from the words that retrieved it.
     """
 
     query: str
@@ -74,8 +74,9 @@ class QueryOutcome:
     #: 1-based position of `query.expected_source` in `sources`, or None if
     #: it never appeared.
     rank: Optional[int]
-    #: Whether `expected_substring` appeared in any retrieved chunk's text;
-    #: None when the query declares no substring.
+    #: Whether `expected_substring` appeared in a retrieved chunk OF THE
+    #: EXPECTED DOCUMENT; None when the query declares no substring. A chunk
+    #: of another document containing the same words is not a hit.
     substring_hit: Optional[bool]
 
 
@@ -197,7 +198,16 @@ def evaluate(kb, queries: Sequence[EvalQuery], top_k: int = DEFAULT_TOP_K) -> Ev
                 sources.append(chunk.source)
         substring_hit = None
         if query.expected_substring is not None:
-            substring_hit = any(query.expected_substring in chunk.text for chunk in chunks)
+            # Only the expected document's own chunks can satisfy this. A
+            # chunk of some other document that happens to contain the same
+            # words is a retrieval miss, not a partial credit -- scoring it
+            # as a hit would decouple the metric from the chunking regression
+            # it exists to catch.
+            substring_hit = any(
+                chunk.source == query.expected_source
+                and query.expected_substring in chunk.text
+                for chunk in chunks
+            )
         outcomes.append(QueryOutcome(
             query=query,
             sources=sources,
