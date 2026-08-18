@@ -1230,6 +1230,23 @@ the caller's existing delete+commit+rmtree transaction rather than
 committing separately). See `ui/backend/db/CLAUDE.md` for the three tables'
 schema.
 
+**An org manages its own knowledge bases** (`org_knowledge_bases.py`:
+`GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
+all `get_current_org`-scoped). `_kb_summary` reports `used_by`
+(`workflows_referencing`), `servable` and `latest_job` -- the newest attempt of
+*any* status, `config` stripped, since that field carries the server's absolute
+upload path and this list is customer-facing. The DELETE is the same
+`knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
+(deployed dependency, in-flight ingestion) hold here too. Two consequences
+elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only
+asking whether any exists, and reports a `failed` one's own error instead of
+telling the customer to wait for something that will never finish; and
+`builder._all_knowledge_base_tools` skips a KB that won't resolve (logged
+warning) with `_with_knowledge_base_catalog(..., names=)` listing only the ones
+that built -- it runs over every KB in the org, so one unparseable upload used
+to 4xx spec generation for everybody. `load_knowledge_base_tools` still fails
+closed, because there the KB is one an agent actually references.
+
 **Deleting a knowledge base is refused (`409`) while an upload is still
 processing**, and the whole sequence lives in
 `knowledge_bases.py::delete_knowledge_base`, not in `crud.py` — it needs this

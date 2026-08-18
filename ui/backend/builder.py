@@ -166,7 +166,9 @@ def _with_skill_catalog(db: Session, text: str, org_id: Optional[int] = None) ->
     return text + "\n".join(lines)
 
 
-def _with_knowledge_base_catalog(db: Session, text: str, org_id: Optional[int] = None) -> str:
+def _with_knowledge_base_catalog(
+    db: Session, text: str, org_id: Optional[int] = None, names: Optional[set[str]] = None
+) -> str:
     """Append available standalone knowledge bases (if any) so the Solution
     Architect can reference them by name, parallel to `_with_skill_catalog`.
 
@@ -174,8 +176,16 @@ def _with_knowledge_base_catalog(db: Session, text: str, org_id: Optional[int] =
     "Available knowledge bases" section and has nothing to draw a name
     from -- combined with `_ARCHITECT_SYSTEM_PROMPT`'s instruction not to
     invent one, this is what stops it from fabricating a `path`.
+
+    `names` restricts the listing to knowledge bases that actually built
+    (`_all_knowledge_base_tools`'s keys). A KB whose ingestion failed has no
+    tool, so naming it here would invite the architect to reference something
+    no agent could ever call. `None` lists every record, for callers that
+    aren't building tools at all.
     """
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
+    if names is not None:
+        records = [r for r in records if r.name in names]
     if not records:
         return text
     lines = ["", "", "Available knowledge bases (reference by name in an agent's tools, do not redeclare):"]
@@ -192,11 +202,22 @@ def _all_knowledge_base_tools(db: Session, source: Path, org_id: Optional[int] =
     don't yet know which knowledge bases the architect's agents will
     reference -- unlike `load_knowledge_base_tools`, which filters to a
     known `raw` config's referenced names.
+
+    A knowledge base that can't be resolved (its ingestion failed, or hasn't
+    completed yet) is skipped rather than raised: this runs for every one of
+    the org's knowledge bases at generation time, so one customer's
+    unparseable upload used to 4xx spec generation for the whole org. The
+    workflow-build path (`load_knowledge_base_tools`) still fails closed --
+    there a broken KB is one an agent actually references.
     """
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
     tools: Dict[str, Any] = {}
     for record in records:
-        kb = resolve_knowledge_base(db, record, source)
+        try:
+            kb = resolve_knowledge_base(db, record, source)
+        except ConfigurationError as exc:
+            logger.warning("Skipping knowledge base '%s' in the wizard catalog: %s", record.name, exc)
+            continue
         tools[kb.name] = make_knowledge_base_tool(kb)
     return tools
 
@@ -451,16 +472,19 @@ def submit_specification(
         requirements_text = _requirements_text(session)
         if req.feedback:
             requirements_text += f"\n\nCustomer feedback on the previous design:\n{req.feedback}"
+        # Build the tools first: the catalog only names knowledge bases that
+        # actually resolved, so the architect can't reference a broken one.
+        kb_tools = _all_knowledge_base_tools(db, source, org.id)
         requirements_text = _with_model_catalog(db, requirements_text)
         requirements_text = _with_skill_catalog(db, requirements_text, org.id)
-        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+        requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id, names=set(kb_tools))
         chat_model = _call_model(_resolve_model, req.model)
         spec = _call_model(
             generate_specification,
             chat_model,
             requirements_text,
             source=source,
-            extra_tools=_all_knowledge_base_tools(db, source, org.id),
+            extra_tools=kb_tools,
             extra_skills=load_skills(db, org.id),
             pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
         )
@@ -509,15 +533,16 @@ def submit_solution_feedback(
                 f"The current team design is:\n{current.model_dump_json()}\n\n"
                 f"Customer feedback on this design:\n{req.feedback}"
             )
+            kb_tools = _all_knowledge_base_tools(db, source, org.id)
             requirements_text = _with_model_catalog(db, requirements_text)
             requirements_text = _with_skill_catalog(db, requirements_text, org.id)
-            requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id)
+            requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id, names=set(kb_tools))
             spec = _call_model(
                 generate_specification,
                 chat_model,
                 requirements_text,
                 source=source,
-                extra_tools=_all_knowledge_base_tools(db, source, org.id),
+                extra_tools=kb_tools,
                 extra_skills=load_skills(db, org.id),
                 pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
             )

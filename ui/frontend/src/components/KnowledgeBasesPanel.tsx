@@ -1,0 +1,145 @@
+import { useCallback, useEffect, useState } from 'react'
+import { api } from '../lib/api'
+import type { OrgKnowledgeBase } from '../lib/types'
+
+// Only while something is actually being indexed -- an idle "My teams" page
+// must not poll this endpoint forever (same rule as the Activity page's run
+// list, which polls only while a run is still running).
+const POLL_INTERVAL_MS = 3000
+
+function isProcessing(kb: OrgKnowledgeBase): boolean {
+  return kb.latest_job?.status === 'queued' || kb.latest_job?.status === 'running'
+}
+
+// One customer-facing sentence per collection. The wording deliberately
+// avoids ingestion-job vocabulary: the reader uploaded some documents and
+// wants to know whether their team can search them yet.
+function statusFor(kb: OrgKnowledgeBase): string {
+  const job = kb.latest_job
+  if (!job) return 'Not indexed yet'
+  if (job.status === 'queued' || job.status === 'running') return 'Processing…'
+  if (job.status === 'failed') {
+    const reason = job.errors[0]?.error ?? 'the documents could not be processed'
+    // A failed *re*-upload leaves the previous generation live, so the row
+    // has to say so -- otherwise the reader deletes a collection their team
+    // is still successfully using.
+    const stillLive = kb.servable ? ' — an earlier version is still in use.' : ''
+    return `Failed: ${reason}${stillLive}`
+  }
+  const n = job.documents_succeeded
+  return `Ready · ${n} document${n === 1 ? '' : 's'}`
+}
+
+// Why Delete is refused, in the reader's own terms, or null when it's
+// allowed. The backend refuses both cases with a 409 regardless; this only
+// saves the reader a pointless click.
+function deleteBlockedReason(kb: OrgKnowledgeBase): string | null {
+  if (isProcessing(kb)) return 'This upload is still processing. Wait for it to finish, then delete it.'
+  if (kb.used_by.length > 0) {
+    return `In use by ${kb.used_by.join(', ')}. Update or remove those teams first.`
+  }
+  return null
+}
+
+// The org's own document collections, listed under "My teams" so a customer
+// can see what they uploaded, whether it worked, which teams depend on it,
+// and remove one -- none of which previously existed outside the admin
+// Advanced page.
+export default function KnowledgeBasesPanel() {
+  const [items, setItems] = useState<OrgKnowledgeBase[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
+  const [openSkipped, setOpenSkipped] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      setItems(await api.listOwnKnowledgeBases())
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const anyProcessing = items.some(isProcessing)
+  useEffect(() => {
+    if (!anyProcessing) return undefined
+    const id = setInterval(() => void refresh(), POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [anyProcessing, refresh])
+
+  const handleDelete = async (kb: OrgKnowledgeBase) => {
+    if (!window.confirm(`Delete "${kb.name}"? Its documents are removed and teams can no longer search them.`)) {
+      return
+    }
+    try {
+      await api.deleteOwnKnowledgeBase(kb.name)
+      setItems((prev) => prev.filter((i) => i.name !== kb.name))
+    } catch (e) {
+      // Shown on the row it belongs to: the 409 names the teams still using
+      // this particular collection, which is meaningless at page level.
+      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
+    }
+  }
+
+  if (items.length === 0 && !error) return null
+
+  return (
+    <section className="knowledge-bases-panel">
+      <div className="session-status-header">
+        <h2>My documents</h2>
+        <button type="button" onClick={() => void refresh()}>
+          Refresh
+        </button>
+      </div>
+
+      {error && <p className="banner banner-error">{error}</p>}
+
+      <ul className="session-list">
+        {items.map((kb) => {
+          const job = kb.latest_job
+          const skipped = job?.status === 'completed' ? job.errors : []
+          const blocked = deleteBlockedReason(kb)
+          return (
+            <li key={kb.name} className="session-item">
+              <h3>{kb.name}</h3>
+              <p className="hint">{statusFor(kb)}</p>
+              {kb.used_by.length > 0 && <p className="hint">Used by {kb.used_by.join(', ')}</p>}
+              {skipped.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setOpenSkipped((n) => (n === kb.name ? null : kb.name))}
+                  >
+                    {skipped.length} file{skipped.length === 1 ? '' : 's'} skipped
+                  </button>
+                  {openSkipped === kb.name && (
+                    <ul>
+                      {skipped.map((e, i) => (
+                        <li key={i} className="hint">
+                          {e.filename ?? 'This upload'}: {e.error}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+              {rowErrors[kb.name] && <p className="banner banner-error">{rowErrors[kb.name]}</p>}
+              <button
+                type="button"
+                disabled={blocked !== null}
+                title={blocked ?? 'Delete'}
+                onClick={() => void handleDelete(kb)}
+              >
+                Delete
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}

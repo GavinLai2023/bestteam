@@ -3,8 +3,8 @@ import type {
   EmailFilterSettings, EmailTrigger, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
-  OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, RetentionSettings, RunListItem, Requirements,
-  ShareLink, ShareMessage, ShareSessionSummary,
+  OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
+  Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
 } from './types'
 
@@ -377,6 +377,14 @@ export const api = {
     request<IngestionJobStatus>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/ingestion-jobs/${jobId}`,
     ),
+  // The org's own knowledge bases, for the "My documents" panel on My teams.
+  // Deleting is refused (409) while an upload is still processing or while a
+  // live team still uses the collection.
+  listOwnKnowledgeBases: () => request<OrgKnowledgeBase[]>('/api/org/knowledge-bases'),
+  getOwnKnowledgeBase: (name: string) =>
+    request<OrgKnowledgeBase>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`),
+  deleteOwnKnowledgeBase: (name: string) =>
+    request<void>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),

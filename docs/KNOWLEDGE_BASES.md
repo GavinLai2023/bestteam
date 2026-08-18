@@ -304,6 +304,35 @@ smart search unavailable, or the env var unset despite a stale client sending
 `smart_search=true`) always falls back to plain `local_folder` — the exact
 same shape as before this toggle existed. See `.env.example`.
 
+**Org self-service listing and deletion** (`GET /api/org/knowledge-bases`,
+`GET`/`DELETE /api/org/knowledge-bases/{name}`) is the same org member's view
+of what they uploaded, without an admin having to be involved. Each entry
+carries `name`, `description`, `type`, `updated_at`, `used_by` (the deployed
+teams whose current version depends on it), `servable`, and `latest_job` --
+the newest ingestion attempt of any status, so a *failed* upload's error text
+reaches the person who made it. `latest_job` deliberately omits the `config`
+the per-job route returns: it carries the server's absolute upload path, and
+this is a customer-facing list. `servable` is not "the latest job succeeded" --
+a failed re-upload leaves the previous completed generation live, and a
+knowledge base with no jobs at all is a legacy/manual-path one served from
+disk. `DELETE` returns `204` and shares `knowledge_bases.delete_knowledge_base`
+with the admin route, so it is refused with the same `409` while a deployed
+team still depends on it or an upload is still processing, and a cross-org
+name is a `404`.
+
+A knowledge base whose *newest* ingestion job failed is stuck until someone
+re-uploads or deletes it, so `resolve_knowledge_base` says so
+("could not be indexed: <the job's own error>. Upload the documents again, or
+delete it.") rather than the "wait for the current upload to finish" wording,
+which was permanently wrong advice for that case. The wizard's
+pre-Specification catalogue (`builder.py::_all_knowledge_base_tools`) skips an
+unresolvable knowledge base with a logged warning instead of raising -- it
+builds *every* one of the org's knowledge bases, so one customer's unparseable
+upload used to fail spec generation for the whole org -- and the architect is
+only told about the ones that actually built. The workflow-build path
+(`load_knowledge_base_tools`) still fails closed: there a broken knowledge base
+is one an agent actually references.
+
 **Wiring into a workflow**: a workflow's `_build_workflow()` validation only
 builds the standalone knowledge bases its agents actually reference by name
 (`ui/backend/knowledge_bases.py::load_knowledge_base_tools`) — not every

@@ -597,8 +597,24 @@ def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Pat
     # (including the currently-staging one), so scanning it directly would
     # serve un-vetted, possibly-partial, or entirely un-embedded content
     # instead of treating the KB as not yet servable (Codex review finding).
-    has_any_job = db.query(IngestionJob.id).filter_by(kb_id=record.id).first() is not None
-    if has_any_job:
+    latest = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id)
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    if latest is not None:
+        # Distinguish "not ready yet" from "will never be ready". A KB whose
+        # newest attempt failed is stuck until someone re-uploads or deletes
+        # it, so telling the customer to wait was permanently wrong advice --
+        # say what actually went wrong and what to do about it instead.
+        if latest.status == "failed":
+            errors = ingestion.job_status_payload(db, latest)["errors"]
+            detail = errors[0]["error"] if errors else "the documents could not be processed"
+            raise ConfigurationError(
+                f"Knowledge base '{record.name}' could not be indexed: {detail}. "
+                "Upload the documents again, or delete it."
+            )
         raise ConfigurationError(
             f"Knowledge base '{record.name}' has no completed ingestion yet. "
             "Wait for the current upload to finish processing and try again."

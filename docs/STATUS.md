@@ -1321,6 +1321,14 @@
   known-issues entries below. Spec:
   `docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
 
+- **An org manages its own knowledge bases** (P0-2): `GET /api/org/knowledge-bases`,
+  `GET`/`DELETE /api/org/knowledge-bases/{name}` plus a "My documents" panel on
+  My teams — each collection's latest ingestion attempt (a failed upload's error
+  now reaches the customer, not just a bare status), which teams use it, and a
+  delete that shares the admin route's 409 guards. A knowledge base that can't
+  be resolved no longer fails spec generation for the whole org: the wizard's
+  catalogue skips it and only lists what actually built.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

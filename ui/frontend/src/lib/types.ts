@@ -267,6 +267,23 @@ export interface IngestionJobStatus {
   config: ConfigItem | null
 }
 
+// One of the org's own knowledge bases, as the customer-facing "My
+// documents" panel sees it (GET /api/org/knowledge-bases). `latest_job` is
+// the newest ingestion attempt of any status, with `config` deliberately
+// stripped server-side -- it carries the server's absolute upload path.
+export interface OrgKnowledgeBase {
+  name: string
+  description: string | null
+  type: string
+  updated_at: string
+  used_by: string[]
+  // Whether the knowledge base can answer questions right now: a failed
+  // re-upload leaves the previous generation live, so this is not simply
+  // "the latest job succeeded".
+  servable: boolean
+  latest_job: Omit<IngestionJobStatus, 'config'> | null
+}
+
 export interface ShareLink {
   id: number
   workflow_id: number
