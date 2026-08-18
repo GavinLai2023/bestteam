@@ -278,13 +278,14 @@ because there is no path. `../../etc/passwd` is simply a name no MIME part has.
 `file_parser.py` carries this: the parsers are `*_bytes` functions behind
 `parse_bytes(data, filename)`, and `parse_file(path)` keeps its signature and
 becomes a thin wrapper that reads the file and delegates. The knowledge-base
-path is unchanged **except in one respect**: `_decode_text` decodes with
-`errors="replace"`, where `Path.read_text(encoding="utf-8")` used to raise
-`UnicodeDecodeError`. Right for an attachment — a sender can name anything
-`.txt` and one bad file must not fail a run — but it also reaches
-`LocalFolderKnowledgeBase`, which used to skip a mis-encoded document with a
-warning and now ingests it silently as mojibake. Kept deliberately; recorded in
-`src/bestteam/core/CLAUDE.md`'s knowledge-base limitations.
+path is unchanged, including for a mis-encoded file. The two callers want
+opposite things from a bad decode — an attachment must not fail a customer's
+run, a knowledge base must not silently index mojibake — so `parse_bytes` takes
+`lenient_text` (off by default, so both entry points agree) and only the
+attachment path passes it. `parse_file` therefore still raises
+`UnicodeDecodeError`, and `LocalFolderKnowledgeBase` still skips the document
+with a warning. The switch is scoped to plain text; the binary parsers raise
+either way.
 
 **Two tools, not one enriched one.** `email_read` lists; it never inlines
 attachment text. Cost — Phase 4a exists because customers were billed for

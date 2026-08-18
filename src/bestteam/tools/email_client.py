@@ -852,7 +852,12 @@ def _attachment_impl(backend, message_id: str, filename: str) -> str:
             f"Readable types: {', '.join(sorted(SUPPORTED_SUFFIXES))}."
         )
     try:
-        text = parse_bytes(record.get("data") or b"", name)
+        # `lenient_text=True`: a sender can name anything `.txt`, and a
+        # UnicodeDecodeError here would fail the customer's whole run over one
+        # bad attachment. `parse_file`'s knowledge-base callers keep the strict
+        # default, where a mis-encoded document is better skipped with a
+        # warning than ingested as mojibake.
+        text = parse_bytes(record.get("data") or b"", name, lenient_text=True)
     except Exception as exc:  # noqa: BLE001 -- a sender can attach anything
         return f"'{name}' couldn't be read: {exc}"
     if len(text) > _MAX_BODY_CHARS:

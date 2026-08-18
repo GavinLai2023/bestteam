@@ -185,15 +185,15 @@ workflow load re-embeds all chunks (real embedding APIs incur cost/latency
 on each run). There's no DMS connector (SharePoint/Confluence/Google Drive)
 for any of the three knowledge base types.
 
-**A mis-encoded plain-text document is now ingested, not skipped.** Since the
-Phase 4b bytes refactor, `parse_file` decodes text through
-`file_parser._decode_text`, which uses `errors="replace"`; it previously used
-`Path.read_text(encoding="utf-8")`, whose `UnicodeDecodeError` made
-`_load_document_chunks` skip the file with a warning. A non-UTF-8 document
-therefore no longer announces itself — it silently becomes chunks full of
-U+FFFD. Kept deliberately (it is the right behaviour for the attachment path
-the decoder is shared with, where one sender-supplied file must not fail a
-run); the knowledge-base cost is that mojibake is indexed instead of reported.
+**A mis-encoded plain-text document is still skipped, not ingested.** The
+Phase 4b bytes refactor shares `file_parser._decode_text` between knowledge
+bases and email attachments, which pulled in opposite directions: an attachment
+must never fail a customer's run (a sender can name anything `.txt`), while a
+knowledge base is better served by a warning than by chunks full of U+FFFD that
+nobody can search and nobody was told about. The decoder therefore takes
+`lenient`, and only the attachment path turns it on. `parse_file` keeps strict
+decoding, so `_load_document_chunks` still skips a non-UTF-8 document with a
+warning exactly as it did before.
 Suffix support is also shared now: `_SUPPORTED_SUFFIXES` is an alias of
 `file_parser.SUPPORTED_SUFFIXES`, so a suffix added to `parse_bytes` is
 discovered by folder scanning automatically.

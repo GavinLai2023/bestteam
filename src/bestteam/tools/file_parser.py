@@ -40,10 +40,15 @@ def parse_file(path: str) -> str:
     if not file_path.exists():
         raise ConfigurationError(f"File not found: {path}")
 
+    # `lenient_text` deliberately left at its strict default: a mis-encoded
+    # file here is an operator's own document, and a knowledge base is better
+    # served by skipping it with a warning than by silently ingesting mojibake
+    # chunks nobody can search. Attachments make the opposite trade -- see
+    # `parse_bytes`.
     return parse_bytes(file_path.read_bytes(), file_path.name)
 
 
-def parse_bytes(data: bytes, filename: str) -> str:
+def parse_bytes(data: bytes, filename: str, *, lenient_text: bool = False) -> str:
     """Extract text from a file's bytes, dispatching on `filename`'s suffix.
 
     The byte-based entry point exists because email attachments are named by
@@ -58,6 +63,13 @@ def parse_bytes(data: bytes, filename: str) -> str:
     Args:
         data: The file's raw bytes.
         filename: The file's name, used only for suffix dispatch and headers.
+        lenient_text: Replace undecodable bytes in a plain-text file instead of
+            raising. Off by default, so this entry point and `parse_file` agree
+            and a mis-encoded document is reported rather than silently
+            mangled. The email attachment path turns it on: a sender can name
+            anything `.txt`, and one bad attachment must not fail a customer's
+            whole run. Affects only plain text -- the binary parsers raise
+            either way.
 
     Returns:
         Extracted text content as a single string.
@@ -73,7 +85,7 @@ def parse_bytes(data: bytes, filename: str) -> str:
     if suffix == ".xml":
         return _parse_xml_bytes(data, filename)
     if suffix in _TEXT_SUFFIXES:
-        return _decode_text(data)
+        return _decode_text(data, lenient=lenient_text)
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
@@ -81,17 +93,22 @@ def parse_bytes(data: bytes, filename: str) -> str:
     )
 
 
-def _decode_text(data: bytes) -> str:
+def _decode_text(data: bytes, *, lenient: bool = False) -> str:
     """Decode plain-text bytes the way `Path.read_text` would.
 
-    `errors="replace"` because a sender can attach anything named `.txt`: a
-    UnicodeDecodeError escaping into the caller would fail a whole run over one
-    bad attachment. Line endings are translated because the path-based reader
-    this replaces opened files in text mode (universal newlines), and its
-    output must not change.
-    """
-    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    Strict by default, which is what `Path.read_text(encoding="utf-8")` did: a
+    mis-encoded document should be reported to whoever owns it, not stored as
+    mojibake. `lenient` swaps in `errors="replace"` for the attachment path,
+    where a sender can name anything `.txt` and a UnicodeDecodeError escaping
+    into the poller would fail a whole run over one bad file.
 
+    Line endings are translated either way, because the path-based reader this
+    replaces opened files in text mode (universal newlines) and its output must
+    not change.
+    """
+    errors = "replace" if lenient else "strict"
+    decoded = data.decode("utf-8", errors=errors)
+    return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
 def _parse_pdf_bytes(data: bytes, name: str) -> str:
     try:

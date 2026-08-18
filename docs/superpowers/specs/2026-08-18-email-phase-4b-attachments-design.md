@@ -59,15 +59,16 @@ So:
   wrong, and no second copy for Phase 3b's retention sweep to miss.
 - `file_parser.py` grows internal `*_bytes` parsers; `parse_file(path)` keeps
   its public signature and becomes a thin wrapper that reads the file and
-  delegates. The knowledge-base path is unchanged **except in one respect,
-  which shipped deliberately**: `_decode_text` decodes with
-  `errors="replace"`, where `Path.read_text(encoding="utf-8")` used to raise
-  `UnicodeDecodeError`. That is right for an attachment — a sender can name
-  anything `.txt`, and one bad file must not fail a customer's whole run — but
-  it also reaches `LocalFolderKnowledgeBase`, where a mis-encoded document used
-  to be skipped with a warning (`core/knowledge_base.py`) and is now silently
-  ingested as mojibake chunks. The decoding is kept; the claim of "unchanged"
-  is what was wrong.
+  delegates. The knowledge-base path is unchanged, **including for a
+  mis-encoded file**. Sharing one decoder between the two callers surfaced a
+  genuine conflict: an attachment must never fail a customer's run, because a
+  sender can name anything `.txt`; a knowledge base must never silently index
+  mojibake, because U+FFFD chunks are unsearchable and announce nothing. Rather
+  than pick one, `parse_bytes` takes `lenient_text` — off by default, so the
+  two entry points agree — and only the attachment path turns it on.
+  `parse_file` keeps the strict `UnicodeDecodeError` that lets
+  `_load_document_chunks` skip a bad document with a warning. The switch is
+  scoped to plain text; the binary parsers raise either way.
 
 Path traversal is not defended against here. It is made **structurally
 impossible**: there is no path.

@@ -39,12 +39,38 @@ def test_the_suffix_is_read_case_insensitively():
     assert parse_bytes(b"x", "NOTES.TXT") == "x"
 
 
-def test_undecodable_text_does_not_raise(tmp_path):
-    # A sender can attach anything named .txt. A UnicodeDecodeError escaping
-    # into the poller would fail the whole run over one bad attachment.
-    result = parse_bytes(b"\xff\xfe\x00binary", "notes.txt")
+def test_undecodable_text_raises_by_default():
+    # Strict is the default so `parse_bytes` and `parse_file` agree. A
+    # mis-encoded document belongs in a warning to whoever owns it, not in a
+    # knowledge base as mojibake nobody can search.
+    with pytest.raises(UnicodeDecodeError):
+        parse_bytes(bytes([0xFF, 0xFE, 0x00]) + b"binary", "notes.txt")
+
+
+def test_undecodable_text_is_replaced_when_lenient():
+    # The attachment path opts in: a sender can name anything `.txt`, and a
+    # UnicodeDecodeError escaping into the poller would fail a customer's
+    # whole run over one bad attachment.
+    result = parse_bytes(bytes([0xFF, 0xFE, 0x00]) + b"binary", "notes.txt",
+                         lenient_text=True)
     assert isinstance(result, str)
 
+
+def test_parse_file_raises_on_a_mis_encoded_document(tmp_path):
+    # What `Path.read_text(encoding="utf-8")` did before the byte refactor,
+    # and what lets a knowledge base skip the file with a warning rather
+    # than ingest it as mojibake.
+    target = tmp_path / "legacy.txt"
+    target.write_bytes("你好".encode("gbk"))
+    with pytest.raises(UnicodeDecodeError):
+        parse_file(str(target))
+
+
+def test_leniency_does_not_loosen_the_binary_parsers():
+    # The switch is scoped to plain text, so nothing can smuggle a broken
+    # document past a parser by asking for leniency.
+    with pytest.raises(ConfigurationError):
+        parse_bytes(b"<r><unclosed>", "doc.xml", lenient_text=True)
 
 def test_windows_and_classic_mac_line_endings_are_normalised():
     # `Path.read_text` translates newlines by default, so a bare decode would

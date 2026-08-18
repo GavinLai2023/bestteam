@@ -202,6 +202,25 @@ def test_skips_file_with_configuration_error_and_warns(tmp_path, monkeypatch):
     assert "bad.txt" not in sources
 
 
+def test_skips_a_mis_encoded_document_instead_of_ingesting_mojibake(tmp_path):
+    # No monkeypatching: this is a real GBK-encoded file, the kind an
+    # operator actually drops into a knowledge folder. Phase 4b's byte
+    # refactor briefly made `parse_file` lenient, which turned this from
+    # 'skipped with a warning' into 'silently indexed as replacement
+    # characters' -- searchable nonsense nobody was told about.
+    (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "legacy.txt").write_bytes("你好，这是一份旧文档。".encode("gbk"))
+
+    with pytest.warns(UserWarning, match="legacy.txt"):
+        kb = LocalFolderKnowledgeBase("kb", tmp_path)
+
+    sources = {chunk.source for chunk in kb._chunks}
+    assert "good.txt" in sources
+    assert "legacy.txt" not in sources
+    # And nothing partially-decoded leaked into the index.
+    assert not any("�" in chunk.text for chunk in kb._chunks)
+
+
 @pytest.mark.parametrize("chunk_size,chunk_overlap", [(100, 100), (100, 150)])
 def test_rejects_chunk_overlap_gte_chunk_size(tmp_path, chunk_size, chunk_overlap):
     (tmp_path / "doc.txt").write_text("hello world", encoding="utf-8")

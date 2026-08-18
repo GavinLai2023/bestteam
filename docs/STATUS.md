@@ -1409,11 +1409,13 @@
   A related consequence of parsing from bytes: **peak memory for a parsed file
   is now the whole file**, where `openpyxl(read_only=True)` previously streamed
   from disk — bounded at 10 MB for attachments, unbounded for a knowledge-base
-  workbook. A second consequence reaches the knowledge base: `_decode_text` uses
-  `errors="replace"`, so **a mis-encoded plain-text document is now ingested as
-  mojibake instead of being skipped with a warning** (`Path.read_text` used to
-  raise `UnicodeDecodeError`). Right for attachments, kept deliberately, and
-  recorded in `src/bestteam/core/CLAUDE.md`.
+  workbook. Plain-text decoding is
+  **strict by default and lenient only for attachments**: `parse_bytes` takes
+  `lenient_text`, off unless the attachment path asks for it, so `parse_file`
+  still raises `UnicodeDecodeError` on a mis-encoded document and a knowledge
+  base still skips it with a warning rather than indexing mojibake. The
+  leniency exists because a sender can name anything `.txt` and one bad
+  attachment must not fail a customer's whole run.
   Finally, **a refused or unparseable attachment is traced as
   `outcome: "attachment_read"`** like a successful one, so it does not force
   `needs_attention` the way a raised call does. Distinguishing it would mean
