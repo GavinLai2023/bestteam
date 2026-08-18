@@ -92,7 +92,7 @@ top_k) -> List[_Chunk]` is the abstract method each subclass implements;
 `query()` is **concrete on the base class** and is just
 `format_results(self.name, query, self.search(...))`. One formatter means the
 citation tags cannot drift between types, and the split is the seam the
-upcoming retrieval trace (P0-5) and the eval harness (P0-7) were meant to
+retrieval trace (P0-5) and the eval harness (P0-7) were meant to
 build on — consuming chunks rather than re-parsing a formatted string. The
 **eval harness now exists** (`core/kb_eval.py` + `scripts/kb_eval.py`, P0-7):
 `evaluate(kb, queries, top_k)` drives any KB type through `search()` and
@@ -105,8 +105,21 @@ document doesn't count), which catches a chunking regression. The golden set is
 significant terms, so BM25 misses them by design; they are the headroom a real
 embedding model should close, and why the guarded thresholds are recall@3 ≥
 0.8 / MRR ≥ 0.7 rather than 1.0). `fake:` embeddings are deterministic noise —
-the hybrid test is a smoke test and asserts no quality. The retrieval trace
-(P0-5) still doesn't exist. A `_Chunk` carries `source`, `text`, and two optional location fields —
+the hybrid test is a smoke test and asserts no quality. The **retrieval trace
+now exists too** (P0-5): `make_knowledge_base_tool`'s wrapper calls `search()`
+and `format_results()` itself (instead of `query()`, which is exactly those
+two) so it can report the retrieval — `query` (first 200 chars),
+`hit_count`, `sources` (de-duplicated `_citation`s, at most 10) and a
+`summary` — through `core/tool_context.py`, a contextvar-scoped box the
+adapter's tool loop opens around each call (`ToolCallContext(trace, usage)`,
+`report_trace`/`add_usage`, all no-ops when no run is active, so an
+SDK-direct `kb.query()` is unaffected). The wrapper is marked
+`__bestteam_tool_kind__ = "knowledge_base"` (a marker, not a name set — a KB
+tool is named after its KB), and the adapter builds that call's
+`tool_completed` from the report alone: a KB tool's event never carries
+`_summarize(result)`, i.e. never the indexed documents' own text. `usage` is
+the same channel's unused half, for metering a tool's internal LLM calls
+(query expansion) later. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
 `heading` (Markdown, the section a chunk opens under, an 80-char
 approximation) — which `_citation()` renders as

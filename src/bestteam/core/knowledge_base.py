@@ -18,6 +18,7 @@ from .reranking import (
     resolve_reranker,
 )
 from .text_tokenize import significant_terms, tokenize
+from .tool_context import report_trace
 
 _logger = logging.getLogger(__name__)
 
@@ -564,18 +565,52 @@ def _rerank_candidates(
     return [candidates[i] for i in order[:top_k]]
 
 
+# Trace bounds for a knowledge base tool call. The query is model-written
+# text, so it needs the same length bound `_summarize()` gives every other
+# trace field; the source list is ours, but a large `top_k` shouldn't turn one
+# event into a wall of filenames.
+_MAX_TRACE_QUERY_CHARS = 200
+_MAX_TRACE_SOURCES = 10
+
+
 def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
     """Wrap a :class:`KnowledgeBase` as a single-argument agent tool.
 
     The returned callable's ``__name__`` matches ``kb.name``, so it can be
     referenced directly by name in a workflow's ``tools:`` list — exactly
     like a built-in tool.
+
+    The tool searches and formats separately (rather than calling
+    ``kb.query()``, which is exactly those two steps) so it can report the
+    retrieval to the run's trace: the query, how many chunks came back and
+    which documents they came from. Byte-for-byte the same string is returned
+    either way. The report travels via ``core/tool_context.py`` and is a no-op
+    outside a run, and the ``__bestteam_tool_kind__`` marker tells the adapter
+    this tool's ``tool_completed`` event is built from that report and never
+    from a truncation of the result text — the documents an org indexed are
+    not something a monitoring UI (or the ``trace_events`` table) should hold.
     """
 
     def _tool(query: str) -> str:
-        return kb.query(query)
+        chunks = kb.search(query)
+        bounded_query = query[:_MAX_TRACE_QUERY_CHARS]
+        # dict.fromkeys de-duplicates while keeping best-first order: several
+        # chunks of one document cite it once.
+        sources = list(dict.fromkeys(_citation(chunk) for chunk in chunks))[:_MAX_TRACE_SOURCES]
+        report_trace(
+            query=bounded_query,
+            hit_count=len(chunks),
+            sources=sources,
+            summary=(
+                f"{len(chunks)} result(s) for “{bounded_query}” — sources: {', '.join(sources)}"
+                if chunks
+                else f"No results for “{bounded_query}”"
+            ),
+        )
+        return format_results(kb.name, query, chunks)
 
     _tool.__name__ = kb.name
+    _tool.__bestteam_tool_kind__ = "knowledge_base"
     # The knowledge base's own one-line description, when it has one, is the
     # only thing telling the model WHICH collection answers a question -- an
     # org can have several, and their names alone rarely say.

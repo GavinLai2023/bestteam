@@ -777,6 +777,17 @@ the envelope; an unsupported version gets the same whole-batch error-row
 treatment as an invalid enum. `draft_type` is length-capped like every other
 free-text payload field (it was the one field that wasn't).
 
+**A knowledge base tool's `tool_completed` no longer carries document text**
+(P0-5). It used to be `_summarize(result)` — the first 200 characters of the
+retrieved excerpts, i.e. an org's own indexed documents, in every
+`trace_events` row and every UI that renders one. The adapter now builds that
+event from what the tool reported through `core/tool_context.py`:
+`summary` plus `query` (≤200 chars), `hit_count` and `sources` (filenames,
+with page/section, at most 10). `summary` stays, so `lib/traceEvents.ts`,
+`RunDetail`, `TracePage` and the `trace_events` persistence need no change —
+the three new keys ride alongside in `data`. This is an SDK/adapter-layer
+boundary like `_redacted_email_tool_data`, not a `runtime.py` one.
+
 A property-maintenance run's raw agent output (`agent_completed`'s `data`,
 and `run_completed`'s -- `core/workflow.py`'s `last_output`, the same text)
 is derived from customer email content -- the envelope's free-text

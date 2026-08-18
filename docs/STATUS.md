@@ -1349,8 +1349,7 @@
   `format_results`, so a hit reads `[source: handbook.pdf, p.3 § Refunds]`.
   `KnowledgeBase.query()` is now concrete on the base class over a new
   abstract `search()` returning chunks — the seam the retrieval trace (P0-5)
-  and eval harness (P0-7) are meant to build on; P0-7 is written (below), the
-  retrieval trace is not. A
+  and eval harness (P0-7) are meant to build on; both are written (below). A
   knowledge base also has an optional `description` (asked for in the wizard,
   carried into the agent tool's own docstring and the architect's catalogue),
   so a model can tell an org's collections apart. Existing chunks keep NULL
@@ -1370,6 +1369,18 @@
   not 1.0. `fake:` embeddings are deterministic noise: the hybrid test is smoke
   only, and a real-model comparison is a manual run
   (`--type hybrid --embedding-model openai:text-embedding-3-small`).
+
+- **A knowledge base search is traceable without archiving the documents**
+  (P0-5): a KB tool's `tool_completed` event used to be `_summarize(result)` —
+  200 characters of the retrieved excerpts, persisted in `trace_events` and
+  rendered in the dashboard. It now carries `query` (≤200 chars), `hit_count`,
+  `sources` (de-duplicated citations, ≤10) and a `summary` built from those,
+  and never the document text. The tool reports them through a new contextvar
+  side channel (`core/tool_context.py`, whose unused `usage` half is where a
+  KB's internal LLM calls will be metered), and
+  `make_knowledge_base_tool` marks the wrapper `__bestteam_tool_kind__ =
+  "knowledge_base"` so the adapter never falls back to summarising its result.
+  `summary` is kept, so no frontend or persistence change was needed.
 
 ## In Progress
 

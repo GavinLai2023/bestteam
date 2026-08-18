@@ -306,6 +306,33 @@ tool. At runtime, `adapters/langgraph_adapter.py`'s tool-calling loop binds
 all of an agent's tools to the model and dispatches by name when the model
 calls one.
 
+### What a search looks like in the trace
+
+Every knowledge base search shows up in the run's trace as a `tool_completed`
+event that records **what was asked and where the answer came from, never the
+answer text**:
+
+```json
+{
+  "tool": "product_docs",
+  "success": true,
+  "duration_ms": 12,
+  "summary": "2 result(s) for “refund window” — sources: handbook.pdf, p.3 § Refunds, policies.md",
+  "query": "refund window",
+  "hit_count": 2,
+  "sources": ["handbook.pdf, p.3 § Refunds", "policies.md"]
+}
+```
+
+That is enough to answer the questions an operator actually asks — did the
+agent search at all, what did it search for, did anything match, which
+documents did it draw on — while the excerpts themselves stay out of the
+`trace_events` table, the monitoring dashboard and any log that renders one.
+A query longer than 200 characters is truncated, and at most 10 sources are
+listed. Nothing here is parsed out of the tool's return string: the tool
+reports these fields directly (`core/tool_context.py`), and the adapter knows
+not to fall back to summarising the result text for a knowledge base tool.
+
 ## Managing knowledge bases through the backend API
 
 Beyond YAML files on disk, the backend (`ui/backend/`) lets you manage
@@ -669,6 +696,7 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
 | `hybrid` implementation | `src/bestteam/core/hybrid_knowledge_base.py` |
 | Shared RRF fusion + query expansion helpers | `src/bestteam/core/fusion.py` |
 | Shared reranking helper | `src/bestteam/core/reranking.py` |
+| Per-tool-call trace/usage side channel | `src/bestteam/core/tool_context.py` |
 | YAML loader (`_build_knowledge_base`) | `src/bestteam/core/loader.py` |
 | Retrieval-quality metrics (`evaluate`, `recall_at_k`, `mrr`) | `src/bestteam/core/kb_eval.py` |
 | Evaluation CLI | `scripts/kb_eval.py` |
