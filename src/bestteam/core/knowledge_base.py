@@ -441,6 +441,13 @@ def _chunk_table_block(
     which wastes a little room but says nothing untrue.
     """
     stripped = block.strip()
+    # An empty sheet -- the trailing `Sheet2`/`Sheet3` of a real workbook, or a
+    # table that parsed to nothing -- is a block with no rows under its marker.
+    # It is exactly the content-free chunk P0-6 stopped indexing: it matches no
+    # query and reports no problem, so it contributes nothing here either.
+    if not _has_extractable_text(stripped):
+        return []
+
     lines = stripped.split("\n")
     marker = lines[0]
     # Same 80-character cap as a Markdown heading: a sheet name is a citation
@@ -454,7 +461,7 @@ def _chunk_table_block(
     # fits is one chunk, and a marker+header that leaves no room for a body
     # row would make `chunk_size - len(prefix)` zero or negative. Either way
     # the block goes through the ordinary path -- but still carries `heading`.
-    if len(stripped) <= chunk_size or len(prefix) >= chunk_size or not body.strip():
+    if len(stripped) <= chunk_size or len(prefix) >= chunk_size:
         texts = _chunk_text(stripped, chunk_size, chunk_overlap, suffix)
     else:
         # `_apply_overlap` clamps the borrowed tail to the room left inside

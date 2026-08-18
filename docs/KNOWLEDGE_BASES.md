@@ -101,7 +101,9 @@ from (see "Citations", below):
   chunk's budget, so the body of each chunk is smaller and the overlap
   borrowed from the previous chunk shrinks (to zero if the prefix is long).
   A `.docx`'s body paragraphs, before its first table, chunk the ordinary way
-  and carry no heading.
+  and carry no heading. A block with no rows under its marker — an empty
+  sheet, such as a workbook's untouched trailing `Sheet2` — yields no chunk
+  at all, so it can't become the content-free chunk described above.
 
 Every other format supplies neither, and such a chunk cites its filename
 alone.

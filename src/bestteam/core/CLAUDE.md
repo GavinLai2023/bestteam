@@ -310,8 +310,11 @@ filename alone. The marker also becomes the chunk's `heading`, under the same
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
 for the body), so overlap shrinks and can reach zero; a prefix that would leave
 no room at all falls back to the ordinary path, still tagged with the heading.
-A `.docx`'s body paragraphs (before its first table) chunk normally. Every other
-format goes through
+A `.docx`'s body paragraphs (before its first table) chunk normally, and a block
+with no rows under its marker -- a workbook's untouched trailing `Sheet2` --
+yields no chunk at all, checked with P0-6's own `_has_extractable_text`, so
+table awareness can't reintroduce the content-free chunk P0-6 removed. Every
+other format goes through
 `_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
 is composed of — so a `.md` chunk's section heading (`_headings_for`) can be
 read off the pieces *before* overlap prefixes each one with the previous

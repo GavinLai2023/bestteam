@@ -1058,6 +1058,35 @@ def test_table_chunks_never_exceed_chunk_size(chunk_size, chunk_overlap):
     assert all(len(chunk.text) <= chunk_size for chunk in chunks)
 
 
+def test_an_empty_sheet_or_table_block_produces_no_chunk():
+    """Empty trailing sheets are ubiquitous in real workbooks. A block that is
+    its marker line and nothing else is exactly the content-free chunk P0-6 set
+    out to stop indexing -- it matches no query and reports no problem."""
+    text = (
+        "[Excel: sales.xlsx]\n\n"
+        "[Sheet: Q1]\nregion,units\n" + _sheet_rows(3) + "\n\n"
+        "[Sheet: Sheet2]\n\n"
+        "[Sheet: Sheet3]"
+    )
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=1000, chunk_overlap=0, suffix=".xlsx")
+
+    assert [chunk.heading for chunk in chunks] == ["Sheet: Q1"]
+
+    # The same holds for a Word table that parsed to its marker alone: the
+    # body paragraph is still chunked, the empty table contributes nothing.
+    docx_chunks = _chunk_document(
+        "report.docx",
+        "[Word: report.docx]\nBody text.\n\n[Table 1]",
+        chunk_size=1000,
+        chunk_overlap=0,
+        suffix=".docx",
+    )
+    assert [(chunk.text, chunk.heading) for chunk in docx_chunks] == [
+        ("[Word: report.docx]\nBody text.", None)
+    ]
+
+
 def test_format_results_cites_sheet_heading():
     chunk = _Chunk(source="sales.xlsx", text="[Sheet: Q1]\nregion,units\nnorth,12", heading="Sheet: Q1")
 
