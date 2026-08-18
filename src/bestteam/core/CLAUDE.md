@@ -91,15 +91,16 @@ results found..."` string shape regardless of type.
 top_k) -> List[_Chunk]` is the abstract method each subclass implements;
 `query()` is **concrete on the base class** and is just
 `format_results(self.name, query, self.search(...))`. One formatter means the
-citation tags cannot drift between types, and it is what the eval harness and
-the retrieval trace consume (they call `search()`/`format_results()` rather
-than re-parsing a string). A `_Chunk` carries `source`, `text`, and two
-optional location fields — `page` (PDF, chunked per page by
-`_chunk_document`, so `p.N` is exact) and `heading` (Markdown, the section a
-chunk opens under, an 80-char approximation) — which `_citation()` renders as
+citation tags cannot drift between types, and the split is the seam the
+upcoming retrieval trace (P0-5) and eval harness (P0-7) are meant to build on
+— consuming chunks rather than re-parsing a formatted string. Neither exists
+yet. A `_Chunk` carries `source`, `text`, and two optional location fields —
+`page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
+`heading` (Markdown, the section a chunk opens under, an 80-char
+approximation) — which `_citation()` renders as
 `[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
-two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep
-working and render byte-for-byte as before. All three types also take an
+two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
+and render byte-for-byte as before. All three types also take an
 optional `description` (≤500 chars, `KnowledgeBaseSpec.description`) — one
 sentence about the documents, injected into the tool's own docstring so a
 model can tell an org's collections apart. See `docs/KNOWLEDGE_BASES.md`.
@@ -232,11 +233,15 @@ cannot disagree about why a file was rejected.
 
 **Chunking is format-aware, not hierarchical.** `_chunk_document` (shared by
 all three KB types, and by `ui/backend/ingestion.py`) is the per-document
-entry point: it splits a `.pdf` per page (`_PAGE_BREAK`, the `\f`
-`_parse_pdf_bytes` now joins pages with) so a chunk never straddles a page,
-tags `.md` chunks with their section heading (`_headings_for`), and delegates
-the split itself to `_chunk_text`. Per-page PDF chunking costs cross-page
-overlap — accepted for an exact `p.N`. `_chunk_text` splits on the document's own structure — Markdown heading
+entry point. A `.pdf` is split on `_PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
+now joins pages with) and each page chunked through `_chunk_text` on its own,
+so a chunk never straddles a page. Every other format goes through
+`_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
+is composed of — so a `.md` chunk's section heading (`_headings_for`) can be
+read off the pieces *before* overlap prefixes each one with the previous
+chunk's tail, which would otherwise shift every heading by one section.
+Per-page PDF chunking costs cross-page overlap — accepted for an exact `p.N`.
+`_chunk_text` splits on the document's own structure — Markdown heading
 boundaries, XML element boundaries (via the renderer's indentation), and a
 generic paragraph/sentence/word fallback (with CJK sentence terminators
 `。！？`) — replacing the old fixed-offset character slicing. This closes the

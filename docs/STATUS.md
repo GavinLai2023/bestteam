@@ -1348,12 +1348,12 @@
   opens under — and every retrieval result is rendered by one shared
   `format_results`, so a hit reads `[source: handbook.pdf, p.3 § Refunds]`.
   `KnowledgeBase.query()` is now concrete on the base class over a new
-  abstract `search()` returning chunks, which is what the eval harness and the
-  retrieval trace build on. A knowledge base also has an optional
-  `description` (asked for in the wizard, carried into the agent tool's own
-  docstring and the architect's catalogue), so a model can tell an org's
-  collections apart. Existing chunks keep NULL for both columns and cite their
-  filename alone, exactly as before.
+  abstract `search()` returning chunks — the seam the retrieval trace (P0-5)
+  and eval harness (P0-7) are meant to build on; neither is written yet. A
+  knowledge base also has an optional `description` (asked for in the wizard,
+  carried into the agent tool's own docstring and the architect's catalogue),
+  so a model can tell an org's collections apart. Existing chunks keep NULL
+  for both columns and cite their filename alone, exactly as before.
 
 ## In Progress
 
