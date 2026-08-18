@@ -671,9 +671,10 @@ the same commit. For a *client's* corpus, leave the fixture alone and pass
 `--docs`/`--queries`; nothing in the harness is specific to the bundled set.
 
 Keep new lexical queries honest against the tokeniser (`core/text_tokenize.py`):
-it lowercases English into alphanumeric tokens with no stemming, so "cost"
-does not match "costs", and it has no Chinese word segmenter, so Chinese
-matches on character bigrams.
+it lowercases English into alphanumeric tokens and stems them, so "cost" does
+match "costs" but only inflections of one word conflate (never synonyms), and
+it has no word segmenter for Chinese, Japanese or Korean, so those match on
+character bigrams.
 
 ### What it does not measure
 

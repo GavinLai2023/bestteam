@@ -1321,6 +1321,25 @@
   known-issues entries below. Spec:
   `docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
 
+- **The BM25 tokeniser stems English and segments kana/Hangul** (P1-1):
+  `core/text_tokenize.py` now stems every Latin/digit token with
+  `snowballstemmer`'s English stemmer (added to the `tools-rag` and `tools`
+  extras; a **soft import**, so an install without it falls back to the identity
+  and simply retrieves less forgivingly), so a query for "refund" reaches a
+  document that only says "refunds". `_STOPWORDS` is stemmed with the same
+  stemmer — otherwise "does" → "doe" would stop matching its own stopword entry.
+  `_CJK_RUN_RE` gains Hiragana/Katakana (U+3040–U+30FF) and Hangul Syllables
+  (U+AC00–U+D7AF), so Japanese and Korean finally get the bigram fallback the
+  entry above already claimed for them, and a kanji+kana word is **one** run
+  rather than two fragments. Tokens are never persisted and the same `tokenize`
+  runs on both the index and the query side, so this needed no migration or
+  backfill. **Per-user memory recall shares the tokeniser**, so English memory
+  recall is stemmed too. The golden-set eval is unchanged at recall@3 / MRR /
+  hit@1 = 80% (16/16 lexical queries still rank their document first). One
+  side effect: `estimate_embedding_tokens` now counts kana and Hangul per
+  character instead of per four characters — the right direction for Japanese
+  and Korean, which run near one token per character.
+
 - **An org manages its own knowledge bases** (P0-2): `GET /api/org/knowledge-bases`,
   `GET`/`DELETE /api/org/knowledge-bases/{name}` plus a "My documents" panel on
   My teams — each collection's latest ingestion attempt (a failed upload's error

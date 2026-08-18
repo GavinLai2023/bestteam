@@ -85,11 +85,10 @@ def estimate_embedding_tokens(text: str) -> int:
     here is one token per CJK character plus one per four other characters,
     which is roughly where the mainstream BPE tokenizers land for each
     script. Expect the estimate to be within about **±30%** of a provider's
-    own count *for Han and Latin text*: enough to keep a spend cap honest, not
-    enough to reconcile against a bill. Kana and Hangul are outside
-    `_CJK_RUN_RE`'s ranges, so they are counted at the four-characters-per-token
-    rate and under-estimated by roughly 4x -- a known limit of reusing the BM25
-    tokenizer's definition rather than adding a second one.
+    own count: enough to keep a spend cap honest, not enough to reconcile
+    against a bill. Kana and Hangul are inside `_CJK_RUN_RE`'s ranges too, so
+    they are counted per character, which is roughly where Japanese and Korean
+    land as well.
 
     Deterministic and dependency-free (no `tiktoken`), and it reuses
     `text_tokenize._CJK_RUN_RE` so "CJK" means exactly what the BM25

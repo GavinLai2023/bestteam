@@ -423,6 +423,25 @@ def test_knowledge_base_xml_chunking_respects_element_boundaries(tmp_path):
     assert "automotive repair manual" in result
 
 
+def test_knowledge_base_query_matches_inflected_english(tmp_path):
+    """Stemming means a singular query reaches a document that only ever uses
+    the plural."""
+    (tmp_path / "refunds.txt").write_text(
+        "Refunds are issued within 30 days.",
+        encoding="utf-8",
+    )
+    (tmp_path / "shipping.txt").write_text(
+        "Orders leave the warehouse within two business days.",
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("docs", tmp_path)
+
+    result = kb.query("refund")
+
+    assert "refunds.txt" in result
+    assert "shipping.txt" not in result
+
+
 @pytest.fixture
 def chinese_docs_kb(tmp_path):
     (tmp_path / "policy.txt").write_text(

@@ -363,6 +363,27 @@ an end-user across sessions. It shares the CJK-aware tokenizer with the
 knowledge base — both now import `tokenize`/`significant_terms` from
 `core/text_tokenize.py` (extracted so the BM25 logic lives in one place).
 
+**What the tokenizer does** (P1-1): it lowercases text, stems each Latin/digit
+token with `snowballstemmer`'s English stemmer, and splits each maximal run of
+Han, kana or Hangul characters into overlapping bigrams (a lone character
+becomes its own token). Stemming means only inflections of one word conflate
+("refund"/"refunds"/"refunded"), never synonyms — that headroom is still the
+`vector`/`hybrid` types' job. `_STOPWORDS` is stemmed with the same stemmer so
+a stemmed query token still matches its stopword entry. Kana and Hangul sit in
+the *same* character class as Han, so a kanji+kana Japanese word is one run
+rather than two fragments cut at the script boundary. `snowballstemmer` is a
+**soft import** (in the `tools-rag` and `tools` extras): without it `_stem` is
+the identity, which keeps `core/embeddings.py` — which imports this module only
+for `_CJK_RUN_RE` — working in an install with no RAG extra, and keeps one
+process symmetric on both the index and the query side either way. The stemmer
+object is per-thread (`threading.local`), because Snowball's `stemWord` mutates
+instance state and the backend queries from a worker pool, and `_stem` is
+memoized (a bounded `lru_cache`) because stemming a token costs ~150x
+tokenizing it and a corpus reuses one small vocabulary — without the cache,
+indexing a chunk went from 0.10 ms to 16 ms, paid on every workflow load.
+Tokens are never persisted, so changing any of this needs no migration or
+backfill.
+
 - **`Memory` ABC** — `add`/`search`/`all`/`delete` over `MemoryRecord`
   (`id, user_id, type, content, metadata, created_at`). The old
   `remember`/`recall` key-value stub and `InMemoryStore` were removed (unused).
