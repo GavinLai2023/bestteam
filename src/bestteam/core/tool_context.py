@@ -10,9 +10,11 @@ facts into while it runs:
   knows something a generic 200-char stringification of its result cannot
   express (a knowledge base's query, hit count and sources -- never the
   document text itself) reports it directly.
-- `usage` -- token usage entries for LLM calls a tool makes internally
-  (a knowledge base's query expansion, for instance), which today go
-  unmetered because the tool loop has no hook to report them.
+- `usage` -- token usage entries for the paid calls a tool makes internally
+  (a knowledge base's query embedding and its query expansion). The tool
+  loop drains these onto the calling agent's `agent_completed.usage`, the
+  same list a model call's own usage rides, so they reach `usage_records`
+  with no new event field and no backend change.
 
 Every reporting function is a **no-op when no context is active**, so a tool
 called directly from the SDK (`kb.query(...)` in a script, or a unit test)

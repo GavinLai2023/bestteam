@@ -468,6 +468,14 @@ def _run_agent(
                             **extra_data,
                         },
                     )
+                if usage_sink is not None:
+                    # LLM/embedding calls the tool made internally (a knowledge
+                    # base's query embedding and its query-expansion call) ride
+                    # the agent's own usage list, so they reach `usage_records`
+                    # through the same `agent_completed.usage` path as a model
+                    # call -- no new event field, no backend change. Drained on
+                    # the failure path too: the paid call already happened.
+                    usage_sink.extend(tool_ctx.usage)
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = model.invoke(messages)

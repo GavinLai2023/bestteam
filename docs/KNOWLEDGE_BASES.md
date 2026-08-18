@@ -216,10 +216,48 @@ unparseable response degrades to searching the literal query alone — a
 query never fails because expansion failed. Left unset (the default),
 `query()` is byte-for-byte unchanged.
 
-This call's cost is **unmetered**: knowledge base tools run inside the
-agent's generic tool-calling loop, which has no hook to report a nested
-LLM call's token usage back to the backend — the same pre-existing gap the
-`vector` type's embedding calls already have.
+This call **is metered** — see "What a knowledge base costs, and how it is
+metered", below.
+
+## What a knowledge base costs, and how it is metered
+
+Three things a knowledge base does cost money, and all three land in the one
+`usage_records` ledger the org's monthly spend cap already sums over:
+
+| Spend | When | How it is recorded |
+| --- | --- | --- |
+| Ingestion embeddings (`vector`/`hybrid`) | Once per upload | One row per ingestion job: `agent="kb:ingest"`, `run_id` NULL, `ingestion_job_id` set |
+| Query embedding (`vector`/`hybrid`) | Once per query variant, per run | Rides the calling agent's own usage, so it is a normal run row |
+| Query expansion (all three types) | Once per query, when `query_expansion_model` is set | Same: a normal run row under the calling agent |
+
+Reranking costs **$0** and is deliberately not recorded: the cross-encoder
+runs locally, in-process, with no provider call to bill.
+
+**Token counts for embeddings are estimated, not reported.** LangChain's
+embeddings interface returns vectors and nothing else — no provider reports
+token usage for an embedding call the way a chat model does — so
+`bestteam.core.embeddings.estimate_embedding_tokens()` counts one token per
+CJK character plus one per four other characters. Expect it to be within
+about **±30%** of the provider's own count: enough to keep a spend cap
+honest, not enough to reconcile against a bill. Query-expansion tokens are
+*not* estimated — that is a chat model, and its reported `usage_metadata` is
+used directly.
+
+**Nothing billable, nothing recorded.** A `"fake:"` spec is $0 by
+construction and an `Embeddings`/`BaseChatModel` instance passed in from code
+has no spec string for the catalog to price, so neither produces a row. A
+`local_folder` KB embeds nothing at all.
+
+**Pricing an embedding model.** Give it a `model_catalog` entry whose `tier`
+is `"embedding"` (`PUT /api/config/model-catalog/<spec>`, admin-only), with
+`input_price_per_1k` set to the provider's price and `output_price_per_1k`
+left at `0`. That tier is what keeps it out of every place a *chat* model is
+offered — the wizard's catalog, the Solution Architect's prompt, smart
+search's default expansion model — so nobody can hand an embedding model to
+an agent. No embedding entry is seeded by default: prices depend on the
+provider you actually use. Without one the calls are still recorded, just
+with a NULL `cost_estimate` (the same "we ran it but cannot price it"
+signal any unlisted model gets).
 
 ## Reranking (opt-in, all three types)
 

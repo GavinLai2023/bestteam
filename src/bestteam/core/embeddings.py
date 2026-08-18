@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+import math
+from typing import Any, Optional
 
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 
 from ..exceptions import ConfigurationError
+from .text_tokenize import _CJK_RUN_RE
+from .tool_context import add_usage
 
 _DEFAULT_FAKE_EMBEDDING_DIM = 32
 
@@ -71,3 +74,54 @@ def normalize_rows(matrix: Any) -> Any:
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     safe_norms = np.where(norms == 0, 1.0, norms)
     return matrix / safe_norms
+
+
+def estimate_embedding_tokens(text: str) -> int:
+    """Estimate how many tokens embedding `text` will be billed for.
+
+    LangChain's `Embeddings` interface returns vectors and nothing else --
+    no provider reports token usage for an embedding call the way a chat
+    model does -- so a metered embedding row has to estimate. The ratio used
+    here is one token per CJK character plus one per four other characters,
+    which is roughly where the mainstream BPE tokenizers land for each
+    script. Expect the estimate to be within about **±30%** of a provider's
+    own count: enough to keep a spend cap honest, not enough to reconcile
+    against a bill.
+
+    Deterministic and dependency-free (no `tiktoken`), and it reuses
+    `text_tokenize._CJK_RUN_RE` so "CJK" means exactly what the BM25
+    tokenizer already means by it.
+    """
+    if not text:
+        return 0
+    cjk_chars = sum(len(run) for run in _CJK_RUN_RE.findall(text))
+    return cjk_chars + math.ceil((len(text) - cjk_chars) / 4)
+
+
+def billable_spec(model: Any) -> Optional[str]:
+    """The catalog spec an embedding call should be metered against, or None
+    when there is nothing billable to meter: a live `Embeddings` instance has
+    no spec string for `model_catalog` to price, and a `"fake:"` spec is $0 by
+    construction. Shared by the query-time path (below) and the backend's
+    ingestion metering (`ui/backend/ingestion.py`) so both agree on what
+    counts as spend."""
+    if isinstance(model, str) and not model.startswith("fake:"):
+        return model
+    return None
+
+
+def report_query_embedding_usage(spec: Optional[str], query_text: str) -> None:
+    """Meter one `embed_query` call on `spec` into the active tool-call
+    context (`core/tool_context.py`), from which the adapter's tool loop
+    forwards it onto the agent's `agent_completed` event. `spec` is a
+    `billable_spec()` result, so None means "nothing to bill"; a no-op
+    outside a run either way."""
+    if spec is None:
+        return
+    add_usage(
+        {
+            "model": spec,
+            "input_tokens": estimate_embedding_tokens(query_text),
+            "output_tokens": 0,
+        }
+    )

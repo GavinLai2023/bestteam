@@ -5,8 +5,13 @@ from unittest.mock import patch
 
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
+from bestteam.adapters import langgraph_adapter
+from bestteam.core import vector_knowledge_base
 from bestteam.core.embeddings import resolve_embedding_model as _resolve_embedding_model
+from bestteam.core.tool_context import tool_call_context
 from bestteam.core.vector_knowledge_base import VectorKnowledgeBase
 from bestteam.exceptions import ConfigurationError
 
@@ -562,3 +567,69 @@ def test_init_raises_numpy_missing_before_chunk_param_validation(tmp_path):
                 "kb", tmp_path, embedding_model="fake:8",
                 chunk_size=100, chunk_overlap=150
             )
+
+
+# ---------------------------------------------------------------------------
+# Query-time spend metering (P0-4)
+# ---------------------------------------------------------------------------
+
+def test_query_records_embed_query_usage_into_tool_context(tmp_path, monkeypatch):
+    # A real provider spec, with the provider call itself stubbed out: only a
+    # non-`fake:` string spec is billable, so only that path is metered.
+    (tmp_path / "doc0.txt").write_text("gadget notes", encoding="utf-8")
+    monkeypatch.setattr(
+        vector_knowledge_base, "resolve_embedding_model", lambda spec: _VocabEmbedding()
+    )
+    kb = VectorKnowledgeBase(
+        "kb", tmp_path, embedding_model="openai:text-embedding-3-small", top_k=1
+    )
+
+    with tool_call_context() as ctx:
+        kb.query("gadget")
+
+    # "gadget" is 6 non-CJK characters -> ceil(6 / 4) == 2 estimated tokens.
+    assert ctx.usage == [
+        {"model": "openai:text-embedding-3-small", "input_tokens": 2, "output_tokens": 0}
+    ]
+
+
+def test_fake_spec_records_nothing(tmp_path):
+    (tmp_path / "doc0.txt").write_text("gadget notes", encoding="utf-8")
+    fake_spec_kb = VectorKnowledgeBase("kb", tmp_path, embedding_model="fake:4", top_k=1)
+    # An Embeddings instance has no spec string to price, and follows the same
+    # "nothing billable, nothing recorded" rule.
+    instance_kb = VectorKnowledgeBase(
+        "kb", tmp_path, embedding_model=_VocabEmbedding(), top_k=1
+    )
+
+    with tool_call_context() as ctx:
+        fake_spec_kb.query("gadget")
+        instance_kb.query("gadget")
+
+    assert ctx.usage == []
+
+
+def test_expansion_usage_metadata_is_recorded(tmp_path, monkeypatch):
+    (tmp_path / "doc0.txt").write_text("widget notes", encoding="utf-8")
+    expansion_model = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"queries": ["widget"]}',
+                usage_metadata={"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+            )
+        ]
+    )
+    monkeypatch.setattr(langgraph_adapter, "_resolve_model", lambda spec: expansion_model)
+    kb = VectorKnowledgeBase(
+        "kb", tmp_path, embedding_model=_VocabEmbedding(), top_k=1,
+        query_expansion_model="openai:gpt-4o-mini",
+    )
+
+    with tool_call_context() as ctx:
+        kb.query("sprocket")
+
+    # The embedding model is an instance ($0 to meter), so the expansion call
+    # is the only entry.
+    assert ctx.usage == [
+        {"model": "openai:gpt-4o-mini", "input_tokens": 12, "output_tokens": 7}
+    ]

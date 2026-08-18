@@ -1376,11 +1376,30 @@
   rendered in the dashboard. It now carries `query` (≤200 chars), `hit_count`,
   `sources` (de-duplicated citations, ≤10) and a `summary` built from those,
   and never the document text. The tool reports them through a new contextvar
-  side channel (`core/tool_context.py`, whose unused `usage` half is where a
-  KB's internal LLM calls will be metered), and
+  side channel (`core/tool_context.py`, whose `usage` half now meters a KB's
+  internal paid calls — P0-4, below), and
   `make_knowledge_base_tool` marks the wrapper `__bestteam_tool_kind__ =
   "knowledge_base"` so the adapter never falls back to summarising its result.
   `summary` is kept, so no frontend or persistence change was needed.
+
+- **A knowledge base's spend is billed instead of absorbed** (P0-4): all three
+  paid KB calls now land in `usage_records`. Query-time spend (the
+  `vector`/`hybrid` query embedding, and the query-expansion LLM call on all
+  three types) rides the **existing** `agent_completed.usage` list — the tool
+  reports it through `core/tool_context.py` and the adapter's tool loop drains
+  it into the node's `usage_sink`, on the failure path too — so `runtime.py`
+  needed no change and no new event field was added. Ingestion writes one
+  best-effort `agent="kb:ingest"` row per completed job (`run_id` NULL,
+  `ingestion_job_id` set), which is why `usage_records.run_id` is now nullable
+  (migration `n1o2p3q4r5s6`) rather than there being a second ledger — the
+  org's monthly spend cap already sums this one. Two limits worth stating:
+  embedding token counts are **estimated** (`estimate_embedding_tokens`, one
+  token per CJK character plus one per four others, ±30%) because no provider
+  reports embedding usage through LangChain, and pricing an embedding model
+  requires an operator to add a `tier="embedding"` `model_catalog` entry by
+  hand (none is seeded) — without one the calls are recorded with a NULL
+  `cost_estimate`. Reranking is a local cross-encoder, $0, and is deliberately
+  not recorded.
 
 ## In Progress
 

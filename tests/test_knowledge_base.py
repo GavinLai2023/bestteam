@@ -902,3 +902,21 @@ def test_tool_docstring_without_description_is_generic(tmp_path):
     doc = make_knowledge_base_tool(kb).__doc__
     assert "Search the 'docs' knowledge base. Use it whenever" in doc
     assert kb.description is None
+
+
+# ---------------------------------------------------------------------------
+# estimate_embedding_tokens
+# ---------------------------------------------------------------------------
+
+def test_estimate_embedding_tokens_counts_cjk_per_char_and_latin_per_4():
+    from bestteam.core.embeddings import estimate_embedding_tokens
+
+    assert estimate_embedding_tokens("") == 0
+    # Latin: one token per four characters, rounded up.
+    assert estimate_embedding_tokens("abcd") == 1
+    assert estimate_embedding_tokens("abcde") == 2
+    # CJK: one token per character, because there are no word boundaries to
+    # merge across.
+    assert estimate_embedding_tokens("退货政策") == 4
+    # Mixed: 4 CJK characters + " refunds" (8 characters -> 2).
+    assert estimate_embedding_tokens("退货政策 refunds") == 6

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..exceptions import ConfigurationError
-from .embeddings import normalize_rows, resolve_embedding_model
+from .embeddings import (
+    billable_spec,
+    normalize_rows,
+    report_query_embedding_usage,
+    resolve_embedding_model,
+)
 from .knowledge_base import (
     KnowledgeBase,
     _Chunk,
@@ -105,6 +110,10 @@ class HybridKnowledgeBase(KnowledgeBase):
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
                            query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
+        # Kept for metering only: the query-time `embed_query` call below is
+        # billed against this spec, and there is nothing to bill when the
+        # customer handed in a live model or a `"fake:"` spec.
+        self._embedding_spec = billable_spec(embedding_model)
         vectors = self._embed_chunks(embedding_model, cache_path)
         self._set_vectors(name, vectors)
 
@@ -134,6 +143,10 @@ class HybridKnowledgeBase(KnowledgeBase):
         self._init_common(name, chunks, top_k, score_threshold, rerank_model, candidate_k,
                            query_expansion_model, query_expansion_count, description)
         self._embeddings = resolve_embedding_model(embedding_model)
+        # Kept for metering only: the query-time `embed_query` call below is
+        # billed against this spec, and there is nothing to bill when the
+        # customer handed in a live model or a `"fake:"` spec.
+        self._embedding_spec = billable_spec(embedding_model)
         self._set_vectors(name, vectors)
         return self
 
@@ -235,6 +248,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         import numpy as np
 
         query_vec = np.array(self._embeddings.embed_query(query_text), dtype=np.float64)
+        report_query_embedding_usage(self._embedding_spec, query_text)
         norm = np.linalg.norm(query_vec)
         if norm > 0:
             query_vec = query_vec / norm

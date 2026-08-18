@@ -82,9 +82,14 @@ implemented** — don't assume they exist:
 - **Knowledge bases have no external vector store, no DMS connectors.**
   Three types are supported: `local_folder` (BM25), `vector` (cosine), and
   `hybrid` (BM25 + vector, RRF-fused). All three support opt-in query
-  expansion (`query_expansion_model`/`query_expansion_count`, MultiQueryRetriever-style,
-  unmetered) and opt-in reranking (`rerank_model`/`candidate_k`) —
-  see `src/bestteam/core/CLAUDE.md`.
+  expansion (`query_expansion_model`/`query_expansion_count`, MultiQueryRetriever-style)
+  and opt-in reranking (`rerank_model`/`candidate_k`) —
+  see `src/bestteam/core/CLAUDE.md`. **KB spend is metered**: query-time
+  embedding and expansion calls ride the calling agent's
+  `agent_completed.usage` into `usage_records`, and each ingestion job writes
+  one `agent="kb:ingest"` row with a NULL `run_id`. Embedding token counts are
+  *estimated* (±30%) — no provider reports them — and a local reranker is $0,
+  so it is not recorded.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or

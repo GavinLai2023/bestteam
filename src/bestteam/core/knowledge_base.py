@@ -18,7 +18,7 @@ from .reranking import (
     resolve_reranker,
 )
 from .text_tokenize import significant_terms, tokenize
-from .tool_context import report_trace
+from .tool_context import add_usage, report_trace
 
 _logger = logging.getLogger(__name__)
 
@@ -517,11 +517,36 @@ def _rrf_retrieve(
     return [idx for idx, _score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)]
 
 
+def _report_expansion_usage(response: Any, model_spec: Any) -> None:
+    """Meter the query-expansion call's tokens into the active tool-call
+    context (`core/tool_context.py`), from which the adapter's tool loop
+    forwards them onto the agent's `agent_completed` event.
+
+    Entry shape mirrors `MemoryManager._usage_entry`, including its rule that
+    only a string spec can be priced against the catalog (a `BaseChatModel`
+    instance records tokens with `model=None`, leaving the cost null). A
+    `fake:` model reports no `usage_metadata`, so it records nothing.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        return
+    add_usage(
+        {
+            "model": model_spec if isinstance(model_spec, str) else None,
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        }
+    )
+
+
 def _query_variants(query: str, query_expansion_model: Any, query_expansion_count: int) -> List[str]:
     """`[query]` plus up to `query_expansion_count` LLM-generated alternative
     phrasings. Expansion failures/unset already degrade to `[]` inside
     `expand_query`, so this never raises and never returns an empty list."""
-    expansions, _response = expand_query(query_expansion_model, query, query_expansion_count)
+    expansions, response = expand_query(query_expansion_model, query, query_expansion_count)
+    # A parse failure still returns the response: the call was billed either
+    # way, so it is metered either way.
+    _report_expansion_usage(response, query_expansion_model)
     return [query] + expansions
 
 

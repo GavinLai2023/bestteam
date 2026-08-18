@@ -118,8 +118,10 @@ SDK-direct `kb.query()` is unaffected). The wrapper is marked
 tool is named after its KB), and the adapter builds that call's
 `tool_completed` from the report alone: a KB tool's event never carries
 `_summarize(result)`, i.e. never the indexed documents' own text. `usage` is
-the same channel's unused half, for metering a tool's internal LLM calls
-(query expansion) later. A `_Chunk` carries `source`, `text`, and two optional location fields —
+the same channel's other half, and is now in use (P0-4): the tool loop drains
+it onto the calling agent's `agent_completed.usage` so a KB's query embedding
+and query-expansion calls are metered -- see "Metering a knowledge base's
+spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
 `heading` (Markdown, the section a chunk opens under, an 80-char
 approximation) — which `_citation()` renders as
@@ -211,13 +213,42 @@ alternative, and fuses the per-variant ranked results with Reciprocal Rank
 Fusion (`core/fusion.py`, shared with Memory) before slicing to `top_k`.
 Unset (the default) -> `query()` is byte-for-byte unchanged. A bad spec /
 invoke error / unparseable response degrades to searching the literal query
-alone -- a query never fails because expansion failed. **This call's cost is
-unmetered**: KB tools run inside the agent's generic tool-calling loop
-(`adapters/langgraph_adapter.py`), which has no hook to report a nested LLM
-call's token usage back to the backend (unlike Memory's recall, which runs
-at the `Workflow.stream()` orchestration layer) -- the same pre-existing gap
-`VectorKnowledgeBase`'s embedding calls already have. See
+alone -- a query never fails because expansion failed. **This call is
+metered** (P0-4): `_query_variants()` reads the expansion response's
+`usage_metadata` and reports it through `core/tool_context.py::add_usage`,
+from which the adapter's tool loop drains it onto the calling agent's
+`agent_completed.usage` -- the same list a model call's own usage rides, so
+the backend needs no new event field. An unparseable response is still
+metered (the call was still billed); a `fake:` model reports no
+`usage_metadata` and so records nothing, and a `BaseChatModel` instance
+records tokens with `model=None` (cost stays null), mirroring
+`MemoryManager._usage_entry`. See
 `docs/superpowers/specs/2026-08-15-kb-hybrid-retrieval-design.md`.
+
+## Metering a knowledge base's spend (P0-4)
+
+Query-time spend rides the tool call's own context and needs no backend
+change; ingestion spend is recorded by the backend directly. What the SDK
+owns:
+
+- `core/embeddings.py::estimate_embedding_tokens(text)` -- one token per CJK
+  character (via `text_tokenize._CJK_RUN_RE`) plus one per four other
+  characters. Embedding providers report no token usage through LangChain's
+  `Embeddings` interface, so an embedding row *has* to estimate; expect ±30%.
+  Deterministic, no `tiktoken` dependency.
+- `core/embeddings.py::billable_spec(model)` -- the single definition of "is
+  there anything to bill": a non-`fake:` **string** spec, else None. A live
+  `Embeddings`/`BaseChatModel` instance has no spec for `model_catalog` to
+  price, and `fake:` is $0 by construction. Shared with
+  `ui/backend/ingestion.py` so both sides agree.
+- `report_query_embedding_usage()` in the same module, called from
+  `VectorKnowledgeBase._vector_leg`/`HybridKnowledgeBase._vector_leg` right
+  after `embed_query` -- once per query variant, so expansion's extra
+  variants are billed as the extra calls they are. `self._embedding_spec` is
+  the `billable_spec()` result stashed at construction (both the folder
+  constructor and `from_chunks`).
+- Reranking is **not** metered: a cross-encoder runs locally, in-process,
+  with no provider call to bill.
 
 ## Known limitations: knowledge base storage, chunking, and reranking
 
