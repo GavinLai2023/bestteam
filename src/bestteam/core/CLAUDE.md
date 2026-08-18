@@ -249,6 +249,13 @@ owns:
   constructor and `from_chunks`).
 - Reranking is **not** metered: a cross-encoder runs locally, in-process,
   with no provider call to bill.
+- **Document embeddings are metered only on the upload/ingestion path**
+  (`ui/backend/ingestion.py`). A `vector`/`hybrid` KB built straight from a
+  folder path — a YAML-configured one via `core/loader.py`, or an uploaded one
+  with no completed `IngestionJob`, which `resolve_knowledge_base()` falls
+  back to building from files — embeds every chunk in its constructor, at load
+  time, outside any run and any job; that spend is not recorded, and without
+  `cache_path` it repeats on every load. Query-time metering is unaffected.
 
 ## Known limitations: knowledge base storage, chunking, and reranking
 

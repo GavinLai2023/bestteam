@@ -86,8 +86,10 @@ implemented** — don't assume they exist:
   and opt-in reranking (`rerank_model`/`candidate_k`) —
   see `src/bestteam/core/CLAUDE.md`. **KB spend is metered**: query-time
   embedding and expansion calls ride the calling agent's
-  `agent_completed.usage` into `usage_records`, and each ingestion job writes
-  one `agent="kb:ingest"` row with a NULL `run_id`. Embedding token counts are
+  `agent_completed.usage` into `usage_records`, and a `vector`/`hybrid`
+  ingestion job with a billable embedding spec (a non-`fake:` string) and a
+  non-zero token estimate writes one `agent="kb:ingest"` row with a NULL
+  `run_id` — a path-constructed KB embeds at load time and is not metered. Embedding token counts are
   *estimated* (±30%) — no provider reports them — and a local reranker is $0,
   so it is not recorded.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +

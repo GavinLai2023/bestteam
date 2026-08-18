@@ -221,17 +221,27 @@ metered", below.
 
 ## What a knowledge base costs, and how it is metered
 
-Three things a knowledge base does cost money, and all three land in the one
-`usage_records` ledger the org's monthly spend cap already sums over:
+Three things a knowledge base does cost money, and they land in the one
+`usage_records` ledger the org's monthly spend cap already sums over — with
+one gap on the non-upload path, noted under the table:
 
 | Spend | When | How it is recorded |
 | --- | --- | --- |
-| Ingestion embeddings (`vector`/`hybrid`) | Once per upload | One row per ingestion job: `agent="kb:ingest"`, `run_id` NULL, `ingestion_job_id` set |
+| Ingestion embeddings (`vector`/`hybrid`) | Once per upload, ingestion path only | One row per ingestion job: `agent="kb:ingest"`, `run_id` NULL, `ingestion_job_id` set |
 | Query embedding (`vector`/`hybrid`) | Once per query variant, per run | Rides the calling agent's own usage, so it is a normal run row |
 | Query expansion (all three types) | Once per query, when `query_expansion_model` is set | Same: a normal run row under the calling agent |
 
 Reranking costs **$0** and is deliberately not recorded: the cross-encoder
 runs locally, in-process, with no provider call to bill.
+
+**Only the upload/ingestion path's document embeddings are metered.** A
+`vector`/`hybrid` knowledge base constructed directly from a folder path —
+a YAML-configured KB (`core/loader.py`), or an uploaded one with no completed
+ingestion job, which the backend falls back to building from files — embeds
+every chunk at **load** time, outside any run and outside any ingestion job,
+and that spend is **not** recorded. Without `cache_path` it re-embeds on every
+load, so the unrecorded cost repeats. Query-time spend is metered for these
+knowledge bases exactly as for any other.
 
 **Token counts for embeddings are estimated, not reported.** LangChain's
 embeddings interface returns vectors and nothing else — no provider reports
