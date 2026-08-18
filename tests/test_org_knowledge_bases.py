@@ -617,6 +617,9 @@ def test_list_own_kbs_shows_latest_job_status_and_never_config_path(client):
     assert kb["type"] == "local_folder"
     assert kb["servable"] is True
     assert kb["used_by"] == []
+    # `iso_utc`, not the bare column: SQLite round-trips these tz-naive, and a
+    # timestamp with no UTC marker is parsed as local time by the panel.
+    assert kb["updated_at"].endswith("+00:00")
     assert kb["latest_job"]["status"] == "completed"
     # `job_status_payload` includes the KB's `config` once a job completes,
     # and that config carries the server's absolute upload path. The summary

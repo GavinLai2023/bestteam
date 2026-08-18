@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
 from .db.dependencies import workflows_referencing
-from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User
+from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User, iso_utc
 from .db_session import get_db
 from .ingestion import job_status_payload
 from .knowledge_bases import _kb_upload_lock, delete_knowledge_base, upload_knowledge_base
@@ -122,7 +122,9 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
         # doesn't need a shape change if one is ever added.
         "description": config.get("description"),
         "type": config.get("type", "local_folder"),
-        "updated_at": record.updated_at,
+        # `iso_utc`, not the bare column: SQLite hands it back tz-naive, and
+        # the panel's `Date` would then read a UTC timestamp as local time.
+        "updated_at": iso_utc(record.updated_at),
         "used_by": workflows_referencing(db, kind="knowledge_base", resource_id=record.id),
         "servable": has_completed or latest is None,
         "latest_job": latest_job,
