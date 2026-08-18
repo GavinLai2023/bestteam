@@ -1349,11 +1349,27 @@
   `format_results`, so a hit reads `[source: handbook.pdf, p.3 § Refunds]`.
   `KnowledgeBase.query()` is now concrete on the base class over a new
   abstract `search()` returning chunks — the seam the retrieval trace (P0-5)
-  and eval harness (P0-7) are meant to build on; neither is written yet. A
+  and eval harness (P0-7) are meant to build on; P0-7 is written (below), the
+  retrieval trace is not. A
   knowledge base also has an optional `description` (asked for in the wizard,
   carried into the agent tool's own docstring and the architect's catalogue),
   so a model can tell an org's collections apart. Existing chunks keep NULL
   for both columns and cite their filename alone, exactly as before.
+
+- **Retrieval quality is a number now, not an impression** (P0-7):
+  `scripts/kb_eval.py` runs a golden set (`tests/fixtures/kb_eval/` — 10
+  documents, 5 English / 5 Chinese, and 20 graded queries) against any
+  knowledge base type and reports recall@k / MRR / hit@1 **per source
+  document**, plus an `expected_substring` hit@k over chunk text that catches a
+  chunking regression. Metrics live in `core/kb_eval.py` (pure functions over
+  `KnowledgeBase.search()`, never the formatted string), so `tests/test_kb_eval.py`
+  guards the BM25 baseline at recall@3 ≥ 0.8 / MRR ≥ 0.7 in CI. The four
+  `paraphrase` queries share no significant term with their document, so BM25
+  scores exactly 0 on them by construction — that gap is the headroom a real
+  embedding model is supposed to close, and it is why the thresholds are 0.8,
+  not 1.0. `fake:` embeddings are deterministic noise: the hybrid test is smoke
+  only, and a real-model comparison is a manual run
+  (`--type hybrid --embedding-model openai:text-embedding-3-small`).
 
 ## In Progress
 

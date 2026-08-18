@@ -92,9 +92,20 @@ top_k) -> List[_Chunk]` is the abstract method each subclass implements;
 `query()` is **concrete on the base class** and is just
 `format_results(self.name, query, self.search(...))`. One formatter means the
 citation tags cannot drift between types, and the split is the seam the
-upcoming retrieval trace (P0-5) and eval harness (P0-7) are meant to build on
-— consuming chunks rather than re-parsing a formatted string. Neither exists
-yet. A `_Chunk` carries `source`, `text`, and two optional location fields —
+upcoming retrieval trace (P0-5) and the eval harness (P0-7) were meant to
+build on — consuming chunks rather than re-parsing a formatted string. The
+**eval harness now exists** (`core/kb_eval.py` + `scripts/kb_eval.py`, P0-7):
+`evaluate(kb, queries, top_k)` drives any KB type through `search()` and
+reports recall@k / MRR / hit@1 **per source document** (one relevant document
+per query, so recall@k == hit@k), plus an optional `expected_substring` hit@k
+over chunk *text* that catches a chunking regression. The golden set is
+`tests/fixtures/kb_eval/` — 10 documents (5 EN / 5 ZH) and 20 queries split
+16 `lexical` (BM25 must rank the document first) / 4 `paraphrase` (no shared
+significant terms, so BM25 misses them by design; they are the headroom a real
+embedding model should close, and why the guarded thresholds are recall@3 ≥
+0.8 / MRR ≥ 0.7 rather than 1.0). `fake:` embeddings are deterministic noise —
+the hybrid test is a smoke test and asserts no quality. The retrieval trace
+(P0-5) still doesn't exist. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
 `heading` (Markdown, the section a chunk opens under, an 80-char
 approximation) — which `_citation()` renders as

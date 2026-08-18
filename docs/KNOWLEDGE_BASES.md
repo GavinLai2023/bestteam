@@ -502,6 +502,112 @@ can't be parsed doesn't accumulate storage.
 See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.
 
+## Evaluating retrieval
+
+Retrieval quality is otherwise judged by whoever last tried a query and
+thought the answer looked reasonable. `scripts/kb_eval.py` turns that into a
+number: it runs a fixed set of queries whose right answer is known against a
+knowledge base, and reports how often the expected document came back and how
+highly it ranked.
+
+```powershell
+# The bundled golden set through the default BM25 knowledge base
+.\.venv\Scripts\python.exe scripts/kb_eval.py
+
+# The same questions through hybrid retrieval -- $0, no API key
+.\.venv\Scripts\python.exe scripts/kb_eval.py --type hybrid --embedding-model fake:32
+
+# The same questions with a real embedding model (this one costs money)
+.\.venv\Scripts\python.exe scripts/kb_eval.py --type hybrid `
+    --embedding-model openai:text-embedding-3-small
+```
+
+Other flags: `--rerank-model`, `--expansion-model`, `--chunk-size`,
+`--chunk-overlap`, `--top-k`, `--docs`/`--queries` to point at your own
+corpus, and `--json` for the same report as machine-readable output. The
+defaults (`top_k=3`, `chunk_size=300`, `chunk_overlap=50`) are the bundled
+golden set's smoke configuration, and live in `core/kb_eval.py` so the
+documented numbers and the measured ones cannot drift apart.
+
+**`fake:` specs prove the harness runs, never that retrieval improved.** A
+`fake:<dim>` embedding is deterministic noise, so a hybrid run with one scores
+differently from `local_folder` for no reason worth acting on. Only a real
+embedding/rerank model says anything about quality.
+
+### What it measures
+
+Every metric is computed **per source document**, not per chunk — a knowledge
+base that returns three chunks of the right document has answered the
+question, whichever chunk of it ranked first. Because each query in a golden
+set has exactly one relevant document, recall@k here is the same quantity as
+hit@k.
+
+| Metric | Meaning |
+|---|---|
+| `recall@k` | Fraction of queries whose expected document appeared in the top `k`. |
+| `MRR` | Mean reciprocal rank — 1.0 for a hit at position 1, 0.5 at position 2, 0 for a miss. Rewards ranking it highly, not merely returning it. |
+| `hit@1` | Fraction of queries whose expected document ranked first. |
+| `substring hit@k` | Fraction of queries whose `expected_substring` (a concrete fact) appeared in the retrieved chunk *text* — this is what catches a chunking change that separates the answer from the words that found it. |
+
+The report splits every metric by query `kind`, and lists each query that did
+not rank its expected document first, with what came back instead.
+
+`evaluate()` consumes `KnowledgeBase.search()` (structured chunks), never the
+formatted `query()` string, so a change to the citation format cannot quietly
+change a score.
+
+### The golden set
+
+`tests/fixtures/kb_eval/` holds `docs/` — ten short support documents, five
+English and five Chinese (refunds, shipping, opening hours, password reset,
+warranty in each language) — and `queries.yaml`, twenty queries over them.
+Each document is 300–600 characters and carries three to five concrete facts
+(amounts, deadlines, place names) so a query has something exact to hit.
+
+```yaml
+queries:
+  - query: restocking fee for opened items
+    expected_source: refund_policy.md   # folder-relative path, as in a citation
+    kind: lexical                       # or: paraphrase
+    expected_substring: 15%             # optional
+```
+
+`kind` records why a query is in the set:
+
+- **`lexical`** (16 of the 20) shares wording with its document. Keyword
+  search is expected to rank that document first, and
+  `tests/test_kb_eval.py::test_local_folder_baseline_on_golden_set` fails if
+  any of them slips — the guarded thresholds are recall@3 ≥ 0.8 and MRR ≥ 0.7.
+- **`paraphrase`** (4 of the 20) deliberately shares *no* significant term
+  with its document ("I have changed my mind about a purchase and want my
+  money back" for the refund policy). BM25 misses these by construction, so
+  `local_folder` scores exactly 0 on them — they are the headroom a real
+  embedding model is supposed to close, and the reason the whole-set
+  thresholds sit at 0.8 rather than 1.0.
+
+### Extending it
+
+Add a document to `docs/` and at least one query naming it in `queries.yaml`
+— `test_golden_set_is_well_formed` enforces the invariants (ten documents,
+twenty queries, the 16/4 split, every `expected_source` an existing file,
+every `expected_substring` genuinely present in it, every document the answer
+to at least one query), so extending the set means updating those counts in
+the same commit. For a *client's* corpus, leave the fixture alone and pass
+`--docs`/`--queries`; nothing in the harness is specific to the bundled set.
+
+Keep new lexical queries honest against the tokeniser (`core/text_tokenize.py`):
+it lowercases English into alphanumeric tokens with no stemming, so "cost"
+does not match "costs", and it has no Chinese word segmenter, so Chinese
+matches on character bigrams.
+
+### What it does not measure
+
+Retrieval only. Nothing here scores the *answer* an agent then writes, and
+there is no regression baseline stored on disk to compare a run against — the
+numbers are printed, not tracked over time. There is also no fixture for the
+`vector`/`hybrid` types under a *real* embedding model: those runs cost money,
+so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
+
 ## Known limitations
 
 - **Chunking is format-aware, not hierarchical.** Related content tends to
@@ -564,6 +670,9 @@ for the full design.
 | Shared RRF fusion + query expansion helpers | `src/bestteam/core/fusion.py` |
 | Shared reranking helper | `src/bestteam/core/reranking.py` |
 | YAML loader (`_build_knowledge_base`) | `src/bestteam/core/loader.py` |
+| Retrieval-quality metrics (`evaluate`, `recall_at_k`, `mrr`) | `src/bestteam/core/kb_eval.py` |
+| Evaluation CLI | `scripts/kb_eval.py` |
+| Golden set (documents + graded queries) | `tests/fixtures/kb_eval/` |
 | `KnowledgeBaseSpec` (pydantic model mirroring the YAML schema) | `src/bestteam/core/specification.py` |
 | Document parsing (PDF/Word/Excel/XML/text) | `src/bestteam/tools/file_parser.py` |
 | Backend CRUD + admin upload endpoint | `ui/backend/crud.py` |
