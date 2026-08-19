@@ -1,9 +1,9 @@
 """Login rate limiting (beta gate G2).
 
 The limiter is a pure in-memory sliding window over *failed* attempts, keyed
-per username and per client IP; the API tests pin that `/api/auth/login`
-consults it before it hashes a password, and that a successful login clears
-the username's failures.
+per username and per client IP, and the check reserves the attempt it admits;
+the API tests pin that `/api/auth/login` consults it before it hashes a
+password, and that a successful login clears the username's failures.
 """
 
 import pytest
@@ -38,62 +38,78 @@ def test_blocks_after_the_username_limit_within_the_window():
     now, advance = _clock()
     limiter = LoginRateLimiter(username_limit=3, ip_limit=100, window_seconds=60, clock=now)
     for _ in range(3):
-        assert limiter.retry_after("alice", "1.1.1.1") is None
-        limiter.record_failure("alice", "1.1.1.1")
-    assert limiter.retry_after("alice", "1.1.1.1") == 60
+        assert limiter.reserve("alice", "1.1.1.1") is None  # admitted, and counted
+    assert limiter.reserve("alice", "1.1.1.1") == 60
     # The window is sliding: the oldest failure ages out first.
     advance(59)
-    assert limiter.retry_after("alice", "1.1.1.1") == 1
+    assert limiter.reserve("alice", "1.1.1.1") == 1
     advance(1)
-    assert limiter.retry_after("alice", "1.1.1.1") is None
+    assert limiter.reserve("alice", "1.1.1.1") is None
+
+
+def test_the_check_itself_reserves_the_slot():
+    # No separate "record failure" step exists to race against: once `limit`
+    # attempts have been admitted -- none of them yet resolved -- the next is
+    # refused. This is what makes a concurrent burst hash at most `limit`
+    # times rather than once per pool thread.
+    now, _ = _clock()
+    limiter = LoginRateLimiter(username_limit=2, ip_limit=100, window_seconds=60, clock=now)
+    assert limiter.reserve("alice", "1.1.1.1") is None
+    assert limiter.reserve("alice", "1.1.1.1") is None
+    assert limiter.reserve("alice", "1.1.1.1") == 60
+    # A refused attempt is not counted, so the window is not extended by it.
+    assert limiter.tracked_keys() == 2
 
 
 def test_username_key_is_case_insensitive_and_ip_independent():
     now, _ = _clock()
     limiter = LoginRateLimiter(username_limit=2, ip_limit=100, window_seconds=60, clock=now)
-    limiter.record_failure("Alice", "1.1.1.1")
-    limiter.record_failure("alice", "2.2.2.2")
-    assert limiter.retry_after("ALICE", "3.3.3.3") == 60
-    assert limiter.retry_after("bob", "3.3.3.3") is None
+    limiter.reserve("Alice", "1.1.1.1")
+    limiter.reserve("alice", "2.2.2.2")
+    assert limiter.reserve("ALICE", "3.3.3.3") == 60
+    assert limiter.reserve("bob", "3.3.3.3") is None
 
 
 def test_blocks_an_ip_across_usernames():
     now, _ = _clock()
     limiter = LoginRateLimiter(username_limit=100, ip_limit=3, window_seconds=60, clock=now)
     for name in ("a", "b", "c"):
-        limiter.record_failure(name, "9.9.9.9")
-    assert limiter.retry_after("d", "9.9.9.9") == 60
-    assert limiter.retry_after("d", "8.8.8.8") is None
+        limiter.reserve(name, "9.9.9.9")
+    assert limiter.reserve("d", "9.9.9.9") == 60
+    assert limiter.reserve("d", "8.8.8.8") is None
 
 
-def test_success_clears_the_username_but_not_the_ip():
+def test_success_clears_the_username_and_releases_only_its_own_ip_slot():
     now, _ = _clock()
-    limiter = LoginRateLimiter(username_limit=2, ip_limit=3, window_seconds=60, clock=now)
-    limiter.record_failure("alice", "1.1.1.1")
-    limiter.record_failure("alice", "1.1.1.1")
-    limiter.record_success("alice")
-    assert limiter.retry_after("alice", "1.1.1.1") is None
-    limiter.record_failure("bob", "1.1.1.1")
-    # 3 failures from the IP in the window: the success did not forgive them.
-    assert limiter.retry_after("carol", "1.1.1.1") == 60
+    limiter = LoginRateLimiter(username_limit=3, ip_limit=3, window_seconds=60, clock=now)
+    limiter.reserve("alice", "1.1.1.1")  # fails
+    limiter.reserve("alice", "1.1.1.1")  # fails
+    assert limiter.reserve("alice", "1.1.1.1") is None  # succeeds:
+    limiter.record_success("alice", "1.1.1.1")
+    assert limiter.reserve("alice", "1.1.1.1") is None  # ...the username is forgiven,
+    limiter.record_success("alice", "1.1.1.1")
+    # ...but the address still carries the two failures: one more and it is out.
+    limiter.reserve("bob", "1.1.1.1")
+    assert limiter.reserve("carol", "1.1.1.1") == 60
 
 
 def test_missing_ip_only_counts_against_the_username():
     now, _ = _clock()
     limiter = LoginRateLimiter(username_limit=100, ip_limit=1, window_seconds=60, clock=now)
-    limiter.record_failure("alice", None)
-    limiter.record_failure("bob", None)
-    assert limiter.retry_after("carol", None) is None
+    limiter.reserve("alice", None)
+    limiter.reserve("bob", None)
+    assert limiter.reserve("carol", None) is None
+    limiter.record_success("carol", None)  # nothing to release; must not raise
 
 
 def test_expired_keys_are_swept():
     now, advance = _clock()
     limiter = LoginRateLimiter(username_limit=5, ip_limit=5, window_seconds=60, clock=now)
     for i in range(50):
-        limiter.record_failure(f"user{i}", f"10.0.0.{i}")
+        limiter.reserve(f"user{i}", f"10.0.0.{i}")
     assert limiter.tracked_keys() == 100
     advance(61)
-    limiter.record_failure("late", "1.1.1.1")
+    limiter.reserve("late", "1.1.1.1")
     assert limiter.tracked_keys() == 2
 
 

@@ -9,6 +9,12 @@ denial of service as much as a credential attack. A successful login clears
 the username's failures (the legitimate owner is back) but not the address's
 (the address may be shared with the attacker).
 
+The check *reserves* the attempt: `reserve` counts it as a failure in the same
+locked step that admits it, and only `record_success` takes that back. A
+check-then-record pair would let a concurrent burst -- the route runs in
+FastAPI's thread pool -- pass the check many times before the first failure
+was recorded, hashing (and guessing) once per thread instead of once per slot.
+
 Deliberately in-process and in-memory: the deployment is one process (see
 `docs/DECISIONS.md`), a restart forgiving the counters is acceptable, and a
 table would need its own sweep. Behind a reverse proxy the address uvicorn
@@ -62,8 +68,12 @@ class LoginRateLimiter:
             return None
         return window
 
-    def retry_after(self, username: str, ip: Optional[str]) -> Optional[int]:
-        """Seconds until the next attempt is allowed, or `None` if it is now."""
+    def reserve(self, username: str, ip: Optional[str]) -> Optional[int]:
+        """Admit an attempt, counting it as a failure until `record_success`.
+
+        Returns `None` when the attempt is admitted, else the whole seconds
+        until the next one would be -- and then nothing is counted.
+        """
         now = self._clock()
         with self._lock:
             worst = 0.0
@@ -71,26 +81,32 @@ class LoginRateLimiter:
                 window = self._prune(key, now)
                 if window is not None and len(window) >= self._limit_for(key):
                     worst = max(worst, window[0] + self.window_seconds - now)
-        if worst <= 0:
-            return None
+            if worst <= 0:
+                for key in self._keys(username, ip):
+                    self._failures.setdefault(key, deque()).append(now)
+                # A guesser rotating usernames grows the dict by one key per
+                # name, so sweep expired keys here. Cheap by construction: a
+                # key is only added for an attempt that goes on to run PBKDF2
+                # (~0.76 s of CPU) in one of the pool's threads, so the dict
+                # cannot grow faster than a few keys per second and is empty
+                # again one window after the guessing stops.
+                for key in list(self._failures):
+                    self._prune(key, now)
+                return None
         return max(1, int(-(-worst // 1)))  # ceil
 
-    def record_failure(self, username: str, ip: Optional[str]) -> None:
-        now = self._clock()
+    def record_success(self, username: str, ip: Optional[str]) -> None:
+        """The reserved attempt succeeded: forgive the username outright and
+        give the address back the one slot this attempt took."""
         with self._lock:
-            for key in self._keys(username, ip):
-                self._failures.setdefault(key, deque()).append(now)
-            # A guesser rotating usernames grows the dict by one key per
-            # name, so sweep expired keys here. Cheap by construction: a
-            # failure is only recorded after PBKDF2 ran (~0.76 s of CPU), so
-            # the dict cannot grow faster than a few keys per second and is
-            # empty again one window after the guessing stops.
-            for key in list(self._failures):
-                self._prune(key, now)
-
-    def record_success(self, username: str) -> None:
-        with self._lock:
-            self._failures.pop(next(self._keys(username, None)), None)
+            user_key, *ip_keys = self._keys(username, ip)
+            self._failures.pop(user_key, None)
+            for key in ip_keys:
+                window = self._failures.get(key)
+                if window:
+                    window.pop()
+                    if not window:
+                        del self._failures[key]
 
     def tracked_keys(self) -> int:
         with self._lock:

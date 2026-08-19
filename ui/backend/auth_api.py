@@ -48,10 +48,12 @@ class TokenResponse(BaseModel):
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
     ip = request.client.host if request.client else None
-    retry_after = _LOGIN_LIMITER.retry_after(req.username, ip)
+    retry_after = _LOGIN_LIMITER.reserve(req.username, ip)
     if retry_after is not None:
         # Same message whether the username exists or not, and raised before
-        # PBKDF2 runs -- see login_rate_limit.py for both halves of why.
+        # PBKDF2 runs -- see login_rate_limit.py for both halves of why. The
+        # admitted attempt is already counted as a failure; only success
+        # below takes that back.
         raise HTTPException(
             status_code=429,
             detail=f"Too many failed login attempts. Try again in {retry_after} seconds.",
@@ -59,9 +61,8 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         )
     user = authenticate_user(db, req.username, req.password)
     if user is None:
-        _LOGIN_LIMITER.record_failure(req.username, ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    _LOGIN_LIMITER.record_success(req.username)
+    _LOGIN_LIMITER.record_success(req.username, ip)
     # A deactivated org's member can't log in (full-suspend enforcement).
     # Platform operators/admins (org_id NULL) are never affected.
     if user.org_id is not None:
