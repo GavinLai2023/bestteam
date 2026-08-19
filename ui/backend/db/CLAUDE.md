@@ -328,7 +328,11 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
 
 `db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
 `StaticPool` so all connections share one database — needed for tests/dry
-runs), `init_db(engine)` (`Base.metadata.create_all`), and
+runs; a file engine sets `PRAGMA journal_mode=WAL` on every connection, so
+readers are not blocked by the one writer the run workers / ingestion /
+poller / requests take turns being — the `-wal`/`-shm` siblings are why
+`scripts/backup-db.sh` goes through the online backup API rather than a file
+copy), `init_db(engine)` (`Base.metadata.create_all`), and
 `session_factory(engine)`. `db/builder_sessions.py` has the
 `builder_sessions` CRUD (`create_session`/`get_session`/`update_session`/
 `append_feedback`); CRUD for `knowledge_bases`/`skills`/`workflows` lives in

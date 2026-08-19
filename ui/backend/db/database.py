@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Union
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -38,7 +38,22 @@ def make_engine(db_path: Union[str, Path] = "bestteam.db", *, echo: bool = False
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-    return create_engine(f"sqlite:///{Path(db_path)}", echo=echo)
+    engine = create_engine(f"sqlite:///{Path(db_path)}", echo=echo)
+
+    @event.listens_for(engine, "connect")
+    def _use_wal(dbapi_connection, _record):
+        # One file is shared by the run workers, the ingestion executor, the
+        # email poller and every request. In the default rollback-journal
+        # mode a write transaction blocks every reader until it commits; WAL
+        # lets readers proceed beside one writer. The mode is persisted in
+        # the file, so repeating it per connection is cheap and makes a fresh
+        # file correct from its very first connection. (Busy waiting needs no
+        # setting: pysqlite's default timeout is already 5 s.)
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+    return engine
 
 
 def init_db(engine: Engine) -> None:
