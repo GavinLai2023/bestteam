@@ -83,30 +83,58 @@ during the beta included -- gets exactly the dependency versions the previous
 build ran on, not whatever was newest that day. Newer upstream versions arrive
 only through a deliberate lockfile update (README, "Updating the lockfile").
 
+What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
+
+- **Both services restart on their own** (`restart: unless-stopped`) after a
+  crash or a host reboot, and stay down only after an explicit
+  `docker compose stop`. The backend has a `HEALTHCHECK` on `/api/health`, so
+  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`.
+- **The backend runs as an unprivileged user** (`app`, uid 1000). Only the data
+  directory -- the SQLite database and knowledge-base uploads, the
+  `bestteam_data` volume -- is writable. A volume created by an *earlier*
+  root-running image is root-owned; before the first start on this image, run
+  once: `docker compose run --rm --no-deps --user root backend chown -R 1000:1000 /app/ui/backend/data`.
+- **The backend applies migrations on every start** (`docker-entrypoint.sh`
+  runs `alembic upgrade head` before `uvicorn`, and only before `uvicorn` --
+  `docker compose run backend python -m ui.backend.admin ...` runs as given, so
+  the recovery commands in section 3 are never gated on the migration they
+  recover from).
+- **Container logs are rotated** (json-file, 5 x 20 MB backend, 3 x 10 MB
+  frontend); see "Logs and error reporting" below for where to look and what
+  is reported.
+- The backend is capped at **2 GB of memory**; raise `deploy.resources.limits`
+  before enabling the local reranker.
+- **Upload size limits belong on your reverse proxy**, not the frontend nginx:
+  the browser talks to port 8000 directly, and a knowledge-base workbook or an
+  interview recording (up to 200 MB) has to fit through whatever fronts it.
+
 `docker compose` automatically loads `.env` from the project root to
 substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
 is separate from the backend's `env_file: .env`), so the values you set in
 step 1 are baked into the frontend image at build time.
 
-## 3. Apply database migrations
+## 3. Database migrations
+
+The backend container runs `alembic upgrade head` itself every time it starts
+(see section 2), so on a normal `docker compose up -d` -- first start or after
+pulling an update with a new file under `alembic/versions/` -- there is nothing
+to do. The command is still yours to run by hand when you want to migrate
+without starting the server, or to see a migration's output on its own:
 
 ```bash
-docker compose exec backend alembic upgrade head
+docker compose run --rm --no-deps backend alembic upgrade head
 ```
 
-Run this once after the first `docker compose up -d`, and again after
-pulling any update that includes a new file under `alembic/versions/`. This
-is the canonical way the database schema is created/updated going forward
+Migrations are the canonical way the schema is created/updated
 (replacing a bare `Base.metadata.create_all()`, which still runs
 automatically as a harmless no-op safety net on a brand-new database).
 
-**Run migrations promptly after an upgrade.** `create_all()` never adds a new
-index/constraint to a pre-existing table, so a security invariant introduced by
-a migration (currently: one member per org) isn't in force until
+**Why the entrypoint migrates before serving.** `create_all()` never adds a
+new index/constraint to a pre-existing table, so a security invariant
+introduced by a migration (currently: one member per org) isn't in force until
 `alembic upgrade head` runs. As a backstop the backend **refuses to start**
 (HTTP) while that invariant is violated — see the recovery procedure below —
-so the window can't be served through, but you still complete the upgrade by
-running the migration.
+so the window can't be served through either way.
 
 ### Recovering a legacy multi-member org
 
@@ -425,6 +453,20 @@ Back up the live database (safe to run while the backend is running):
 # or with an explicit path:
 ./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
 ```
+
+**Schedule it.** Nothing in the containers backs the database up on its own.
+On the Docker host, a nightly cron entry (adjust the paths; the script must
+run from the checkout so `docker compose` finds the project) is enough for the
+beta:
+
+```cron
+15 3 * * * cd /opt/bestteam && ./scripts/backup-db.sh /var/backups/bestteam/bestteam-$(date +\%F).db >> /var/log/bestteam-backup.log 2>&1
+```
+
+Prune old files with whatever you already use (`find /var/backups/bestteam
+-mtime +30 -delete` in the same crontab is the simplest), and copy the
+directory off the host — a backup on the disk that fails with the database is
+not a backup.
 
 **Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
 or secrets vault — NOT alongside the database dump). Stored mailbox passwords

@@ -150,3 +150,38 @@ def test_dockerfile_and_ci_install_under_the_lockfile():
     for line in installs:
         assert "-c requirements.lock" in line, line
     assert "cache-dependency-path: pyproject.toml" not in ci
+
+
+# --- G3: container / ops baseline ------------------------------------------
+
+
+def test_image_runs_unprivileged_with_a_healthcheck_and_migrating_entrypoint():
+    dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "useradd" in dockerfile
+    assert "\nUSER app\n" in dockerfile
+    # Only the data directory is handed to the unprivileged user: the volume
+    # mount point must exist in the image with that owner, or a fresh named
+    # volume is created root-owned and the first write fails.
+    assert "chown -R app:app ui/backend/data" in dockerfile
+    assert "HEALTHCHECK" in dockerfile and "/api/health" in dockerfile
+    assert 'ENTRYPOINT ["./docker-entrypoint.sh"]' in dockerfile
+    # The default command must stay `uvicorn ...`: that is the literal the
+    # entrypoint keys its migration step on.
+    assert 'CMD ["uvicorn"' in dockerfile
+
+
+def test_entrypoint_migrates_only_when_starting_the_server():
+    script = (_ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    assert "\r" not in script, "CRLF would break the shebang inside the container"
+    assert 'if [ "$1" = "uvicorn" ]' in script
+    assert "alembic upgrade head" in script
+    assert 'exec "$@"' in script
+    attrs = (_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.sh text eol=lf" in attrs
+
+
+def test_compose_restarts_and_bounds_the_services():
+    compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert compose.count("restart: unless-stopped") == 2
+    assert "memory: 2g" in compose
+    assert compose.count("max-size:") == 2
