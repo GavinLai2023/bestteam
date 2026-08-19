@@ -475,10 +475,22 @@ diff the printed default against your stored value and merge by hand.
 
 ## Data persistence
 
-The SQLite database (agents, teams, workflows, users — config persistence,
-not run history) lives in the `bestteam_data` named volume, mounted at
-`/app/ui/backend/data` in the backend container. It survives
-`docker compose restart` / `docker compose down` (without `-v`).
+Everything the deployment owns lives in the `bestteam_data` named volume,
+mounted at `/app/ui/backend/data` in the backend container, and survives
+`docker compose restart` / `docker compose down` (without `-v`):
+
+- `bestteam.db` — the SQLite database: organisations, users, teams and their
+  version history, skills, knowledge-base chunks, run history and traces,
+  usage, the inbox ledger, settings. This is the part a restore cannot do
+  without.
+- `knowledge_base_uploads/<org>/<name>/<version>/` — the original documents
+  behind every knowledge base. Retrieval is served from the database, so a
+  collection still answers without these; they are what a re-index or a
+  "which file was this" question falls back on.
+- `builder_sessions/` — per-session wizard workspace directories (the
+  `source` a session's spec is validated against; mostly empty), plus the
+  per-user memory store if the operator pointed `BESTTEAM_MEMORY_DB` into this
+  directory.
 
 ## Logs and error reporting
 
@@ -514,21 +526,32 @@ to turn reporting off. `sentry-sdk` ships in the image; on a bare
 
 ## Backup and restore
 
-Back up the live database (safe to run while the backend is running):
+A backup is **two files**, taken by two scripts, both safe to run while the
+backend is running:
 
 ```bash
-./scripts/backup-db.sh
-# or with an explicit path:
-./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
+./scripts/backup-db.sh       # the database, via SQLite's online backup API
+./scripts/backup-files.sh    # everything else on the data volume, as a .tgz
+# or with explicit paths:
+./scripts/backup-db.sh    /path/to/backups/bestteam-2026-06-17.db
+./scripts/backup-files.sh /path/to/backups/bestteam-files-2026-06-17.tgz
 ```
 
-**Schedule it.** Nothing in the containers backs the database up on its own.
-On the Docker host, a nightly cron entry (adjust the paths; the script must
+They are separate on purpose: a database in use must be copied through
+SQLite's backup API (a raw copy can catch a half-written page), while the
+uploads directory is ordinary files for which `tar` is exactly right — so
+`backup-files.sh` excludes `bestteam.db` and its `-wal`/`-shm` siblings, and
+`backup-db.sh` never looks at anything else. The database alone restores a
+working deployment; the files archive restores the original documents behind
+each knowledge base (see "Data persistence" above for what lives where).
+
+**Schedule both.** Nothing in the containers backs anything up on its own.
+On the Docker host, one nightly cron entry (adjust the paths; the scripts must
 run from the checkout so `docker compose` finds the project) is enough for the
 beta:
 
 ```cron
-15 3 * * * cd /opt/bestteam && ./scripts/backup-db.sh /var/backups/bestteam/bestteam-$(date +\%F).db >> /var/log/bestteam-backup.log 2>&1
+15 3 * * * cd /opt/bestteam && ./scripts/backup-db.sh /var/backups/bestteam/bestteam-$(date +\%F).db >> /var/log/bestteam-backup.log 2>&1 && ./scripts/backup-files.sh /var/backups/bestteam/bestteam-files-$(date +\%F).tgz >> /var/log/bestteam-backup.log 2>&1
 ```
 
 Prune old files with whatever you already use (`find /var/backups/bestteam
@@ -551,7 +574,18 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin set-email <
 There is no in-place re-encrypt/rekey command yet; rotating the key means
 clearing and re-entering each org's mailbox under the new key.
 
-To restore from a backup:
+To restore from a backup, run the restore script with the database file and,
+if you have one, the files archive:
+
+```bash
+./scripts/restore.sh /path/to/backups/bestteam-2026-06-17.db /path/to/backups/bestteam-files-2026-06-17.tgz
+```
+
+It performs the steps below in order and finishes by waiting for
+`/api/health` to answer 200. **Rehearse it once before the first beta customer
+is on the box** — against a throwaway `docker compose` stack, not production —
+so the first restore you do is not the one that matters. The manual
+equivalent, if you would rather see each step:
 
 1. Stop the backend so nothing writes to the database during restore:
    ```bash
