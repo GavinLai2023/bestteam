@@ -1431,6 +1431,22 @@
   (`tools/file_parser.py`) in the same pass, so the sentinel is defined once
   where it is written rather than copied where it is read.
 
+- **An XML subtree's ancestors now reach every chunk of the subtree** (2026-08-19):
+  the case is a flowchart or decision tree exported as nested XML, where a
+  `<branch answer="No">` split away from its `<decision question="…">` was an
+  orphan the model could not interpret. `_chunk_xml_document` reads the element
+  tree off the renderer's indentation, packs sibling subtrees greedily, opens an
+  over-large subtree up one level at a time (the old boundary regex only saw
+  depth 1, so a single-root tree fell straight through to line splitting), and
+  repeats the element lines on the path from the root at the top of every chunk
+  -- the XML counterpart of the repeated sheet marker and header row -- with
+  `heading` set to the nearest ancestor's `tag attr="…"`. XML chunks carry no
+  character overlap (the path is the context, and the raw slice used to cut
+  tags in half). Edge-list exports (draw.io's `<mxCell source= target=>`) are
+  not reconstructed -- their branches are id references, not nesting. The
+  wizard's file picker also lists `.xml` now; the backend had accepted it all
+  along.
+
 - **The P1 wrap-up: stale limitations, downgrade coverage, and a cap advisory
   that sees every deployed team** (P1-6): the "Known issues" entry claiming
   knowledge-base retrieval is single-stage contradicted four other places in

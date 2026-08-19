@@ -302,7 +302,7 @@ export default function DocumentsPage() {
             style={{ display: 'none' }}
             onChange={addFiles}
             disabled={busy}
-            accept=".txt,.md,.csv,.json,.yaml,.yml,.log,.pdf,.xlsx,.xlsm,.docx"
+            accept=".txt,.md,.csv,.json,.yaml,.yml,.log,.pdf,.xlsx,.xlsm,.docx,.xml"
           />
         </label>
       </div>

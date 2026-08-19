@@ -330,6 +330,28 @@ header: `read_only` openpyxl renders the spacer row above a sheet's headers as
 very common workbook layout. The residual limit is a **non-empty title row**
 above the headers, which nothing here can tell apart from a header row. The marker also becomes the chunk's `heading`, under the same
 `_MAX_HEADING_CHARS` cap, so a long sheet name can't bypass it into a citation.
+An `.xml` goes through `_chunk_xml_document`, which reads the element tree
+off the renderer's indentation (one line per element, two spaces per level
+-- `tools/file_parser.py::_render_xml_tree`) and packs sibling subtrees
+greedily; a subtree too large to fit is opened up one level, its own element
+line joining the **ancestor path that is repeated at the top of every chunk**
+-- the XML counterpart of the repeated sheet marker and header row. The case
+it exists for is a flowchart or decision tree exported as nested XML: a
+`<branch answer="No">` cut away from its `<decision question="…">` is
+meaningless, so the chunk carries the decision and every branch and decision
+above it, and cites the nearest one as `heading`
+(`[source: flow.xml § decision id="3" question="Is the item unopened?"]`,
+the `tag attr="…"` part of the line, same 80-char cap). Three consequences
+worth knowing: XML chunks get **no character overlap** (the path is the
+cross-chunk context, every split lands on a whole line, and a raw slice of
+the previous chunk would put a cut-open tag ahead of the path); a leaf too
+large for its path, or a path that would leave no room at all, falls back to
+the generic separators under whatever path did fit; and the `[XML: name]`
+header rides on the first chunk only when there is room, since the citation
+already names the file. A document that fits one chunk is byte-for-byte what
+it was. Edge-based diagram exports (draw.io's `<mxCell source= target=>`)
+get no special treatment: their branches are id references, not nesting,
+and nothing here reconstructs them.
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
 for the body), so overlap shrinks and can reach zero; a prefix that would leave
 no room at all falls back to the ordinary path, still tagged with the heading.
@@ -347,9 +369,9 @@ read off the pieces *before* overlap prefixes each one with the previous
 chunk's tail, which would otherwise shift every heading by one section.
 Per-page PDF chunking costs cross-page overlap — accepted for an exact `p.N`.
 `_chunk_text` splits on the document's own structure — Markdown heading
-boundaries, XML element boundaries (via the renderer's indentation), and a
-generic paragraph/sentence/word fallback (with CJK sentence terminators
-`。！？`) — replacing the old fixed-offset character slicing. This closes the
+boundaries and a generic paragraph/sentence/word fallback (with CJK sentence
+terminators `。！？`) — replacing the old fixed-offset character slicing; XML
+has its own tree-aware path above. This closes the
 "chunking is naive" half of the gap above; small-to-big multi-level retrieval
 is still the remaining, unaddressed half. Overlap between chunks is still a
 raw character-slice of the previous chunk's tail (not structure-aware), and
