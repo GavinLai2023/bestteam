@@ -6,7 +6,7 @@ recall, so anything asserted here holds for all three.
 """
 import pytest
 
-from bestteam.core.text_tokenize import significant_terms, tokenize
+from bestteam.core.text_tokenize import _CJK_RUN_RE, significant_terms, tokenize
 
 pytestmark = pytest.mark.unit
 
@@ -67,3 +67,17 @@ def test_tokenize_is_symmetric_for_index_and_query():
     tokenize("unrelated shipping enquiries 配送時間")
 
     assert tokenize(text) == first
+
+
+def test_cjk_run_class_covers_exactly_the_documented_ranges():
+    # The class is written with `\u` escapes on purpose: an editor or tool
+    # that NFC-normalises source once turned the literal U+F900 (a CJK
+    # compatibility ideograph) into U+8C48 (its unified equivalent), which
+    # silently widened the class to U+8C48-U+FAFF and swept unrelated scripts
+    # into the bigrammer and the per-character embedding estimate.
+    for codepoint in (0x4E00, 0x9FFF, 0x3400, 0x4DBF, 0xF900, 0xFAFF, 0x3040, 0x30FF, 0xAC00, 0xD7AF):
+        assert _CJK_RUN_RE.fullmatch(chr(codepoint)), hex(codepoint)
+    # Just outside each range, plus Yi (U+A000) and private-use (U+E000, U+F8FF)
+    # points the accidental U+8C48-U+FAFF class used to sweep in.
+    for codepoint in (0x9FFF + 1, 0xA000, 0xE000, 0xF8FF, 0xFB00, 0x303F, 0x3100, 0xABFF, 0xD7B0):
+        assert not _CJK_RUN_RE.fullmatch(chr(codepoint)), hex(codepoint)

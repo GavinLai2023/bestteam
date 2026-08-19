@@ -77,7 +77,13 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # at the script boundary only if the scripts are in different classes, and a
 # bigram straddling that boundary carries more signal than the two fragments
 # it would otherwise be split into.
-_CJK_RUN_RE = re.compile("[一-鿿㐀-䶿豈-﫿぀-ヿ가-힯]+")
+# Written as `\u` escapes, never as literal characters: an NFC-normalising
+# editor once rewrote the literal U+F900 (a compatibility ideograph) as its
+# unified equivalent U+8C48 and silently widened the class to
+# U+8C48-U+FAFF. `tests/test_text_tokenize.py` pins every range endpoint.
+_CJK_RUN_RE = re.compile(
+    "[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]+"
+)
 
 
 def _cjk_tokens(text: str) -> List[str]:
