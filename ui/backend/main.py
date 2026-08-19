@@ -316,7 +316,9 @@ logger = logging.getLogger("bestteam.api")
 # the root logger already has handlers (pytest's capture, an operator's own
 # dictConfig), so this cannot override anything deliberate.
 logging.basicConfig(
-    level=os.environ.get("BESTTEAM_LOG_LEVEL", "INFO").upper(),
+    # `or`, not a default: `.env.example` ships the variable blank and
+    # compose passes a blank through, and `basicConfig(level="")` raises.
+    level=(os.environ.get("BESTTEAM_LOG_LEVEL") or "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 if error_reporting.init_from_env():

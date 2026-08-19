@@ -85,6 +85,23 @@ def test_beta_defaults_warn_when_left_at_dev_values():
     assert _by_name(check_environment(dict(_GOOD, BESTTEAM_RUN_RETENTION_DAYS="ninety")))["BESTTEAM_RUN_RETENTION_DAYS"].level == "FAIL"
 
 
+def test_a_malformed_sentry_dsn_fails_because_the_backend_would_not_start():
+    pytest.importorskip("sentry_sdk")
+    for dsn in ("garbage", "https://o.ingest.sentry.io/1", "https://k@o.ingest.sentry.io/"):
+        finding = _by_name(check_environment(dict(_GOOD, BESTTEAM_SENTRY_DSN=dsn)))["BESTTEAM_SENTRY_DSN"]
+        assert finding.level == "FAIL", (dsn, finding)
+        assert "refuses to start" in finding.message
+
+
+def test_a_dsn_without_the_sdk_is_a_warning(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sentry_sdk", None)  # `import` raises ImportError
+    monkeypatch.setitem(sys.modules, "sentry_sdk.utils", None)
+    finding = _by_name(check_environment(_GOOD))["BESTTEAM_SENTRY_DSN"]
+    assert finding.level == "WARN" and "not installed" in finding.message
+
+
 def test_the_cli_prints_the_checklist_and_exits_1_on_a_failure(monkeypatch, capsys):
     pytest.importorskip("sqlalchemy")
     from ui.backend import admin
@@ -102,3 +119,32 @@ def test_the_cli_prints_the_checklist_and_exits_1_on_a_failure(monkeypatch, caps
     assert admin.main(["check-env"]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] BESTTEAM_DEMO_WORKFLOWS" in out
+
+
+def test_check_env_does_not_create_the_database(tmp_path):
+    # `docker compose run --rm --no-deps backend python -m ui.backend.admin
+    # check-env` is documented as safe on a box whose database does not
+    # exist yet. A fresh interpreter, because `db_session` builds the
+    # database at import and this process has long since imported it.
+    import os
+    import subprocess
+    import sys
+
+    pytest.importorskip("sqlalchemy")
+    db_path = tmp_path / "data" / "bestteam.db"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BESTTEAM_")}
+    env.update(_GOOD, BESTTEAM_DB_PATH=str(db_path), BESTTEAM_MEMORY_DB="")
+    proc = subprocess.run(
+        [sys.executable, "-m", "ui.backend.admin", "check-env"],
+        cwd=str(_repo_root()), env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no failures" in proc.stdout
+    assert not db_path.exists(), "check-env created the database"
+    assert not db_path.parent.exists()
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1]

@@ -688,11 +688,12 @@ def run_in_background(
                     if event.type == "run_failed":
                         # The workflow failed without raising (a provider or
                         # BestTeamError the SDK already turned into an event):
-                        # still worth an operator's attention. Ids and a capped
-                        # reason only -- see error_reporting.py.
+                        # still worth an operator's attention. Ids only -- the
+                        # reason (`event.data`, an exception's text) can quote
+                        # a prompt or a model's output, and is in the run's
+                        # persisted trace on-box; see error_reporting.py.
                         error_reporting.report_message(
                             f"Run failed: {getattr(workflow, 'name', '')}",
-                            extras={"reason": str(event.data)[:300]},
                             run_id=run_id,
                             workflow=getattr(workflow, "name", ""),
                         )

@@ -19,7 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
-from typing import List, Mapping
+from typing import List, Mapping, Optional
 
 from .auth import is_insecure_secret_key
 
@@ -131,10 +131,18 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
     else:
         ok("BESTTEAM_RUN_RETENTION_DAYS", f"{retention} days for newly created orgs")
 
-    if _get(env, "BESTTEAM_SENTRY_DSN"):
-        ok("BESTTEAM_SENTRY_DSN", "set; unhandled errors and failed runs are reported")
-    else:
+    dsn = _get(env, "BESTTEAM_SENTRY_DSN")
+    if not dsn:
         warn("BESTTEAM_SENTRY_DSN", "unset; the only record of a failure will be the container log")
+    else:
+        problem = _dsn_problem(dsn)
+        if problem is None:
+            ok("BESTTEAM_SENTRY_DSN", "set; unhandled errors and failed runs are reported")
+        elif problem == "no-sdk":
+            warn("BESTTEAM_SENTRY_DSN", "set, but sentry-sdk is not installed (pip install 'bestteam[ui]'); "
+                 "reporting will be off")
+        else:
+            fail("BESTTEAM_SENTRY_DSN", f"not a valid DSN ({problem}); the backend refuses to start")
 
     if _get(env, "FORWARDED_ALLOW_IPS"):
         ok("FORWARDED_ALLOW_IPS", _get(env, "FORWARDED_ALLOW_IPS"))
@@ -143,6 +151,20 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
              "the proxy, so the per-address login budget is shared by all users")
 
     return out
+
+
+def _dsn_problem(dsn: str) -> Optional[str]:
+    """None if `sentry_sdk.init(dsn=...)` would accept it; "no-sdk" if that
+    cannot be known here; else the SDK's own one-line reason."""
+    try:
+        from sentry_sdk.utils import BadDsn, Dsn
+    except ImportError:
+        return "no-sdk"
+    try:
+        Dsn(dsn)
+    except BadDsn as exc:
+        return str(exc)
+    return None
 
 
 def has_failures(findings: List[Finding]) -> bool:

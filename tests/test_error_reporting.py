@@ -85,16 +85,40 @@ def test_init_never_captures_content(monkeypatch, fake_sdk):
     assert kwargs["traces_sample_rate"] == 0.0
     assert kwargs["default_integrations"] is False
     assert kwargs["integrations"] == ["dedupe"]
+    assert kwargs["before_send"] is error_reporting._scrub_event
+
+
+def test_before_send_drops_exception_messages_but_keeps_type_and_stack():
+    # A parser error quotes the model's output, an HTTP error the URL a tool
+    # fetched: the message is the one part of an exception that can carry
+    # customer content, so it never leaves the box.
+    frame = {"filename": "ui/backend/runtime.py", "function": "_run", "lineno": 12}
+    event = {
+        "exception": {
+            "values": [
+                {"type": "OutputParserException", "value": "Could not parse: <the whole document>",
+                 "stacktrace": {"frames": [frame]}},
+                {"type": "ValueError", "value": "https://intranet.example/secret"},
+            ]
+        },
+        "tags": {"run_id": "r1"},
+    }
+    scrubbed = error_reporting._scrub_event(event, hint=None)
+    assert scrubbed["exception"]["values"] == [
+        {"type": "OutputParserException", "stacktrace": {"frames": [frame]}},
+        {"type": "ValueError"},
+    ]
+    assert scrubbed["tags"] == {"run_id": "r1"}
+    # A message-only event has no exception block and passes through.
+    assert error_reporting._scrub_event({"message": "Run failed: w"}, hint=None) == {"message": "Run failed: w"}
 
 
 def test_reports_carry_string_tags_only(reporting_on):
     exc = RuntimeError("boom")
     error_reporting.report_exception(exc, run_id=42, workflow="triage", org_id=None)
-    error_reporting.report_message("Run failed: triage", extras={"reason": "x"}, run_id=42)
+    error_reporting.report_message("Run failed: triage", run_id=42)
     assert reporting_on.exceptions == [(exc, {"tags": {"run_id": "42", "workflow": "triage"}})]
-    assert reporting_on.messages == [
-        ("Run failed: triage", {"level": "error", "tags": {"run_id": "42"}, "extras": {"reason": "x"}})
-    ]
+    assert reporting_on.messages == [("Run failed: triage", {"level": "error", "tags": {"run_id": "42"}})]
 
 
 def test_missing_sdk_is_a_warning_not_a_crash(monkeypatch, caplog):
@@ -112,6 +136,25 @@ def test_a_reporting_failure_is_swallowed(reporting_on, monkeypatch):
 
     monkeypatch.setattr(sys.modules["sentry_sdk"], "capture_exception", explode)
     error_reporting.report_exception(RuntimeError("x"))  # must not raise
+
+
+def test_a_blank_log_level_means_info():
+    # `.env.example` ships `BESTTEAM_LOG_LEVEL=` blank and compose passes a
+    # blank through, so main.py must not hand "" to `logging.basicConfig`
+    # (`ValueError: Unknown level: ''` at import -- a restart loop). Read
+    # from source: basicConfig runs once, at main's import.
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    example_lines = (root / ".env.example").read_text(encoding="utf-8").splitlines()
+    assert "BESTTEAM_LOG_LEVEL=" in example_lines
+    source = (root / "ui" / "backend" / "main.py").read_text(encoding="utf-8")
+    assert '(os.environ.get("BESTTEAM_LOG_LEVEL") or "INFO").upper()' in source
+    assert 'get("BESTTEAM_LOG_LEVEL", "INFO")' not in source
+    with pytest.raises(ValueError):
+        import logging
+
+        logging.getLogger("bestteam.test").setLevel("")  # the failure mode, for the record
 
 
 # --- wiring: unhandled request exceptions ----------------------------------
@@ -215,9 +258,9 @@ def test_the_workflows_own_run_failed_event_is_reported(tmp_path, reporting_on):
     assert reporting_on.exceptions == []
     ((message, scope),) = reporting_on.messages
     assert message == "Run failed: w"
-    assert scope["tags"] == {"run_id": run.id, "workflow": "w"}
-    # The failure reason is what the operator needs to see; it is capped so
-    # a provider echoing a prompt back cannot ship a document off-box.
-    assert scope["extras"] == {"reason": ("Provider said no: " + "x" * 1000)[:300]}
+    # Ids only: the reason is an exception's text and can quote a prompt or
+    # a model's output. It stays on-box, in the run's persisted trace.
+    assert scope == {"level": "error", "tags": {"run_id": run.id, "workflow": "w"}}
+    assert "Provider said no" not in repr(scope)
     with session_factory(engine)() as s:
         assert s.get(Run, run.id).status == "failed"

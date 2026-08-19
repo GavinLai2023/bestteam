@@ -11,13 +11,20 @@ request body would carry them. `default_integrations=False` is what keeps the
 SDK from adding capture points on its own; every report goes through the two
 functions below, which are no-ops when the DSN is unset or the SDK is not
 installed, and never raise.
+
+Exception *messages* are scrubbed too (`_scrub_event`, the SDK's
+`before_send`): a provider or parser error routinely quotes what it choked on
+-- an output parser echoes the model's text, an HTTP error carries the URL a
+tool fetched -- so a report keeps the exception type, the stack (file, line,
+function; no locals) and our tags, and drops the message. The operator gets
+the run id and reads the reason from the run's persisted trace, on-box.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 _logger = logging.getLogger(__name__)
 
@@ -54,6 +61,7 @@ def init_from_env() -> bool:
         traces_sample_rate=0.0,
         default_integrations=False,
         integrations=[DedupeIntegration()],
+        before_send=_scrub_event,
     )
     _sdk = sentry_sdk
     return True
@@ -73,15 +81,22 @@ def report_exception(exc: BaseException, **tags: Any) -> None:
         _logger.warning("Could not report an exception", exc_info=True)
 
 
-def report_message(message: str, *, extras: Optional[Dict[str, Any]] = None, **tags: Any) -> None:
+def report_message(message: str, **tags: Any) -> None:
     """Report an error-level message (a failed run that raised nothing)."""
     if _sdk is None:
         return
     try:
-        _sdk.capture_message(message, level="error", tags=_stringify(tags), extras=extras or {})
+        _sdk.capture_message(message, level="error", tags=_stringify(tags))
     except Exception:  # noqa: BLE001
         _logger.warning("Could not report a message", exc_info=True)
 
 
 def _stringify(tags: Dict[str, Any]) -> Dict[str, str]:
     return {key: str(value) for key, value in tags.items() if value is not None}
+
+
+def _scrub_event(event: Dict[str, Any], hint: Any) -> Dict[str, Any]:
+    """`before_send`: drop every exception message; keep type, stack and tags."""
+    for entry in (event.get("exception") or {}).get("values") or []:
+        entry.pop("value", None)
+    return event
