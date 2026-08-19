@@ -46,3 +46,19 @@ except ImportError:  # pragma: no cover - ui/ absent
     pass
 else:
     _auth._PBKDF2_ITERATIONS = 1_000
+
+
+# The login limiter is process-global state: without a reset, a handful of
+# wrong-password logins spread across unrelated tests would 429 a later one.
+# Imported lazily so collecting an SDK-only test never imports the backend.
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _fresh_login_limiter(monkeypatch):
+    try:
+        from ui.backend import auth_api
+        from ui.backend.login_rate_limit import LoginRateLimiter
+    except ImportError:  # pragma: no cover - ui/ absent or extras missing
+        return
+    monkeypatch.setattr(auth_api, "_LOGIN_LIMITER", LoginRateLimiter())

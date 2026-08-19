@@ -62,6 +62,15 @@ Edit `.env` and fill in:
 TLS termination (HTTPS/WSS) is assumed to be handled by a reverse proxy or
 the hosting platform's load balancer in front of these containers.
 
+**Login throttling and the client address.** `/api/auth/login` throttles
+failed attempts per username (5 in 15 minutes) and per client address (20 in
+15 minutes) and answers 429 with `Retry-After`. Uvicorn only substitutes the
+address from `X-Forwarded-For` for a proxy it trusts, so behind your reverse
+proxy set `FORWARDED_ALLOW_IPS` in `.env` to the proxy's address (or `*` if
+the backend port is reachable only from the proxy) -- otherwise every login
+appears to come from the proxy and the per-address budget is shared by all
+users. The per-username budget holds either way.
+
 ## 2. Build and start
 
 ```bash

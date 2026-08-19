@@ -1412,6 +1412,15 @@ that KB permanently undeletable.
   module-level seeding likewise warns-and-skips on a pre-migration schema).
   `/api/health` and `/api/auth/*` stay public; the run stream WebSocket
   authenticates with a single-use `?ticket=` (see the runs section).
+  **`POST /login` is throttled** (`login_rate_limit.py`, beta gate G2): a
+  process-wide in-memory sliding window over *failed* attempts, 5 per
+  username (lower-cased) and 20 per client address in 15 minutes; a
+  throttled attempt gets 429 + `Retry-After` **before** PBKDF2 runs (the CPU
+  half of the defence -- 0.76 s per hash), with the same message whether the
+  username exists or not; a success clears the username's failures, not the
+  address's. Behind a reverse proxy the address is the proxy's unless uvicorn
+  is told to trust it (`docs/deployment.md`), which is why the username key
+  exists. `tests/conftest.py` swaps in a fresh limiter per test.
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
   Solution Architect's prompt. **`tier="embedding"` marks an entry as an
