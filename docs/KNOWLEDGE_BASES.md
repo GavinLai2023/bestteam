@@ -95,14 +95,19 @@ from (see "Citations", below):
   chunk still says which sheet it came from and what its columns mean. The
   marker also becomes the chunk's `heading` (`Sheet: Q1`, `Table 2`), capped
   at the same 80 characters, so the chunk cites `sales.xlsx § Sheet: Q1`
-  rather than the filename alone. Two caveats: the first body row is
-  *assumed* to be the column header — a table whose first row is already data
-  simply gets that row repeated — and the repeated prefix comes out of the
+  rather than the filename alone. Two caveats: the first body row *with
+  anything in it* is *assumed* to be the column header — leading rows that
+  are empty once commas and whitespace are removed are skipped, because a
+  spacer row above the headers parses to `,,` and repeating that would say
+  nothing, but a **non-empty title row** above the headers can't be told from
+  a header row and does get repeated, as does a table whose first row is
+  already data — and the repeated prefix comes out of the
   chunk's budget, so the body of each chunk is smaller and the overlap
   borrowed from the previous chunk shrinks (to zero if the prefix is long).
   A `.docx`'s body paragraphs, before its first table, chunk the ordinary way
-  and carry no heading. A block with no rows under its marker — an empty
-  sheet, such as a workbook's untouched trailing `Sheet2` — yields no chunk
+  and carry no heading. A block with no readable row under its marker — an
+  empty sheet, such as a workbook's untouched trailing `Sheet2`, or a
+  formatted-but-empty one whose rows are bare commas — yields no chunk
   at all, so it can't become the content-free chunk described above. Two
   knock-on effects: a workbook of many small sheets now yields at least one
   chunk per sheet where the sheets used to be packed together, so a
@@ -282,9 +287,9 @@ used directly.
 
 **A retried batch is not billed twice.** Document embedding goes out 100
 chunks at a time, and a batch that fails gets up to three attempts — two
-retries, 1s then 2s apart — on its own — only the failing batch, so a provider hiccup partway
-through a large upload no longer throws away the chunks already embedded and
-paid for. The ingestion row's token estimate is computed once from the chunk
+retries, 1s then 2s apart — with only the failing batch retried, so a
+provider hiccup partway through a large upload no longer throws away the
+chunks already embedded and paid for. The ingestion row's token estimate is computed once from the chunk
 texts (in `ui/backend/ingestion.py`, after the embedding call returns), so a
 retry adds nothing to it. That cuts the
 other way too: the estimate counts each chunk once even though a retried batch

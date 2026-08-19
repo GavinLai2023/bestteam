@@ -430,32 +430,48 @@ _TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|Table \d+)\]$", re.M)
 _TABULAR_SUFFIXES = {".xlsx", ".xlsm", ".docx"}
 
 
+def _row_has_text(row: str) -> bool:
+    """True when a CSV-style table row holds anything beyond its own commas.
+
+    `read_only` openpyxl renders an empty row as its delimiters alone (`,,`),
+    which survives `.strip()` but is not a row anybody can read. Deliberately
+    local to the tabular path: `_has_extractable_text` answers a different
+    question (did the *document* contribute anything) for every format.
+    """
+    return bool(row.replace(",", "").strip())
+
+
 def _chunk_table_block(
     source: str, block: str, chunk_size: int, chunk_overlap: int, suffix: str
 ) -> List[_Chunk]:
     """Chunk one `[Sheet: ...]`/`[Table N]` block, repeating its marker line
     and header row at the top of every chunk it produces.
 
-    The first body line is *assumed* to be the column header -- a heuristic.
-    A table whose first row is already data gets that row repeated instead,
-    which wastes a little room but says nothing untrue.
+    The first body line with text in it is *assumed* to be the column header
+    -- a heuristic. Leading rows that are empty once commas and whitespace are
+    removed are skipped, because the spacer row so many workbooks put above
+    their headers would otherwise be repeated instead of the headers. A table
+    whose first real row is already data gets that row repeated, which wastes
+    a little room but says nothing untrue.
     """
     stripped = block.strip()
-    # An empty sheet -- the trailing `Sheet2`/`Sheet3` of a real workbook, or a
-    # table that parsed to nothing -- is a block with no rows under its marker.
-    # It is exactly the content-free chunk P0-6 stopped indexing: it matches no
-    # query and reports no problem, so it contributes nothing here either.
-    if not _has_extractable_text(stripped):
-        return []
-
     lines = stripped.split("\n")
     marker = lines[0]
+    header_index = next((i for i in range(1, len(lines)) if _row_has_text(lines[i])), None)
+    # A block with no readable row under its marker -- the trailing
+    # `Sheet2`/`Sheet3` of a real workbook, a table that parsed to nothing, or
+    # a formatted-but-empty sheet whose rows are bare commas -- is exactly the
+    # content-free chunk P0-6 stopped indexing: it matches no query and reports
+    # no problem, so it contributes nothing here either.
+    if header_index is None:
+        return []
+
     # Same 80-character cap as a Markdown heading: a sheet name is a citation
     # label, and a long one must not reach `_Chunk.heading` unbounded.
     heading = marker[1:-1][:_MAX_HEADING_CHARS]
-    header_row = lines[1] if len(lines) > 1 else ""
+    header_row = lines[header_index]
     prefix = marker + "\n" + header_row + "\n"
-    body = "\n".join(lines[2:])
+    body = "\n".join(lines[header_index + 1 :])
 
     # Repeat only when there is something to repeat over: a block that already
     # fits is one chunk, and a marker+header that leaves no room for a body

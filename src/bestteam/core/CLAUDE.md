@@ -320,18 +320,26 @@ producer that writes it, and is imported here) and each page chunked through
 `_chunk_text` on its own, so a chunk never straddles a page. An
 `.xlsx`/`.xlsm`/`.docx` goes through `_chunk_tabular_document`, which splits on
 the parser's own `[Sheet: ...]`/`[Table N]` marker lines and, for a block too
-long to fit one chunk, repeats the marker and the first body row (**assumed**
-to be the column header) at the top of every chunk of that block -- otherwise
-the second chunk on has neither the sheet name nor the columns, and cites the
-filename alone. The marker also becomes the chunk's `heading`, under the same
+long to fit one chunk, repeats the marker and the first body row with anything
+in it (**assumed** to be the column header) at the top of every chunk of that
+block -- otherwise the second chunk on has neither the sheet name nor the
+columns, and cites the filename alone. Leading rows that are empty once commas
+and whitespace are removed (`_row_has_text`) are skipped when choosing that
+header: `read_only` openpyxl renders the spacer row above a sheet's headers as
+`,,`, and repeating *that* would make the feature silently do nothing for a
+very common workbook layout. The residual limit is a **non-empty title row**
+above the headers, which nothing here can tell apart from a header row. The marker also becomes the chunk's `heading`, under the same
 `_MAX_HEADING_CHARS` cap, so a long sheet name can't bypass it into a citation.
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
 for the body), so overlap shrinks and can reach zero; a prefix that would leave
 no room at all falls back to the ordinary path, still tagged with the heading.
 A `.docx`'s body paragraphs (before its first table) chunk normally, and a block
-with no rows under its marker -- a workbook's untouched trailing `Sheet2` --
-yields no chunk at all, checked with P0-6's own `_has_extractable_text`, so
-table awareness can't reintroduce the content-free chunk P0-6 removed. Every
+with no readable row under its marker -- a workbook's untouched trailing
+`Sheet2`, or a formatted-but-empty sheet whose rows are bare commas -- yields no
+chunk at all, so table awareness can't reintroduce the content-free chunk P0-6
+removed. That emptiness test is `_row_has_text` per row rather than P0-6's own
+`_has_extractable_text`, which counts a `,,` row as content and is left alone
+because every other format goes through it. Every
 other format goes through
 `_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
 is composed of — so a `.md` chunk's section heading (`_headings_for`) can be

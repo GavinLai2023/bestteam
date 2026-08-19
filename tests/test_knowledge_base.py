@@ -965,10 +965,37 @@ def test_xlsx_long_sheet_repeats_sheet_marker_and_header_row_in_every_chunk():
     for chunk in chunks:
         assert chunk.text.startswith("[Sheet: Q1]\nregion,product,units\n")
         assert chunk.heading == "Sheet: Q1"
-    # No body row is lost or duplicated across the chunks.
-    bodies = [chunk.text.split("\n", 2)[2] for chunk in chunks]
-    assert "north,widget-039,39" in bodies[-1]
-    assert "north,widget-000,0" in bodies[0]
+    # No body row is lost or duplicated across the chunks: with
+    # `chunk_overlap=0`, the chunk bodies -- each chunk stripped of its
+    # repeated marker and header prefix -- rejoin to exactly the input rows.
+    body_rows = [
+        row for chunk in chunks for row in chunk.text.split("\n", 2)[2].split("\n") if row
+    ]
+    assert body_rows == _sheet_rows(40).split("\n")
+
+
+def test_xlsx_blank_leading_row_is_skipped_when_choosing_the_header_row():
+    """Many workbooks put a spacer or title row above their headers, which
+    `read_only` openpyxl renders as `,,`. Repeating *that* in every chunk
+    would make the repeated header say nothing at all."""
+    text = "[Excel: sales.xlsx]\n\n[Sheet: Data]\n,,\nregion,product,units\n" + _sheet_rows(40)
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=200, chunk_overlap=0, suffix=".xlsx")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.text.startswith("[Sheet: Data]\nregion,product,units\n")
+        assert chunk.heading == "Sheet: Data"
+
+
+def test_xlsx_comma_only_sheet_yields_no_chunk():
+    """A formatted-but-empty sheet parses to rows of bare commas, which
+    survive `.strip()` -- but there is nothing in them to index."""
+    text = "[Excel: sales.xlsx]\n\n[Sheet: Data]\n,,\n,,"
+
+    chunks = _chunk_document("sales.xlsx", text, chunk_size=200, chunk_overlap=0, suffix=".xlsx")
+
+    assert chunks == []
 
 
 def test_xlsx_small_sheet_is_a_single_chunk_without_duplication():
