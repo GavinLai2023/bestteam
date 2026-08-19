@@ -170,7 +170,9 @@ implemented** — don't assume they exist:
   paraphrased. A purge is also not a secure erase — no `VACUUM`. See
   `ui/backend/retention.py`.
 - **Live run state (`RunRegistry`) isn't rehydrated from the DB on restart**:
-  a killed/restarted process still loses in-flight/live run state. History no
+  a killed/restarted process still loses in-flight/live run state (its
+  `runs` rows are swept to `failed` at startup by
+  `runtime.fail_interrupted_runs`, so they don't show as running forever). History no
   longer disappears, though — every `trace_events` row is now persisted per
   run alongside `usage_records`, with a read API (`GET /api/runs`,
   `GET /api/runs/{id}/trace`) and cooperative cancellation

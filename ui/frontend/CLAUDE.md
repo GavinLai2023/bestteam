@@ -14,7 +14,10 @@ commands; see `ui/backend/CLAUDE.md` for the API this frontend talks to.
 
 ## Frontend — wizard UI (Phase 4, `ui/frontend/src/`)
 
-`react-router-dom` (`main.tsx` wraps `<App/>` in `<BrowserRouter>`) drives
+`react-router-dom` (`main.tsx` wraps `<App/>` in `<BrowserRouter>`, itself
+inside `components/ErrorBoundary.tsx` — the one render-error boundary, so a
+thrown render shows "Something went wrong" + Reload instead of a blank page;
+it never renders the raw error text) drives
 several areas, all under a shared `<Layout/>` nav shell (`components/Layout.tsx`;
 customer nav is Dashboard / Build a team / My teams / Run a team):
 

@@ -190,3 +190,50 @@ def test_compose_restarts_and_bounds_the_services():
     assert compose.count("restart: unless-stopped") == 2
     assert "memory: 2g" in compose
     assert compose.count("max-size:") == 2
+    # The backend image declares a HEALTHCHECK; the frontend should wait on it
+    # rather than on the container merely having started, so an operator who
+    # opens port 80 right after `up -d` finds a backend that answers.
+    assert "condition: service_healthy" in compose
+
+
+def test_backup_covers_the_data_volume_not_only_the_database():
+    # docs/BETA_NOTES.md promises a nightly backup of "everything on the
+    # server"; the database script alone leaves knowledge-base uploads (the
+    # originals behind every collection) out. A second script tars the rest
+    # of the data volume, and the docs pair the two.
+    files = (_ROOT / "scripts" / "backup-files.sh").read_text(encoding="utf-8")
+    assert "\r" not in files
+    assert "/app/ui/backend/data" in files
+    # The live SQLite file (and its WAL/journal siblings) belong to the
+    # online-backup script, never to a raw tar of a database in use.
+    assert "--exclude='bestteam.db'" in files or "--exclude=bestteam.db" in files
+    assert "bestteam.db-*" in files
+    # GNU tar exits 1 ("file changed as we read it") when an upload is staged
+    # while the archive streams; the archive is still complete. Only exit 2
+    # (a real error) may fail the backup, or cron reports a spurious failure.
+    assert "--warning=no-file-changed" in files
+    assert "-gt 1" in files
+    doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "backup-files.sh" in doc
+
+
+def test_restore_script_follows_the_documented_procedure():
+    restore = (_ROOT / "scripts" / "restore.sh").read_text(encoding="utf-8")
+    assert "\r" not in restore
+    # Stop -> copy -> hand the file back to uid 1000 -> start -> verify: the
+    # same steps docs/deployment.md spells out, so the two cannot drift.
+    for step in (
+        "docker compose stop backend",
+        "docker compose cp",
+        "chown -R 1000:1000",
+        "docker compose start backend",
+        "/api/health",
+    ):
+        assert step in restore, step
+    # `docker compose cp` lands in the stopped backend container's own
+    # filesystem; a later `docker compose run` is a fresh container that
+    # shares only the data volume -- so the archive must be staged inside the
+    # data directory, never /tmp, or the extraction finds nothing.
+    assert "/tmp/" not in restore
+    doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "restore.sh" in doc

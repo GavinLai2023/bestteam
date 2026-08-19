@@ -29,7 +29,7 @@ from .automation_results import (
     already_drafted_uids,
     normalize_run_result,
 )
-from .db.inbox_events import complete_events
+from .db.inbox_events import complete_events, release_events
 from .db.models import Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -39,6 +39,52 @@ _logger = logging.getLogger(__name__)
 
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
+
+INTERRUPTED_RUN_MESSAGE = (
+    "The run was interrupted by a server restart before it finished."
+)
+
+
+def fail_interrupted_runs(engine: Engine, *, max_event_attempts: int) -> int:
+    """Resolve every `running` row to `failed` and return how many.
+
+    Called once from `main.py::_lifespan`, beside
+    `ingestion.fail_interrupted_jobs`. The run executor lives in this process,
+    so a row still `running` when the app starts belongs to a worker that no
+    longer exists and will never reach a terminal event. Left alone it is
+    permanent: the Activity page shows it running forever and its retry path
+    (gated on `failed`) never appears.
+
+    A dead run gets the same infrastructure-class treatment
+    `email_trigger._release_stale_run` gives a hung one: mark the row failed,
+    hand back the inbox events it had claimed (`release_events` -- pending
+    again, or dead-lettered once `max_event_attempts` is used up, so the next
+    poll reprocesses them instead of leaving them `claimed` by a run that will
+    never finish), and normalise a declared maintenance batch so it does not
+    vanish from Needs-attention. Duplicate drafts on reprocessing are guarded
+    where `_release_stale_run` relies on it too: `email_draft_reply` checks the
+    Drafts folder for the message's source key before APPEND. Usage rows and
+    trace events are left as they are.
+    """
+    swept = 0
+    with Session(engine) as db:
+        dead = db.query(Run).filter(Run.status == "running").all()
+        for run_row in dead:
+            run_row.status = "failed"
+            run_row.output = INTERRUPTED_RUN_MESSAGE
+            dead_lettered = release_events(
+                db, run_row.id, max_attempts=max_event_attempts, error=INTERRUPTED_RUN_MESSAGE
+            )
+            if dead_lettered:
+                _logger.warning(
+                    "Run %s was interrupted by a restart; %s of its messages have used up their "
+                    "attempts and were dead-lettered", run_row.id, dead_lettered,
+                )
+            swept += 1
+        db.commit()
+        for run_row in dead:
+            normalize_run_result(db, run_row)  # never raises; no-op unless a declared batch
+    return swept
 
 # A property-maintenance-batch run's agent output is derived from customer
 # email content (the envelope's free-text `extracted`/`missing_information`/

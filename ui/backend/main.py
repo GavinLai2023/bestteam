@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text as sa_text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -40,6 +40,7 @@ from . import error_reporting
 from . import ingestion
 from . import interview
 from . import retention
+from . import runtime
 from . import secret_store
 from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
@@ -161,6 +162,18 @@ async def _lifespan(_app):
                 logger.warning(
                     "Marked %s interrupted knowledge-base ingestion job(s) as failed "
                     "on startup; those uploads need to be retried", interrupted,
+                )
+            # Same reasoning for runs: the run executor is per-process too, so
+            # a row still `running` now was orphaned by the last shutdown and
+            # would otherwise show as running forever; the inbox events it had
+            # claimed are handed back the way the stale-run watchdog does it
+            # (beta B1).
+            orphaned = runtime.fail_interrupted_runs(
+                session.get_bind(), max_event_attempts=email_trigger.max_event_attempts()
+            )
+            if orphaned:
+                logger.warning(
+                    "Marked %s interrupted run(s) as failed on startup", orphaned,
                 )
         except OperationalError:
             pass  # pre-migration schema (no users table yet); nothing to enforce
@@ -559,7 +572,23 @@ def _get_workflow(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    """Liveness + a database ping. The container HEALTHCHECK polls this, so
+    a process that cannot reach its database (missing/unmounted volume, a
+    corrupt file) must report 503 rather than a constant "ok" -- that is what
+    makes `docker compose ps` show `unhealthy` and what the frontend's
+    `depends_on: service_healthy` waits on (beta B2). Note that plain Docker
+    does not restart an unhealthy container (only Swarm or an autoheal
+    sidecar does); the gain is visibility, not self-healing. Deliberately no
+    Alembic head comparison here: a process mid-migration is healthy and
+    must not be marked otherwise for being behind; that check belongs in
+    `admin check-env` or a later `/metrics`."""
+    try:
+        with SessionLocal() as db:
+            db.execute(sa_text("SELECT 1"))
+    except Exception:  # noqa: BLE001 -- any failure to answer is "degraded"
+        logger.warning("health: database ping failed", exc_info=True)
+        return JSONResponse(status_code=503, content={"status": "degraded", "database": "error"})
+    return {"status": "ok", "database": "ok"}
 
 
 @app.get("/api/workflows")
