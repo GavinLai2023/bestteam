@@ -45,6 +45,9 @@ uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --ext
 .\.venv\Scripts\python.exe -m bestteam run workflow.yaml "some input"
 .\.venv\Scripts\python.exe -m bestteam graph workflow.yaml
 
+# Launch checklist for a deployment's environment (FAIL/WARN/OK per variable)
+.\.venv\Scripts\python.exe -m ui.backend.admin check-env
+
 # Monitoring dashboard — needs BOTH running simultaneously
 $env:BESTTEAM_SECRET_KEY = "dev-only-secret-change-me-for-real-use"
 .\.venv\Scripts\python.exe -m uvicorn ui.backend.main:app --port 8000 --host 127.0.0.1
