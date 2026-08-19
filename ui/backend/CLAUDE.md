@@ -1322,6 +1322,7 @@ schema.
 
 **An org manages its own knowledge bases** (`org_knowledge_bases.py`:
 `GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
+`POST /api/org/knowledge-bases/{name}/search`,
 all `get_current_org`-scoped). `_kb_summary` reports `used_by`
 (`workflows_referencing`), `servable` and `latest_job` -- the newest attempt of
 *any* status, `config` stripped, since that field carries the server's absolute
@@ -1336,6 +1337,28 @@ warning) with `_with_knowledge_base_catalog(..., names=)` listing only the ones
 that built -- it runs over every KB in the org, so one unparseable upload used
 to 4xx spec generation for everybody. `load_knowledge_base_tools` still fails
 closed, because there the KB is one an agent actually references.
+
+**A customer can try a search against their own collection** (P1-4):
+`POST /api/org/knowledge-bases/{name}/search`, body
+`{"query": <1..500 chars>, "top_k": <1..10>}`, returning
+`{"query", "hit_count", "results": [{"citation", "source", "page", "heading",
+"text"}]}` with each `text` capped at 1,500 characters -- enough to judge the
+retrieval by, not a document reader. It resolves the knowledge base through
+`resolve_knowledge_base(db, record)` with **no `source`**, which is what
+turns the legacy file-based fallback off for this surface: rebuilding a
+disk-backed collection would re-parse every file, and re-embed a `vector` one
+unmetered, on every click. That refusal, "still processing" and "the last
+upload failed" are all `KnowledgeBaseNotReady` (a `ConfigurationError`
+subclass raised at exactly those three sites in `knowledge_bases.py`), and
+the route maps **only** that subclass to `409`. Any other
+`ConfigurationError` out of `_build_knowledge_base_from_job` -- a missing
+`rank-bm25` extra, a bad `rerank_model` -- is an operator's deployment
+problem the customer cannot act on, so it falls through to the app's generic
+logged `500` rather than masquerading as a conflict to wait out. A provider
+failure inside `kb.search` is a `502`; another org's name is the usual `404`.
+The search runs inside `tool_call_context()` and whatever the knowledge base
+reports there is metered (see the usage section below). No cache and no rate
+limit, deliberately -- see `docs/KNOWLEDGE_BASES.md`, "Trying a search".
 
 **Deleting a knowledge base is refused (`409`) while an upload is still
 processing**, and the whole sequence lives in
@@ -1452,8 +1475,8 @@ that KB permanently undeletable.
   usage persistence goes through `_safe_record_usage`, which isolates a
   `usage_records` write failure (logs + rolls back) so metering can never
   flip a successful run to `run_failed`.
-- **Knowledge-base spend** (P0-4) reaches the same ledger by two routes, and
-  `runtime.py` needed no change for either:
+- **Knowledge-base spend** (P0-4, extended by P1-4) reaches the same ledger by
+  three routes, and `runtime.py` needed no change for any of them:
   - *Query time* (the query embedding for `vector`/`hybrid`, and the
     query-expansion LLM call for all three types) rides the **existing**
     `agent_completed.usage` list. A KB tool reports its spend through
@@ -1468,6 +1491,18 @@ that KB permanently undeletable.
     after the job's own commit and is best-effort in its own `try/except`,
     like the cache invalidation and pruning beside it: a metering failure
     must never turn a completed ingestion into a failed one.
+  - *A test search* (`org_knowledge_bases.py::_safe_record_search_usage`)
+    drains the same `tool_call_context()` the run-time path uses, but writes
+    `agent="kb:search"` rows with **both** `run_id` and `ingestion_job_id`
+    NULL: a customer clicking "Try a search" spends against no run and no
+    upload. That makes `usage_records` a three-source ledger (run / ingestion
+    job / ad-hoc `kb:search`), which is the wording to keep consistent in
+    `db/models.py`, `db/usage.py`, `db/CLAUDE.md` and migration
+    `n1o2p3q4r5s6`. The org's monthly `SUM(cost_estimate) WHERE org_id`
+    counts these naturally; every run-keyed consumer drops them the same way
+    it drops ingestion rows. Best-effort in its own `try/except`, and applied
+    on the search's failure path too -- a query expansion is paid for before
+    the embedding call that raised.
 
   Two things to keep in mind. **Embedding token counts are estimated**
   (`core/embeddings.py::estimate_embedding_tokens`, ±30%) because no provider

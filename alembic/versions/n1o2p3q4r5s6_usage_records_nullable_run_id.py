@@ -7,8 +7,10 @@ Create Date: 2026-08-18 12:00:00.000000
 A knowledge base's ingestion embeddings are billed to an upload, not to a
 run, so they need a home in the one usage ledger the org's monthly spend cap
 sums over. Rather than a second table, `run_id` becomes nullable and a
-nullable `ingestion_job_id` FK says which upload the spend came from; exactly
-one of the two is set on any row.
+nullable `ingestion_job_id` FK says which upload the spend came from. A row
+therefore names one of three sources: a run (`run_id` set), an ingestion job
+(`ingestion_job_id` set), or neither -- an ad-hoc `agent="kb:search"` test
+search, which belongs to no run and no upload and so leaves both NULL.
 
 Existing rows are untouched -- every one of them belongs to a run and keeps
 its `run_id`. SQLite cannot ALTER a column's nullability in place, so both

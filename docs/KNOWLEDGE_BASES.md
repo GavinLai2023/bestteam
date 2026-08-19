@@ -502,6 +502,70 @@ builds the standalone knowledge bases its agents actually reference by name
 knowledge base in the database — since building one means re-reading and
 re-chunking files (and, for `vector`, calling an embedding model).
 
+### Trying a search
+
+`POST /api/org/knowledge-bases/{name}/search`
+(`ui/backend/org_knowledge_bases.py`) runs one query against the org's own
+collection and returns the passages an agent would have retrieved — the
+"Try a search" panel behind each row of the "My documents" list. Body:
+`{"query": "...", "top_k": 5}`, with `query` between 1 and 500 characters and
+`top_k` between 1 and 10; anything else is a `422`. Response:
+
+```json
+{
+  "query": "refund policy",
+  "hit_count": 2,
+  "results": [
+    {
+      "citation": "handbook.pdf, p.3 § Refunds",
+      "source": "handbook.pdf",
+      "page": 3,
+      "heading": "Refunds",
+      "text": "…at most 1500 characters of the passage…"
+    }
+  ]
+}
+```
+
+`citation` is exactly what an agent's own tool output cites (see "Citations"
+above), so the panel and the model name the same passage. `text` is capped at
+1,500 characters: enough to judge the retrieval by, and not a way to page a
+whole collection out through a search box.
+
+The other status codes: a name belonging to another org is a `404` (never a
+`403` — existence is never revealed); a collection that cannot answer yet is
+a `409` whose message says which case it is (still processing, the last
+upload failed, or — for a legacy knowledge base never uploaded through the
+app — it cannot be searched here at all, since rebuilding it would re-parse
+every file from disk, and re-embed a `vector` one unmetered, on every click);
+and a provider failure during the search itself is a `502`. A
+`ConfigurationError` that is *not* one of those readiness cases (a missing
+optional extra, a bad `rerank_model`) stays a logged `500` — it is an
+operator's deployment problem, and answering it with "wait and try again"
+would be wrong.
+
+**A test search is metered like any other spend.** A `vector`/`hybrid`
+collection embeds the query, and any of the three types may make a
+query-expansion call, so whatever the knowledge base reports through
+`core/tool_context.py` is written to `usage_records` with `agent="kb:search"`
+and **both** `run_id` and `ingestion_job_id` NULL — the row belongs to no run
+and to no upload, and the org's monthly spend cap
+(`SUM(cost_estimate) WHERE org_id`) counts it without a second query. The
+spend is recorded on the failure path too, because a query expansion is paid
+for before the embedding call that raised. Recording is best-effort: a
+metering failure is logged and never turns a successful search into an error.
+
+There is deliberately **no cache and no rate limit**. Every call rebuilds the
+knowledge base from its `KnowledgeChunk` rows (a `hybrid` one also
+`json.loads`es every stored vector), which is sub-second to a few seconds at
+the tens-to-hundreds-of-documents scale this beta is sized for, and the
+caller is a person clicking a button rather than an agent loop. A cache would
+have to be invalidated by every re-upload to buy correctness this does not
+need; the `top_k` cap and the metering above already bound the cost.
+
+This answers one query at a time. For judging a collection as a whole — and
+for telling whether a change to it helped — see "Evaluating retrieval" below.
+
 ### Uploads are asynchronous (ingestion jobs)
 
 Both upload endpoints (admin `/api/config/knowledge_bases/{name}/upload` and
@@ -630,11 +694,13 @@ for the full design.
 
 ## Evaluating retrieval
 
-Retrieval quality is otherwise judged by whoever last tried a query and
-thought the answer looked reasonable. `scripts/kb_eval.py` turns that into a
-number: it runs a fixed set of queries whose right answer is known against a
-knowledge base, and reports how often the expected document came back and how
-highly it ranked.
+The "Try a search" panel (above) answers one query at a time: did *this*
+question return the right passage? Judging a whole collection by clicking
+through queries until the answers look reasonable does not scale, and it
+cannot tell you whether a change helped. `scripts/kb_eval.py` turns the
+question into a number: it runs a fixed set of queries whose right answer is
+known against a knowledge base, and reports how often the expected document
+came back and how highly it ranked.
 
 ```powershell
 # The bundled golden set through the default BM25 knowledge base

@@ -35,19 +35,33 @@ then re-submits with `replace=true` once the customer confirms.
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
+from bestteam.core.knowledge_base import _citation
+from bestteam.core.tool_context import tool_call_context
 
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
 from .db.dependencies import workflows_referencing
 from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User, iso_utc
+from .db.usage import record_usage
 from .db_session import get_db
 from .ingestion import job_status_payload
-from .knowledge_bases import _kb_upload_lock, delete_knowledge_base, upload_knowledge_base
+from .knowledge_bases import (
+    KnowledgeBaseNotReady,
+    _kb_upload_lock,
+    delete_knowledge_base,
+    resolve_knowledge_base,
+    upload_knowledge_base,
+)
+
+_logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/org", tags=["org-knowledge-bases"])
 
@@ -85,6 +99,11 @@ _MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 # name (replacing its content) never counts against this -- only creating a
 # new name does.
 _MAX_SELF_SERVICE_KBS_PER_ORG = 20
+
+# How much of a retrieved passage the "Try a search" panel gets back. Enough
+# to judge whether the right thing was retrieved; not a document reader, and
+# not a way to page a whole collection out through a search box.
+_MAX_RESULT_TEXT_CHARS = 1500
 
 
 def _latest_completed_job(db: Session, record: KnowledgeBaseRecord) -> Optional[IngestionJob]:
@@ -325,6 +344,132 @@ def get_own_knowledge_base(
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
     return _kb_summary(db, _own_kb_or_404(db, org.id, item_name))
+
+
+class KnowledgeBaseSearchRequest(BaseModel):
+    """One test query against a collection the caller's org owns.
+
+    Both bounds are the customer's, not the model's: a query longer than a
+    sentence or two tells retrieval nothing useful, and `top_k` is capped
+    well below any real appetite because each result costs a slice of the
+    response and, for a `vector`/`hybrid` collection, the whole call costs a
+    query embedding.
+    """
+
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(5, ge=1, le=10)
+
+
+def _safe_record_search_usage(
+    db: Session, usage: List[Dict[str, Any]], org_id: Optional[int]
+) -> None:
+    """Meter what one test search spent, as `agent="kb:search"` rows.
+
+    A search is billable on two counts -- the query embedding for a
+    `vector`/`hybrid` collection, and a query-expansion LLM call for any of
+    the three types -- and the knowledge base reports both through
+    `core/tool_context.py`, exactly as it does inside a run. This is the same
+    ledger, so the org's monthly spend cap (`db/email_budget_settings.py`, a
+    `SUM(cost_estimate) WHERE org_id`) counts a test search without a second
+    query.
+
+    These are the third kind of row in `usage_records` and the only one with
+    **both** foreign keys NULL: a test search belongs to no run and to no
+    ingestion job. Nothing billable means nothing recorded -- a
+    `local_folder` collection with no expansion model reports no usage at all.
+
+    Best-effort, exactly like `ingestion._safe_record_ingestion_usage`: the
+    search has already run and its answer is what the customer asked for, so
+    a metering failure must never be able to turn it into an error.
+    """
+    for entry in usage:
+        try:
+            record_usage(
+                db,
+                run_id=None,
+                ingestion_job_id=None,
+                agent="kb:search",
+                model=entry.get("model"),
+                input_tokens=entry.get("input_tokens", 0),
+                output_tokens=entry.get("output_tokens", 0),
+                org_id=org_id,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Could not meter a knowledge-base test search for org %s; the "
+                "search itself is unaffected", org_id, exc_info=True,
+            )
+            db.rollback()
+
+
+@router.post("/knowledge-bases/{item_name}/search")
+def search_own_knowledge_base(
+    item_name: str,
+    req: KnowledgeBaseSearchRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Run one query against the org's own collection and return the passages
+    an agent would have retrieved, each with the citation the agent sees.
+
+    Deliberately **uncached and unthrottled**. Every call rebuilds the
+    knowledge base from its Document/Chunk rows (a `hybrid` one also
+    `json.loads`es every stored vector), which is sub-second to a few seconds
+    at the tens-to-hundreds-of-documents this beta is sized for, and the
+    caller is a person clicking a button rather than an agent loop. A cache
+    would need invalidating on every re-upload to buy correctness this does
+    not yet need; a rate limit would bound a cost the `top_k` cap and the
+    metering below already bound.
+    """
+    record = _own_kb_or_404(db, org.id, item_name)
+    try:
+        # No `source`: this route has no workflow to resolve relative paths
+        # against, and a legacy file-backed collection is refused rather than
+        # rebuilt from disk on every click (see `resolve_knowledge_base`).
+        kb = resolve_knowledge_base(db, record)
+    except KnowledgeBaseNotReady as exc:
+        # The customer's own conflict, and its message already says which one
+        # it is. Every other `ConfigurationError` -- a missing optional extra,
+        # a bad `rerank_model` -- is an operator's deployment problem that the
+        # customer cannot act on, so it falls through to the app's generic
+        # (logged) 500 rather than masquerading as "wait and try again".
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    with tool_call_context() as ctx:
+        try:
+            chunks = kb.search(req.query, req.top_k)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Test search against knowledge base '%s' failed", item_name, exc_info=True
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "The search could not be run: the search provider did not "
+                    "respond. Try again in a moment."
+                ),
+            ) from exc
+        finally:
+            # On the failure path too: a `hybrid` collection pays for its
+            # query expansion before the embedding call that raised, and that
+            # money is spent either way -- the same rule the adapter's tool
+            # loop follows when it drains `tool_ctx.usage`.
+            _safe_record_search_usage(db, ctx.usage, org.id)
+
+    return {
+        "query": req.query,
+        "hit_count": len(chunks),
+        "results": [
+            {
+                "citation": _citation(chunk),
+                "source": chunk.source,
+                "page": chunk.page,
+                "heading": chunk.heading,
+                "text": chunk.text[:_MAX_RESULT_TEXT_CHARS],
+            }
+            for chunk in chunks
+        ],
+    }
 
 
 @router.delete("/knowledge-bases/{item_name}", status_code=204)

@@ -1340,6 +1340,36 @@
   character instead of per four characters — the right direction for Japanese
   and Korean, which run near one token per character.
 
+- **A customer can try a search against their own documents** (P1-4):
+  `POST /api/org/knowledge-bases/{name}/search` (`query` 1–500 chars, `top_k`
+  1–10) returns `{"query", "hit_count", "results": [{"citation", "source",
+  "page", "heading", "text"}]}`, each `text` capped at 1,500 characters, and a
+  "Try a search" toggle on every row of the "My documents" panel
+  (`components/KnowledgeBaseSearch.tsx`) shows them under the same citation
+  label the agent's own tool output cites. Retrieval quality was previously
+  only knowable by deploying a team and watching what it answered.
+  The route resolves the collection through `resolve_knowledge_base(db,
+  record)` with **no `source`**, which is what switches the legacy file-based
+  fallback off here: rebuilding a disk-backed collection would re-parse every
+  file, and re-embed a `vector` one unmetered, on every click. That refusal
+  joins "still processing" and "the last upload failed" as
+  `KnowledgeBaseNotReady` (a new `ConfigurationError` subclass raised at
+  exactly those three sites), and the route maps **only** that subclass to
+  `409` — any other `ConfigurationError` out of `_build_knowledge_base_from_job`
+  is an operator's deployment problem and stays a logged `500`. Another org's
+  name is a `404`, a provider failure inside the search is a `502`, a bad body
+  is a `422`. **Metering**: the search runs inside `tool_call_context()` and
+  whatever it reports (a query embedding, a query expansion) is written to
+  `usage_records` as `agent="kb:search"` with **both** foreign keys NULL, which
+  makes that ledger a three-source one (run / ingestion job / ad-hoc search) —
+  the wording was corrected in `db/models.py`, `db/usage.py`, `db/CLAUDE.md`
+  and migration `n1o2p3q4r5s6`'s docstring; no new migration, and the
+  downgrade's `DELETE ... WHERE run_id IS NULL` already covers these rows.
+  Recording is best-effort and also runs on the failure path, since a query
+  expansion is paid for before an embedding call that raises. Deliberately
+  **no cache and no rate limit** — see `docs/KNOWLEDGE_BASES.md`, "Trying a
+  search".
+
 - **A re-upload keeps the collection's shape, and the panel reports the one
   that serves** (P1-3): `upload_knowledge_base()`'s `kb_type` is now optional
   and, when a caller names none, inherits the whole shape group

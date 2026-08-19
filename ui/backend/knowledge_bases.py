@@ -37,6 +37,21 @@ from .deploy_validation import find_kb_tool_collisions
 
 _logger = logging.getLogger(__name__)
 
+
+class KnowledgeBaseNotReady(ConfigurationError):
+    """A knowledge base exists, but nothing behind it can answer a query yet.
+
+    Its own subclass because it is the one `ConfigurationError` this module
+    raises that the *customer* can resolve: an upload is still processing,
+    the last one failed, or the collection was never uploaded through the app
+    at all. `org_knowledge_bases.py`'s search endpoint turns exactly this into
+    a `409` carrying the message; every other `ConfigurationError` (a missing
+    optional extra, a bad `rerank_model`) is an operator's deployment problem
+    and stays a logged `500`. `builder.py`'s `except ConfigurationError` still
+    catches it, being a subclass.
+    """
+
+
 # --- KB path containment (CR-001) -------------------------------------------
 # A KB `cache_path` is a server-file *write* target (the vector KB's
 # `_save_embedding_cache` does `os.replace(tmp, cache_path)`). We keep the SDK
@@ -603,14 +618,23 @@ def load_knowledge_base_tools(
     return tools
 
 
-def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Path) -> Any:
+def resolve_knowledge_base(
+    db: Session, record: KnowledgeBaseRecord, source: Optional[Path] = None
+) -> Any:
     """Build the `KnowledgeBase` for one `KnowledgeBaseRecord`: DB-backed
     (from its most recent completed `IngestionJob`'s Document/Chunk rows) if
     one exists, else the original file-based construction (a pre-existing KB
     that predates this feature and was never re-uploaded). Shared by
     `load_knowledge_base_tools` (above) and `builder.py::_all_knowledge_base_tools`
     (the pre-Specification "every standalone KB" catalog builder), so both
-    resolve a KB's live content the same way."""
+    resolve a KB's live content the same way.
+
+    `source` is the workflow file the file-based fallback resolves relative
+    paths against, so omitting it turns that fallback **off**: a caller with
+    no workflow in hand (the "Try a search" endpoint, which resolves a
+    collection on its own) gets `KnowledgeBaseNotReady` for a legacy
+    file-backed KB rather than a rebuild that re-parses every file -- and, for
+    a `vector` one, re-embeds all of them unmetered -- on every click."""
     job = (
         db.query(IngestionJob)
         .filter_by(kb_id=record.id, status="completed")
@@ -652,13 +676,18 @@ def resolve_knowledge_base(db: Session, record: KnowledgeBaseRecord, source: Pat
             # A per-document error may already be a full sentence (the
             # unsupported-type and no-extractable-text messages both are), so
             # don't append a second full stop onto it.
-            raise ConfigurationError(
+            raise KnowledgeBaseNotReady(
                 f"Knowledge base '{record.name}' could not be indexed: "
                 f"{detail.rstrip('.')}. Upload the documents again, or delete it."
             )
-        raise ConfigurationError(
+        raise KnowledgeBaseNotReady(
             f"Knowledge base '{record.name}' has no completed ingestion yet. "
             "Wait for the current upload to finish processing and try again."
+        )
+    if source is None:
+        raise KnowledgeBaseNotReady(
+            f"Knowledge base '{record.name}' was not uploaded through the app "
+            "and cannot be searched here."
         )
     config = resolve_kb_upload_path(contain_kb_config_for_load(record.config))
     ensure_contained_cache_path_for_source(config, source)
