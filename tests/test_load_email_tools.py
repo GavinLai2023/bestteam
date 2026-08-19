@@ -126,7 +126,7 @@ def test_no_credentials_no_env_yields_friendly_tools(db_session, monkeypatch):
 
 
 def test_undecryptable_credentials_yield_unreadable_tools_not_a_crash(db_session, monkeypatch):
-    # A wrong/rotated key must not crash the workflow build with InvalidToken;
+    # A wrong/rotated key must not crash the pipeline build with InvalidToken;
     # the tools return a clear message instead.
     org_id = _org(db_session, "acme")
     set_email_credentials(db_session, org_id, host="h", username="u", password="p")
@@ -145,10 +145,10 @@ def test_yaml_demo_resolves_per_org_mailbox(db_session, monkeypatch, tmp_path):
     from ui.backend import main as backend_main
     from ui.backend.skills import seed_default_skills
 
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")
     monkeypatch.delenv("BESTTEAM_EMAIL_BACKEND", raising=False)
-    backend_main._workflow_cache.clear()
+    backend_main._pipeline_cache.clear()
     seed_default_skills(db_session)
     (tmp_path / "emaildemo.yaml").write_text(
         "name: emaildemo\n"
@@ -162,7 +162,7 @@ def test_yaml_demo_resolves_per_org_mailbox(db_session, monkeypatch, tmp_path):
         "  - name: t\n"
         "    agents: [triager]\n"
         "    mode: sequential\n"
-        "workflow:\n"
+        "pipeline:\n"
         "  steps: [t]\n",
         encoding="utf-8",
     )
@@ -175,17 +175,17 @@ def test_yaml_demo_resolves_per_org_mailbox(db_session, monkeypatch, tmp_path):
         agent = wf.steps[0].agents[0]
         return next(t for t in agent.tools if t.__name__ == "email_find")
 
-    wf_a = backend_main._get_workflow("emaildemo", db_session, a)
-    wf_b = backend_main._get_workflow("emaildemo", db_session, b)
+    wf_a = backend_main._get_pipeline("emaildemo", db_session, a)
+    wf_b = backend_main._get_pipeline("emaildemo", db_session, b)
     assert "a@x" in _email_find(wf_a)("")
     assert "b@x" in _email_find(wf_b)("")
     assert "b@x" not in _email_find(wf_a)("")  # no cross-org leak
 
 
-def test_connecting_mailbox_invalidates_workflow_cache_key(db_session):
-    # Per-org email tools are baked into the compiled workflow, so connecting a
-    # mailbox must change the freshness key that keys the workflow cache --
-    # otherwise a "no mailbox connected" workflow would keep being served.
+def test_connecting_mailbox_invalidates_pipeline_cache_key(db_session):
+    # Per-org email tools are baked into the compiled pipeline, so connecting a
+    # mailbox must change the freshness key that keys the pipeline cache --
+    # otherwise a "no mailbox connected" pipeline would keep being served.
     from ui.backend import main as backend_main
 
     org_id = _org(db_session, "acme")
@@ -197,7 +197,7 @@ def test_connecting_mailbox_invalidates_workflow_cache_key(db_session):
 # ---------------------------------------------------------------------------
 # Structural: this module's own enumeration of the email tool names
 #
-# `load_email_tools`'s result is merged into a workflow's `extra_tools` and
+# `load_email_tools`'s result is merged into a pipeline's `extra_tools` and
 # overrides the env-based tools in `REGISTRY` **by name**. A name this module
 # doesn't know is therefore never overridden: the run falls through to the
 # process-env mailbox, which on a deployment that also sets

@@ -181,7 +181,7 @@ def claimed_events(db: Session, run_id: str) -> List[InboxEvent]:
 def mark_dispatched(db: Session, run_id: str) -> None:
     """Charge one attempt against every event this run claimed.
 
-    Charged here rather than at claim time on purpose. A workflow that fails to
+    Charged here rather than at claim time on purpose. A pipeline that fails to
     *build* (team deleted or edited into an invalid state) is not the message's
     fault, and today such mail is never consumed -- it retries until the
     customer fixes the team. Charging at claim would dead-letter a whole day of

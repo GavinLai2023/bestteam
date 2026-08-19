@@ -14,7 +14,7 @@ every endpoint follows:
 
 - Org-owned rows carry `org_id`; org users only ever see their own org's
   data plus platform built-ins (`skills.org_id IS NULL`), and — only where
-  `BESTTEAM_DEMO_WORKFLOWS` is on — the global YAML demo workflows.
+  `BESTTEAM_DEMO_PIPELINES` is on — the global YAML demo pipelines.
   **Cross-org access is a 404** (and the WS stream closes 4404 ==
   unknown-run) — existence is never revealed. This applies to an explicit
   `run_id` passed to a list-style filter too, not just a path parameter:
@@ -27,7 +27,7 @@ every endpoint follows:
 - Scoping is centralized: `get_current_org` (auth_api),
   `load_skills(db, org_id)` (org's own shadows a same-named built-in),
   `load_knowledge_base_tools(..., org_id=)`, org-filtered queries in
-  crud/builder/main. The workflow cache is keyed `(org_id, name)`; YAML
+  crud/builder/main. The pipeline cache is keyed `(org_id, name)`; YAML
   demos cache under `(None, name)`.
 - Component names are unique per `(org_id, name)`. KB upload dirs are
   `data/knowledge_base_uploads/<org_id>/<name>` (legacy un-prefixed dirs
@@ -51,10 +51,10 @@ every endpoint follows:
   `secret_store` / `BESTTEAM_SECRETS_KEY`, a key distinct from the JWT one).
   `email_tools.load_email_tools(db, org_id)` resolves the running org's
   mailbox and is merged into `extra_tools` beside `load_knowledge_base_tools`
-  at every workflow-build site (main/builder/crud), overriding the env-based
+  at every pipeline-build site (main/builder/crud), overriding the env-based
   `email_*` tools in `REGISTRY` by name — so org A's agents reach only org A's
   inbox. `_dependency_freshness` includes `OrgEmailCredential`, so connecting/
-  rotating a mailbox invalidates that org's cached workflows. An org with no
+  rotating a mailbox invalidates that org's cached pipelines. An org with no
   stored mailbox gets `{}` when `BESTTEAM_EMAIL_BACKEND` is set (env single-
   mailbox path still applies) or friendly "no mailbox connected" tools
   otherwise. Startup refuses to boot if stored credentials exist but the
@@ -67,7 +67,7 @@ every endpoint follows:
   only when the team uses email: `email_tools.spec_uses_email` resolves each
   agent's `tools` + skill tools and drives the `uses_email` flag on the builder
   session response. Drafts use current skill heads; deployed/synthetic team
-  responses use the workflow's pinned skill versions, matching runtime. The
+  responses use the pipeline's pinned skill versions, matching runtime. The
   hard mailbox gate runs inside `component_mutation_lock` with validation and
   publication, so a concurrent skill edit cannot change capability after the
   check but before the pinned dependency is written.
@@ -97,10 +97,10 @@ try/except so one org's mail-server failure never stops the loop (stored as
 customer-readable `last_error` on the row). Single-process poller: if the
 backend ever runs multiple workers, it needs a leader lock (known limitation).
 An automatic run is confined to the poller-detected UID batch: it runs an
-UNCACHED workflow (`email_trigger.build_trigger_workflow`) whose email tools
+UNCACHED pipeline (`email_trigger.build_trigger_pipeline`) whose email tools
 are UID-scoped (`make_email_tools(backend, allowed_uids=)`), so the triage
 skill's `email_find` can only see that batch. State advances (baseline, cap)
-only after the workflow builds and a durable `runs` row is written; a build
+only after the pipeline builds and a durable `runs` row is written; a build
 failure consumes nothing. The advance is a compare-and-swap
 (`UPDATE ... WHERE enabled = 1`): if the customer/operator disabled the trigger
 or replaced the mailbox (a replacement disables via
@@ -121,7 +121,7 @@ Five changes to the above:
    batch and created a second draft for every message already replied to, with
    no crash needed. `retry_triggered_run` additionally unions
    `_mailbox_drafted_uids`, a best-effort Drafts search on the
-   `X-BestTeam-Source-Key` header that `build_trigger_workflow` now stamps on
+   `X-BestTeam-Source-Key` header that `build_trigger_pipeline` now stamps on
    every draft (`make_email_tools(..., draft_marker_prefix=)`, prefix shape
    identical to `automation_results._source_key`) -- the only way to see a
    draft that was APPENDed but whose trace event never got persisted. A scan
@@ -134,14 +134,16 @@ Five changes to the above:
    closed an org's guard permanently and silently.
 3. **Run outcomes reach trigger health.** `runtime._safe_record_trigger_health`
    (called from `_maybe_normalize`, so every terminal path) sets a sticky
-   `workflow`-kind `last_error` when a triggered run fails/cancels and clears
+   `workflow`-kind `last_error` (the stored value stays `"workflow"` — only
+   the constant/identifier names around it were renamed, see the `Phase 3a`
+   section below) when a triggered run fails/cancels and clears
    it on success. A `mailbox`-kind fault is left alone -- it is owned by the
    connectivity check. Before this, `runtime.py` never referenced
    `EmailTrigger` at all, so a team failing every run still showed "Active".
 4. **Deploy refuses email + egress on one agent**
    (`deploy_validation.find_email_egress_conflicts` over
    `email_tools.resolve_agent_tool_sets`, wired into `builder.deploy_session`
-   and `crud.upsert_workflow_config`). The draft-only bound ("worst case is a
+   and `crud.upsert_pipeline_config`). The draft-only bound ("worst case is a
    bad draft") only holds while the agent reading attacker-controlled mail has
    no other route out; `http_get`/`web_search` is such a route. Deploy-time
    only, matching `validate_agent_models`.
@@ -161,7 +163,7 @@ Detection and execution are no longer the same act. `poll_org` records one
 `_start_triggered_run` then *claims* up to `BESTTEAM_TRIGGER_BATCH_SIZE` of
 them. This closes the window `_start_triggered_run` used to concede in its own
 docstring: it advanced the cursor, persisted the run row and burned the cap in
-one commit, then handed the workflow to a thread pool -- a process killed
+one commit, then handed the pipeline to a thread pool -- a process killed
 between those two points consumed the mail forever.
 
 The failure handling splits by class, which is the rule to keep in mind when
@@ -171,7 +173,7 @@ touching any of it:
   failure, a trigger disabled mid-build): no model spend was incurred and the
   messages are innocent, so `release_events` hands them back. These paths never
   reach `runtime`, so they release at the site.
-- **Workflow-class** (anything reaching `runtime._maybe_normalize` -- the model
+- **Pipeline-class** (anything reaching `runtime._maybe_normalize` -- the model
   actually ran): `_safe_complete_inbox_events` marks the messages Phase 0's
   `already_drafted_uids` proves a draft exists for as `done`, and the rest
   `failed`, awaiting the existing human retry. That is today's product
@@ -214,24 +216,36 @@ Two rules are load-bearing and easy to break by "simplifying":
   column; a condition already alerted for stays quiet until it clears.
   Removing it turns every poll cycle into an alert. It is a set because two
   domains can be broken at once: when it held a single value, a mailbox fault
-  overwrote an outstanding workflow one and the next successful mailbox check
+  overwrote an outstanding pipeline one and the next successful mailbox check
   then cleared it and announced a recovery that had not happened. A
   pre-existing single value parses as a one-element set, so no migration.
 - **Recovery is domain-specific.** `OUTCOME_MAILBOX_OK` clears only a `mailbox`
-  alert; `OUTCOME_WORKFLOW_OK` clears `workflow` and `run_timeout`. A single
+  alert; `OUTCOME_PIPELINE_OK` clears the `workflow` fingerprint value (kept
+  as `"workflow"` on purpose -- see below) and `run_timeout`. A single
   generic "healthy" outcome would let a successful mailbox check clear a
-  workflow alert -- exactly the "healthy trigger, every run failing" state
+  pipeline alert -- exactly the "healthy trigger, every run failing" state
   Phase 0's item 0.5 exists to prevent (the same asymmetry `last_error_kind`
   already encodes as F5).
 
 Three sites feed it and each keeps its existing `last_error`/`last_error_kind`
 write untouched -- those drive the dashboard's error surface and are pinned by
 Phase 0's tests; alerting is additive:
-`runtime._safe_record_trigger_health` (workflow outcomes, and note it now
+`runtime._safe_record_trigger_health` (pipeline outcomes, and note it now
 returns early unless `trigger.last_run_id == run_row.id`, so a superseded run's
 late outcome is ignored), `email_trigger`'s connectivity check (mailbox), and
 `_release_stale_run` (timeout, which alerts immediately -- it has already been
 stuck for the full run timeout).
+
+Note: the underlying `fingerprint`/`last_error_kind` STRING VALUE that
+identifies this class of fault is still the literal `"workflow"` (not
+renamed to `"pipeline"`) -- only the Python constant names that hold it
+(`FINGERPRINT_WORKFLOW`→`FINGERPRINT_PIPELINE`,
+`_ERROR_KIND_WORKFLOW`→`_ERROR_KIND_PIPELINE`,
+`OUTCOME_WORKFLOW`/`OUTCOME_WORKFLOW_OK`→`OUTCOME_PIPELINE`/
+`OUTCOME_PIPELINE_OK`) were renamed, deliberately, to avoid a data backfill
+of every already-stored fingerprint/`last_error_kind` value for a purely
+cosmetic rename. See the `db/CLAUDE.md` `notifications` section and the
+`email_trigger.py`/`trigger_health.py`/`runtime.py` source.
 
 `notifications.py` delivers. Stdlib `http.client` (no new dependency),
 HMAC-SHA256 over the exact posted body, five attempts then `failed` (still
@@ -455,7 +469,7 @@ definition the metering uses) even though an agent's `fake:` model is not --
 an unmetered $0 call is not a blind spot. `rerank_model` is absent for the same
 reason: reranking is a local cross-encoder and is never recorded. The helper is
 wrapped in one `except Exception -> []` (advisory copy must never fail a save),
-reads `WorkflowRecord.config` rather than building the workflow, and scopes to
+reads `PipelineRecord.config` rather than building the pipeline, and scopes to
 `status="deployed"` on purpose -- a trigger pointing at a draft cannot run, so
 it cannot spend (which does mean an undeployed team's models are not warned
 about). Note the whole cap bounds an **estimate**: `cost_estimate` is computed
@@ -515,15 +529,17 @@ is the likeliest outcome of a half-finished Azure setup.
 
 Round-2 hardening (independent-reviewer follow-up on PR #22): `poll_org`
 resolves the IMAP backend once per cycle and threads it into
-`build_trigger_workflow` instead of letting it re-fetch credentials
+`build_trigger_pipeline` instead of letting it re-fetch credentials
 independently -- closes a race where a mid-cycle mailbox swap could detect
 mail on one mailbox and build tools against another. `admin.py`'s
 `set-email`/`clear-email` now call the same `email_trigger.disable_trigger`/
 `disable_trigger_on_identity_change` helpers as `org_settings.py`, so the
 operator CLI path disables the trigger on mailbox change too (previously
 only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
-"workflow" | None`) distinguishes a connectivity fault, which auto-clears on
-the next successful mailbox check, from a workflow/dispatch fault, which
+"workflow" | None` -- the `"workflow"` string value is unchanged by the
+Workflow→Pipeline rename, see the Phase 3a note above) distinguishes a
+connectivity fault, which auto-clears on
+the next successful mailbox check, from a pipeline/dispatch fault, which
 still persists until a real successful dispatch (F5, unchanged). A dispatch-
 submission failure now marks the run failed (`last_error_kind = "workflow"`,
 so it stays sticky the same way, rather than getting auto-cleared by an
@@ -552,7 +568,7 @@ original UID batch as a brand-new `Run` (`retry_of_run_id` set, history
 untouched): revalidates the current mailbox's host/username still match
 `trigger_context` (not just UIDVALIDITY -- a replaced mailbox could
 coincidentally share a UIDVALIDITY value), the mailbox still decrypts and
-connects, the workflow still builds, the org's daily cap isn't already hit,
+connects, the pipeline still builds, the org's daily cap isn't already hit,
 and -- same overlap guard `poll_org` itself checks before touching the
 mailbox -- `trigger.last_run_id` isn't still a registered run that's actually
 running; any of these raises `RetryError` (customer-facing message). It also
@@ -572,7 +588,7 @@ too, and the customer retries the original again rather than that failed
 retry, creating a sibling branch); checking only `run_row` would miss a UID
 a sibling branch already drafted (Codex review finding). The
 narrowed `retry_uids` list (not the original full batch) is what gets passed
-to `build_trigger_workflow` and into the new run's `trigger_context["uids"]`
+to `build_trigger_pipeline` and into the new run's `trigger_context["uids"]`
 -- narrowing `trigger_context` too, not just the tool-visible UID set, is
 what keeps `normalize_run_result` on the *new* run from treating an
 intentionally-excluded already-drafted UID as "missing" and synthesizing a
@@ -598,7 +614,7 @@ the same call, before the lock. On dispatch, `retry_triggered_run` sets
 `trigger.last_run_id` to the new run (registering itself with that same
 guard for the next poll cycle) and clears `last_error`/`last_error_kind`,
 mirroring `_start_triggered_run`'s "a run is going out: clear any prior
-fault" -- without it a resolved workflow-kind error kept reporting failure
+fault" -- without it a resolved `"workflow"`-kind error kept reporting failure
 indefinitely despite the successful retry. Exposed as
 `POST /api/runs/{run_id}/retry` in `main.py`. The per-org lock also closes
 the previously-deferred, narrower "two near-simultaneous manual retry
@@ -609,7 +625,7 @@ output failed *normalization* (not a real engine failure) currently has no
 retry path at all -- see `docs/STATUS.md` Known issues.
 
 The daily cap has the same staleness problem as `last_run_id`: the check
-further up (before mailbox/workflow work -- a fast-path to skip unnecessary
+further up (before mailbox/pipeline work -- a fast-path to skip unnecessary
 IMAP calls when obviously already at cap) reads a possibly-stale
 `trigger.runs_today`, so two dispatches that both read "under cap" before
 either committed its increment could both pass and push the count past the
@@ -664,8 +680,8 @@ gaps: Codex review findings).
 
 The first vertical solution template (Release 1A of
 `docs/superpowers/specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`):
-a two-agent SEQUENTIAL Workflow template
-(`workflows/property_maintenance_inbox_demo.yaml`) built from three platform
+a two-agent SEQUENTIAL Pipeline template
+(`pipelines/property_maintenance_inbox_demo.yaml`) built from three platform
 Skills (`email_input_security_core_v1`, `property_maintenance_intake_v2`,
 `property_maintenance_response_v1`, seeded in `skills.py`; `_intake_v1` is
 still seeded but no longer referenced by the template — Phase 4b added
@@ -706,25 +722,25 @@ run's final output (handling a ```json fence) and only proceeds if
 `result_type == "property_maintenance_email_batch"` -- any other
 `trigger_context`-bearing run (e.g. another org's plain `email_triage_reply`
 team, free-text output) is left completely untouched, so this never
-regresses unrelated email-trigger workflows. The one exception: a run that
+regresses unrelated email-trigger pipelines. The one exception: a run that
 crashed (`run_failed`) before producing any JSON at all looks identical, from
 the output alone, to that unrelated case -- so `_start_triggered_run` stamps
 `trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER` at dispatch
-time whenever the deployed workflow's config gives an agent the
+time whenever the deployed pipeline's config gives an agent the
 `property_maintenance_response_v1` skill AND that name still resolves to the
 actual platform-tier skill row, not an org skill shadowing it
 (`email_trigger._declares_property_maintenance_contract` +
-`_resolves_to_platform_skill`, a small independent `WorkflowRecord.config`
+`_resolves_to_platform_skill`, a small independent `PipelineRecord.config`
 read -- advisory only, never blocks dispatch on failure; `skills.load_skills`
 intentionally lets an org's own skill shadow a same-named platform built-in,
-so a name-only check would wrongly redact/stamp an org's unrelated workflow
+so a name-only check would wrongly redact/stamp an org's unrelated pipeline
 that happens to name its own skill the same thing (Codex review finding)),
 and an unparseable output still gets the batch's synthesized
 error rows when that marker is present. `retry_triggered_run` does NOT just
 carry the marker forward from the original run's `trigger_context` -- it
-re-runs `_declares_property_maintenance_contract` against the workflow as
+re-runs `_declares_property_maintenance_contract` against the pipeline as
 CURRENTLY deployed and sets/clears the retry's own marker from that fresh
-result, so a workflow that gained or lost the maintenance skill between the
+result, so a pipeline that gained or lost the maintenance skill between the
 original run and the retry gets the right redaction/normalization behavior
 either way, instead of a stale one carried over from dispatch time (Codex
 review finding). Once engaged: the whole envelope is validated via Pydantic
@@ -809,7 +825,7 @@ the three new keys ride alongside in `data`. This is an SDK/adapter-layer
 boundary like `_redacted_email_tool_data`, not a `runtime.py` one.
 
 A property-maintenance run's raw agent output (`agent_completed`'s `data`,
-and `run_completed`'s -- `core/workflow.py`'s `last_output`, the same text)
+and `run_completed`'s -- `core/pipeline.py`'s `last_output`, the same text)
 is derived from customer email content -- the envelope's free-text
 `extracted`/`missing_information`/`risk_reasons` fields can quote it
 directly -- so it gets the same redaction boundary that already covers
@@ -822,7 +838,7 @@ instead of at the SDK/adapter layer (the SDK itself has no notion of
 `run_row.trigger_context["result_contract"]`, right after the run row is
 persisted; for such a run, every event whose type is in
 `_PM_REDACTED_EVENT_TYPES` -- `agent_completed`/`run_completed` plus, for a
-declared maintenance workflow that happens to use HIERARCHICAL mode,
+declared maintenance pipeline that happens to use HIERARCHICAL mode,
 `subagent_started`/`subagent_completed`/`delegation_started`/
 `delegation_completed` (the manager/subordinate delegate exchange carries
 the same customer-email-derived text -- `task_summary`/`summary` -- and
@@ -879,7 +895,7 @@ Schema (`share_links`/`share_sessions`/`share_messages`): `db/CLAUDE.md`.
 
 Two routers, deliberately separate surfaces:
 
-- **`share_links_api.py`** (`/api/workflows/{id}/share-links`,
+- **`share_links_api.py`** (`/api/pipelines/{id}/share-links`,
   `/api/share-links/{id}`, `.../sessions[/{id}/messages]`) -- org-side
   management, every route behind `get_current_org`. Create/list/revoke a
   link, and audit any visitor session's transcript. `expires_at` is
@@ -935,7 +951,7 @@ request, so the per-session cap alone caps nobody.
 
 ## Sync-to-async streaming bridge
 
-`Workflow.stream()` / `compiled.stream()` are blocking generators. The
+`Pipeline.stream()` / `compiled.stream()` are blocking generators. The
 FastAPI backend runs them in a `ThreadPoolExecutor` and hands events back to
 the event loop via `loop.call_soon_threadsafe(queue.put_nowait, ...)`.
 Each subscriber's `asyncio.Queue` is paired with the event loop captured at
@@ -991,7 +1007,7 @@ replay log and the persisted historical trace start at the same event.
 `registry.request_cancel`/`cancel_requested` backed by a per-run
 `threading.Event`) is checked in `run_in_background` between yielded
 events -- never a forceful thread kill, since a node already executing
-can't be safely interrupted mid-`workflow.stream()`. The check is skipped
+can't be safely interrupted mid-`pipeline.stream()`. The check is skipped
 for a node's own buffered event types (listed above): those describe paid
 work that's already happened by the time any of them is yielded, so
 stopping between them and their `agent_completed` would silently drop that
@@ -1019,8 +1035,8 @@ WebSocket the monitor page uses, anything else fetches
 
 ## Backend API (`ui/backend/`)
 
-Beyond the existing monitoring endpoints (`/api/health`, `/api/workflows`,
-`/api/workflows/{name}/graph`, `/api/runs`, the `/api/runs/{id}/stream`
+Beyond the existing monitoring endpoints (`/api/health`, `/api/pipelines`,
+`/api/pipelines/{name}/graph`, `/api/runs`, the `/api/runs/{id}/stream`
 WebSocket — all in `main.py`), Phase 2 adds two routers:
 
 - **`builder.py`** (`/api/builder/sessions`) — the wizard's session
@@ -1039,7 +1055,7 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     `feedback` and always records it via `append_feedback()`; with `model`,
     the current Specification + feedback are fed back to the architect.
   - `POST /{id}/test-runs` — Stage 5: validates `specification_json` and
-    runs it through the same `RunRegistry`/`Workflow.stream()`/
+    runs it through the same `RunRegistry`/`Pipeline.stream()`/
     `ThreadPoolExecutor` machinery as `/api/runs` (factored into
     `ui/backend/runtime.py` so both routers can use it without a circular
     import).
@@ -1047,11 +1063,11 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
     catalog (`deploy_validation.validate_agent_models`, `fake:` exempt; 400
     listing any agent whose model is missing/empty/non-string or not offered —
     the CRUD path builds `Agent(**spec)` directly, so this is the only guard on
-    those), then **publishes a new immutable version** of the workflow
-    (`db/workflows.py::publish_workflow_version` — append a `workflow_versions`
+    those), then **publishes a new immutable version** of the pipeline
+    (`db/pipelines.py::publish_pipeline_version` — append a `pipeline_versions`
     snapshot from `specification.to_raw()`, move the head's `current_version_id`,
     keep `config` as the current mirror; `status=deployed`) and links
-    `session.workflow_id` to that head, both in the session's single commit
+    `session.pipeline_id` to that head, both in the session's single commit
     (P1-14). A redeploy versions the same head and two same-named sessions
     converge on one team (P1-01/02/03). Model validation is **deploy-time
     only** — a model later removed from the catalog, or a legacy row promoted by
@@ -1063,37 +1079,37 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
 - **`crud.py`** (`/api/config/...`) — the "advanced view" (operator-only):
   `GET`/`PUT`/`DELETE` for `knowledge_bases`/`skills` (validated as standalone
   components via `KnowledgeBaseSpec`/`SkillSpec` — field shape only; both are
-  resolvable by name from a workflow, via `load_knowledge_base_tools` and
-  `load_skills`) and `workflows` (a complete `Specification.to_raw()`-shaped
+  resolvable by name from a pipeline, via `load_knowledge_base_tools` and
+  `load_skills`) and `pipelines` (a complete `Specification.to_raw()`-shaped
   dict carrying its own `agents:`/`teams:` inline, validated via
-  `_build_workflow()` exactly like the wizard's Specification stage, then
+  `_build_pipeline()` exactly like the wizard's Specification stage, then
   `deploy_validation.validate_agent_models()` against the model catalog —
-  the wizard's `deploy_session` and `crud.py`'s `PUT /workflows/{name}` both
+  the wizard's `deploy_session` and `crud.py`'s `PUT /pipelines/{name}` both
   400 listing any agent model spec not in `model_catalog` (`fake:` exempt)). An operator save
-  via `PUT /workflows/{name}` writes `status="deployed"` on both insert and
+  via `PUT /pipelines/{name}` writes `status="deployed"` on both insert and
   update — **save is deploy**: there is no separate promote step, mirroring
   the wizard's `deploy_session`, which validates the same way at the same
   point. Like the wizard, it publishes an immutable version each save
-  (`publish_workflow_version`, `workflow_id=None` → resolve-or-create the head
+  (`publish_pipeline_version`, `pipeline_id=None` → resolve-or-create the head
   by `(org_id, name)`) rather than overwriting `config` in place. Plus two read-only reference routes for the UI: `GET /orgs` (the org
   selector) and `GET /tools` (the built-in `bestteam.tools.REGISTRY`, name +
   docstring).
   **Standalone `agents`/`teams` CRUD was removed**: nothing consumed those
-  records (`_build_workflow` takes only `extra_tools`/`extra_skills`), and both
+  records (`_build_pipeline` takes only `extra_tools`/`extra_skills`), and both
   tables were empty everywhere. The models remain in `db/models.py`.
   `DELETE /skills/{name}` and `/knowledge_bases/{name}` refuse with `409` if a
-  workflow's **current version** still depends on the item — the guard now
-  queries `db/dependencies.py::workflows_referencing(db, kind=, resource_id=item.id)`
-  against typed `workflow_dependencies` rows (populated at deploy by
-  `record_version_dependencies`) instead of scanning deployed workflows' JSON;
+  pipeline's **current version** still depends on the item — the guard now
+  queries `db/dependencies.py::pipelines_referencing(db, kind=, resource_id=item.id)`
+  against typed `pipeline_dependencies` rows (populated at deploy by
+  `record_version_dependencies`) instead of scanning deployed pipelines' JSON;
   the check runs before any deletion/`rmtree`, naming the referencing team(s)
   in the error. A skill dependency also pins `resource_version_id`; editing a
   platform/org skill or creating a same-named org override does not alter an
   already-deployed team. Redeploying the team explicitly adopts the skill
-  version resolved then. A workflow's inline KB likewise
+  version resolved then. A pipeline's inline KB likewise
   shadows a same-named standalone KB, so the standalone isn't recorded as a
-  dependency of that workflow.
-  Both deploy points also reject (`400`) a workflow whose KB name — inline or
+  dependency of that pipeline.
+  Both deploy points also reject (`400`) a pipeline whose KB name — inline or
   a referenced standalone KB — shadows a built-in tool:
   `knowledge_bases.kb_name_collisions(db, org_id, raw_spec)` resolves the
   referenced standalone KB names and delegates to the pure
@@ -1114,31 +1130,31 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   consumer yet), and standalone-KB content pinning.
   P1-07/P1-08, data-architecture review; see
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
-- **`_get_workflow()`** (`main.py`) checks for a `WorkflowRecord` in the DB
+- **`_get_pipeline()`** (`main.py`) checks for a `PipelineRecord` in the DB
   first, within the caller's org and filtered to `status == "deployed"`
-  (cached on `updated_at`), then falls back to `WORKFLOWS_DIR/<name>.yaml`
-  (cached on mtime) — so a workflow deployed via the wizard or saved via
-  `/api/config/workflows` is immediately runnable through `/api/runs`, and a
+  (cached on `updated_at`), then falls back to `PIPELINES_DIR/<name>.yaml`
+  (cached on mtime) — so a pipeline deployed via the wizard or saved via
+  `/api/config/pipelines` is immediately runnable through `/api/runs`, and a
   non-`deployed` record is treated as unknown (same 404 as absent, no
-  existence oracle). `GET /api/workflows` applies the same `status ==
-  "deployed"` filter to its DB-backed listing. `/api/config/workflows` (the
+  existence oracle). `GET /api/pipelines` applies the same `status ==
+  "deployed"` filter to its DB-backed listing. `/api/config/pipelines` (the
   admin CRUD list) is **not** filtered — operators see all configs
   regardless of status. P1-06, data-architecture review; see
   `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
-- **Demo YAML workflows are opt-in** (`main.py::demo_workflows_enabled`,
-  `BESTTEAM_DEMO_WORKFLOWS`, **off by default**). The two workflow sources
-  serve different audiences: YAML is the *SDK's* format (`load_workflow`,
+- **Demo YAML pipelines are opt-in** (`main.py::demo_pipelines_enabled`,
+  `BESTTEAM_DEMO_PIPELINES`, **off by default**). The two pipeline sources
+  serve different audiences: YAML is the *SDK's* format (`load_pipeline`,
   `bestteam run x.yaml`, unaffected by this flag and by the DB entirely),
   while DB rows are what the wizard creates per-org at runtime. The files in
-  `WORKFLOWS_DIR` are our shipped fixtures — mostly `fake:` models returning
+  `PIPELINES_DIR` are our shipped fixtures — mostly `fake:` models returning
   hardcoded text, plus `*_live` ones that spend real quota and, for
   `email_triage_demo_live`, read the running org's connected mailbox (per-org
   stored credentials, env fallback on single-org) — and they carry no `org_id`,
   so while enabled *every* org user sees and can run them.
-  The gate covers **both** the list (`GET /api/workflows`) and resolution
-  (`_get_workflow`, hence `/api/runs` and `/graph`): hiding them from the
+  The gate covers **both** the list (`GET /api/pipelines`) and resolution
+  (`_get_pipeline`, hence `/api/runs` and `/graph`): hiding them from the
   list alone would leave them runnable by name. Disabled ⇒ the same 404 as an
-  unknown workflow.
+  unknown pipeline.
 
 ## Async knowledge-base document ingestion (`ingestion.py`)
 
@@ -1206,7 +1222,7 @@ row's** own `kb_type`/`embedding_model` — not the `KnowledgeBaseRecord`'s
 ingestion window (and permanently, if the new job fails); `config` still
 supplies `top_k`/`rerank_model`/`candidate_k`/`query_expansion_*`, which
 apply uniformly to whichever generation is live. A successful job also invalidates the
-workflow cache (`_invalidate_workflow_cache()`, called at job completion,
+pipeline cache (`_invalidate_pipeline_cache()`, called at job completion,
 not at upload-dispatch time — that's the point the KB's live content
 actually changes) and best-effort prunes older completed generations,
 keeping the current one plus one grace-window generation, mirroring the
@@ -1330,7 +1346,7 @@ schema.
 `GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
 `POST /api/org/knowledge-bases/{name}/search`,
 all `get_current_org`-scoped). `_kb_summary` reports `used_by`
-(`workflows_referencing`), `servable` and `latest_job` -- the newest attempt of
+(`pipelines_referencing`), `servable` and `latest_job` -- the newest attempt of
 *any* status, `config` stripped, since that field carries the server's absolute
 upload path and this list is customer-facing. The DELETE is the same
 `knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
@@ -1406,7 +1422,7 @@ that KB permanently undeletable.
   `get_current_admin` (403s non-admins; router-level guards the admin-only
   `/api/config/*` and `/api/memory/*`), and `get_current_org` (the user's
   `Organization`; **403s platform operators** — org-NULL users — on org-user
-  surfaces: workflows list/graph, `POST /api/runs`, the builder router).
+  surfaces: pipelines list/graph, `POST /api/runs`, the builder router).
   Admin is granted only via the operator CLI, never from a username match,
   and never read at import (a DB predating the migrations still boots; the
   module-level seeding likewise warns-and-skips on a pre-migration schema).
@@ -1459,8 +1475,8 @@ that KB permanently undeletable.
   `SkillRecord.current_version_id`, and exposes the current `version` plus
   `GET /skills/{name}/versions` history. `load_skills(db)` returns current
   heads for drafts/deploy validation/YAML; `load_skills(...,
-  workflow_version_id=)` returns only the exact skill versions pinned by that
-  deployed workflow. Both return `Dict[str, SkillSpec]` for `_build_workflow()`.
+  pipeline_version_id=)` returns only the exact skill versions pinned by that
+  deployed pipeline. Both return `Dict[str, SkillSpec]` for `_build_pipeline()`.
   `builder.py::_with_skill_catalog(db, text)` appends "Available skills..." list
   (name/description/tools) to the requirements text before `generate_specification()`,
   so the Solution Architect knows what skills exist for assignment to agents.
@@ -1471,7 +1487,7 @@ that KB permanently undeletable.
   `fake:` models leave it empty). For `HIERARCHICAL` teams, the manager and
   all delegated subordinates share one `usage_sink` per turn, so the total
   surfaces on the manager's single `agent_completed` event.
-  `ui/backend/runtime.py::run_in_background(run_id, workflow, input,
+  `ui/backend/runtime.py::run_in_background(run_id, pipeline, input,
   engine=None, user_id=None)` — if `engine` is given (callers pass
   `db.get_bind()` so tests using an overridden in-memory DB still work), opens
   its own `Session` and calls `db/usage.py::record_usage()` for each `usage`
@@ -1545,7 +1561,7 @@ that KB permanently undeletable.
 from env: `BESTTEAM_MEMORY_DB` (unset/empty → memory disabled, runs unchanged;
 set → the SQLite path) and `BESTTEAM_MEMORY_MODEL` (optional → enables one
 extraction LLM call per run for semantic/procedural records). `run_in_background`
-passes it plus `user_id` into `workflow.stream(...)`; `main.py::create_run`
+passes it plus `user_id` into `pipeline.stream(...)`; `main.py::create_run`
 threads the JWT `user.username` through as `user_id` (the wizard's
 `builder.py` test-runs omit it, so sandbox runs never touch memory). See
 `src/bestteam/core/CLAUDE.md` for the SDK-side design.
@@ -1586,11 +1602,11 @@ disables rerank for that run. See `src/bestteam/core/CLAUDE.md`'s "Known
 limitations (per-user memory)" for the full reranking design (weighted RRF
 re-fusion, literal-query-only scoring, deferred v1 items).
 
-`create_run` also resolves and passes `workflow_id` (`WorkflowRecord.id`, the
-deployed team's stable head) alongside `workflow_version_id` — see
-`_resolve_workflow_and_version`. Unlike `workflow_version_id` (pure
-provenance metadata), `workflow_id` scopes recall/writes: episodic/procedural
-memory is isolated per workflow, semantic stays org-wide. See
+`create_run` also resolves and passes `pipeline_id` (`PipelineRecord.id`, the
+deployed team's stable head) alongside `pipeline_version_id` — see
+`_resolve_pipeline_and_version`. Unlike `pipeline_version_id` (pure
+provenance metadata), `pipeline_id` scopes recall/writes: episodic/procedural
+memory is isolated per pipeline, semantic stays org-wide. See
 `src/bestteam/core/CLAUDE.md`'s "Known limitations (per-user memory)" for the
 full design.
 
@@ -1709,10 +1725,10 @@ points of its own. Exactly two call sites: `main.unhandled_exception_handler`
 (`report_exception`, tags method + the matched route *template* --
 `/api/share/{token}/messages`, never the concrete path, whose parameter can
 be a capability token) and `runtime.py` -- the streaming
-loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, tags
+loop's `run_failed` branch (`report_message("Run failed: <pipeline name>")`, tags
 only; the reason is an exception's text and stays in the run's persisted
 trace) and the worker-thread catch-all (`report_exception`, tags
-run_id/workflow). A `before_send` hook (`_scrub_event`) drops every exception
+run_id/pipeline). A `before_send` hook (`_scrub_event`) drops every exception
 *message* from an event -- an output parser echoes the model's text, an HTTP
 error carries the URL a tool fetched -- keeping type, stack (no locals) and
 tags. Both helpers are no-ops without a DSN or without the SDK and never
@@ -1725,5 +1741,5 @@ blank (as `.env.example` ships it) means INFO. Tests:
 
 ## Known limitation: general-purpose cache
 
-Only local caches exist (`_workflow_cache` in `ui/backend/main.py`,
-`Workflow._compiled`) — no shared/cross-request cache layer.
+Only local caches exist (`_pipeline_cache` in `ui/backend/main.py`,
+`Pipeline._compiled`) — no shared/cross-request cache layer.

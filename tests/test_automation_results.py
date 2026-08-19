@@ -35,7 +35,7 @@ def db():
 def _make_run(db, *, org_id, output, uids, uidvalidity=3, mailbox_credential_id=7, run_id="run-1"):
     run = Run(
         id=run_id,
-        workflow="property_maintenance_inbox_demo",
+        pipeline="property_maintenance_inbox_demo",
         input="triage",
         output=output,
         status="completed",
@@ -269,7 +269,7 @@ def test_repeated_normalization_is_idempotent(db):
 def test_no_trigger_context_is_a_noop(db):
     org = get_or_create_org(db, "acme")
     run = Run(
-        id="manual-1", workflow="w", input="hi", output=_envelope([_valid_item("42")]),
+        id="manual-1", pipeline="w", input="hi", output=_envelope([_valid_item("42")]),
         status="completed", org_id=org.id,
     )
     db.add(run)
@@ -347,14 +347,14 @@ def test_envelope_less_failed_run_with_declared_contract_gets_synthetic_error_ro
     """Spec 10.1: a UID batch must never silently disappear. A run that
     crashed before producing any JSON output looks identical, from the
     output alone, to an unrelated org's non-maintenance email-trigger
-    workflow -- trigger_context['result_contract'] (stamped at dispatch time,
+    pipeline -- trigger_context['result_contract'] (stamped at dispatch time,
     see email_trigger._declares_property_maintenance_contract) is the
     positive signal that this WAS a Property Maintenance Inbox batch, so it
     still gets synthetic error rows instead of vanishing (Codex review
     finding)."""
     org = get_or_create_org(db, "acme")
     run = Run(
-        id="run-1", workflow="property_maintenance_inbox_demo", input="triage",
+        id="run-1", pipeline="property_maintenance_inbox_demo", input="triage",
         output="The run failed due to an internal error.", status="failed",
         org_id=org.id, username="email-trigger",
         trigger_context={
@@ -377,8 +377,8 @@ def test_envelope_less_failed_run_with_declared_contract_gets_synthetic_error_ro
 
 def test_envelope_less_failed_run_without_declared_contract_is_still_left_alone(db):
     """Without the dispatch-time marker, an unparseable/failed output stays
-    indistinguishable from any other org's unrelated email-trigger workflow
-    -- must not start creating rows for it (would regress that workflow, see
+    indistinguishable from any other org's unrelated email-trigger pipeline
+    -- must not start creating rows for it (would regress that pipeline, see
     the module docstring's 'Scoping note')."""
     org = get_or_create_org(db, "acme")
     run = _make_run(
@@ -396,7 +396,7 @@ def test_summary_respects_the_callers_local_day_via_tz_offset(db):
     -- the browser's own offset (Date.getTimezoneOffset()) fixes this (Codex
     review finding)."""
     org = get_or_create_org(db, "acme")
-    run = Run(id="run-1", workflow="w", input="x", status="completed", org_id=org.id)
+    run = Run(id="run-1", pipeline="w", input="x", status="completed", org_id=org.id)
     db.add(run)
     db.commit()
     row = AutomationItemResult(
@@ -433,7 +433,7 @@ def test_envelope_less_failed_run_records_a_confirmed_draft_on_its_synthetic_err
     mailbox (Codex review finding)."""
     org = get_or_create_org(db, "acme")
     run = Run(
-        id="run-1", workflow="property_maintenance_inbox_demo", input="triage",
+        id="run-1", pipeline="property_maintenance_inbox_demo", input="triage",
         output="The run failed due to an internal error.", status="failed",
         org_id=org.id, username="email-trigger",
         trigger_context={
@@ -506,7 +506,7 @@ def test_already_drafted_uids_sees_a_sibling_retrys_confirmed_draft(db):
     normalize_run_result(db, original, confirmed_draft_message_ids=frozenset({"5"}))
 
     sibling_retry = Run(
-        id="retry-1", workflow="property_maintenance_inbox_demo", input="triage",
+        id="retry-1", pipeline="property_maintenance_inbox_demo", input="triage",
         output=_envelope([_valid_item("6", action={"draft_created": True, "draft_type": "ack"})]),
         status="failed", org_id=org.id, username="email-trigger",
         retry_of_run_id="orig",
@@ -596,7 +596,7 @@ def test_trace_evidence_spans_the_whole_retry_family(db):
     original = _make_run(db, org_id=org.id, output="", uids=[5, 6], run_id="run-original")
     sibling = Run(
         id="run-sibling",
-        workflow="email_triage",
+        pipeline="email_triage",
         input="triage",
         output="",
         status="failed",

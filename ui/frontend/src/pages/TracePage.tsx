@@ -7,8 +7,8 @@ import type {
   AdminOrg,
   ModelAnalyticsSummary,
   RunListItem,
-  WorkflowAnalyticsDetail,
-  WorkflowAnalyticsSummary,
+  PipelineAnalyticsDetail,
+  PipelineAnalyticsSummary,
 } from '../lib/types'
 import '../components/WizardLayout.css'
 import '../pages/ActivityPage.css' // reuses .session-list/.session-card/.run-detail-panel
@@ -22,8 +22,8 @@ interface SelectedRun {
   status: string
 }
 
-interface SelectedWorkflow {
-  workflow: string
+interface SelectedPipeline {
+  pipeline: string
   org: string | null
 }
 
@@ -46,7 +46,7 @@ function formatCost(value: number | null): string {
 // Platform-admin technical trace/analytics view: a superset of the
 // customer-facing Activity page's Runs tab (cross-org by default, full
 // event data + per-agent token/cost via AdminRunDetail) plus a
-// workflow-level aggregate view for spotting patterns across many runs.
+// pipeline-level aggregate view for spotting patterns across many runs.
 // Reuses exactly what's already captured (TraceEventRecord/UsageRecord) --
 // no new capture, no redaction changes. Follows the MemoryPage/AdvancedPage
 // admin-page conventions (master layout, org selector).
@@ -63,7 +63,7 @@ export default function TracePage() {
   }, [])
 
   // --- Runs tab ---
-  const [workflowFilter, setWorkflowFilter] = useState('')
+  const [pipelineFilter, setPipelineFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [runsOffset, setRunsOffset] = useState(0)
@@ -75,7 +75,7 @@ export default function TracePage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset pagination on filter/tab change
     setRunsOffset(0)
-  }, [org, workflowFilter, statusFilter, tab])
+  }, [org, pipelineFilter, statusFilter, tab])
 
   useEffect(() => {
     if (tab !== 'runs') return undefined
@@ -85,7 +85,7 @@ export default function TracePage() {
     api
       .listRuns({
         org: org ?? undefined,
-        workflow: workflowFilter || undefined,
+        pipeline: pipelineFilter || undefined,
         status: statusFilter || undefined,
         offset: runsOffset,
       })
@@ -104,14 +104,14 @@ export default function TracePage() {
     return () => {
       ignore = true
     }
-  }, [tab, org, workflowFilter, statusFilter, runsOffset])
+  }, [tab, org, pipelineFilter, statusFilter, runsOffset])
 
   // --- Analytics tab ---
-  const [summaries, setSummaries] = useState<WorkflowAnalyticsSummary[]>([])
+  const [summaries, setSummaries] = useState<PipelineAnalyticsSummary[]>([])
   const [summariesLoading, setSummariesLoading] = useState(true)
   const [summariesError, setSummariesError] = useState<string | null>(null)
-  const [selectedWorkflow, setSelectedWorkflow] = useState<SelectedWorkflow | null>(null)
-  const [detail, setDetail] = useState<WorkflowAnalyticsDetail | null>(null)
+  const [selectedPipeline, setSelectedPipeline] = useState<SelectedPipeline | null>(null)
+  const [detail, setDetail] = useState<PipelineAnalyticsDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -120,10 +120,10 @@ export default function TracePage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- load on tab/org change
     setSummariesLoading(true)
     api
-      .listWorkflowAnalytics({ org: org ?? undefined })
+      .listPipelineAnalytics({ org: org ?? undefined })
       .then((d) => {
         if (!ignore) {
-          setSummaries(d.workflows)
+          setSummaries(d.pipelines)
           setSummariesError(null)
         }
       })
@@ -139,7 +139,7 @@ export default function TracePage() {
   }, [tab, org])
 
   useEffect(() => {
-    if (!selectedWorkflow) {
+    if (!selectedPipeline) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- clear stale detail on deselect
       setDetail(null)
       return undefined
@@ -147,7 +147,7 @@ export default function TracePage() {
     let ignore = false
     setDetailError(null)
     api
-      .getWorkflowAnalytics(selectedWorkflow.workflow, { org: selectedWorkflow.org ?? undefined })
+      .getPipelineAnalytics(selectedPipeline.pipeline, { org: selectedPipeline.org ?? undefined })
       .then((d) => {
         if (!ignore) setDetail(d)
       })
@@ -157,7 +157,7 @@ export default function TracePage() {
     return () => {
       ignore = true
     }
-  }, [selectedWorkflow])
+  }, [selectedPipeline])
 
   // --- By model tab ---
   const [modelSummaries, setModelSummaries] = useState<ModelAnalyticsSummary[]>([])
@@ -192,7 +192,7 @@ export default function TracePage() {
     <div className="advanced">
       <header>
         <h1>Trace</h1>
-        <p>Technical run history and workflow analytics, across every organisation by default.</p>
+        <p>Technical run history and pipeline analytics, across every organisation by default.</p>
       </header>
 
       <label className="advanced-org">
@@ -223,12 +223,12 @@ export default function TracePage() {
         <>
           <section className="activity-filters">
             <label>
-              Workflow
+              Pipeline
               <input
                 type="text"
-                placeholder="Any workflow"
-                value={workflowFilter}
-                onChange={(e) => setWorkflowFilter(e.target.value)}
+                placeholder="Any pipeline"
+                value={pipelineFilter}
+                onChange={(e) => setPipelineFilter(e.target.value)}
               />
             </label>
             <label>
@@ -258,7 +258,7 @@ export default function TracePage() {
                     className="wizard-card session-card"
                     onClick={() => setSelectedRun({ id: run.id, status: run.status })}
                   >
-                    <h2>{run.team_display_name ?? run.workflow}</h2>
+                    <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
                       <span className="status-badge">{run.status}</span>
                       <span className="session-updated">
@@ -302,7 +302,7 @@ export default function TracePage() {
                 <thead>
                   <tr>
                     <th>Organisation</th>
-                    <th>Workflow</th>
+                    <th>Pipeline</th>
                     <th>Runs</th>
                     <th>Success rate</th>
                     <th>Avg duration</th>
@@ -314,14 +314,14 @@ export default function TracePage() {
                 <tbody>
                   {summaries.map((s) => (
                     <tr
-                      key={`${s.org_id}:${s.workflow}`}
+                      key={`${s.org_id}:${s.pipeline}`}
                       className={
-                        selectedWorkflow?.workflow === s.workflow && selectedWorkflow?.org === s.org ? 'active' : ''
+                        selectedPipeline?.pipeline === s.pipeline && selectedPipeline?.org === s.org ? 'active' : ''
                       }
-                      onClick={() => setSelectedWorkflow({ workflow: s.workflow, org: s.org })}
+                      onClick={() => setSelectedPipeline({ pipeline: s.pipeline, org: s.org })}
                     >
                       <td>{s.org ?? 'unknown org'}</td>
-                      <td>{s.workflow}</td>
+                      <td>{s.pipeline}</td>
                       <td>{s.total_runs}</td>
                       <td>{formatPct(s.success_rate)}</td>
                       <td>{formatSeconds(s.avg_duration_seconds)}</td>
@@ -336,13 +336,13 @@ export default function TracePage() {
             </div>
           )}
 
-          {selectedWorkflow && (
+          {selectedPipeline && (
             <section className="run-detail-panel">
               <div className="run-detail-panel-header">
                 <h2>
-                  {selectedWorkflow.workflow} <span className="hint">· {selectedWorkflow.org ?? 'unknown org'}</span>
+                  {selectedPipeline.pipeline} <span className="hint">· {selectedPipeline.org ?? 'unknown org'}</span>
                 </h2>
-                <button type="button" onClick={() => setSelectedWorkflow(null)}>
+                <button type="button" onClick={() => setSelectedPipeline(null)}>
                   Close
                 </button>
               </div>

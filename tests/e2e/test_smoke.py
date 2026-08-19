@@ -103,7 +103,7 @@ def test_smoke_journey(page):
     page.goto(BASE_URL + "/run")
     page.wait_for_selector("select", timeout=8000)
     options = page.locator("select option").all_inner_texts()
-    assert len(options) > 0, "Workflow dropdown is empty -- was BESTTEAM_DEMO_WORKFLOWS=1 set?"
+    assert len(options) > 0, "Pipeline dropdown is empty -- was BESTTEAM_DEMO_PIPELINES=1 set?"
     bad = [e for e in js_errors if "Cannot read properties of undefined" in e]
     assert not bad, f"TypeError still present: {bad[0]}"
 
@@ -125,7 +125,7 @@ def test_smoke_journey(page):
     page.goto(BASE_URL + "/advanced")
     page.wait_for_selector(".advanced-kinds", timeout=6000)
 
-    for label in ["Workflows", "Skills", "Knowledge bases", "Tools", "Model catalog"]:
+    for label in ["Pipelines", "Skills", "Knowledge bases", "Tools", "Model catalog"]:
         page.click(f".advanced-kinds button:has-text('{label}')")
         page.wait_for_selector(".advanced-list", timeout=3000)
         time.sleep(0.3)
@@ -224,21 +224,21 @@ def test_smoke_journey(page):
     pw_expect(page.locator(".advanced-readonly-text")).to_be_visible(timeout=4000)
     pw_expect(page.locator(".advanced-editor textarea")).to_have_count(0)
 
-    WF = f"wf_{int(time.time())}"
-    WF_BODY = json.dumps({
-        "name": WF,
+    PL = f"pl_{int(time.time())}"
+    PL_BODY = json.dumps({
+        "name": PL,
         "teams": [{"name": "t", "mode": "sequential", "agents": ["a"]}],
         "agents": [{"name": "a", "role": "Asst", "goal": "Help",
                     "backstory": "Friendly AI assistant.", "model": "fake:Hello! How can I help?"}],
-        "workflow": {"steps": ["t"]},
+        "pipeline": {"steps": ["t"]},
     }, indent=2)
 
-    open_advanced_tab(page, "Workflows")
+    open_advanced_tab(page, "Pipelines")
     page.select_option(".advanced-org select", label=ORG_LABEL)
-    page.fill(".advanced-new input", WF)
+    page.fill(".advanced-new input", PL)
     page.click(".advanced-new button:has-text('New')")
-    page.wait_for_selector(f".advanced-editor h2:has-text('{WF}')", timeout=4000)
-    page.fill(".advanced-editor textarea", WF_BODY)
+    page.wait_for_selector(f".advanced-editor h2:has-text('{PL}')", timeout=4000)
+    page.fill(".advanced-editor textarea", PL_BODY)
     page.click(".advanced-editor button:has-text('Save')")
     page.wait_for_selector(".banner-success, .banner-error", timeout=8000)
     assert not page.locator(".banner-error").is_visible()
@@ -248,7 +248,7 @@ def test_smoke_journey(page):
     page.goto(BASE_URL + "/run")
     page.wait_for_selector("select", timeout=8000)
     opts = page.locator("select option").all_inner_texts()
-    assert WF in opts, f"{WF} not found in Monitor dropdown for demo"
+    assert PL in opts, f"{PL} not found in Monitor dropdown for demo"
 
     # -- T5. Edge cases --
     page.goto(BASE_URL + "/")
@@ -258,16 +258,16 @@ def test_smoke_journey(page):
     login_ui(page, OP)
     page.goto(BASE_URL + "/advanced")
     page.wait_for_selector(".advanced-kinds", timeout=5000)
-    open_advanced_tab(page, "Workflows")
+    open_advanced_tab(page, "Pipelines")
     page.select_option(".advanced-org select", label=ORG_LABEL)
-    page.fill(".advanced-new input", WF)
+    page.fill(".advanced-new input", PL)
     page.click(".advanced-new button:has-text('New')")
-    page.wait_for_selector(f".advanced-editor h2:has-text('{WF}')", timeout=4000)
-    page.fill(".advanced-editor textarea", WF_BODY)
+    page.wait_for_selector(f".advanced-editor h2:has-text('{PL}')", timeout=4000)
+    page.fill(".advanced-editor textarea", PL_BODY)
     page.click(".advanced-editor button:has-text('Save')")
     page.wait_for_selector(".banner-success, .banner-error", timeout=8000)
     assert not page.locator(".banner-error").is_visible()
-    count = page.locator(f".advanced-list button:has-text('{WF}')").count()
+    count = page.locator(f".advanced-list button:has-text('{PL}')").count()
     assert count == 1, f"Expected 1 entry (upsert), got {count}"
 
     login_ui(page, DEMO)

@@ -13,7 +13,7 @@ const MODE_LABELS: Record<TeamMode, string> = {
 }
 
 // Renders a customer-friendly "how your team works together" diagram from a
-// Specification: one block per team (in workflow-step order), showing the
+// Specification: one block per team (in pipeline-step order), showing the
 // manager (for hierarchical teams) and the agents who do the work, with no
 // technical jargon -- just job titles and one-line descriptions.
 export default function TeamFlow({ specification }: TeamFlowProps) {
@@ -21,7 +21,7 @@ export default function TeamFlow({ specification }: TeamFlowProps) {
 
   const agentsByName = Object.fromEntries((specification.agents ?? []).map((agent) => [agent.name, agent]))
   const teamsByName = Object.fromEntries((specification.teams ?? []).map((team) => [team.name, team]))
-  const steps = specification.workflow?.steps ?? []
+  const steps = specification.pipeline?.steps ?? []
 
   return (
     <div className="team-flow">

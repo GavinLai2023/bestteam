@@ -75,7 +75,7 @@ from ui.backend.retention import purge_org_runs, purge_run
 def _run(db, org_id, *, run_id="r1", status="completed", age_days=0):
     created = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=age_days)
     run = Run(
-        id=run_id, workflow="support", input="From alice@example.com: my boiler leaks",
+        id=run_id, pipeline="support", input="From alice@example.com: my boiler leaks",
         output="Drafted a reply to alice@example.com", status=status,
         org_id=org_id, created_at=created,
     )

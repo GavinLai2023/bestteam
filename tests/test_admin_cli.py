@@ -442,7 +442,7 @@ def test_set_email_disables_trigger_on_host_change(session_local, secrets_key, m
     admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
     with session_local() as db:
         org = get_org_by_name(db, "acme")
-        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+        upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True,
                              last_uid=10, uidvalidity=1)
 
     admin_cli.main(["set-email", "acme", "--host", "imap.other.com", "--user", "u@acme.com"])
@@ -460,7 +460,7 @@ def test_set_email_keeps_trigger_enabled_on_password_only_rotation(session_local
     admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
     with session_local() as db:
         org = get_org_by_name(db, "acme")
-        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+        upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True,
                              last_uid=10, uidvalidity=1)
 
     _patch_password(monkeypatch, "new-pw")
@@ -479,7 +479,7 @@ def test_clear_email_disables_trigger(session_local, secrets_key, monkeypatch):
     admin_cli.main(["set-email", "acme", "--host", "imap.acme.com", "--user", "u@acme.com"])
     with session_local() as db:
         org = get_org_by_name(db, "acme")
-        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+        upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True,
                              last_uid=10, uidvalidity=1)
 
     admin_cli.main(["clear-email", "acme"])

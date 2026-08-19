@@ -6,7 +6,7 @@ import { api } from '../lib/api'
 
 vi.mock('../lib/api', () => ({
   api: {
-    listWorkflows: vi.fn(),
+    listPipelines: vi.fn(),
     listRuns: vi.fn(),
     getEmailTrigger: vi.fn(),
     emailTriggerActivity: vi.fn(),
@@ -37,8 +37,8 @@ const renderPage = () =>
 describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf-a', 'wf-b'] })
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'off', daily_cap: 0 })
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf-a', 'wf-b'] })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'off', daily_cap: 0 })
     mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })
     mockedApi.automationResultsSummary.mockResolvedValue({
       ever_used: false,
@@ -88,7 +88,7 @@ describe('ActivityPage', () => {
 
   it('switching to the Runs tab lists runs and lets you filter', async () => {
     mockedApi.listRuns.mockResolvedValue({
-      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
 
     renderPage()
@@ -104,7 +104,7 @@ describe('ActivityPage', () => {
       fireEvent.change(screen.getByLabelText('Team'), { target: { value: 'wf-b' } })
     })
 
-    expect(mockedApi.listRuns).toHaveBeenCalledWith({ workflow: 'wf-b', offset: 0 })
+    expect(mockedApi.listRuns).toHaveBeenCalledWith({ pipeline: 'wf-b', offset: 0 })
   })
 
   it('shows the team\'s customer-facing display name instead of the internal technical name', async () => {
@@ -112,7 +112,7 @@ describe('ActivityPage', () => {
       runs: [
         {
           id: 'r1',
-          workflow: 'customer_support_team',
+          pipeline: 'customer_support_team',
           team_display_name: 'Customer Support Team',
           status: 'completed',
           started_at: '2026-07-31T11:00:00Z',
@@ -132,7 +132,7 @@ describe('ActivityPage', () => {
 
   it('falls back to the internal technical name when no team display name is available', async () => {
     mockedApi.listRuns.mockResolvedValue({
-      runs: [{ id: 'r1', workflow: 'wf-a', team_display_name: null, status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      runs: [{ id: 'r1', pipeline: 'wf-a', team_display_name: null, status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
 
     renderPage()
@@ -145,7 +145,7 @@ describe('ActivityPage', () => {
 
   it('shows a run\'s start time as "DD MMM YYYY, h:mm AM/PM"', async () => {
     mockedApi.listRuns.mockResolvedValue({
-      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T14:05:00', autonomous: false }],
+      runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T14:05:00', autonomous: false }],
     })
 
     renderPage()
@@ -164,10 +164,10 @@ describe('ActivityPage', () => {
     vi.useFakeTimers()
     mockedApi.listRuns
       .mockResolvedValueOnce({
-        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+        runs: [{ id: 'r1', pipeline: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
       .mockResolvedValueOnce({
-        runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+        runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
 
     renderPage()
@@ -197,11 +197,11 @@ describe('ActivityPage', () => {
 
     mockedApi.listRuns
       .mockResolvedValueOnce({
-        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+        runs: [{ id: 'r1', pipeline: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
       .mockReturnValueOnce(stalePollPromise as ReturnType<typeof api.listRuns>)
       .mockResolvedValueOnce({
-        runs: [{ id: 'r2', workflow: 'wf-b', status: 'completed', started_at: '2026-07-31T11:05:00Z', autonomous: false }],
+        runs: [{ id: 'r2', pipeline: 'wf-b', status: 'completed', started_at: '2026-07-31T11:05:00Z', autonomous: false }],
       })
 
     renderPage()
@@ -230,7 +230,7 @@ describe('ActivityPage', () => {
     // The stale poll now resolves, carrying pre-filter-change data.
     await act(async () => {
       resolveStalePoll({
-        runs: [{ id: 'r1', workflow: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+        runs: [{ id: 'r1', pipeline: 'wf-a', status: 'running', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
       })
       await Promise.resolve()
       await Promise.resolve()
@@ -243,7 +243,7 @@ describe('ActivityPage', () => {
   it('"View automatic runs" on the Automations tab jumps to the Runs tab filtered to Automatic only', async () => {
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true,
-      workflow_name: 'wf-a',
+      pipeline_name: 'wf-a',
       status: 'active',
       daily_cap: 0,
       last_checked_at: null,
@@ -311,7 +311,7 @@ describe('ActivityPage', () => {
       Promise.resolve({
         runs:
           filters?.run_id === 'run-42'
-            ? [{ id: 'run-42', workflow: 'wf-a', status: 'failed', started_at: '2026-08-02T10:00:00Z', autonomous: true }]
+            ? [{ id: 'run-42', pipeline: 'wf-a', status: 'failed', started_at: '2026-08-02T10:00:00Z', autonomous: true }]
             : [],
       }),
     )
@@ -331,7 +331,7 @@ describe('ActivityPage', () => {
 
   it('scrolls the run detail panel into view when a run is selected', async () => {
     mockedApi.listRuns.mockResolvedValue({
-      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
     const scrollIntoView = vi.fn()
@@ -352,7 +352,7 @@ describe('ActivityPage', () => {
 
   it('clicking a run opens its detail via getRunTrace', async () => {
     mockedApi.listRuns.mockResolvedValue({
-      runs: [{ id: 'r1', workflow: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
     })
     mockedApi.getRunTrace.mockResolvedValue({ events: [{ type: 'run_completed', agent: undefined, data: 'done' }] })
 
@@ -371,13 +371,13 @@ describe('ActivityPage', () => {
   })
 
   it('offers only teams with a real id in the Shared tab picker', async () => {
-    // A YAML-only demo workflow has no `workflow_ids` entry, so it used to
+    // A YAML-only demo pipeline has no `pipeline_ids` entry, so it used to
     // render with value="" -- indistinguishable from the "Pick a team…"
-    // placeholder and silently doing nothing when selected. Such a workflow
+    // placeholder and silently doing nothing when selected. Such a pipeline
     // can't have share links at all.
-    mockedApi.listWorkflows.mockResolvedValue({
-      workflows: ['db-team', 'yaml-only-demo'],
-      workflow_ids: { 'db-team': 7 },
+    mockedApi.listPipelines.mockResolvedValue({
+      pipelines: ['db-team', 'yaml-only-demo'],
+      pipeline_ids: { 'db-team': 7 },
     })
 
     renderPage()

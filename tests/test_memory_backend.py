@@ -14,7 +14,7 @@ from bestteam import (
     MemoryManager,
     SqliteBM25Memory,
     Team,
-    Workflow,
+    Pipeline,
 )
 from bestteam.core.memory import EPISODIC
 from helpers import make_concurrent_safe_engine
@@ -37,11 +37,11 @@ class _CloseSpyManager(MemoryManager):
         super().close()
 
 
-def _workflow():
+def _pipeline():
     agent = Agent(
         name="a", role="role-a", goal="goal-a", model=FakeListChatModel(responses=["done"])
     )
-    return Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    return Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
 
 def test_make_memory_disabled_when_env_unset(monkeypatch):
@@ -193,10 +193,10 @@ def test_run_in_background_records_episodic_memory_for_user(monkeypatch, tmp_pat
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
     monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
 
-    workflow = _workflow()
+    pipeline = _pipeline()
     run = registry.create("wf", "hello there")
 
-    run_in_background(run.id, workflow, "hello there", engine=None, user_id="alice")
+    run_in_background(run.id, pipeline, "hello there", engine=None, user_id="alice")
 
     # Re-open the same DB file and assert an episodic row for alice exists.
     store = SqliteBM25Memory(str(db_path))
@@ -214,7 +214,7 @@ def test_run_in_background_records_with_run_org_id(monkeypatch, tmp_path):
     monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
 
     run = registry.create("wf", "hello there")
-    run_in_background(run.id, _workflow(), "hello there", engine=None, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hello there", engine=None, user_id="alice", org_id=5)
 
     store = SqliteBM25Memory(str(db_path))
     records = store.all("alice", org_id=None)
@@ -234,7 +234,7 @@ def test_run_in_background_records_with_run_principal_id(monkeypatch, tmp_path):
 
     run = registry.create("wf", "hello there")
     run_in_background(
-        run.id, _workflow(), "hello there", engine=None,
+        run.id, _pipeline(), "hello there", engine=None,
         user_id="alice", org_id=5, principal_id="P1",
     )
 
@@ -246,29 +246,29 @@ def test_run_in_background_records_with_run_principal_id(monkeypatch, tmp_path):
     store.close()
 
 
-def test_run_in_background_records_with_run_workflow_id(monkeypatch, tmp_path):
-    # The episodic record carries the run's workflow_id, and a different
-    # workflow recalls nothing of it.
+def test_run_in_background_records_with_run_pipeline_id(monkeypatch, tmp_path):
+    # The episodic record carries the run's pipeline_id, and a different
+    # pipeline recalls nothing of it.
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
     monkeypatch.delenv("BESTTEAM_MEMORY_MODEL", raising=False)
 
     run = registry.create("wf", "hello there")
     run_in_background(
-        run.id, _workflow(), "hello there", engine=None, user_id="alice", workflow_id=1,
+        run.id, _pipeline(), "hello there", engine=None, user_id="alice", pipeline_id=1,
     )
 
     store = SqliteBM25Memory(str(db_path))
-    records = store.all("alice", workflow_id=None)
+    records = store.all("alice", pipeline_id=None)
     assert len(records) == 1
-    assert records[0].workflow_id == 1
-    # Another workflow sees nothing of workflow 1's episodic memory.
-    assert store.all("alice", workflow_id=2) == []
+    assert records[0].pipeline_id == 1
+    # Another pipeline sees nothing of pipeline 1's episodic memory.
+    assert store.all("alice", pipeline_id=2) == []
     store.close()
 
 
 def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
-    # SP-3 M-06: the run's id + workflow_version_id are stamped into each record's
+    # SP-3 M-06: the run's id + pipeline_version_id are stamped into each record's
     # metadata (via the real _make_memory binding path).
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
@@ -276,13 +276,13 @@ def test_run_in_background_stamps_provenance_metadata(monkeypatch, tmp_path):
 
     run = registry.create("wf", "hello there")
     run_in_background(
-        run.id, _workflow(), "hello there", engine=None,
-        user_id="alice", org_id=5, workflow_version_id=9,
+        run.id, _pipeline(), "hello there", engine=None,
+        user_id="alice", org_id=5, pipeline_version_id=9,
     )
 
     store = SqliteBM25Memory(str(db_path))
     rec = store.all("alice", org_id=None)[0]
-    assert rec.metadata == {"run_id": run.id, "workflow_version_id": 9}
+    assert rec.metadata == {"run_id": run.id, "pipeline_version_id": 9}
     assert rec.org_id == 5
     store.close()
 
@@ -312,7 +312,7 @@ def test_run_in_background_meters_memory_extraction(monkeypatch, tmp_path):
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
 
     run = registry.create("wf", "hello")
-    run_in_background(run.id, _workflow(), "hello", engine=engine, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hello", engine=engine, user_id="alice", org_id=5)
 
     with Session() as db:
         mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:extraction"]
@@ -345,7 +345,7 @@ def test_run_in_background_meters_memory_query_expansion(monkeypatch, tmp_path):
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
 
     run = registry.create("wf", "hello")
-    run_in_background(run.id, _workflow(), "hello", engine=engine, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hello", engine=engine, user_id="alice", org_id=5)
 
     with Session() as db:
         mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:query_expansion"]
@@ -383,7 +383,7 @@ def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
 
     run = registry.create("wf", "hi")
-    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hi", engine=engine, user_id="alice", org_id=5)
 
     with Session() as db:
         mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:query_expansion"]
@@ -421,7 +421,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch, tmp_path):
     monkeypatch.setattr("ui.backend.runtime.record_usage", boom)
 
     run = registry.create("wf", "hi")
-    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hi", engine=engine, user_id="alice", org_id=5)
 
     events = registry.get(run.id).events
     assert any(e["type"] == "run_completed" for e in events)
@@ -456,7 +456,7 @@ def test_total_write_failure_still_meters_extraction(monkeypatch, tmp_path):
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: mgr)
 
     run = registry.create("wf", "hi")
-    run_in_background(run.id, _workflow(), "hi", engine=engine, user_id="alice", org_id=5)
+    run_in_background(run.id, _pipeline(), "hi", engine=engine, user_id="alice", org_id=5)
 
     with Session() as db:
         mem_rows = [r for r in list_usage_for_run(db, run.id) if r.agent == "memory:extraction"]
@@ -471,11 +471,11 @@ def test_run_in_background_no_memory_when_user_absent(monkeypatch, tmp_path):
     db_path = tmp_path / "m.db"
     monkeypatch.setenv("BESTTEAM_MEMORY_DB", str(db_path))
 
-    workflow = _workflow()
+    pipeline = _pipeline()
     run = registry.create("wf", "hello there")
 
     # No user_id -> memory stays disabled even though the env var is set.
-    run_in_background(run.id, workflow, "hello there", engine=None)
+    run_in_background(run.id, pipeline, "hello there", engine=None)
 
     assert not db_path.exists()
 
@@ -486,7 +486,7 @@ def test_run_in_background_closes_memory_store_on_success(monkeypatch):
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: spy)
 
     run = registry.create("wf", "hello")
-    run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
+    run_in_background(run.id, _pipeline(), "hello", engine=None, user_id="alice")
 
     assert spy.close_calls == 1
 
@@ -496,15 +496,15 @@ def test_run_in_background_closes_memory_store_on_failure(monkeypatch):
     spy = _CloseSpyManager(SqliteBM25Memory(":memory:"))
     monkeypatch.setattr("ui.backend.runtime._make_memory", lambda *a, **k: spy)
 
-    workflow = _workflow()
+    pipeline = _pipeline()
 
     def boom(*args, **kwargs):
         raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(workflow, "stream", boom)
+    monkeypatch.setattr(pipeline, "stream", boom)
     run = registry.create("wf", "hello")
 
-    run_in_background(run.id, workflow, "hello", engine=None, user_id="alice")
+    run_in_background(run.id, pipeline, "hello", engine=None, user_id="alice")
 
     assert spy.close_calls == 1
     events = registry.get(run.id).events
@@ -526,7 +526,7 @@ def test_run_in_background_survives_memory_close_failure(monkeypatch):
 
     run = registry.create("wf", "hello")
     # Returns normally despite close() raising inside the finally.
-    run_in_background(run.id, _workflow(), "hello", engine=None, user_id="alice")
+    run_in_background(run.id, _pipeline(), "hello", engine=None, user_id="alice")
 
     events = registry.get(run.id).events
     assert any(e["type"] == "run_completed" for e in events)
@@ -536,11 +536,11 @@ def test_run_in_background_survives_memory_close_failure(monkeypatch):
 def test_run_in_background_no_memory_when_env_unset(monkeypatch):
     monkeypatch.delenv("BESTTEAM_MEMORY_DB", raising=False)
 
-    workflow = _workflow()
+    pipeline = _pipeline()
     run = registry.create("wf", "hello there")
 
     # Runs fine with a user but no configured store — no error, nothing stored.
-    run_in_background(run.id, workflow, "hello there", engine=None, user_id="alice")
+    run_in_background(run.id, pipeline, "hello there", engine=None, user_id="alice")
 
     events = registry.get(run.id).events
     assert any(e["type"] == "run_completed" for e in events)

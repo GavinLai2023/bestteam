@@ -26,11 +26,11 @@ interface Kind {
 }
 
 // Ordered whole-then-parts: the deployable unit, then what it's built from,
-// then read-only reference. A workflow is what the wizard and the customer UI
+// then read-only reference. A pipeline is what the wizard and the customer UI
 // call an "AI team"; this page is operator-only, so it uses the noun that
 // matches the JSON keys, the API path, and the YAML.
 const KINDS: Kind[] = [
-  { key: 'workflows', label: 'Workflows', idField: 'name', editableField: 'config', orgScope: 'required' },
+  { key: 'pipelines', label: 'Pipelines', idField: 'name', editableField: 'config', orgScope: 'required' },
   { key: 'skills', label: 'Skills', idField: 'name', editableField: 'config', orgScope: 'optional' },
   { key: 'knowledge_bases', label: 'Knowledge bases', idField: 'name', editableField: 'config', orgScope: 'required' },
   { key: 'tools', label: 'Tools', idField: 'name', editableField: null, orgScope: 'none', readOnly: true },
@@ -293,7 +293,7 @@ export default function AdvancedPage() {
     <div className="advanced">
       <header>
         <h1>Advanced configuration</h1>
-        <p>Direct access to the underlying workflows, skills, knowledge bases, tools, and model catalog.</p>
+        <p>Direct access to the underlying pipelines, skills, knowledge bases, tools, and model catalog.</p>
         {kind.orgScope !== 'none' && (
           <label className="advanced-org">
             Organisation

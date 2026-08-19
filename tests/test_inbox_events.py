@@ -111,7 +111,7 @@ def test_claim_takes_the_oldest_pending_rows_up_to_the_limit(db):
     db.commit()
     assert [e.external_id for e in claimed] == ["1", "2", "3"]
     assert all(e.status == "claimed" and e.run_id == "run-a" for e in claimed)
-    # Claiming does NOT charge an attempt -- a workflow that fails to build is
+    # Claiming does NOT charge an attempt -- a pipeline that fails to build is
     # not the message's fault (see mark_dispatched).
     assert all(e.attempts == 0 for e in claimed)
 
@@ -225,7 +225,7 @@ def test_release_dead_letters_at_the_attempt_limit(db):
 def test_release_without_an_attempt_charged_is_penalty_free(db):
     from ui.backend.db import inbox_events as store
 
-    # A workflow that fails to BUILD never charged an attempt, so it returns to
+    # A pipeline that fails to BUILD never charged an attempt, so it returns to
     # pending and retries forever -- today's behaviour, and correct: a broken
     # team config must not dead-letter a whole day of an org's mail.
     _claimed(db, ["1"])

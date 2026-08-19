@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-_WORKFLOW_TEMPLATE = """\
-# bestteam workflow definition — agents, teams, and the pipeline that chains them.
+_PIPELINE_TEMPLATE = """\
+# bestteam pipeline definition — agents, teams, and the pipeline that chains them.
 #
 # Model specs are resolved lazily through langchain's `init_chat_model`, so any
 # provider it supports works here ("openai:gpt-4o-mini", "anthropic:claude-sonnet-4-6", ...).
@@ -31,7 +31,7 @@ teams:
     agents: [reviewer, fixer]
     mode: sequential   # sequential | parallel  (hierarchical/debate: coming soon)
 
-workflow:
+pipeline:
   steps: [qa_team]
 """
 
@@ -53,7 +53,7 @@ def create_project(target: Path) -> List[Path]:
 
     target.mkdir(parents=True)
     files = {
-        target / "workflow.yaml": _WORKFLOW_TEMPLATE,
+        target / "pipeline.yaml": _PIPELINE_TEMPLATE,
         target / ".gitignore": _GITIGNORE_TEMPLATE,
     }
     for file_path, content in files.items():

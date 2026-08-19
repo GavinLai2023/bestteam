@@ -168,7 +168,7 @@ def e2e_backend():
         **os.environ,
         "BESTTEAM_DB_PATH": db_path,
         "BESTTEAM_SECRET_KEY": secret,
-        "BESTTEAM_DEMO_WORKFLOWS": "1",
+        "BESTTEAM_DEMO_PIPELINES": "1",
         # Neutralize every BESTTEAM_* var that could otherwise route this
         # supposedly $0, side-effect-free E2E run at a real external
         # service or a real persistent store outside tmp_dir, regardless

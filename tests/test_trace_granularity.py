@@ -5,7 +5,7 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Team, Pipeline
 
 pytestmark = pytest.mark.unit
 
@@ -29,12 +29,12 @@ class _FakeToolCallingChatModel(FakeMessagesListChatModel):
 
 def test_stream_emits_agent_started_around_agent_completed_for_simple_agent():
     a = _agent("a", "output from a")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
 
     assert [e.type for e in events] == [
         "run_started",
@@ -59,12 +59,12 @@ def test_stream_emits_tool_started_and_completed_around_tool_call():
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[echo_tool])
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
     types = [e.type for e in events]
 
     assert types.index("agent_started") < types.index("tool_started") < types.index("tool_completed") < types.index("agent_completed")
@@ -89,12 +89,12 @@ def test_tool_completed_summary_is_truncated_for_long_result():
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[long_tool])
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
     tool_completed = next(e for e in events if e.type == "tool_completed")
 
     assert len(tool_completed.data["summary"]) <= 201
@@ -114,12 +114,12 @@ def test_failed_tool_call_emits_tool_completed_with_success_false_and_no_excepti
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[failing_tool])
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
     tool_completed = next(e for e in events if e.type == "tool_completed")
 
     assert tool_completed.data["success"] is False
@@ -144,9 +144,9 @@ def test_hierarchical_delegation_emits_events_in_order():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
+    pipeline = Pipeline(name="wf", steps=[team])
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
     types = [e.type for e in events]
 
     assert types.index("delegation_started") < types.index("subagent_started")
@@ -166,12 +166,12 @@ def test_hierarchical_delegation_emits_events_in_order():
 def test_parallel_team_trace_events_do_not_collide_between_branches():
     a = _agent("a", "alpha")
     b = _agent("b", "beta")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a, b], mode=CollaborationMode.PARALLEL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
     started_agents = {e.agent for e in events if e.type == "agent_started"}
     completed_agents = {e.agent for e in events if e.type == "agent_completed"}
 
@@ -184,7 +184,7 @@ def test_parallel_team_trace_events_do_not_collide_between_branches():
 # 2026-08-02-property-maintenance-inbox-phase-1-development-plan.md section 15.2) --
 
 
-def _email_tool_call_workflow(tool_fn, tool_name, args, final_message="done"):
+def _email_tool_call_pipeline(tool_fn, tool_name, args, final_message="done"):
     model = _FakeToolCallingChatModel(
         responses=[
             AIMessage(content="", tool_calls=[{"name": tool_name, "args": args, "id": "call_1"}]),
@@ -192,11 +192,11 @@ def _email_tool_call_workflow(tool_fn, tool_name, args, final_message="done"):
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[tool_fn])
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
-    return list(workflow.stream("do the thing"))
+    return list(pipeline.stream("do the thing"))
 
 
 def test_email_read_tool_completed_summary_never_contains_body_or_subject():
@@ -207,7 +207,7 @@ def test_email_read_tool_completed_summary_never_contains_body_or_subject():
             "Please send someone immediately, my landlord's phone is 555-1234."
         )
 
-    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "42"})
+    events = _email_tool_call_pipeline(email_read, "email_read", {"message_id": "42"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     summary = tool_completed.data["summary"]
     assert "gas leak" not in summary
@@ -220,7 +220,7 @@ def test_email_find_tool_completed_summary_never_contains_subject_lines():
     def email_find(query: str = "") -> str:
         return "Found 2 message(s):\n42 · a@b.com · Confidential lease dispute · today\n43 · c@d.com · gas smell · today"
 
-    events = _email_tool_call_workflow(email_find, "email_find", {"query": ""})
+    events = _email_tool_call_pipeline(email_find, "email_find", {"query": ""})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     summary = tool_completed.data["summary"]
     assert "lease dispute" not in summary
@@ -232,7 +232,7 @@ def test_email_draft_reply_tool_completed_summary_never_contains_draft_body():
     def email_draft_reply(message_id: str, body: str) -> str:
         return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_draft_reply, "email_draft_reply",
         {"message_id": "42", "body": "We will send a plumber tomorrow and cover the cost."},
     )
@@ -247,7 +247,7 @@ def test_non_email_tool_summary_is_unaffected_by_redaction():
     def some_tool(text: str) -> str:
         return f"result: {text}"
 
-    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    events = _email_tool_call_pipeline(some_tool, "some_tool", {"text": "hello"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["summary"] == "result: hello"
 
@@ -256,7 +256,7 @@ def test_draft_reply_success_is_recorded_with_a_draft_created_outcome():
     def email_draft_reply(message_id: str, body: str) -> str:
         return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_draft_reply, "email_draft_reply", {"message_id": "42", "body": "ok"},
     )
     tool_completed = next(e for e in events if e.type == "tool_completed")
@@ -271,7 +271,7 @@ def test_out_of_batch_rejection_is_not_recorded_as_a_successful_read_or_draft():
     def email_read(message_id: str) -> str:
         return "That message isn't part of this batch of new mail."
 
-    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "99"})
+    events = _email_tool_call_pipeline(email_read, "email_read", {"message_id": "99"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["outcome"] == "out_of_batch"
     assert "Rejected" in tool_completed.data["summary"]
@@ -285,7 +285,7 @@ def test_failed_email_read_still_records_the_message_id():
     def email_read(message_id: str) -> str:
         raise RuntimeError("IMAP connection reset")
 
-    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": "42"})
+    events = _email_tool_call_pipeline(email_read, "email_read", {"message_id": "42"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["success"] is False
     assert tool_completed.data["message_id"] == "42"
@@ -295,7 +295,7 @@ def test_failed_email_draft_reply_still_records_the_message_id():
     def email_draft_reply(message_id: str, body: str) -> str:
         raise RuntimeError("IMAP connection reset")
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_draft_reply, "email_draft_reply", {"message_id": "42", "body": "ok"},
     )
     tool_completed = next(e for e in events if e.type == "tool_completed")
@@ -310,7 +310,7 @@ def test_failed_email_read_attachment_still_records_the_message_id():
     def email_read_attachment(message_id: str, filename: str) -> str:
         raise RuntimeError("IMAP connection reset")
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_read_attachment, "email_read_attachment",
         {"message_id": "42", "filename": "quote.pdf"},
     )
@@ -325,7 +325,7 @@ def test_email_read_attachment_summary_never_contains_the_extracted_text():
     def email_read_attachment(message_id: str, filename: str) -> str:
         return "Quotation: replace the hot water system for 4,850 including labour."
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_read_attachment, "email_read_attachment",
         {"message_id": "42", "filename": "quote.pdf"},
     )
@@ -342,7 +342,7 @@ def test_failed_email_find_does_not_fabricate_a_message_id():
     def email_find(query: str = "") -> str:
         raise RuntimeError("IMAP connection reset")
 
-    events = _email_tool_call_workflow(email_find, "email_find", {"query": ""})
+    events = _email_tool_call_pipeline(email_find, "email_find", {"query": ""})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["success"] is False
     assert "message_id" not in tool_completed.data
@@ -352,7 +352,7 @@ def test_failed_non_email_tool_is_unaffected():
     def some_tool(text: str) -> str:
         raise RuntimeError("boom")
 
-    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    events = _email_tool_call_pipeline(some_tool, "some_tool", {"text": "hello"})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert tool_completed.data["success"] is False
     assert "message_id" not in tool_completed.data
@@ -363,7 +363,7 @@ def test_message_id_is_length_bounded_in_the_trace():
         return "From: a\nTo: b\nSubject: c\nDate: d\n\nbody"
 
     huge_id = "x" * 500
-    events = _email_tool_call_workflow(email_read, "email_read", {"message_id": huge_id})
+    events = _email_tool_call_pipeline(email_read, "email_read", {"message_id": huge_id})
     tool_completed = next(e for e in events if e.type == "tool_completed")
     assert len(tool_completed.data["message_id"]) <= 65
     assert huge_id not in tool_completed.data["summary"]
@@ -378,7 +378,7 @@ def test_message_id_is_stripped_in_the_trace_to_match_the_email_tools_own_normal
     def email_draft_reply(message_id: str, body: str) -> str:
         return "Draft reply saved to the 'Drafts' folder (reply to message 42)."
 
-    events = _email_tool_call_workflow(
+    events = _email_tool_call_pipeline(
         email_draft_reply, "email_draft_reply", {"message_id": " 42 ", "body": "ok"},
     )
     tool_completed = next(e for e in events if e.type == "tool_completed")
@@ -394,7 +394,7 @@ def test_message_id_is_stripped_in_the_trace_to_match_the_email_tools_own_normal
 # team leaks raw message content into its trace. It does not: the redaction
 # that strips subjects/bodies/draft text happens one layer down, in the
 # adapter, for every run -- as the three tests above demonstrate using a plain
-# Workflow with no run row, no trigger_context and no contract.
+# Pipeline with no run row, no trigger_context and no contract.
 #
 # What the PM gate additionally redacts is the MODEL'S OWN output, which for a
 # generic email team is the entire product result the customer needs to read --
@@ -528,12 +528,12 @@ def _policies_kb():
 
 def _kb_tool_completed(kb, query):
     """The `tool_completed` data of one agent turn whose only tool call
-    searches `kb`. `_email_tool_call_workflow` is tool-agnostic despite the
+    searches `kb`. `_email_tool_call_pipeline` is tool-agnostic despite the
     name -- it scripts a single tool call and runs the turn."""
     from bestteam.core.knowledge_base import make_knowledge_base_tool
 
     tool = make_knowledge_base_tool(kb)
-    events = _email_tool_call_workflow(tool, kb.name, {"query": query})
+    events = _email_tool_call_pipeline(tool, kb.name, {"query": query})
     return next(e for e in events if e.type == "tool_completed").data
 
 
@@ -575,7 +575,7 @@ def test_non_kb_tool_summary_unchanged():
     def some_tool(text: str) -> str:
         return f"result: {text}"
 
-    events = _email_tool_call_workflow(some_tool, "some_tool", {"text": "hello"})
+    events = _email_tool_call_pipeline(some_tool, "some_tool", {"text": "hello"})
     data = next(e for e in events if e.type == "tool_completed").data
 
     assert data["summary"] == "result: hello"

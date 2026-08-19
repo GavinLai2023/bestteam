@@ -5,24 +5,24 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from ..core.trace import TraceEvent
-    from ..core.workflow import Workflow, WorkflowResult
+    from ..core.pipeline import Pipeline, PipelineResult
 
 
 class EngineAdapter(ABC):
-    """Translates business-facing config (Agent/Team/Workflow) into a runnable
-    engine-specific graph, and normalizes results back into a WorkflowResult.
+    """Translates business-facing config (Agent/Team/Pipeline) into a runnable
+    engine-specific graph, and normalizes results back into a PipelineResult.
 
     This is the seam that lets bestteam swap LangGraph for CrewAI — or any
     other orchestration engine — without customer code ever noticing.
     """
 
     @abstractmethod
-    def compile(self, workflow: "Workflow") -> Any:
-        """Build and return an executable representation of the workflow."""
+    def compile(self, pipeline: "Pipeline") -> Any:
+        """Build and return an executable representation of the pipeline."""
 
     @abstractmethod
-    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> "WorkflowResult":
-        """Run the compiled workflow against `input` and normalize the result.
+    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> "PipelineResult":
+        """Run the compiled pipeline against `input` and normalize the result.
 
         `memory_preamble`, if non-empty, is recalled per-user memory injected
         into each agent's system prompt for this run (see `core/memory.py`).
@@ -34,7 +34,7 @@ class EngineAdapter(ABC):
 
     @abstractmethod
     def stream(self, compiled: Any, input: str, memory_preamble: str = "") -> Iterator["TraceEvent"]:
-        """Yield TraceEvents live as the workflow executes, for monitoring/observability.
+        """Yield TraceEvents live as the pipeline executes, for monitoring/observability.
 
         `memory_preamble` behaves as in `execute`.
         """

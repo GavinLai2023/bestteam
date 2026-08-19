@@ -7,9 +7,9 @@ vi.mock('../lib/api', () => ({
   api: {
     listOrgs: vi.fn(),
     listRuns: vi.fn(),
-    listWorkflowAnalytics: vi.fn(),
+    listPipelineAnalytics: vi.fn(),
     listModelAnalytics: vi.fn(),
-    getWorkflowAnalytics: vi.fn(),
+    getPipelineAnalytics: vi.fn(),
     getRunTrace: vi.fn(),
     createWsTicket: vi.fn(),
   },
@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockedApi.listOrgs.mockResolvedValue(ORGS)
   mockedApi.listRuns.mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 })
-  mockedApi.listWorkflowAnalytics.mockResolvedValue({ workflows: [] })
+  mockedApi.listPipelineAnalytics.mockResolvedValue({ pipelines: [] })
   mockedApi.listModelAnalytics.mockResolvedValue({ models: [] })
 })
 
@@ -53,7 +53,7 @@ describe('TracePage', () => {
     )
   })
 
-  it('switching to the Analytics tab fetches cross-org workflow summaries by default', async () => {
+  it('switching to the Analytics tab fetches cross-org pipeline summaries by default', async () => {
     render(<TracePage />)
     await screen.findByDisplayValue('All organisations')
 
@@ -61,21 +61,21 @@ describe('TracePage', () => {
       fireEvent.click(screen.getByText('Analytics'))
     })
 
-    expect(mockedApi.listWorkflowAnalytics).toHaveBeenCalledWith(expect.objectContaining({ org: undefined }))
+    expect(mockedApi.listPipelineAnalytics).toHaveBeenCalledWith(expect.objectContaining({ org: undefined }))
   })
 
-  it('clicking a workflow summary row fetches its per-agent detail', async () => {
-    mockedApi.listWorkflowAnalytics.mockResolvedValue({
-      workflows: [
+  it('clicking a pipeline summary row fetches its per-agent detail', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
         {
-          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
         },
       ],
     })
-    mockedApi.getWorkflowAnalytics.mockResolvedValue({
-      org_id: 1, workflow: 'wf',
+    mockedApi.getPipelineAnalytics.mockResolvedValue({
+      org_id: 1, pipeline: 'wf',
       per_agent: [{ agent: 'agent-a', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05, avg_duration_seconds: 4 }],
       per_model: [],
       common_failure_points: [],
@@ -91,22 +91,22 @@ describe('TracePage', () => {
       fireEvent.click(row)
     })
 
-    expect(mockedApi.getWorkflowAnalytics).toHaveBeenCalledWith('wf', { org: 'org_a' })
+    expect(mockedApi.getPipelineAnalytics).toHaveBeenCalledWith('wf', { org: 'org_a' })
     expect(await screen.findByText(/3 run\(s\)/)).toBeInTheDocument()
   })
 
-  it('renders a per-model breakdown in the workflow detail panel', async () => {
-    mockedApi.listWorkflowAnalytics.mockResolvedValue({
-      workflows: [
+  it('renders a per-model breakdown in the pipeline detail panel', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
         {
-          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 300, total_output_tokens: 60, total_cost_estimate: 0.4,
         },
       ],
     })
-    mockedApi.getWorkflowAnalytics.mockResolvedValue({
-      org_id: 1, workflow: 'wf',
+    mockedApi.getPipelineAnalytics.mockResolvedValue({
+      org_id: 1, pipeline: 'wf',
       per_agent: [],
       per_model: [{ model: 'openai:gpt-4o-mini', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05 }],
       common_failure_points: [],
@@ -126,10 +126,10 @@ describe('TracePage', () => {
   })
 
   it('renders token and cost totals in the summary table', async () => {
-    mockedApi.listWorkflowAnalytics.mockResolvedValue({
-      workflows: [
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
         {
-          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 98497, total_output_tokens: 3928, total_cost_estimate: 0.0171,
         },
@@ -146,11 +146,11 @@ describe('TracePage', () => {
     expect(screen.getByText('$0.0171')).toBeInTheDocument()
   })
 
-  it('renders a dash for a workflow with no cost data', async () => {
-    mockedApi.listWorkflowAnalytics.mockResolvedValue({
-      workflows: [
+  it('renders a dash for a pipeline with no cost data', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
         {
-          org_id: 1, org: 'org_a', workflow: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
           running: 0, success_rate: 1, avg_duration_seconds: null,
           total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
         },

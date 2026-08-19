@@ -47,7 +47,7 @@ describe('SessionsPage automation tag', () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session()] })
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true,
-      workflow_name: 'my-team',
+      pipeline_name: 'my-team',
       status: 'active',
       daily_cap: 0,
       last_checked_at: '2026-07-31T11:02:00Z',
@@ -62,7 +62,7 @@ describe('SessionsPage automation tag', () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session()] })
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true,
-      workflow_name: 'some-other-team',
+      pipeline_name: 'some-other-team',
       status: 'active',
       daily_cap: 0,
       last_checked_at: null,
@@ -78,7 +78,7 @@ describe('SessionsPage automation tag', () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session()] })
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: false,
-      workflow_name: null,
+      pipeline_name: null,
       status: 'disabled',
       daily_cap: 0,
     })
@@ -93,7 +93,7 @@ describe('SessionsPage automation tag', () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session()] })
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true,
-      workflow_name: 'my-team',
+      pipeline_name: 'my-team',
       status: 'active',
       daily_cap: 0,
       last_checked_at: null,
@@ -119,7 +119,7 @@ describe('SessionsPage automation tag', () => {
 describe('SessionsPage date format', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it('shows the updated time as "DD MMM YYYY, h:mm AM/PM"', async () => {
@@ -134,7 +134,7 @@ describe('SessionsPage date format', () => {
 describe('SessionsPage card description', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it("shows the team's friendly description instead of the raw intent text", async () => {
@@ -168,7 +168,7 @@ describe('SessionsPage card description', () => {
 describe('SessionsPage card title', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it("shows the team's customer-facing display_name instead of the internal technical name", async () => {
@@ -202,7 +202,7 @@ describe('SessionsPage card title', () => {
 describe('SessionsPage status grouping', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it('groups sessions into a Live section and one In Progress section covering Spec/Solution/Testing', async () => {
@@ -237,7 +237,7 @@ describe('SessionsPage status grouping', () => {
 describe('SessionsPage status explanations', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it('clicking the status help button toggles its explanation open and closed', async () => {
@@ -277,11 +277,11 @@ describe('SessionsPage status explanations', () => {
 describe('SessionsPage draft deletion', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
   it('shows a Delete button for a session that was never deployed', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: null })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
 
     renderPage()
 
@@ -292,7 +292,7 @@ describe('SessionsPage draft deletion', () => {
     // "Delete" as visible text reads as if the AI team itself is being
     // erased; a recycle-bin icon (with "Delete" kept as the accessible
     // name, for screen readers and the existing role queries) softens that.
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: null })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
 
     renderPage()
     const deleteButton = await screen.findByRole('button', { name: 'Delete' })
@@ -302,7 +302,7 @@ describe('SessionsPage draft deletion', () => {
   })
 
   it('does not show a Delete button for a session linked to a live team', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: 7 })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 7 })] })
 
     renderPage()
 
@@ -311,7 +311,7 @@ describe('SessionsPage draft deletion', () => {
   })
 
   it('does nothing if the user cancels the confirmation', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: null })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
     vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     renderPage()
@@ -326,7 +326,7 @@ describe('SessionsPage draft deletion', () => {
   })
 
   it('deletes the session and removes its card when confirmed', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ id: 's1', workflow_id: null })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ id: 's1', pipeline_id: null })] })
     mockedApi.deleteSession.mockResolvedValue(undefined)
     vi.spyOn(window, 'confirm').mockReturnValue(true)
 
@@ -342,7 +342,7 @@ describe('SessionsPage draft deletion', () => {
   })
 
   it('shows an error banner and keeps the card if deletion fails', async () => {
-    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ workflow_id: null })] })
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
     mockedApi.deleteSession.mockRejectedValue(new Error("Can't delete right now"))
     vi.spyOn(window, 'confirm').mockReturnValue(true)
 
@@ -358,20 +358,20 @@ describe('SessionsPage draft deletion', () => {
   })
 })
 
-describe('SessionsPage session-less deployed workflows', () => {
-  // A workflow can be deployed straight through the admin Advanced/CRUD
+describe('SessionsPage session-less deployed pipelines', () => {
+  // A pipeline can be deployed straight through the admin Advanced/CRUD
   // page, bypassing the wizard entirely; the backend represents it as a
   // session-shaped entry with id: null (see builder.py's
-  // _synthetic_session_for_workflow) so My Teams shows every deployed team,
+  // _synthetic_session_for_pipeline) so My Teams shows every deployed team,
   // not just wizard-built ones.
   beforeEach(() => {
     vi.clearAllMocks()
-    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, workflow_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
   })
 
-  it('shows a card for a deployed workflow with no builder session', async () => {
+  it('shows a card for a deployed pipeline with no builder session', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, pipeline_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
@@ -379,9 +379,9 @@ describe('SessionsPage session-less deployed workflows', () => {
     expect(await screen.findByText('orphan_team')).toBeInTheDocument()
   })
 
-  it('does not show a Delete button for a session-less deployed workflow', async () => {
+  it('does not show a Delete button for a session-less deployed pipeline', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, pipeline_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
@@ -390,9 +390,9 @@ describe('SessionsPage session-less deployed workflows', () => {
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
   })
 
-  it('clicking a session-less deployed workflow card goes to Run a Team pre-selected, not a wizard page', async () => {
+  it('clicking a session-less deployed pipeline card goes to Run a Team pre-selected, not a wizard page', async () => {
     mockedApi.listSessions.mockResolvedValue({
-      sessions: [session({ id: null, workflow_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
+      sessions: [session({ id: null, pipeline_id: 3, specification_json: { name: 'orphan_team', agents: [], teams: [] } })],
     })
 
     renderPage()
@@ -402,6 +402,6 @@ describe('SessionsPage session-less deployed workflows', () => {
       fireEvent.click(card)
     })
 
-    expect(mockNavigate).toHaveBeenCalledWith('/run?workflow=orphan_team')
+    expect(mockNavigate).toHaveBeenCalledWith('/run?pipeline=orphan_team')
   })
 })

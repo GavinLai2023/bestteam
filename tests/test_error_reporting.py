@@ -12,7 +12,7 @@ pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
-from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
+from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 from bestteam.core.trace import TraceEvent
 from helpers import make_concurrent_safe_engine
 from ui.backend import error_reporting
@@ -115,9 +115,9 @@ def test_before_send_drops_exception_messages_but_keeps_type_and_stack():
 
 def test_reports_carry_string_tags_only(reporting_on):
     exc = RuntimeError("boom")
-    error_reporting.report_exception(exc, run_id=42, workflow="triage", org_id=None)
+    error_reporting.report_exception(exc, run_id=42, pipeline="triage", org_id=None)
     error_reporting.report_message("Run failed: triage", run_id=42)
-    assert reporting_on.exceptions == [(exc, {"tags": {"run_id": "42", "workflow": "triage"}})]
+    assert reporting_on.exceptions == [(exc, {"tags": {"run_id": "42", "pipeline": "triage"}})]
     assert reporting_on.messages == [("Run failed: triage", {"level": "error", "tags": {"run_id": "42"}})]
 
 
@@ -166,8 +166,8 @@ def client(monkeypatch, tmp_path):
     from ui.backend import main as backend_main
     from ui.backend.db_session import get_db
 
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
@@ -211,12 +211,12 @@ def test_unhandled_request_exceptions_are_reported_with_the_route_template(clien
 # --- wiring: failed runs ----------------------------------------------------
 
 
-def _workflow(tmp_path):
+def _pipeline(tmp_path):
     spec = Specification(
         name="w",
         agents=[AgentSpec(name="a", role="R", goal="g", model="fake:done")],
         teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
     return validate_specification(spec, source=tmp_path / "w.yaml")
 
@@ -229,7 +229,7 @@ def _engine(tmp_path):
 
 def test_a_worker_thread_exception_is_reported_with_ids_not_content(tmp_path, reporting_on):
     engine = _engine(tmp_path)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
 
     def _boom(*a, **k):
         raise RuntimeError("model exploded")
@@ -240,19 +240,19 @@ def test_a_worker_thread_exception_is_reported_with_ids_not_content(tmp_path, re
 
     ((exc, scope),) = reporting_on.exceptions
     assert str(exc) == "model exploded"
-    assert scope == {"tags": {"run_id": run.id, "workflow": "w"}}
+    assert scope == {"tags": {"run_id": run.id, "pipeline": "w"}}
     assert reporting_on.messages == []
     with session_factory(engine)() as s:
         assert s.get(Run, run.id).status == "failed"
 
 
-def test_the_workflows_own_run_failed_event_is_reported(tmp_path, reporting_on):
+def test_the_pipelines_own_run_failed_event_is_reported(tmp_path, reporting_on):
     engine = _engine(tmp_path)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
 
     def _fails_cleanly(*a, **k):
-        yield TraceEvent(type="run_started", workflow="w", data="")
-        yield TraceEvent(type="run_failed", workflow="w", data="Provider said no: " + "x" * 1000)
+        yield TraceEvent(type="run_started", pipeline="w", data="")
+        yield TraceEvent(type="run_failed", pipeline="w", data="Provider said no: " + "x" * 1000)
 
     wf.stream = _fails_cleanly
     run = registry.create("w", "in")
@@ -263,7 +263,7 @@ def test_the_workflows_own_run_failed_event_is_reported(tmp_path, reporting_on):
     assert message == "Run failed: w"
     # Ids only: the reason is an exception's text and can quote a prompt or
     # a model's output. It stays on-box, in the run's persisted trace.
-    assert scope == {"level": "error", "tags": {"run_id": run.id, "workflow": "w"}}
+    assert scope == {"level": "error", "tags": {"run_id": run.id, "pipeline": "w"}}
     assert "Provider said no" not in repr(scope)
     with session_factory(engine)() as s:
         assert s.get(Run, run.id).status == "failed"

@@ -21,7 +21,7 @@ from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import get_email_credentials, set_email_credentials
 from ui.backend.db.models import AutomationItemResult, Run
 from ui.backend.db.orgs import get_or_create_org
-from ui.backend.db.workflows import publish_workflow_version
+from ui.backend.db.pipelines import publish_pipeline_version
 from ui.backend.db_session import get_db
 
 
@@ -29,7 +29,7 @@ from ui.backend.db_session import get_db
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("BESTTEAM_TRIGGERS_DISABLED", raising=False)
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
 
     # POST /api/runs/{id}/retry dispatches a real run, so a worker thread's
     # Session overlaps the request's -- see the helper's docstring.
@@ -86,8 +86,8 @@ def test_list_automation_results_is_org_scoped(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
         other = get_or_create_org(db, "other")
-        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
-        db.add(Run(id="r2", workflow="w", input="x", status="completed", org_id=other.id))
+        db.add(Run(id="r1", pipeline="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r2", pipeline="w", input="x", status="completed", org_id=other.id))
         db.commit()
         _add_result(db, org_id=org.id, run_id="r1")
         _add_result(db, org_id=other.id, run_id="r2")
@@ -102,7 +102,7 @@ def test_list_automation_results_is_org_scoped(client):
 def test_list_automation_results_filters_needs_attention(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
-        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r1", pipeline="w", input="x", status="completed", org_id=org.id))
         db.commit()
         _add_result(db, org_id=org.id, run_id="r1", needs_attention=False, source_key="a")
         _add_result(db, org_id=org.id, run_id="r1", needs_attention=True, source_key="b")
@@ -115,8 +115,8 @@ def test_list_automation_results_filters_needs_attention(client):
 def test_list_automation_results_filters_by_run_id(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
-        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
-        db.add(Run(id="r2", workflow="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r1", pipeline="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r2", pipeline="w", input="x", status="completed", org_id=org.id))
         db.commit()
         _add_result(db, org_id=org.id, run_id="r1", source_key="a")
         _add_result(db, org_id=org.id, run_id="r2", source_key="b")
@@ -135,7 +135,7 @@ def test_list_automation_results_by_run_id_is_404_for_other_orgs_run(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
         other = get_or_create_org(db, "other")
-        db.add(Run(id="r-other", workflow="w", input="x", status="completed", org_id=other.id))
+        db.add(Run(id="r-other", pipeline="w", input="x", status="completed", org_id=other.id))
         db.commit()
         _add_result(db, org_id=other.id, run_id="r-other")
 
@@ -151,7 +151,7 @@ def test_list_automation_results_by_run_id_is_404_for_an_unknown_run(client):
 def test_automation_results_summary_counts(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
-        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r1", pipeline="w", input="x", status="completed", org_id=org.id))
         db.commit()
         _add_result(db, org_id=org.id, run_id="r1", classification="maintenance_request",
                     priority="possible_emergency", needs_attention=True, draft_created=True, source_key="a")
@@ -191,7 +191,7 @@ def test_automation_results_summary_applies_tz_offset_to_the_date_boundary(clien
     # caller's offset is passed (Codex review finding).
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
-        db.add(Run(id="r1", workflow="w", input="x", status="completed", org_id=org.id))
+        db.add(Run(id="r1", pipeline="w", input="x", status="completed", org_id=org.id))
         db.commit()
         row = _add_result(db, org_id=org.id, run_id="r1", source_key="a")
         row.created_at = datetime(2026, 8, 2, 15, 0, tzinfo=timezone.utc)
@@ -215,13 +215,13 @@ def _seed_triage_team(org_id):
         "agents": [{"name": "t", "role": "Triager", "goal": "triage",
                     "model": "fake:done", "skills": ["email_triage_reply"]}],
         "teams": [{"name": "tm", "agents": ["t"], "mode": "sequential"}],
-        "workflow": {"steps": ["tm"]},
+        "pipeline": {"steps": ["tm"]},
     }
     with open_test_db() as db:
         from ui.backend.skills import seed_default_skills
 
         seed_default_skills(db)
-        publish_workflow_version(db, org_id=org_id, name="triage", config=config)
+        publish_pipeline_version(db, org_id=org_id, name="triage", config=config)
         db.commit()
 
 
@@ -231,7 +231,7 @@ def test_retry_run_not_found_is_404_for_other_org(client, monkeypatch):
         other = get_or_create_org(db, "other")
         set_email_credentials(db, other.id, host="imap.other.com", username="u@other.com", password="pw")
         db.add(Run(
-            id="r-other", workflow="triage", input="x", status="failed", org_id=other.id,
+            id="r-other", pipeline="triage", input="x", status="failed", org_id=other.id,
             trigger_context={"trigger_type": "email", "mailbox_credential_id": 1,
                               "uidvalidity": 3, "uids": [42], "folder": "INBOX",
                               "triggered_at": "2026-08-01T00:00:00+00:00"},
@@ -247,9 +247,9 @@ def test_retry_run_succeeds_and_creates_new_run(client, monkeypatch):
         set_email_credentials(db, org.id, host="imap.acme.com", username="u@acme.com", password="pw")
         cred = get_email_credentials(db, org.id)
         from ui.backend.db.email_triggers import upsert_email_trigger
-        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True, last_uid=45, uidvalidity=3)
+        upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True, last_uid=45, uidvalidity=3)
         db.add(Run(
-            id="r-orig", workflow="triage", input="triage this", status="failed", org_id=org.id,
+            id="r-orig", pipeline="triage", input="triage this", status="failed", org_id=org.id,
             trigger_context={"trigger_type": "email", "mailbox_credential_id": cred.id,
                               "mailbox_host": cred.host, "mailbox_username": cred.username,
                               "uidvalidity": 3, "uids": [42], "folder": "INBOX",
@@ -279,7 +279,7 @@ def test_retry_run_uidvalidity_mismatch_is_400(client, monkeypatch):
         set_email_credentials(db, org.id, host="imap.acme.com", username="u@acme.com", password="pw")
         cred = get_email_credentials(db, org.id)
         db.add(Run(
-            id="r-orig", workflow="triage", input="x", status="failed", org_id=org.id,
+            id="r-orig", pipeline="triage", input="x", status="failed", org_id=org.id,
             trigger_context={"trigger_type": "email", "mailbox_credential_id": cred.id,
                               "mailbox_host": cred.host, "mailbox_username": cred.username,
                               "uidvalidity": 3, "uids": [42], "folder": "INBOX",
@@ -296,7 +296,7 @@ def test_retry_run_uidvalidity_mismatch_is_400(client, monkeypatch):
 def test_retry_run_without_trigger_context_is_400(client):
     with open_test_db() as db:
         org = get_or_create_org(db, "default")
-        db.add(Run(id="r-manual", workflow="triage", input="x", status="failed", org_id=org.id))
+        db.add(Run(id="r-manual", pipeline="triage", input="x", status="failed", org_id=org.id))
         db.commit()
     resp = client.post("/api/runs/r-manual/retry")
     assert resp.status_code == 400

@@ -230,7 +230,7 @@ def run_ingestion_job(
                 embedding_model=embedding_model, input_tokens=embedding_tokens,
             )
 
-            # A cached workflow may have been compiled against this KB's
+            # A cached pipeline may have been compiled against this KB's
             # prior document set (or, for a first upload, may not know the
             # KB is servable yet). This is the point the KB's live content
             # actually changes -- earlier, at upload-dispatch time, it
@@ -238,7 +238,7 @@ def run_ingestion_job(
             # KB's underlying documents changing without its own row's
             # `updated_at` changing). Imported lazily -- `knowledge_bases.py`
             # imports this module, so a module-level import here would be
-            # circular; same workaround `_invalidate_workflow_cache()` itself
+            # circular; same workaround `_invalidate_pipeline_cache()` itself
             # already uses for its own `main` circularity. Isolated in its
             # own try/except, same reasoning as the pruning call below: if
             # this raised uncaught, the outer except would mark the
@@ -246,13 +246,13 @@ def run_ingestion_job(
             # rows are already durable and correct -- see the module
             # docstring's "atomic swap" invariant.
             try:
-                from .knowledge_bases import _invalidate_workflow_cache
+                from .knowledge_bases import _invalidate_pipeline_cache
 
-                _invalidate_workflow_cache()
+                _invalidate_pipeline_cache()
             except Exception:  # noqa: BLE001
                 _logger.warning(
-                    "Workflow cache invalidation failed for KB %s after ingestion "
-                    "job %s completed; a cached workflow may briefly keep serving "
+                    "Pipeline cache invalidation failed for KB %s after ingestion "
+                    "job %s completed; a cached pipeline may briefly keep serving "
                     "stale content", kb_id, job_id, exc_info=True,
                 )
 

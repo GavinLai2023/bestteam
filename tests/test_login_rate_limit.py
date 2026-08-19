@@ -145,8 +145,8 @@ def client(monkeypatch, tmp_path):
     from ui.backend.db import init_db, session_factory
     from ui.backend.db_session import get_db
 
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)

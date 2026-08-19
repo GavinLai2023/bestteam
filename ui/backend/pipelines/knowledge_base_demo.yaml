@@ -1,4 +1,4 @@
-# Single-agent support workflow backed by a local-folder knowledge base.
+# Single-agent support pipeline backed by a local-folder knowledge base.
 # "support_agent" can call the "company_docs" tool (BM25 keyword search over
 # kb_docs/) to ground its answers in the company's policy documents.
 # Uses a "fake:" model so the dashboard demo runs with zero cost / no API key.
@@ -22,5 +22,5 @@ teams:
     agents: [support_agent]
     mode: sequential
 
-workflow:
+pipeline:
   steps: [support_team]

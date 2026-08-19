@@ -1,4 +1,4 @@
-"""Pure aggregation helpers for the admin workflow-run analytics API
+"""Pure aggregation helpers for the admin pipeline-run analytics API
 (`run_analytics_api.py`). Kept free of DB/FastAPI dependencies so the
 tricky bits -- checkpoint-based per-agent timing, failure-point tallying --
 are unit-testable against plain data.

@@ -20,7 +20,7 @@ def test_fake_architect_with_structured_output_returns_canned_specification():
     assert isinstance(spec, Specification)
     assert spec.agents
     assert spec.teams
-    assert spec.workflow.steps
+    assert spec.pipeline.steps
 
 
 def test_fake_architect_with_structured_output_returns_canned_requirements():

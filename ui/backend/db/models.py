@@ -242,7 +242,7 @@ class SkillRecord(Base):
 
     ``config`` mirrors the current SkillVersion for compatibility with existing
     admin/library readers. Deployments never execute this mutable mirror: each
-    WorkflowDependency pins an immutable SkillVersion instead.
+    PipelineDependency pins an immutable SkillVersion instead.
     """
 
     __tablename__ = "skills"
@@ -275,7 +275,7 @@ class SkillVersion(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # Nullable intentionally: deleting an unused library head must not destroy
-    # version snapshots retained by superseded workflow versions/audit history.
+    # version snapshots retained by superseded pipeline versions/audit history.
     skill_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("skills.id", ondelete="SET NULL"), nullable=True
     )
@@ -285,16 +285,16 @@ class SkillVersion(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
-class WorkflowRecord(Base):
-    """A Workflow's `raw` config (agents/teams/knowledge_bases/workflow.steps,
+class PipelineRecord(Base):
+    """A Pipeline's `raw` config (agents/teams/knowledge_bases/pipeline.steps,
     i.e. `Specification.to_raw()`) plus its lifecycle status."""
 
-    __tablename__ = "workflows"
+    __tablename__ = "pipelines"
     __table_args__ = (
-        UniqueConstraint("org_id", "name", name="uq_workflows_org_id_name"),
+        UniqueConstraint("org_id", "name", name="uq_pipelines_org_id_name"),
         CheckConstraint(
             "status IN ('draft', 'ready_for_testing', 'deployed')",
-            name="ck_workflows_status",
+            name="ck_pipelines_status",
         ),
     )
 
@@ -304,8 +304,8 @@ class WorkflowRecord(Base):
     # The creator's immutable User.principal_id (NOT username -- usernames are
     # reusable after account deletion, and a username-keyed value here would
     # let a newly created same-named account see/run the deleted account's
-    # personal workflows). NULL = admin-shared template, visible to every org
-    # member. See db/workflows.py::publish_workflow_version.
+    # personal pipelines). NULL = admin-shared template, visible to every org
+    # member. See db/pipelines.py::publish_pipeline_version.
     created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     # draft | ready_for_testing | deployed -- mirrors the Solution/Testing/
@@ -314,55 +314,55 @@ class WorkflowRecord(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
     current_version_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("workflow_versions.id"), nullable=True
+        ForeignKey("pipeline_versions.id"), nullable=True
     )
 
 
-class WorkflowVersion(Base):
-    """An immutable published snapshot of a WorkflowRecord's config.
+class PipelineVersion(Base):
+    """An immutable published snapshot of a PipelineRecord's config.
 
     Deploy appends one row (never updates an existing one) and points the
-    parent WorkflowRecord.current_version_id at it; a Run references the exact
+    parent PipelineRecord.current_version_id at it; a Run references the exact
     version it executed. The inline config and referenced SkillVersions are
     frozen; standalone KBs/models are still resolved by name at load."""
 
-    __tablename__ = "workflow_versions"
+    __tablename__ = "pipeline_versions"
     __table_args__ = (
         UniqueConstraint(
-            "workflow_id", "version_number",
-            name="uq_workflow_versions_workflow_id_version_number",
+            "pipeline_id", "version_number",
+            name="uq_pipeline_versions_pipeline_id_version_number",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"))
+    pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id"))
     version_number: Mapped[int]
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
-class WorkflowDependency(Base):
-    """A typed record of one skill/KB a published workflow version depends on.
+class PipelineDependency(Base):
+    """A typed record of one skill/KB a published pipeline version depends on.
 
     Materialized at deploy from the version's inline config (agents[*].skills and
     the standalone KBs named in agents[*].tools) so the DB can answer "what depends
     on this resource?" and the skill/KB delete guard can RESTRICT by a precise
-    resource_id instead of re-scanning every deployed workflow's JSON (P1-04).
+    resource_id instead of re-scanning every deployed pipeline's JSON (P1-04).
     Written once per version (a version is immutable); resource_id is the resolved
     SkillRecord/KnowledgeBaseRecord id and resource_version_id freezes SkillVersion
     content (NULL only for legacy/unresolved references)."""
 
-    __tablename__ = "workflow_dependencies"
+    __tablename__ = "pipeline_dependencies"
     __table_args__ = (
         UniqueConstraint(
-            "workflow_version_id", "resource_kind", "resource_name",
-            name="uq_workflow_dependencies_version_kind_name",
+            "pipeline_version_id", "resource_kind", "resource_name",
+            name="uq_pipeline_dependencies_version_kind_name",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    workflow_version_id: Mapped[int] = mapped_column(ForeignKey("workflow_versions.id"))
+    pipeline_version_id: Mapped[int] = mapped_column(ForeignKey("pipeline_versions.id"))
     resource_kind: Mapped[str]
     resource_name: Mapped[str]
     resource_id: Mapped[Optional[int]] = mapped_column(nullable=True)
@@ -436,7 +436,7 @@ class EmailTrigger(Base):
     org_id: Mapped[int] = mapped_column(
         ForeignKey("organizations.id"), unique=True, nullable=False
     )
-    workflow_name: Mapped[str]
+    pipeline_name: Mapped[str]
     enabled: Mapped[bool] = mapped_column(default=False)
     # Dedup baseline: only UIDs above this trigger a run. Set to the mailbox's
     # current max UID at enable time so the existing backlog never triggers.
@@ -455,8 +455,11 @@ class EmailTrigger(Base):
     last_error: Mapped[Optional[str]] = mapped_column(nullable=True)
     # "mailbox" (connectivity/credentials -- auto-clears on the next
     # successful check) | "workflow" (dispatch/build fault -- persists until
-    # a real successful dispatch, F5) | None (no error, or a pre-migration
-    # row whose kind is unknown -- treated conservatively as sticky).
+    # a real successful dispatch, F5; the stored value is kept as "workflow"
+    # across the Workflow->Pipeline rename to avoid backfilling stored
+    # EmailTrigger rows -- see runtime.py/trigger_health.py) | None (no error,
+    # or a pre-migration row whose kind is unknown -- treated conservatively
+    # as sticky).
     last_error_kind: Mapped[Optional[str]] = mapped_column(nullable=True)
     # Alerting state (Phase 3a). `consecutive_faults` counts fault cycles of
     # any kind and resets on any healthy outcome; `alerted_fingerprint` is the
@@ -474,7 +477,7 @@ class InboxEvent(Base):
     The row exists so that the commit which consumes the mail (advancing
     `EmailTrigger.last_uid`) is the SAME commit that records the work. Before
     this, `_start_triggered_run` advanced the cursor and only then handed the
-    workflow to a thread pool, so a process killed in between consumed mail
+    pipeline to a thread pool, so a process killed in between consumed mail
     that nothing ever processed.
 
     Identity is `(org, connector, mailbox, generation, external_id)`. The
@@ -547,18 +550,18 @@ class BuilderSession(Base):
     status: Mapped[str] = mapped_column(default="intent")
     org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     feedback_history: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    # The stable WorkflowRecord (team head) this session deploys to. Set on
+    # The stable PipelineRecord (team head) this session deploys to. Set on
     # first deploy; a redeploy publishes a new version under the same head, so
     # two sessions that deploy the same name converge on one head (P1-02).
-    workflow_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("workflows.id"), nullable=True
+    pipeline_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pipelines.id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
 class Run(Base):
-    """A workflow execution. `ui/backend/runtime.py::run_in_background` persists
+    """A pipeline execution. `ui/backend/runtime.py::run_in_background` persists
     one row per run (status/output updated at the terminal event) so usage/trace
     foreign keys reference a real run (CR-012); `RunRegistry` remains the live
     in-memory layer and full restart-survival is deferred to Phase 5."""
@@ -566,7 +569,7 @@ class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[str] = mapped_column(primary_key=True)
-    workflow: Mapped[str]
+    pipeline: Mapped[str]
     input: Mapped[str]
     output: Mapped[Optional[str]] = mapped_column(nullable=True)
     # running | completed | failed
@@ -581,8 +584,8 @@ class Run(Base):
     # The exact immutable version this run executed (P1-03/P1-15). NULL for
     # sandbox test runs (they run the session spec, not a published version)
     # and for pre-migration rows.
-    workflow_version_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("workflow_versions.id"), nullable=True
+    pipeline_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pipeline_versions.id"), nullable=True
     )
     # Server-generated context for an autonomous email-triggered run: mailbox
     # credential id, IMAP UIDVALIDITY, the detected UID batch, folder, and
@@ -732,7 +735,7 @@ class ShareLink(Base):
     __tablename__ = "share_links"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"), nullable=False)
+    pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id"), nullable=False)
     org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     token: Mapped[str] = mapped_column(unique=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)

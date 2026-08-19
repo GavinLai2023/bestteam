@@ -170,12 +170,12 @@ class MemoryRecord:
     # same-username account can't recall the deleted account's rows. None for
     # rows written before principal stamping, or by SDK-direct callers.
     principal_id: Optional[str] = None
-    # Team/workflow this record is scoped to (`WorkflowRecord.id`, the stable
-    # head -- NOT `workflow_version_id`, which is pure per-deploy provenance and
+    # Team/pipeline this record is scoped to (`PipelineRecord.id`, the stable
+    # head -- NOT `pipeline_version_id`, which is pure per-deploy provenance and
     # survives a redeploy differently). None for `semantic` records (deliberately
-    # org-wide, never workflow-scoped) and for rows written before this scoping
+    # org-wide, never pipeline-scoped) and for rows written before this scoping
     # dimension existed.
-    workflow_id: Optional[int] = None
+    pipeline_id: Optional[int] = None
 
 
 class Memory(ABC):
@@ -305,7 +305,7 @@ class SqliteBM25Memory(Memory):
                 created_at TEXT NOT NULL,
                 org_id INTEGER,
                 principal_id TEXT,
-                workflow_id INTEGER,
+                pipeline_id INTEGER,
                 embedding_json TEXT,
                 embedding_model TEXT
             )
@@ -318,10 +318,26 @@ class SqliteBM25Memory(Memory):
         # won and the column now exists, which is fine -- only a different error is
         # a real failure.
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        # Workflow -> Pipeline rename: a DB created before this rename has a
+        # `workflow_id` column holding real data -- rename it in place (SQLite
+        # 3.25+) rather than adding a fresh, empty `pipeline_id` column and
+        # orphaning the old one. Same race tolerance as the ADD COLUMN loop
+        # below: either "duplicate column name" (another connection already
+        # renamed it) or "no such column" (ditto, race lost after the source
+        # column vanished) means it's already done.
+        if "workflow_id" in cols and "pipeline_id" not in cols:
+            try:
+                self._conn.execute("ALTER TABLE memories RENAME COLUMN workflow_id TO pipeline_id")
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "duplicate column name" not in message and "no such column" not in message:
+                    raise
+            cols.discard("workflow_id")
+            cols.add("pipeline_id")
         for column, ddl in (
             ("org_id", "INTEGER"),
             ("principal_id", "TEXT"),
-            ("workflow_id", "INTEGER"),
+            ("pipeline_id", "INTEGER"),
             ("embedding_json", "TEXT"),
             ("embedding_model", "TEXT"),
         ):
@@ -355,12 +371,16 @@ class SqliteBM25Memory(Memory):
             "CREATE INDEX IF NOT EXISTS idx_memories_org_user_created "
             "ON memories(org_id, user_id, created_at)"
         )
-        # Covers a workflow-scoped recall's filter+sort (WHERE user, workflow_id
+        # Covers a pipeline-scoped recall's filter+sort (WHERE user, pipeline_id
         # ORDER BY created_at DESC LIMIT N) the same way idx_memories_org_user_created
-        # covers the org-scoped one.
+        # covers the org-scoped one. The old index name is dropped explicitly
+        # rather than left behind under CREATE INDEX IF NOT EXISTS's new name --
+        # SQLite's RENAME COLUMN updates the index's column reference in place,
+        # but leaves its stored name (idx_memories_workflow_user_created) as-is.
+        self._conn.execute("DROP INDEX IF EXISTS idx_memories_workflow_user_created")
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_workflow_user_created "
-            "ON memories(workflow_id, user_id, created_at)"
+            "CREATE INDEX IF NOT EXISTS idx_memories_pipeline_user_created "
+            "ON memories(pipeline_id, user_id, created_at)"
         )
         # Covers `add_if_absent`'s existence check (WHERE org_id[/IS NULL] AND
         # user_id AND type AND content), so per-type dedup seeks instead of scanning
@@ -401,7 +421,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         # Soft type check (M-11): the framework enum stays open (a custom store
         # may model other types), but a non-string / empty type is a caller bug
@@ -417,7 +437,7 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
-            workflow_id=workflow_id,
+            pipeline_id=pipeline_id,
         )
         # Skip the embedding call outright for an already-retired principal: a
         # remote embedding provider call is real external processing/cost, and
@@ -440,7 +460,7 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="WHERE")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, pipeline_id, "
             "embedding_json, embedding_model) "
             "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" + retired_clause,
             (
@@ -452,7 +472,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
-                record.workflow_id,
+                record.pipeline_id,
                 embedding_json,
                 embedding_model,
                 *retired_params,
@@ -472,17 +492,17 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
     ) -> Optional[MemoryRecord]:
         """Atomic insert-if-not-exists, keyed by `(user_id, type, content, org-scope,
-        principal-scope, workflow-scope)` (SP-4 M-08 dedup + deletion-lifecycle +
-        cross-workflow scoping). Returns the new record, or None when an identical
+        principal-scope, pipeline-scope)` (SP-4 M-08 dedup + deletion-lifecycle +
+        cross-pipeline scoping). Returns the new record, or None when an identical
         record already existed (or the principal is retired). Dedup is **per type**
         (a semantic and a procedural row with the same text don't collide, review r1
         #4), **per principal** (the same text under a recreated account is not a
-        duplicate), **per workflow** (the same text under a different workflow is
-        not a duplicate -- callers never pass `workflow_id` for `semantic` writes,
-        so those always dedup at `workflow_id IS NULL`, keeping semantic facts
+        duplicate), **per pipeline** (the same text under a different pipeline is
+        not a duplicate -- callers never pass `pipeline_id` for `semantic` writes,
+        so those always dedup at `pipeline_id IS NULL`, keeping semantic facts
         org-wide), and **race-safe** across connections: the existence check lives
         inside one `INSERT ... WHERE NOT EXISTS` under SQLite's write serialization,
         so two workers can't both insert (review r1 #2)."""
@@ -497,18 +517,18 @@ class SqliteBM25Memory(Memory):
             created_at=datetime.now(timezone.utc).isoformat(),
             org_id=org_id,
             principal_id=principal_id,
-            workflow_id=workflow_id,
+            pipeline_id=pipeline_id,
         )
         org_clause = "org_id IS NULL" if org_id is None else "org_id = ?"
         principal_clause = "principal_id IS NULL" if principal_id is None else "principal_id = ?"
-        workflow_clause = "workflow_id IS NULL" if workflow_id is None else "workflow_id = ?"
+        pipeline_clause = "pipeline_id IS NULL" if pipeline_id is None else "pipeline_id = ?"
         exists_params: List[Any] = [user_id, type, content]
         if org_id is not None:
             exists_params.append(org_id)
         if principal_id is not None:
             exists_params.append(principal_id)
-        if workflow_id is not None:
-            exists_params.append(workflow_id)
+        if pipeline_id is not None:
+            exists_params.append(pipeline_id)
         # Cost optimization, not a correctness check: skip computing an embedding
         # when this content is very likely already present -- near-duplicate
         # resolution routinely reconciles against existing facts, so this avoids
@@ -517,7 +537,7 @@ class SqliteBM25Memory(Memory):
         # guarantee; a lost race here just means one wasted embedding call.
         already_exists = self._conn.execute(
             "SELECT EXISTS(SELECT 1 FROM memories WHERE user_id = ? AND type = ? "
-            f"AND content = ? AND {org_clause} AND {principal_clause} AND {workflow_clause})",
+            f"AND content = ? AND {org_clause} AND {principal_clause} AND {pipeline_clause})",
             exists_params,
         ).fetchone()[0]
         # Same cost optimization as `add()`: an already-retired principal's
@@ -536,11 +556,11 @@ class SqliteBM25Memory(Memory):
         retired_clause, retired_params = self._retired_fence_clause(principal_id, connector="AND")
         cursor = self._conn.execute(
             "INSERT INTO memories "
-            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, workflow_id, "
+            "(id, user_id, type, content, metadata_json, created_at, org_id, principal_id, pipeline_id, "
             "embedding_json, embedding_model) "
             "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
             "SELECT 1 FROM memories WHERE user_id = ? AND type = ? AND content = ? "
-            f"AND {org_clause} AND {principal_clause} AND {workflow_clause})" + retired_clause,
+            f"AND {org_clause} AND {principal_clause} AND {pipeline_clause})" + retired_clause,
             (
                 record.id,
                 record.user_id,
@@ -550,7 +570,7 @@ class SqliteBM25Memory(Memory):
                 record.created_at,
                 record.org_id,
                 record.principal_id,
-                record.workflow_id,
+                record.pipeline_id,
                 embedding_json,
                 embedding_model,
                 *exists_params,
@@ -593,7 +613,7 @@ class SqliteBM25Memory(Memory):
                     created_at=row["created_at"],
                     org_id=row["org_id"],
                     principal_id=row["principal_id"],
-                    workflow_id=row["workflow_id"],
+                    pipeline_id=row["pipeline_id"],
                 )
             )
         return records
@@ -606,7 +626,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
         include_embeddings: bool = True,
     ) -> "tuple[List[MemoryRecord], List[Optional[List[float]]], List[Optional[str]]]":
         """Same query as `all()`, but also returns each row's parsed embedding
@@ -629,12 +649,12 @@ class SqliteBM25Memory(Memory):
         if principal_id is not None:
             sql += " AND principal_id = ?"
             params.append(principal_id)
-        # A concrete workflow scopes to that team's own episodic/procedural
-        # history; None is unfiltered (admin cross-workflow view, and the
+        # A concrete pipeline scopes to that team's own episodic/procedural
+        # history; None is unfiltered (admin cross-pipeline view, and the
         # back-compat default for callers that never bind one).
-        if workflow_id is not None:
-            sql += " AND workflow_id = ?"
-            params.append(workflow_id)
+        if pipeline_id is not None:
+            sql += " AND pipeline_id = ?"
+            params.append(pipeline_id)
         if types:
             placeholders = ",".join("?" for _ in types)
             sql += f" AND type IN ({placeholders})"
@@ -669,7 +689,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         records, _embeddings, _specs = self._candidates(
             user_id,
@@ -677,7 +697,7 @@ class SqliteBM25Memory(Memory):
             limit=limit,
             org_id=org_id,
             principal_id=principal_id,
-            workflow_id=workflow_id,
+            pipeline_id=pipeline_id,
             include_embeddings=False,
         )
         return records
@@ -750,7 +770,7 @@ class SqliteBM25Memory(Memory):
         *,
         org_id: Union[int, str, None] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
     ) -> List[MemoryRecord]:
         from rank_bm25 import BM25Okapi
 
@@ -766,7 +786,7 @@ class SqliteBM25Memory(Memory):
             limit=max_candidates,
             org_id=org_id,
             principal_id=principal_id,
-            workflow_id=workflow_id,
+            pipeline_id=pipeline_id,
             include_embeddings=self._embeddings is not None,
         )
         if not candidates:
@@ -1129,14 +1149,14 @@ class MemoryOutcome:
 
 
 class MemoryManager:
-    """Ties a `Memory` store into a workflow run.
+    """Ties a `Memory` store into a pipeline run.
 
     `recall`/`recall_preamble` seed recalled memory into every agent's system
     prompt before a run; `record_run` persists what happened after. When
     `extraction_model` is set (a model spec string like ``"fake:..."``/
     ``"openai:..."`` or a `BaseChatModel`), `record_run` makes one extra LLM call
     to derive semantic/procedural records; otherwise only the $0 episodic record
-    is written. `run_id`/`workflow_version_id` (bound by the backend) are stamped
+    is written. `run_id`/`pipeline_version_id` (bound by the backend) are stamped
     into every record's `metadata` for provenance (SP-3, M-06).
     """
 
@@ -1147,9 +1167,9 @@ class MemoryManager:
         top_k: int = 5,
         org_id: Optional[int] = None,
         principal_id: Optional[str] = None,
-        workflow_id: Optional[int] = None,
+        pipeline_id: Optional[int] = None,
         run_id: Optional[str] = None,
-        workflow_version_id: Optional[int] = None,
+        pipeline_version_id: Optional[int] = None,
         recall_max_candidates: Optional[int] = None,
         max_episodic_per_user: Optional[int] = None,
         query_expansion_model: Any = None,
@@ -1188,15 +1208,15 @@ class MemoryManager:
         # account's rows; bound only when a concrete principal exists (an org-less /
         # SDK-direct caller passes None, keeping the pre-SP-2 store contract).
         self.principal_id = principal_id
-        # The team/workflow this run belongs to (cross-workflow memory scoping).
+        # The team/pipeline this run belongs to (cross-pipeline memory scoping).
         # Applied to episodic/procedural recall+writes only -- semantic facts stay
         # org-wide regardless of this value. None for SDK-direct callers and for a
-        # YAML-only demo workflow with no WorkflowRecord (reproduces pre-existing,
-        # workflow-agnostic behavior).
-        self.workflow_id = workflow_id
+        # YAML-only demo pipeline with no PipelineRecord (reproduces pre-existing,
+        # pipeline-agnostic behavior).
+        self.pipeline_id = pipeline_id
         # Run-level provenance (SP-3, M-06), stamped into each record's metadata.
         self.run_id = run_id
-        self.workflow_version_id = workflow_version_id
+        self.pipeline_version_id = pipeline_version_id
         # SP-4 quality/scale knobs (the backend supplies them from env):
         #   recall_max_candidates — recall scans the most-recent N records; None =
         #     unbounded (the ABC-safe default for SDK-direct use).
@@ -1224,14 +1244,14 @@ class MemoryManager:
             kwargs["principal_id"] = self.principal_id
         return kwargs
 
-    def _workflow_kwargs(self) -> Dict[str, Any]:
-        """`{"workflow_id": ...}` only when a concrete workflow is bound. Mirrors
-        `_org_kwargs()`: when None (SDK-direct, or a YAML-only demo workflow with no
-        `WorkflowRecord`), the store is called with the original ABC-compatible
-        contract, so a pre-workflow-scoping custom store still works. Deliberately
+    def _pipeline_kwargs(self) -> Dict[str, Any]:
+        """`{"pipeline_id": ...}` only when a concrete pipeline is bound. Mirrors
+        `_org_kwargs()`: when None (SDK-direct, or a YAML-only demo pipeline with no
+        `PipelineRecord`), the store is called with the original ABC-compatible
+        contract, so a pre-pipeline-scoping custom store still works. Deliberately
         NOT folded into `_scope_kwargs()` -- callers must opt in per write/search,
-        since `semantic` records are never workflow-scoped."""
-        return {"workflow_id": self.workflow_id} if self.workflow_id is not None else {}
+        since `semantic` records are never pipeline-scoped."""
+        return {"pipeline_id": self.pipeline_id} if self.pipeline_id is not None else {}
 
     def _provenance(self) -> Dict[str, Any]:
         """Run-level provenance stamped into a record's metadata (M-06); omits
@@ -1239,8 +1259,8 @@ class MemoryManager:
         meta: Dict[str, Any] = {}
         if self.run_id is not None:
             meta["run_id"] = self.run_id
-        if self.workflow_version_id is not None:
-            meta["workflow_version_id"] = self.workflow_version_id
+        if self.pipeline_version_id is not None:
+            meta["pipeline_version_id"] = self.pipeline_version_id
         return meta
 
     def _usage_entry(self, response: Any, model_spec: Any) -> Optional[Dict[str, Any]]:
@@ -1379,12 +1399,12 @@ class MemoryManager:
         `memory_preamble` (empty = no-op).
 
         Issues TWO scoped searches, not one: `semantic` facts are personal
-        preferences that apply no matter which workflow is running, so that search
-        is org/principal-scoped only and NEVER receives `workflow_id` even when one
-        is bound. `episodic`/`procedural` are workflow-specific task experience, so
-        that search additionally scopes by `workflow_id` (unfiltered when None,
+        preferences that apply no matter which pipeline is running, so that search
+        is org/principal-scoped only and NEVER receives `pipeline_id` even when one
+        is bound. `episodic`/`procedural` are pipeline-specific task experience, so
+        that search additionally scopes by `pipeline_id` (unfiltered when None,
         reproducing pre-existing behavior for SDK-direct callers and YAML-only demo
-        workflows). Each search is independently capped at `top_k`, so the combined
+        pipelines). Each search is independently capped at `top_k`, so the combined
         result can hold up to `2 * top_k` records.
 
         When `query_expansion_model` is configured, the query is expanded ONCE
@@ -1409,7 +1429,7 @@ class MemoryManager:
         try:
             hits = self._fused_search(user_id, queries, types=[SEMANTIC], **base_kwargs)
             hits += self._fused_search(
-                user_id, queries, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._workflow_kwargs()
+                user_id, queries, types=[EPISODIC, PROCEDURAL], **base_kwargs, **self._pipeline_kwargs()
             )
         except Exception:  # noqa: BLE001 -- see below
             # The expansion LLM call already happened and is billable even if
@@ -1467,7 +1487,7 @@ class MemoryManager:
                 f"User asked: {_truncate(input)}\nTeam answered: {_truncate(output)}",
                 metadata=self._provenance(),
                 **self._scope_kwargs(),
-                **self._workflow_kwargs(),
+                **self._pipeline_kwargs(),
             )
             # `add` returns None when the deletion-lifecycle fence dropped the write
             # (a retired principal); don't report a discarded write as recorded
@@ -1640,13 +1660,13 @@ class MemoryManager:
         case fall back to the store's `add()` (its policy applies; dedup is skipped)
         so a pre-SP-4 subclass keeps intercepting every write (review r2 #2).
 
-        `workflow_id` is added for every extracted type EXCEPT `SEMANTIC` --
+        `pipeline_id` is added for every extracted type EXCEPT `SEMANTIC` --
         personal preferences stay org-wide, task-experience notes (`PROCEDURAL`,
         and any custom type a subclass might extract) are scoped to the current
-        workflow."""
+        pipeline."""
         kwargs = {"metadata": self._provenance(), **self._scope_kwargs()}
         if type != SEMANTIC:
-            kwargs.update(self._workflow_kwargs())
+            kwargs.update(self._pipeline_kwargs())
         add_if_absent = getattr(self.store, "add_if_absent", None)
         if callable(add_if_absent) and self._atomic_dedup_is_safe():
             return add_if_absent(user_id, type, content, **kwargs) is not None

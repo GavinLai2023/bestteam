@@ -12,7 +12,7 @@ from .hybrid_knowledge_base import HybridKnowledgeBase
 from .knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase, make_knowledge_base_tool
 from .team import CollaborationMode, Team
 from .vector_knowledge_base import VectorKnowledgeBase
-from .workflow import Workflow
+from .pipeline import Pipeline
 
 _KNOWLEDGE_BASE_TYPES = {
     "local_folder": LocalFolderKnowledgeBase,
@@ -21,28 +21,28 @@ _KNOWLEDGE_BASE_TYPES = {
 }
 
 
-def load_workflow(path, *, toolkits=None, skills=None) -> Workflow:
-    """Build a Workflow from a declarative YAML file.
+def load_pipeline(path, *, toolkits=None, skills=None) -> Pipeline:
+    """Build a Pipeline from a declarative YAML file.
 
     This is what lets customers define agents/teams/pipelines without writing
     any orchestration code — the CLI's `run`/`graph` commands are thin
-    wrappers around this loader plus Workflow.run()/.visualize().
+    wrappers around this loader plus Pipeline.run()/.visualize().
 
     Args:
-        path: Path to the YAML workflow file.
+        path: Path to the YAML pipeline file.
         toolkits: Optional list of ToolKit instances whose tools are made
-            available to agents defined in this workflow. Custom tools are
+            available to agents defined in this pipeline. Custom tools are
             merged with the built-in REGISTRY and can be referenced by name
             in the YAML ``tools:`` list.
         skills: Optional list of SkillSpec instances that agents in this
-            workflow can reference by name via ``skills:`` in their
+            pipeline can reference by name via ``skills:`` in their
             ``agents:`` entry. Looked up by ``.name``.
     """
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise ConfigurationError(f"Workflow file not found: {path}") from exc
+        raise ConfigurationError(f"Pipeline file not found: {path}") from exc
 
     try:
         raw = yaml.safe_load(text)
@@ -59,14 +59,14 @@ def load_workflow(path, *, toolkits=None, skills=None) -> Workflow:
     extra_skills: Dict[str, Any] = {s.name: s for s in (skills or [])}
 
     try:
-        return _build_workflow(raw, source=path, extra_tools=extra_tools, extra_skills=extra_skills)
+        return _build_pipeline(raw, source=path, extra_tools=extra_tools, extra_skills=extra_skills)
     except (KeyError, TypeError) as exc:
-        raise ConfigurationError(f"Malformed workflow config in '{path}': missing or invalid field {exc}") from exc
+        raise ConfigurationError(f"Malformed pipeline config in '{path}': missing or invalid field {exc}") from exc
 
 
-def _build_workflow(
+def _build_pipeline(
     raw: Dict[str, Any], *, source: Path, extra_tools: Dict[str, Any], extra_skills: Optional[Dict[str, Any]] = None
-) -> Workflow:
+) -> Pipeline:
     tool_lookup = {**_TOOL_REGISTRY, **extra_tools}
     skill_lookup = extra_skills or {}
     for spec in raw.get("knowledge_bases", []):
@@ -97,10 +97,10 @@ def _build_workflow(
             manager=manager,
         )
 
-    workflow_spec = raw.get("workflow", {})
-    steps = [_lookup(teams, name, "team", "workflow") for name in workflow_spec.get("steps", [])]
+    pipeline_spec = raw.get("pipeline", {})
+    steps = [_lookup(teams, name, "team", "pipeline") for name in pipeline_spec.get("steps", [])]
 
-    return Workflow(name=raw.get("name", source.stem), steps=steps)
+    return Pipeline(name=raw.get("name", source.stem), steps=steps)
 
 
 def _build_knowledge_base(spec: Dict[str, Any], source: Path) -> KnowledgeBase:

@@ -2,7 +2,7 @@
 
 `validate_specification` (SDK) resolves an agent's tools/skills/KB references,
 and the wizard path enforces `AgentSpec.model: str`. But the operator CRUD path
-builds `Agent(**spec)` directly (`core/loader._build_workflow`), and
+builds `Agent(**spec)` directly (`core/loader._build_pipeline`), and
 `Agent.model` is `ModelSpec | None` -- so a missing, `None`, empty, or
 non-string model, or a real spec the platform doesn't offer, would otherwise
 pass deploy and fail only at first run (the P1-11 defect). This rejects all of
@@ -50,7 +50,7 @@ EGRESS_TOOL_NAMES = frozenset({"http_get", "web_search"})
 
 
 def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
-    """Return a problem string if this workflow holds both an email tool and a
+    """Return a problem string if this pipeline holds both an email tool and a
     general-purpose egress tool ANYWHERE -- on one agent or spread across
     several. Empty list means the combination is absent.
 
@@ -65,13 +65,13 @@ def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
     Splitting the two capabilities across separate agents does NOT restore the
     bound, which is what this check originally assumed. `_agent_node`
     (`adapters/langgraph_adapter.py`) feeds each agent's output into the next
-    agent's context, and a workflow's steps share state, so an injected
+    agent's context, and a pipeline's steps share state, so an injected
     instruction read by the mail agent arrives in the egress agent's prompt as
-    ordinary text. The check is therefore workflow-level and deliberately
+    ordinary text. The check is therefore pipeline-level and deliberately
     blunt: it does not try to reason about ordering or collaboration mode,
     because that reasoning would have to be redone -- correctly -- every time
     routing changes, and a wrong answer is an exfiltration path. No shipped
-    workflow combines the two, so nothing legitimate is refused.
+    pipeline combines the two, so nothing legitimate is refused.
 
     Prompt-level defences (the `email_input_security_core_v1` skill) reduce the
     likelihood but are not a boundary, so this refuses the combination at
@@ -92,7 +92,7 @@ def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
     else:
         where = (
             f"agent '{email_agents[0]}' reads email while agent "
-            f"'{egress_agents[0]}' has {tool_list}, and a workflow's agents "
+            f"'{egress_agents[0]}' has {tool_list}, and a pipeline's agents "
             "share what they produce"
         )
     return [

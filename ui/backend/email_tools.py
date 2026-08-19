@@ -1,7 +1,7 @@
-"""Build per-org email tools for workflow loading (per-org secrets store).
+"""Build per-org email tools for pipeline loading (per-org secrets store).
 
 Mirrors `knowledge_bases.py::load_knowledge_base_tools`: returns a name -> tool
-mapping merged into a workflow's `extra_tools`, where it overrides the
+mapping merged into a pipeline's `extra_tools`, where it overrides the
 env-based `email_*` tools (`EMAIL_TOOL_NAMES`) in `REGISTRY` by name
 (`core/loader.py`). So a run for org A resolves org A's mailbox and never org
 B's.
@@ -12,7 +12,7 @@ Resolution order for one org:
   single-mailbox path stays in effect; used by single-org deployments and the
   SDK/CLI, where env email is the supported model);
 - no credentials and no env backend -> tools that return a friendly
-  "no mailbox connected" message, so a workflow referencing the built-in
+  "no mailbox connected" message, so a pipeline referencing the built-in
   email_triage_reply skill still compiles and runs on a multi-org deployment.
 """
 
@@ -42,7 +42,7 @@ from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
 _logger = logging.getLogger(__name__)
 
 # Every name `make_email_tools` can return. A name missing here is never
-# overridden by the per-org tools (see the module docstring), so a workflow
+# overridden by the per-org tools (see the module docstring), so a pipeline
 # using only that tool resolves as "does not use email": no per-org tools are
 # built, the run falls through to the process-env mailbox, and the wizard never
 # asks the customer to connect one. Pinned structurally in
@@ -59,7 +59,7 @@ def resolve_agent_tool_sets(
     spec_raw: Dict[str, Any],
     org_id: int,
     *,
-    workflow_version_id: int | None = None,
+    pipeline_version_id: int | None = None,
 ) -> list:
     """`[(agent_name, {tool names}), ...]` with each agent's tools resolved
     through the skills it references.
@@ -72,7 +72,7 @@ def resolve_agent_tool_sets(
     """
     from .skills import load_skills
 
-    skills = load_skills(db, org_id, workflow_version_id=workflow_version_id)
+    skills = load_skills(db, org_id, pipeline_version_id=pipeline_version_id)
     resolved = []
     for index, agent in enumerate(spec_raw.get("agents", []) or []):
         if not isinstance(agent, dict):
@@ -91,7 +91,7 @@ def spec_uses_email(
     spec_raw: Dict[str, Any],
     org_id: int,
     *,
-    workflow_version_id: int | None = None,
+    pipeline_version_id: int | None = None,
 ) -> bool:
     """True if any agent in a Specification resolves to an email tool.
 
@@ -101,7 +101,7 @@ def spec_uses_email(
     return any(
         names & EMAIL_TOOL_NAMES
         for _name, names in resolve_agent_tool_sets(
-            db, spec_raw, org_id, workflow_version_id=workflow_version_id
+            db, spec_raw, org_id, pipeline_version_id=pipeline_version_id
         )
     )
 
@@ -118,7 +118,7 @@ _UNREADABLE = (
 def _fixed_message_tools(message: str) -> Dict[str, Any]:
     """One tool per `EMAIL_TOOL_NAMES` that ignores its input and returns `message`.
 
-    Keeps the public names/docstrings so a workflow referencing the built-in
+    Keeps the public names/docstrings so a pipeline referencing the built-in
     email skill still compiles, while communicating the state to the model.
     Covering every name matters as much as the set itself does: a tool with no
     placeholder is not overridden either, so it falls through to the process-env
@@ -188,14 +188,14 @@ def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:
     """Return the email tools for `org_id` (see module docstring for the order).
 
     Cheap: builds the backend object but opens no connection (IMAP connects
-    lazily per operation), so this is safe to call on every workflow build.
+    lazily per operation), so this is safe to call on every pipeline build.
     """
     cred = get_email_credentials(db, org_id)
     if cred is not None:
         try:
             backend = build_org_imap_backend(db, org_id)
         except (InvalidToken, secret_store.SecretsKeyError):
-            # A wrong/rotated key must not crash the workflow build for this (or
+            # A wrong/rotated key must not crash the pipeline build for this (or
             # any other) org -- surface it as a clear tool-level message and log
             # server-side. Startup validation normally catches this first.
             _logger.warning("Could not decrypt email credentials for org_id=%s", org_id)

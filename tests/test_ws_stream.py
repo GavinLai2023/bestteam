@@ -19,8 +19,8 @@ from ui.backend.db_session import get_db
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -63,7 +63,7 @@ def _completed_run(org_id=None):
     run = runtime.registry.create("wf", "in", org_id=org_id if org_id is not None else get_org_id())
     runtime.registry.publish(
         run.id,
-        {"type": "run_completed", "workflow": "wf", "agent": None, "data": "done", "usage": []},
+        {"type": "run_completed", "pipeline": "wf", "agent": None, "data": "done", "usage": []},
     )
     return run
 
@@ -230,13 +230,13 @@ def _running_run(org_id):
     run = runtime.registry.create("wf", "in", org_id=org_id)
     runtime.registry.publish(
         run.id,
-        {"type": "agent_completed", "workflow": "wf", "agent": "a", "data": "x", "usage": []},
+        {"type": "agent_completed", "pipeline": "wf", "agent": "a", "data": "x", "usage": []},
     )
     return run
 
 
 def _terminal_event():
-    return {"type": "run_completed", "workflow": "wf", "agent": None, "data": "done", "usage": []}
+    return {"type": "run_completed", "pipeline": "wf", "agent": None, "data": "done", "usage": []}
 
 
 def test_stream_closes_when_org_deactivated_midstream(client):

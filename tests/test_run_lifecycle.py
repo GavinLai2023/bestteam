@@ -18,9 +18,9 @@ from ui.backend.registry import RunRegistry
 # --- CR-003 -----------------------------------------------------------------
 
 
-class _BoomWorkflow:
+class _BoomPipeline:
     """Stand-in whose .stream() raises like a compile failure escaping
-    Workflow.stream() (which compiles before its own BestTeamError handler)."""
+    Pipeline.stream() (which compiles before its own BestTeamError handler)."""
 
     name = "boom_wf"
 
@@ -32,7 +32,7 @@ def test_run_in_background_publishes_terminal_event_on_worker_exception():
     run = runtime.registry.create("boom_wf", "input")
 
     # engine=None / user_id=None -> no DB, no memory: isolates the failure path.
-    runtime.run_in_background(run.id, _BoomWorkflow(), "input")
+    runtime.run_in_background(run.id, _BoomPipeline(), "input")
 
     stored = runtime.registry.get(run.id)
     assert stored.status == "failed"
@@ -42,14 +42,14 @@ def test_run_in_background_publishes_terminal_event_on_worker_exception():
     assert "internal compile detail" not in failures[0]["data"]
 
 
-class _CompletesThenRaisesWorkflow:
+class _CompletesThenRaisesPipeline:
     """Yields run_completed, then raises -- like a post-completion side effect
     (e.g. memory recording) failing after the run already succeeded."""
 
     name = "wf"
 
     def stream(self, *args, **kwargs):
-        yield TraceEvent(type="run_completed", workflow="wf", data="done")
+        yield TraceEvent(type="run_completed", pipeline="wf", data="done")
         raise RuntimeError("post-completion failure")
 
 
@@ -58,7 +58,7 @@ def test_post_completion_failure_does_not_publish_second_terminal_event():
     # flip the run to failed or emit a second terminal event.
     run = runtime.registry.create("wf", "input")
 
-    runtime.run_in_background(run.id, _CompletesThenRaisesWorkflow(), "input")
+    runtime.run_in_background(run.id, _CompletesThenRaisesPipeline(), "input")
 
     stored = runtime.registry.get(run.id)
     assert stored.status == "completed"
@@ -76,7 +76,7 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
     an empty result set (Codex review finding)."""
     import json
 
-    from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
+    from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 
     from helpers import make_concurrent_safe_engine
     from ui.backend.db import init_db, session_factory
@@ -101,14 +101,14 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
         name="w",
         agents=[AgentSpec(name="a", role="R", goal="g", model=f"fake:{envelope}")],
         teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
     wf = validate_specification(spec, source=tmp_path / "w.yaml")
 
     run = registry.create("w", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="w", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context={
                 "trigger_type": "email", "mailbox_credential_id": 1, "uidvalidity": 1,
                 "uids": [42], "folder": "INBOX", "triggered_at": "2026-08-02T00:00:00+00:00",
@@ -161,16 +161,16 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
         }],
     })
 
-    class _RejectedToolThenCompletesWorkflow:
+    class _RejectedToolThenCompletesPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(type="run_started", pipeline="wf", data=None)
             yield _TE(
-                type="tool_completed", workflow="wf", agent="a",
+                type="tool_completed", pipeline="wf", agent="a",
                 data={"tool": "email_read", "success": True, "outcome": "not_found", "message_id": "42"},
             )
-            yield _TE(type="run_completed", workflow="wf", data=envelope)
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -179,12 +179,12 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
 
-    run_in_background(run.id, _RejectedToolThenCompletesWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _RejectedToolThenCompletesPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     with Session() as s:
         row = s.query(AutomationItemResult).filter_by(run_id=run.id).one()
@@ -218,19 +218,19 @@ def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path)
         }],
     })
 
-    class _FailedAttachmentReadWorkflow:
+    class _FailedAttachmentReadPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(type="run_started", pipeline="wf", data=None)
             yield _TE(
-                type="tool_completed", workflow="wf", agent="a",
+                type="tool_completed", pipeline="wf", agent="a",
                 data={
                     "tool": "email_read_attachment", "success": False,
                     "summary": "Tool call failed", "message_id": "42",
                 },
             )
-            yield _TE(type="run_completed", workflow="wf", data=envelope)
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -239,12 +239,12 @@ def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path)
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="wf", input="in", status="running", org_id=1,
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1,
             username="email-trigger", trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
 
-    run_in_background(run.id, _FailedAttachmentReadWorkflow(), "in", engine=engine,
+    run_in_background(run.id, _FailedAttachmentReadPipeline(), "in", engine=engine,
                       org_id=1, username="email-trigger")
 
     with Session() as s:
@@ -272,7 +272,7 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
-    class _NeverStreamedWorkflow:
+    class _NeverStreamedPipeline:
         name = "w"
 
         def stream(self, *args, **kwargs):
@@ -285,13 +285,13 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
     run = registry.create("w", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="w", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42, 43]),
         ))
         s.commit()
     registry.request_cancel(run.id)
 
-    run_in_background(run.id, _NeverStreamedWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _NeverStreamedPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     with Session() as s:
         rows = s.query(AutomationItemResult).filter_by(run_id=run.id).all()
@@ -301,7 +301,7 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
 
 def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(tmp_path):
     """Same spec 10.1 guarantee as above, for a run that crashes (e.g. a
-    compile failure) before workflow.stream() ever yields a single event --
+    compile failure) before pipeline.stream() ever yields a single event --
     the outer except-Exception fallback previously never normalized either
     (Codex review finding)."""
     from helpers import make_concurrent_safe_engine
@@ -309,7 +309,7 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
-    class _BoomTriggeredWorkflow:
+    class _BoomTriggeredPipeline:
         name = "boom_wf"
 
         def stream(self, *args, **kwargs):
@@ -322,12 +322,12 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
 
-    run_in_background(run.id, _BoomTriggeredWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _BoomTriggeredPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     with Session() as s:
         rows = s.query(AutomationItemResult).filter_by(run_id=run.id).all()
@@ -367,14 +367,14 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
         }],
     })
 
-    class _TwoAgentWorkflow:
+    class _TwoAgentPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield _TE(type="run_started", workflow="wf", data=None)
-            yield _TE(type="agent_completed", workflow="wf", agent="intake", data="raw email body quoted here")
-            yield _TE(type="agent_completed", workflow="wf", agent="responder", data=envelope)
-            yield _TE(type="run_completed", workflow="wf", data=envelope)
+            yield _TE(type="run_started", pipeline="wf", data=None)
+            yield _TE(type="agent_completed", pipeline="wf", agent="intake", data="raw email body quoted here")
+            yield _TE(type="agent_completed", pipeline="wf", agent="responder", data=envelope)
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -383,7 +383,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
@@ -398,7 +398,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
 
     monkeypatch.setattr(registry, "publish", spy_publish)
 
-    run_in_background(run.id, _TwoAgentWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _TwoAgentPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     assert published_data == [runtime._PM_TRACE_REDACTED] * 3  # 2 agent_completed + 1 run_completed
 
@@ -413,7 +413,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
 
 
 def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypatch):
-    """If a declared maintenance workflow uses HIERARCHICAL mode, the
+    """If a declared maintenance pipeline uses HIERARCHICAL mode, the
     manager/subordinate delegate exchange (delegation_started/subagent_started's
     `task_summary`, subagent_completed/delegation_completed's `summary`)
     carries the same customer-email-derived text as agent_completed/
@@ -440,28 +440,28 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypa
         }],
     })
 
-    class _HierarchicalWorkflow:
+    class _HierarchicalPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(type="run_started", pipeline="wf", data=None)
             yield _TE(
-                type="delegation_started", workflow="wf", agent="manager",
+                type="delegation_started", pipeline="wf", agent="manager",
                 data={"to": "responder", "task_summary": "tenant says pipe burst, call 555-1234"},
             )
             yield _TE(
-                type="subagent_started", workflow="wf", agent="responder",
+                type="subagent_started", pipeline="wf", agent="responder",
                 data={"task_summary": "tenant says pipe burst, call 555-1234"},
             )
             yield _TE(
-                type="subagent_completed", workflow="wf", agent="responder",
+                type="subagent_completed", pipeline="wf", agent="responder",
                 data={"success": True, "summary": "drafted reply quoting tenant's phone 555-1234"},
             )
             yield _TE(
-                type="delegation_completed", workflow="wf", agent="manager",
+                type="delegation_completed", pipeline="wf", agent="manager",
                 data={"to": "responder", "summary": "drafted reply quoting tenant's phone 555-1234"},
             )
-            yield _TE(type="run_completed", workflow="wf", data=envelope)
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -470,12 +470,12 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypa
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
 
-    run_in_background(run.id, _HierarchicalWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _HierarchicalPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     with Session() as s:
         trace_rows = (
@@ -525,23 +525,23 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
         }],
     })
 
-    class _HierarchicalWorkflow:
+    class _HierarchicalPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield _TE(type="run_started", workflow="wf", data=None)
+            yield _TE(type="run_started", pipeline="wf", data=None)
             yield _TE(
-                type="tool_completed", workflow="wf", agent="intake",
+                type="tool_completed", pipeline="wf", agent="intake",
                 data={"tool": "email_read", "success": True, "outcome": "read", "message_id": "42"},
             )
             yield _TE(
-                type="tool_completed", workflow="wf", agent="manager",
+                type="tool_completed", pipeline="wf", agent="manager",
                 data={
                     "tool": "delegate_to_responder", "success": True, "duration_ms": 5,
                     "summary": "drafted reply quoting tenant's phone 555-1234",
                 },
             )
-            yield _TE(type="run_completed", workflow="wf", data=envelope)
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -550,12 +550,12 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
 
-    run_in_background(run.id, _HierarchicalWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _HierarchicalPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     with Session() as s:
         trace_rows = (
@@ -590,7 +590,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
-    class _NeverStreamedWorkflow:
+    class _NeverStreamedPipeline:
         name = "w"
 
         def stream(self, *args, **kwargs):
@@ -603,7 +603,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
     run = registry.create("w", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="w", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="w", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
@@ -622,7 +622,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
 
     monkeypatch.setattr(registry, "publish", spy_publish)
 
-    run_in_background(run.id, _NeverStreamedWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _NeverStreamedPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_cancelled was published
 
@@ -636,7 +636,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
 
-    class _BoomTriggeredWorkflow:
+    class _BoomTriggeredPipeline:
         name = "boom_wf"
 
         def stream(self, *args, **kwargs):
@@ -649,7 +649,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
     with Session() as s:
         s.add(Run(
-            id=run.id, workflow="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
+            id=run.id, pipeline="boom_wf", input="in", status="running", org_id=1, username="email-trigger",
             trigger_context=_triggered_run_context([42]),
         ))
         s.commit()
@@ -667,7 +667,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
 
     monkeypatch.setattr(registry, "publish", spy_publish)
 
-    run_in_background(run.id, _BoomTriggeredWorkflow(), "in", engine=engine, org_id=1, username="email-trigger")
+    run_in_background(run.id, _BoomTriggeredPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
 
     assert rows_seen_at_publish_time == [1]  # already committed by the time run_failed was published
 
@@ -686,12 +686,12 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(tm
     from ui.backend.db.models import Run
     from ui.backend.runtime import registry, run_in_background
 
-    class _CompletesWorkflow:
+    class _CompletesPipeline:
         name = "wf"
 
         def stream(self, *args, **kwargs):
-            yield TraceEvent(type="run_started", workflow="wf", data=None)
-            yield TraceEvent(type="run_completed", workflow="wf", data="done")
+            yield TraceEvent(type="run_started", pipeline="wf", data=None)
+            yield TraceEvent(type="run_completed", pipeline="wf", data="done")
 
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
@@ -709,7 +709,7 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(tm
 
     monkeypatch.setattr(SASession, "commit", flaky_commit)
 
-    run_in_background(run.id, _CompletesWorkflow(), "in", engine=engine)
+    run_in_background(run.id, _CompletesPipeline(), "in", engine=engine)
 
     stored = registry.get(run.id)
     failures = [e for e in stored.events if e["type"] == "run_failed"]

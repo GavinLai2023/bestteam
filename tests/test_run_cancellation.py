@@ -32,7 +32,7 @@ def test_request_cancel_returns_false_for_unknown_run():
 def test_request_cancel_returns_false_for_a_terminal_run():
     run = registry.create("wf", "in")
     registry.publish(
-        run.id, {"type": "run_completed", "workflow": "wf", "agent": None, "data": "done", "usage": []}
+        run.id, {"type": "run_completed", "pipeline": "wf", "agent": None, "data": "done", "usage": []}
     )
 
     assert registry.request_cancel(run.id) is False
@@ -48,16 +48,16 @@ def test_request_cancel_succeeds_for_a_running_run():
 def test_publish_run_cancelled_sets_status_cancelled():
     run = registry.create("wf", "in")
 
-    registry.publish(run.id, {"type": "run_cancelled", "workflow": "wf", "agent": None, "data": None, "usage": []})
+    registry.publish(run.id, {"type": "run_cancelled", "pipeline": "wf", "agent": None, "data": None, "usage": []})
 
     assert registry.get(run.id).status == "cancelled"
 
 
-class _NeverStreamedWorkflow:
+class _NeverStreamedPipeline:
     name = "wf"
 
     def stream(self, *args, **kwargs):
-        raise AssertionError("workflow.stream() must not be called once cancellation was requested before dispatch")
+        raise AssertionError("pipeline.stream() must not be called once cancellation was requested before dispatch")
 
 
 def test_cancel_before_dispatch_skips_streaming_entirely(tmp_path):
@@ -66,7 +66,7 @@ def test_cancel_before_dispatch_skips_streaming_entirely(tmp_path):
     run = registry.create("wf", "in")
     registry.request_cancel(run.id)
 
-    run_in_background(run.id, _NeverStreamedWorkflow(), "in", engine=engine)
+    run_in_background(run.id, _NeverStreamedPipeline(), "in", engine=engine)
 
     with Session() as s:
         row = s.get(Run, run.id)
@@ -78,7 +78,7 @@ def test_cancel_before_dispatch_skips_streaming_entirely(tmp_path):
     assert types == ["run_queued", "run_cancelled"]
 
 
-class _MidStreamCancelWorkflow:
+class _MidStreamCancelPipeline:
     """Yields event0, then -- as a side effect of the *next* fetch -- requests
     cancellation before yielding event1; event2 must never be delivered."""
 
@@ -100,12 +100,12 @@ def test_cancel_mid_stream_stops_before_the_next_unfetched_event(tmp_path):
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
-        TraceEvent(type="run_started", workflow="wf"),
-        TraceEvent(type="agent_completed", workflow="wf", agent="a", data="a-output"),
-        TraceEvent(type="agent_completed", workflow="wf", agent="b", data="should-not-be-delivered"),
+        TraceEvent(type="run_started", pipeline="wf"),
+        TraceEvent(type="agent_completed", pipeline="wf", agent="a", data="a-output"),
+        TraceEvent(type="agent_completed", pipeline="wf", agent="b", data="should-not-be-delivered"),
     ]
 
-    run_in_background(run.id, _MidStreamCancelWorkflow(run.id, events), "in", engine=engine)
+    run_in_background(run.id, _MidStreamCancelPipeline(run.id, events), "in", engine=engine)
 
     with Session() as s:
         row = s.get(Run, run.id)
@@ -144,16 +144,16 @@ def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(t
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
-        TraceEvent(type="run_started", workflow="wf"),
-        TraceEvent(type="tool_completed", workflow="wf", agent="a", data={"tool": "t", "success": True}),
+        TraceEvent(type="run_started", pipeline="wf"),
+        TraceEvent(type="tool_completed", pipeline="wf", agent="a", data={"tool": "t", "success": True}),
         TraceEvent(
             type="agent_completed",
-            workflow="wf",
+            pipeline="wf",
             agent="a",
             data="a-output",
             usage=[{"model": "m", "input_tokens": 10, "output_tokens": 5}],
         ),
-        TraceEvent(type="agent_completed", workflow="wf", agent="b", data="should-not-be-delivered"),
+        TraceEvent(type="agent_completed", pipeline="wf", agent="b", data="should-not-be-delivered"),
     ]
 
     run_in_background(run.id, _CancelBetweenBufferedEventAndAgentCompleted(run.id, events), "in", engine=engine)
@@ -199,14 +199,14 @@ def test_cancel_right_after_run_started_preserves_memory_recalled_usage(monkeypa
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
-        TraceEvent(type="run_started", workflow="wf", data="in"),
+        TraceEvent(type="run_started", pipeline="wf", data="in"),
         TraceEvent(
             type="memory_recalled",
-            workflow="wf",
+            pipeline="wf",
             data=0,
             usage=[{"model": None, "input_tokens": 9, "output_tokens": 3}],
         ),
-        TraceEvent(type="agent_started", workflow="wf", agent="a", data="should-not-be-delivered"),
+        TraceEvent(type="agent_started", pipeline="wf", agent="a", data="should-not-be-delivered"),
     ]
 
     run_in_background(
@@ -234,7 +234,7 @@ def test_cancel_right_after_run_started_preserves_memory_recalled_usage(monkeypa
 
 
 class _CancelDuringPreStreamSetup:
-    """Cancellation lands during workflow setup (compile/memory-recall) --
+    """Cancellation lands during pipeline setup (compile/memory-recall) --
     before the generator ever yields its first event. Must be honored right
     after run_started, before entering the first agent's paid work -- not
     deferred until that agent's own agent_completed (round-2 review P1)."""
@@ -257,9 +257,9 @@ def test_cancel_during_pre_stream_setup_stops_before_the_first_agent(tmp_path):
     Session = session_factory(engine)
     run = registry.create("wf", "in")
     events = [
-        TraceEvent(type="run_started", workflow="wf"),
-        TraceEvent(type="agent_started", workflow="wf", agent="a", data={"role": "R", "goal": "G"}),
-        TraceEvent(type="agent_completed", workflow="wf", agent="a", data="should-not-run"),
+        TraceEvent(type="run_started", pipeline="wf"),
+        TraceEvent(type="agent_started", pipeline="wf", agent="a", data={"role": "R", "goal": "G"}),
+        TraceEvent(type="agent_completed", pipeline="wf", agent="a", data="should-not-run"),
     ]
 
     run_in_background(run.id, _CancelDuringPreStreamSetup(run.id, events), "in", engine=engine)
@@ -275,8 +275,8 @@ def test_cancel_during_pre_stream_setup_stops_before_the_first_agent(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     # File-backed, not `:memory:` -- this fixture drives run_in_background,
     # which opens its own Session on a worker thread (see
@@ -320,7 +320,7 @@ def test_cancel_endpoint_returns_409_for_a_finished_run(client):
     org_id = get_org_id()
     run = registry.create("wf", "in", org_id=org_id, username="test")
     registry.publish(
-        run.id, {"type": "run_completed", "workflow": "wf", "agent": None, "data": "done", "usage": []}
+        run.id, {"type": "run_completed", "pipeline": "wf", "agent": None, "data": "done", "usage": []}
     )
 
     resp = client.post(f"/api/runs/{run.id}/cancel")

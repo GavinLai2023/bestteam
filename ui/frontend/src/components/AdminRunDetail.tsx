@@ -36,7 +36,7 @@ function usageByAgent(usage: UsageRecord[]): Map<string, UsageRecord[]> {
 // The admin superset of components/RunDetail.tsx: events grouped by agent,
 // the full raw event `data` payload alongside the same friendly summary
 // customers see, and per-agent token/cost usage -- for a platform admin
-// diagnosing how a workflow's agents actually behaved, not the customer-
+// diagnosing how a pipeline's agents actually behaved, not the customer-
 // facing view. Reuses lib/traceEvents.ts's labels/rendering unmodified (no
 // redaction changes) and the same lib/useRunTrace.ts fetch/stream hook
 // RunDetail uses.

@@ -22,26 +22,31 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `organizations` table may already exist when it runs) and backfills only
   NULL `org_id`s: non-admin users and all org-owned rows → `default`;
   admins and built-in skills stay NULL.
-- `knowledge_bases` / `skills` / `workflows` — each row's `config` is a JSON
+- `knowledge_bases` / `skills` / `pipelines` — each row's `config` is a JSON
   `raw` dict (the technical fields from `KnowledgeBaseSpec`/`SkillSpec`/
-  `Specification.to_raw()`, see `core/specification.py`); `workflows.status`
+  `Specification.to_raw()`, see `core/specification.py`); `pipelines.status`
   tracks `draft` / `ready_for_testing` / `deployed` and is CHECK-constrained
-  to that set (`ck_workflows_status`, migration `b1d7e4f2a9c8`, P1-06). Only
-  `status="deployed"` rows are runnable (`_get_workflow`) or listed
-  (`GET /api/workflows`) — see `ui/backend/CLAUDE.md`. The migration
+  to that set (`ck_workflows_status` — a migrated database keeps this old
+  constraint name; the `workflows`→`pipelines` rename migration
+  (`o2p3q4r5s6t7`) deliberately doesn't rebuild named constraints/indexes to
+  rename them, since SQLite constraint names are diagnostic labels only,
+  never queried against, and a fresh database gets `ck_pipelines_status` from
+  `create_all()` instead; migration `b1d7e4f2a9c8`, P1-06). Only
+  `status="deployed"` rows are runnable (`_get_pipeline`) or listed
+  (`GET /api/pipelines`) — see `ui/backend/CLAUDE.md`. The migration
   backfilled every pre-existing non-`deployed` row to `deployed` so upgrading
   a deployment doesn't retroactively hide/break previously-runnable
-  workflows. A deployed workflow's references now block deletion of the
+  pipelines. A deployed pipeline's references now block deletion of the
   records it depends on: a `knowledge_bases`/`skills` row can't be deleted
-  (`409`) while a `status="deployed"` `workflows` row's `config` still
+  (`409`) while a `status="deployed"` `pipelines` row's `config` still
   references it (KB via an agent's `tools`, skill via an agent's `skills`);
   and a KB may not be named after a built-in tool (rejected `400` at deploy),
   since both resolve through one flat name lookup. See
-  `ui/backend/CLAUDE.md`. A `workflows` row is now the **stable team head**: it
+  `ui/backend/CLAUDE.md`. A `pipelines` row is now the **stable team head**: it
   carries `current_version_id` pointing at the latest immutable
-  `workflow_versions` snapshot, and `config` is a mirror of that current
+  `pipeline_versions` snapshot, and `config` is a mirror of that current
   version. Deploy no longer overwrites history in place — it appends a version
-  via `db/workflows.py::publish_workflow_version` (P1-01/02/03).
+  via `db/pipelines.py::publish_pipeline_version` (P1-01/02/03).
 - `skill_versions` — immutable snapshots appended by
   `db/skills.py::publish_skill_version` on every skill save. `skills` is the
   stable library head: `current_version_id` selects the latest snapshot and
@@ -50,42 +55,48 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   the same `skill_versions.id` foreign keys on upgraded databases that
   `create_all` produces for fresh databases (including retry repair when a
   column exists without its constraint).
-- `workflow_versions` — immutable published snapshots of a workflow's `config`
-  (`WorkflowVersion`; `id`, `workflow_id` FK, `version_number`, `config`,
-  `created_by`, `created_at`; `(workflow_id, version_number)` unique). Deploy
+- `pipeline_versions` — immutable published snapshots of a pipeline's `config`
+  (`PipelineVersion`; `id`, `pipeline_id` FK, `version_number`, `config`,
+  `created_by`, `created_at`; `(pipeline_id, version_number)` unique — the
+  constraint itself is still named `uq_workflow_versions_workflow_id_version_number`
+  on a migrated database, kept as-is by the `o2p3q4r5s6t7` rename migration
+  (see the `ck_workflows_status` note above)).
+  Deploy
   appends one row and moves the parent's `current_version_id`; a row is never
   updated after insert. This freezes the inline config blob; referenced skills
   are frozen through the dependency's `resource_version_id` (below).
   Standalone KBs/models are still resolved by name at load.
-  Migration `c3f5a1b8e2d4` creates the table and backfills one v1 per existing workflow.
-  Deleting a workflow head (`DELETE /api/config/workflows/{name}`) refuses
+  Migration `c3f5a1b8e2d4` creates the table and backfills one v1 per existing pipeline.
+  Deleting a pipeline head (`DELETE /api/config/pipelines/{name}`) refuses
   (`409`) while any `Run` records one of its versions -- deletion removes the
   version history those runs reference (FK enforcement is off, no DB cascade), so
   provenance is preserved. A never-run head deletes cleanly, cascading its
-  (unreferenced) `workflow_versions` and nulling any `builder_sessions.workflow_id`
+  (unreferenced) `pipeline_versions` and nulling any `builder_sessions.pipeline_id`
   that pointed at it (self-heals on next deploy), under `component_mutation_lock`,
   so no orphaned version rows or dangling session pointers survive. Known gap
   (deferred, design spec): an in-flight run whose `runs` row is written by the
-  worker *after* dispatch isn't seen by the delete guard, so deleting a workflow
+  worker *after* dispatch isn't seen by the delete guard, so deleting a pipeline
   at the instant a run of it starts can dangle that run's provenance pointer --
   closed only by soft-delete/archive (deletion-lifecycle sub-project).
-- `workflow_dependencies` — one typed row per (published version, skill|standalone-KB)
-  it depends on (`WorkflowDependency`; `workflow_version_id` FK, `resource_kind`,
+- `pipeline_dependencies` — one typed row per (published version, skill|standalone-KB)
+  it depends on (`PipelineDependency`; `pipeline_version_id` FK, `resource_kind`,
   `resource_name`, `resource_id` = the resolved `skills`/`knowledge_bases` id,
   and `resource_version_id` = the immutable `skill_versions.id` for skills;
-  `(workflow_version_id, resource_kind, resource_name)` unique). Written
-  once at deploy in `db/workflows.py::publish_workflow_version` via
+  `(pipeline_version_id, resource_kind, resource_name)` unique — still named
+  `uq_workflow_dependencies_version_kind_name` on a migrated database, same
+  deliberate non-rename as above). Written
+  once at deploy in `db/pipelines.py::publish_pipeline_version` via
   `db/dependencies.py::record_version_dependencies` (resolves names exactly as the
   loader: org skill shadows platform built-in; KBs org-scoped; a built-in tool /
   email tool / inline KB is not a KB dep — an inline KB shadows a *same-named*
-  standalone KB too, so the standalone isn't recorded when the workflow defines
+  standalone KB too, so the standalone isn't recorded when the pipeline defines
   its own). The skill/KB `DELETE` guard now queries these rows by `resource_id`
-  for the **current** version (`workflows_referencing`) instead of scanning JSON —
+  for the **current** version (`pipelines_referencing`) instead of scanning JSON —
   non-regressing, and the stable id makes the platform-built-in-skill cross-org
   case fall out without an all-orgs scan. Skill dependencies are immutable:
   editing a skill or creating an org override never rewrites a deployed team;
   redeploy is the explicit opt-in to the then-current resolved skill version.
-  Migration `d4e6b2c9f1a7` creates the table and backfills each workflow's current
+  Migration `d4e6b2c9f1a7` creates the table and backfills each pipeline's current
   version; `c4d5e6f7a8b9` adds and backfills skill-version pins. Model/tool deps
   and standalone-KB content pinning remain deferred.
 - `knowledge_ingestion_jobs` (`IngestionJob`) — one async ingestion run for an
@@ -136,8 +147,8 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
-  workflow carries its agents/teams inline in its own `config`, and
-  `_build_workflow` accepts only `extra_tools`/`extra_skills`, so a standalone
+  pipeline carries its agents/teams inline in its own `config`, and
+  `_build_pipeline` accepts only `extra_tools`/`extra_skills`, so a standalone
   row could never reach a run. Writable CRUD routes existed historically
   (`78c7a8a`..`036e1d6`), so the drop migration is guarded: it **refuses** if
   either table holds rows and only drops when empty (a drop is not
@@ -160,7 +171,7 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   switching a mailbox between auth types can't leave the previous type's
   fields behind.
 - `email_triggers` — one org's autonomous new-mail trigger: opt-in flag +
-  target `workflow_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
+  target `pipeline_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
   the two date-scoped counters (`runs_today`, the operator's runs/day rail,
   and `messages_today`, the customer's daily message cap — both reset off the
   one shared `runs_date`, on purpose, so a rollover can never leave them
@@ -190,7 +201,7 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   any model saw it, recorded by the *same* `record_events` call in the *same*
   commit as everything else detected that cycle — filtering chooses a row's
   status, never whether the row exists. `attempts` is
-  charged at **dispatch**, never at claim, so a workflow that fails to *build*
+  charged at **dispatch**, never at claim, so a pipeline that fails to *build*
   releases its messages penalty-free and retries forever (a broken team config
   must not dead-letter a day of an org's mail). `connector_type`/
   `mailbox_generation`/`external_id` are deliberately connector-neutral for
@@ -215,15 +226,15 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`db/builder_sessions.py::STATUSES`); `requirements_json`/
   `specification_json` hold the Business Analyst / Solution Architect
   agents' structured outputs; `feedback_history` is an append-only JSON list
-  recording each round of customer feedback. `workflow_id` (nullable FK) is the
+  recording each round of customer feedback. `pipeline_id` (nullable FK) is the
   stable team head this session deploys to — set on first deploy so a redeploy
   versions the same head and two same-named sessions converge on one team
   (P1-02).
 - `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
   in-memory state (wired up in Phase 5). `runs.username` (migration
   `c9d0e1f2a3b4`) records who started the run (CR-032, audit-only —
-  ownership is org-level via `org_id`). `runs.workflow_version_id` (nullable FK,
-  migration `c3f5a1b8e2d4`) records the exact immutable `workflow_versions`
+  ownership is org-level via `org_id`). `runs.pipeline_version_id` (nullable FK,
+  migration `c3f5a1b8e2d4`) records the exact immutable `pipeline_versions`
   snapshot a production run executed (P1-03/P1-15); NULL for sandbox test-runs
   (they run the session spec, not a published version) and pre-migration rows.
 - `automation_item_results` (`AutomationItemResult`) — one immutable row per
@@ -247,7 +258,7 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (`email_trigger.py::retry_triggered_run`) -- a retry always inserts a new
   `runs` row, never mutates the original.
 - `share_links` — one revocable, anonymous entry point to one deployed team
-  (`db/share_links.py`; `workflow_id`/`org_id`/`created_by` FKs, a unique
+  (`db/share_links.py`; `pipeline_id`/`org_id`/`created_by` FKs, a unique
   random `token`, `active`, optional naive-UTC `expires_at`, `daily_cap`).
   `turns_today`/`turns_date` is the link-wide **aggregate** daily-turn CAS
   (`try_consume_link_turn`) -- `daily_cap` is both the per-session and the
@@ -335,7 +346,7 @@ poller / requests take turns being — the `-wal`/`-shm` siblings are why
 copy), `init_db(engine)` (`Base.metadata.create_all`), and
 `session_factory(engine)`. `db/builder_sessions.py` has the
 `builder_sessions` CRUD (`create_session`/`get_session`/`update_session`/
-`append_feedback`); CRUD for `knowledge_bases`/`skills`/`workflows` lives in
+`append_feedback`); CRUD for `knowledge_bases`/`skills`/`pipelines` lives in
 `ui/backend/crud.py` (Phase 2, see `ui/backend/CLAUDE.md`).
 `ui/backend/db_session.py` wires up the per-deployment engine (default
 `ui/backend/data/bestteam.db`, override with `BESTTEAM_DB_PATH`) and a
@@ -353,7 +364,7 @@ row (`TraceEventRecord`, in `seq` order, starting with a synthesized
 `run_queued` bookend published to the live registry the same way every other
 event is — see `ui/backend/CLAUDE.md`), so `usage_records`/`trace_events`
 foreign keys reference a real row and a run's full history survives past its
-live view. `GET /api/runs` (org-scoped, filterable by `workflow`/`status`/
+live view. `GET /api/runs` (org-scoped, filterable by `pipeline`/`status`/
 `manual`/`since`/`until`, paginated via `limit`/`offset` + `total`, default
 page size 50/max 200 — no frontend "load more" yet, so a page beyond the
 default is currently only reachable by widening filters) and

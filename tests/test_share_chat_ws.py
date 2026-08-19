@@ -17,7 +17,7 @@ from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend import runtime
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import Run, WorkflowRecord
+from ui.backend.db.models import Run, PipelineRecord
 from ui.backend.db.orgs import set_org_active
 from ui.backend.db.share_links import create_share_link, get_share_link_by_token, patch_share_link
 from ui.backend.db.share_sessions import create_share_session
@@ -29,14 +29,14 @@ _TEAM_CONFIG = {
     "name": "greeter",
     "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hello!"}],
     "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     # POST /api/share/{token}/messages dispatches a real run, so a worker
     # thread's Session overlaps the request's -- see the helper's docstring.
@@ -62,11 +62,11 @@ def _make_link():
     with open_test_db() as db:
         org_id = get_org_id()
         user = create_user(db, "owner", "pw", org_id=org_id)
-        team = WorkflowRecord(name=_TEAM_CONFIG["name"], org_id=org_id, config=_TEAM_CONFIG, status="deployed")
+        team = PipelineRecord(name=_TEAM_CONFIG["name"], org_id=org_id, config=_TEAM_CONFIG, status="deployed")
         db.add(team)
         db.commit()
         db.refresh(team)
-        link = create_share_link(db, workflow_id=team.id, org_id=org_id, created_by=user.id)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=user.id)
         return link.token
 
 
@@ -117,7 +117,7 @@ def _session_and_run(client, token):
         db.add(
             Run(
                 id=run.id,
-                workflow="greeter",
+                pipeline="greeter",
                 input="hi",
                 org_id=link.org_id,
                 username="share-link",
@@ -138,7 +138,7 @@ def test_stream_closes_when_org_deactivated_midstream(client):
     link, run_id = _session_and_run(client, token)
 
     runtime.registry.publish(
-        run_id, {"type": "agent_completed", "workflow": "greeter", "agent": "a", "data": "x", "usage": []}
+        run_id, {"type": "agent_completed", "pipeline": "greeter", "agent": "a", "data": "x", "usage": []}
     )
 
     with pytest.raises(WebSocketDisconnect) as exc:
@@ -147,7 +147,7 @@ def test_stream_closes_when_org_deactivated_midstream(client):
             with open_test_db() as db:
                 set_org_active(db, "default", False)
             runtime.registry.publish(
-                run_id, {"type": "run_completed", "workflow": "greeter", "agent": None, "data": "done", "usage": []}
+                run_id, {"type": "run_completed", "pipeline": "greeter", "agent": None, "data": "done", "usage": []}
             )
             ws.receive_json()  # revalidation must close before delivering this
     assert exc.value.code == 4404
@@ -158,7 +158,7 @@ def test_stream_closes_when_link_revoked_midstream(client):
     link, run_id = _session_and_run(client, token)
 
     runtime.registry.publish(
-        run_id, {"type": "agent_completed", "workflow": "greeter", "agent": "a", "data": "x", "usage": []}
+        run_id, {"type": "agent_completed", "pipeline": "greeter", "agent": "a", "data": "x", "usage": []}
     )
 
     with pytest.raises(WebSocketDisconnect) as exc:
@@ -167,7 +167,7 @@ def test_stream_closes_when_link_revoked_midstream(client):
             with open_test_db() as db:
                 patch_share_link(db, get_share_link_by_token(db, token), active=False)
             runtime.registry.publish(
-                run_id, {"type": "run_completed", "workflow": "greeter", "agent": None, "data": "done", "usage": []}
+                run_id, {"type": "run_completed", "pipeline": "greeter", "agent": None, "data": "done", "usage": []}
             )
             ws.receive_json()  # revalidation must close before delivering this
     assert exc.value.code == 4404
@@ -187,7 +187,7 @@ def test_stream_redacts_internals_from_a_non_terminal_event(client):
         run_id,
         {
             "type": "agent_completed",
-            "workflow": "greeter",
+            "pipeline": "greeter",
             "agent": "Secret Internal Analyst",
             "data": "raw intermediate output nobody outside the org may read",
             "usage": [{"model": "openai:gpt-4o-mini", "input_tokens": 123, "output_tokens": 45}],
@@ -201,7 +201,7 @@ def test_stream_redacts_internals_from_a_non_terminal_event(client):
     assert event["agent"] is None
     assert event["data"] is None
     assert event["usage"] == []
-    assert event["workflow"] is None
+    assert event["pipeline"] is None
     serialized = str(event)
     assert "Secret Internal Analyst" not in serialized
     assert "raw intermediate output" not in serialized
@@ -219,7 +219,7 @@ def test_stream_still_delivers_the_final_answer_on_run_completed(client):
         run_id,
         {
             "type": "run_completed",
-            "workflow": "greeter",
+            "pipeline": "greeter",
             "agent": "a",
             "data": "here is your answer",
             "usage": [{"model": "openai:gpt-4o-mini", "input_tokens": 1, "output_tokens": 2}],

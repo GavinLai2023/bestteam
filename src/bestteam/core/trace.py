@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class TraceEvent:
-    """A single observable moment in a workflow run.
+    """A single observable moment in a pipeline run.
 
     This is the unit a monitoring UI subscribes to — engine-agnostic, so
     whatever engine produced it, the UI only ever sees this shape.
@@ -46,7 +46,7 @@ class TraceEvent:
     """
 
     type: str
-    workflow: str
+    pipeline: str
     agent: Optional[str] = None
     data: Any = None
     usage: List[Dict[str, Any]] = field(default_factory=list)

@@ -22,14 +22,14 @@ def _today() -> str:
 def create_share_link(
     db: Session,
     *,
-    workflow_id: int,
+    pipeline_id: int,
     org_id: int,
     created_by: int,
     daily_cap: int = 30,
     expires_at: Optional[datetime] = None,
 ) -> ShareLink:
     link = ShareLink(
-        workflow_id=workflow_id,
+        pipeline_id=pipeline_id,
         org_id=org_id,
         created_by=created_by,
         token=secrets.token_urlsafe(32),
@@ -52,10 +52,10 @@ def get_share_link(db: Session, link_id: int, org_id: int) -> Optional[ShareLink
     return db.query(ShareLink).filter_by(id=link_id, org_id=org_id).one_or_none()
 
 
-def list_share_links(db: Session, workflow_id: int, org_id: int) -> List[ShareLink]:
+def list_share_links(db: Session, pipeline_id: int, org_id: int) -> List[ShareLink]:
     return (
         db.query(ShareLink)
-        .filter_by(workflow_id=workflow_id, org_id=org_id)
+        .filter_by(pipeline_id=pipeline_id, org_id=org_id)
         .order_by(ShareLink.created_at.desc())
         .all()
     )
@@ -116,7 +116,7 @@ def try_consume_link_turn(db: Session, link: ShareLink, daily_cap: int) -> bool:
     return bool(advanced)
 
 
-def count_active_share_links(db: Session, workflow_id: int) -> int:
-    """Used by the workflow-delete guard (crud.py) -- an active link blocks
+def count_active_share_links(db: Session, pipeline_id: int) -> int:
+    """Used by the pipeline-delete guard (crud.py) -- an active link blocks
     deletion of the team it points at."""
-    return db.query(ShareLink).filter_by(workflow_id=workflow_id, active=True).count()
+    return db.query(ShareLink).filter_by(pipeline_id=pipeline_id, active=True).count()

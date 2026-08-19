@@ -55,7 +55,7 @@ def make_concurrent_safe_engine(tmp_path: Path):
     reach into another's.
 
     The database lives in its own subdirectory because callers routinely reuse
-    `tmp_path` as `WORKFLOWS_DIR`, `_SESSIONS_DIR`, or a knowledge-base upload
+    `tmp_path` as `PIPELINES_DIR`, `_SESSIONS_DIR`, or a knowledge-base upload
     root.
 
     Do NOT reach for this reflexively. A test that only ever has one Session
@@ -129,8 +129,8 @@ def get_org_id(name: str = "default") -> int:
 
 
 def get_user_principal_id(username: str = "test") -> str:
-    """Return a user's immutable principal_id, for stamping WorkflowRecord.created_by
-    in tests (never the username -- see WorkflowRecord.created_by)."""
+    """Return a user's immutable principal_id, for stamping PipelineRecord.created_by
+    in tests (never the username -- see PipelineRecord.created_by)."""
     from ui.backend.db.models import User
 
     with open_test_db() as db:

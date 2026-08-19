@@ -148,7 +148,7 @@ def test_marker_uses_the_stripped_message_id():
 # Phase 3a (3a.5): drafting is idempotent per source key.
 #
 # The stale-run watchdog releases a timed-out run's overlap guard without being
-# able to stop the worker -- a node inside `workflow.stream()` can't be
+# able to stop the worker -- a node inside `pipeline.stream()` can't be
 # interrupted. So the wedged worker and the retry it enabled can both be alive,
 # in the SAME process, drafting for the same message. Trace evidence can't
 # close that: the window is exactly the one where the original's APPEND hasn't

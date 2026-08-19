@@ -43,7 +43,7 @@ def test_set_org_active_unknown_raises():
 def test_list_enabled_triggers_excludes_inactive_org():
     db = _session()
     org = create_org(db, "acme")
-    upsert_email_trigger(db, org.id, workflow_name="wf", enabled=True, last_uid=0, uidvalidity=1)
+    upsert_email_trigger(db, org.id, pipeline_name="wf", enabled=True, last_uid=0, uidvalidity=1)
     assert len(list_enabled_triggers(db)) == 1
 
     set_org_active(db, "acme", False)

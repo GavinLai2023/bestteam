@@ -21,7 +21,7 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .db.models import Organization, Run, ShareLink, ShareSession, WorkflowRecord
+from .db.models import Organization, Run, ShareLink, ShareSession, PipelineRecord
 from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
 from .db.share_sessions import create_share_session, get_share_session_by_token, try_consume_turn
@@ -235,12 +235,12 @@ def send_share_message(
     # actually usable first means a 404 here never burns a daily-cap turn
     # for a message that was never persisted and no run that was ever
     # created (controller-ruled fix, Task 8 review finding 1a).
-    workflow_record = (
-        db.query(WorkflowRecord)
-        .filter_by(id=link.workflow_id, org_id=link.org_id, status="deployed")
+    pipeline_record = (
+        db.query(PipelineRecord)
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
         .one_or_none()
     )
-    if workflow_record is None:
+    if pipeline_record is None:
         # Same detail text as _resolve_active_link's failures -- a
         # distinguishable message here would let a prober tell "real,
         # active link whose team just isn't deployed" apart from
@@ -256,10 +256,10 @@ def send_share_message(
     # link-wide daily-cap turn on every retry until the link goes dark for
     # the whole day despite never actually dispatching a run (Codex review
     # finding).
-    from .main import _resolve_workflow_and_version  # local import: main.py imports this router
+    from .main import _resolve_pipeline_and_version  # local import: main.py imports this router
 
-    workflow, version_id, workflow_id = _resolve_workflow_and_version(
-        workflow_record.name, db, link.org_id
+    pipeline, version_id, pipeline_id = _resolve_pipeline_and_version(
+        pipeline_record.name, db, link.org_id
     )
 
     # Link-level aggregate cap claimed BEFORE any session is created (a new
@@ -323,14 +323,14 @@ def send_share_message(
     history = _trim_history_to_budget(history, MAX_HISTORY_CHARS)
     transcript = format_transcript(history)
 
-    run = registry.create(workflow_record.name, transcript, org_id=link.org_id, username="share-link")
+    run = registry.create(pipeline_record.name, transcript, org_id=link.org_id, username="share-link")
     run_row = Run(
         id=run.id,
-        workflow=workflow_record.name,
+        pipeline=pipeline_record.name,
         input=transcript,
         org_id=link.org_id,
         username="share-link",
-        workflow_version_id=version_id,
+        pipeline_version_id=version_id,
         trigger_context={
             "share_link_id": link.id,
             "share_session_id": session.id,
@@ -344,13 +344,13 @@ def send_share_message(
         _executor.submit(
             run_in_background,
             run.id,
-            workflow,
+            pipeline,
             transcript,
             engine=db.get_bind(),
             org_id=link.org_id,
             username="share-link",
-            workflow_version_id=version_id,
-            workflow_id=workflow_id,
+            pipeline_version_id=version_id,
+            pipeline_id=pipeline_id,
         )
     except Exception as exc:  # noqa: BLE001 -- submission must never wedge a visitor's chat
         # The user's message and the Run row are already committed, so if no
@@ -409,7 +409,7 @@ def _link_and_org_active(engine, link_id: int) -> bool:
 def visitor_safe_event(event: dict) -> dict:
     """Strip a trace event down to what an anonymous visitor may see.
 
-    The raw event (`dataclasses.asdict(TraceEvent)`: `type`, `workflow`,
+    The raw event (`dataclasses.asdict(TraceEvent)`: `type`, `pipeline`,
     `agent`, `data`, `usage`) carries the org's internals -- agent names, the
     team name, full intermediate agent output, tool names/summaries, and the
     model identities and token counts in `usage`. The design's visitor
@@ -423,7 +423,7 @@ def visitor_safe_event(event: dict) -> dict:
     event_type = event.get("type")
     return {
         "type": event_type,
-        "workflow": None,
+        "pipeline": None,
         "agent": None,
         "data": event.get("data") if event_type == "run_completed" else None,
         "usage": [],

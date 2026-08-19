@@ -1,11 +1,11 @@
-"""Admin workflow-run analytics API (`/api/admin/analytics`).
+"""Admin pipeline-run analytics API (`/api/admin/analytics`).
 
 Aggregate statistics over persisted runs/trace_events/usage_records --
 success/failure rates, average duration, per-agent and per-model token/cost
 usage, and common failure points -- so a platform admin can see how a
-workflow behaves across many runs, not just drill into one, and which LLM
-models spend is concentrated in (`GET /workflows/{name}`'s `per_model`, and
-`GET /models` for a breakdown global across every workflow in scope).
+pipeline behaves across many runs, not just drill into one, and which LLM
+models spend is concentrated in (`GET /pipelines/{name}`'s `per_model`, and
+`GET /models` for a breakdown global across every pipeline in scope).
 Admin-only (`get_current_admin`):
 this reaches every org's run history, the same trust boundary as
 `GET /api/runs`' cross-org admin mode and the existing `/api/config` and
@@ -45,7 +45,7 @@ _TERMINAL_TYPES = ("run_completed", "run_failed", "run_cancelled")
 
 # Bounded sample for the failure-point tally -- same bounding philosophy as
 # GET /api/runs' limit/offset (an unbounded scan would grow without limit as
-# a workflow's failure history accumulates).
+# a pipeline's failure history accumulates).
 _FAILED_SAMPLE_LIMIT = 500
 
 
@@ -64,15 +64,15 @@ def _scoped_runs(
     db: Session,
     *,
     org_id: Optional[int],
-    workflow: Optional[str],
+    pipeline: Optional[str],
     since: Optional[datetime],
     until: Optional[datetime],
 ) -> List[Run]:
     query = db.query(Run)
     if org_id is not None:
         query = query.filter(Run.org_id == org_id)
-    if workflow is not None:
-        query = query.filter(Run.workflow == workflow)
+    if pipeline is not None:
+        query = query.filter(Run.pipeline == pipeline)
     if since is not None:
         query = query.filter(Run.created_at >= since)
     if until is not None:
@@ -106,23 +106,23 @@ def _events_by_run(db: Session, run_ids: List[str]) -> Dict[str, List[TraceEvent
     return by_run
 
 
-@router.get("/workflows")
-def list_workflow_analytics(
+@router.get("/pipelines")
+def list_pipeline_analytics(
     org: Optional[str] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     db: Session = Depends(get_db),
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """One summary row per `(org, workflow)` pair. Grouped by
-    `(org_id, workflow)`, never workflow name alone -- `Run.workflow` is
-    only unique per org, so two orgs' same-named workflows would otherwise
+    """One summary row per `(org, pipeline)` pair. Grouped by
+    `(org_id, pipeline)`, never pipeline name alone -- `Run.pipeline` is
+    only unique per org, so two orgs' same-named pipelines would otherwise
     be silently conflated.
 
     Note: `total_cost_estimate` only sums usage rows whose model has
-    `model_catalog` pricing -- a workflow mixing priced and unpriced models
+    `model_catalog` pricing -- a pipeline mixing priced and unpriced models
     reports a partial total with no separate indicator that it's partial."""
     org_id = _resolve_org_filter(db, org)
-    runs = _scoped_runs(db, org_id=org_id, workflow=None, since=since, until=until)
+    runs = _scoped_runs(db, org_id=org_id, pipeline=None, since=since, until=until)
 
     org_ids = {r.org_id for r in runs if r.org_id is not None}
     org_names = (
@@ -132,7 +132,7 @@ def list_workflow_analytics(
 
     groups: Dict[tuple, List[Run]] = defaultdict(list)
     for run in runs:
-        groups[(run.org_id, run.workflow)].append(run)
+        groups[(run.org_id, run.pipeline)].append(run)
 
     run_by_id = {r.id: r for r in runs}
     usage_rows = (
@@ -145,14 +145,14 @@ def list_workflow_analytics(
         run = run_by_id.get(u.run_id)
         if run is None:
             continue
-        bucket = usage_by_group[(run.org_id, run.workflow)]
+        bucket = usage_by_group[(run.org_id, run.pipeline)]
         bucket["input"] += u.input_tokens
         bucket["output"] += u.output_tokens
         if u.cost_estimate is not None:
             bucket["cost"].append(u.cost_estimate)
 
     summaries = []
-    for (group_org_id, workflow), group_runs in groups.items():
+    for (group_org_id, pipeline), group_runs in groups.items():
         statuses = Counter(r.status for r in group_runs)
         total = len(group_runs)
         durations = [
@@ -160,12 +160,12 @@ def list_workflow_analytics(
             for r in group_runs
             if (d := run_duration_seconds(r.created_at, terminal_at.get(r.id))) is not None
         ]
-        usage = usage_by_group[(group_org_id, workflow)]
+        usage = usage_by_group[(group_org_id, pipeline)]
         summaries.append(
             {
                 "org_id": group_org_id,
                 "org": org_names.get(group_org_id),
-                "workflow": workflow,
+                "pipeline": pipeline,
                 "total_runs": total,
                 "completed": statuses.get("completed", 0),
                 "failed": statuses.get("failed", 0),
@@ -178,12 +178,12 @@ def list_workflow_analytics(
                 "total_cost_estimate": sum(usage["cost"]) if usage["cost"] else None,
             }
         )
-    summaries.sort(key=lambda s: (s["org"] or "", s["workflow"]))
-    return {"workflows": summaries}
+    summaries.sort(key=lambda s: (s["org"] or "", s["pipeline"]))
+    return {"pipelines": summaries}
 
 
-@router.get("/workflows/{name}")
-def get_workflow_analytics(
+@router.get("/pipelines/{name}")
+def get_pipeline_analytics(
     name: str,
     org: Optional[str] = None,
     since: Optional[datetime] = None,
@@ -191,15 +191,15 @@ def get_workflow_analytics(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Per-agent token/cost/timing breakdown and common failure points for
-    one `(org, workflow)`. `org` is required once more than one org
-    actually has a workflow with this name -- otherwise ambiguous."""
-    candidate_runs = _scoped_runs(db, org_id=None, workflow=name, since=since, until=until)
+    one `(org, pipeline)`. `org` is required once more than one org
+    actually has a pipeline with this name -- otherwise ambiguous."""
+    candidate_runs = _scoped_runs(db, org_id=None, pipeline=name, since=since, until=until)
     distinct_orgs = {r.org_id for r in candidate_runs}
     if org is None:
         if len(distinct_orgs) > 1:
             raise HTTPException(
                 status_code=422,
-                detail=f"Multiple organizations have a workflow named '{name}'; pass ?org= to disambiguate",
+                detail=f"Multiple organizations have a pipeline named '{name}'; pass ?org= to disambiguate",
             )
         org_id = next(iter(distinct_orgs), None)
         runs = candidate_runs
@@ -270,7 +270,7 @@ def get_workflow_analytics(
 
     return {
         "org_id": org_id,
-        "workflow": name,
+        "pipeline": name,
         "per_agent": per_agent,
         "per_model": per_model,
         "common_failure_points": common_failure_points(failed_events),
@@ -284,17 +284,17 @@ def list_model_analytics(
     until: Optional[datetime] = None,
     db: Session = Depends(get_db),
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """One row per LLM model, aggregated across every workflow in scope --
+    """One row per LLM model, aggregated across every pipeline in scope --
     `run_count` counts distinct runs with at least one usage row for that
     model (a run touching more than one model contributes to more than one
-    row, unlike a workflow's `total_runs`).
+    row, unlike a pipeline's `total_runs`).
 
     Note: `total_cost_estimate` only sums usage rows whose model has
     `model_catalog` pricing -- a model with some catalogued and some
     uncatalogued usage rows reports a partial total with no separate
     indicator that it's partial."""
     org_id = _resolve_org_filter(db, org)
-    runs = _scoped_runs(db, org_id=org_id, workflow=None, since=since, until=until)
+    runs = _scoped_runs(db, org_id=org_id, pipeline=None, since=since, until=until)
     run_ids = [r.id for r in runs]
     usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id.in_(run_ids)).all() if run_ids else []
 

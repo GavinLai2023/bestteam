@@ -118,17 +118,17 @@ def test_env_example_secret_is_rejected_by_startup_guard():
 
 
 @pytest.fixture
-def workflows_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+def pipelines_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     return tmp_path
 
 
 @pytest.fixture
-def client(workflows_dir, tmp_path, monkeypatch):
+def client(pipelines_dir, tmp_path, monkeypatch):
     # The WS-stream tests dispatch a run and then write to the DB from the test
     # thread while the run worker's own Session is still live -- see the
-    # helper's docstring. (workflows_dir is this same tmp_path.)
+    # helper's docstring. (pipelines_dir is this same tmp_path.)
     engine = make_concurrent_safe_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
@@ -455,7 +455,7 @@ def test_me_rejects_invalid_token(client):
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/workflows",
+        "/api/pipelines",
         "/api/builder/sessions/missing-id",
         "/api/config/knowledge_bases",
     ],
@@ -534,16 +534,16 @@ def test_stream_run_rejects_invalid_ticket(client):
             ws.receive_json()
 
 
-def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir, monkeypatch):
-    from tests.test_ui_backend import _write_workflow
+def test_stream_run_accepts_valid_ticket_for_known_run(client, pipelines_dir, monkeypatch):
+    from tests.test_ui_backend import _write_pipeline
 
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
-    _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")  # YAML used here as a run fixture
+    _write_pipeline(pipelines_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="bob", password="hunter2")
     client.headers["Authorization"] = f"Bearer {token}"
 
-    run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    run_id = client.post("/api/runs", json={"pipeline": "demo", "input": "hi"}).json()["run_id"]
     ticket = client.post("/api/runs/ws-ticket").json()["ticket"]
 
     with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
@@ -551,16 +551,16 @@ def test_stream_run_accepts_valid_ticket_for_known_run(client, workflows_dir, mo
         assert event["type"] == "run_queued"
 
 
-def test_stream_run_rejects_ticket_for_deleted_user(client, workflows_dir, monkeypatch):
-    from tests.test_ui_backend import _write_workflow
+def test_stream_run_rejects_ticket_for_deleted_user(client, pipelines_dir, monkeypatch):
+    from tests.test_ui_backend import _write_pipeline
     from ui.backend.db.models import User
 
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # YAML used here as a run fixture
-    _write_workflow(workflows_dir / "demo.yaml", "demo", "hello there")
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")  # YAML used here as a run fixture
+    _write_pipeline(pipelines_dir / "demo.yaml", "demo", "hello there")
 
     token = create_user_and_login(client, username="carol", password="hunter2")
     client.headers["Authorization"] = f"Bearer {token}"
-    run_id = client.post("/api/runs", json={"workflow": "demo", "input": "hi"}).json()["run_id"]
+    run_id = client.post("/api/runs", json={"pipeline": "demo", "input": "hi"}).json()["run_id"]
     ticket = client.post("/api/runs/ws-ticket").json()["ticket"]  # issued while carol exists
 
     db_gen = backend_main.app.dependency_overrides[get_db]()

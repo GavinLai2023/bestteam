@@ -192,12 +192,12 @@ def test_search_bounds_candidate_scan(monkeypatch):
     real_candidates = store._candidates
 
     def spy_candidates(
-        user_id, types=None, limit=None, *, org_id=None, principal_id=None, workflow_id=None,
+        user_id, types=None, limit=None, *, org_id=None, principal_id=None, pipeline_id=None,
         include_embeddings=True,
     ):
         captured["limit"] = limit
         return real_candidates(
-            user_id, types, limit, org_id=org_id, principal_id=principal_id, workflow_id=workflow_id,
+            user_id, types, limit, org_id=org_id, principal_id=principal_id, pipeline_id=pipeline_id,
             include_embeddings=include_embeddings,
         )
 
@@ -352,13 +352,13 @@ def test_record_run_returns_outcome_and_stamps_provenance():
     from bestteam.core.memory import MemoryOutcome
 
     store = _store()
-    mgr = MemoryManager(store, run_id="run-1", workflow_version_id=7)
+    mgr = MemoryManager(store, run_id="run-1", pipeline_version_id=7)
 
     outcome = mgr.record_run("alice", "q", "a")
     assert isinstance(outcome, MemoryOutcome)
     assert outcome.recorded == [EPISODIC]
     assert outcome.extraction_usage is None
-    assert store.all("alice")[0].metadata == {"run_id": "run-1", "workflow_version_id": 7}
+    assert store.all("alice")[0].metadata == {"run_id": "run-1", "pipeline_version_id": 7}
 
 
 def test_record_run_provenance_omits_unbound_ids():
@@ -1752,54 +1752,54 @@ def test_opens_pre_org_db_and_migrates(tmp_path):
     store.close()
 
 
-# --- workflow scoping (episodic/procedural isolation, cross-workflow project) ---
+# --- pipeline scoping (episodic/procedural isolation, cross-pipeline project) ---
 
 
-def test_add_persists_workflow_id():
+def test_add_persists_pipeline_id():
     store = _store()
-    rec = store.add("alice", EPISODIC, "content", workflow_id=1)
-    assert rec.workflow_id == 1
-    assert store.all("alice", workflow_id=1)[0].workflow_id == 1
+    rec = store.add("alice", EPISODIC, "content", pipeline_id=1)
+    assert rec.pipeline_id == 1
+    assert store.all("alice", pipeline_id=1)[0].pipeline_id == 1
 
 
-def test_all_scopes_by_workflow():
+def test_all_scopes_by_pipeline():
     store = _store()
-    store.add("alice", EPISODIC, "workflow one note", workflow_id=1)
-    store.add("alice", EPISODIC, "workflow two note", workflow_id=2)
+    store.add("alice", EPISODIC, "pipeline one note", pipeline_id=1)
+    store.add("alice", EPISODIC, "pipeline two note", pipeline_id=2)
 
-    assert [r.content for r in store.all("alice", workflow_id=1)] == ["workflow one note"]
-    assert [r.content for r in store.all("alice", workflow_id=2)] == ["workflow two note"]
-    # workflow_id=None (admin / unfiltered) sees both.
-    assert len(store.all("alice", workflow_id=None)) == 2
+    assert [r.content for r in store.all("alice", pipeline_id=1)] == ["pipeline one note"]
+    assert [r.content for r in store.all("alice", pipeline_id=2)] == ["pipeline two note"]
+    # pipeline_id=None (admin / unfiltered) sees both.
+    assert len(store.all("alice", pipeline_id=None)) == 2
 
 
-def test_search_scopes_by_workflow():
+def test_search_scopes_by_pipeline():
     store = _store()
-    store.add("alice", EPISODIC, "the refund policy for workflow one", workflow_id=1)
-    store.add("alice", EPISODIC, "the refund policy for workflow two", workflow_id=2)
+    store.add("alice", EPISODIC, "the refund policy for pipeline one", pipeline_id=1)
+    store.add("alice", EPISODIC, "the refund policy for pipeline two", pipeline_id=2)
 
-    hits1 = store.search("alice", "refund policy", workflow_id=1)
-    assert len(hits1) == 1 and hits1[0].workflow_id == 1
-    # Unfiltered search still spans every workflow.
-    assert len(store.search("alice", "refund policy", workflow_id=None)) == 2
+    hits1 = store.search("alice", "refund policy", pipeline_id=1)
+    assert len(hits1) == 1 and hits1[0].pipeline_id == 1
+    # Unfiltered search still spans every pipeline.
+    assert len(store.search("alice", "refund policy", pipeline_id=None)) == 2
 
 
-def test_dedup_is_per_workflow():
+def test_dedup_is_per_pipeline():
     store = _store()
-    a = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=1)
-    # Same text under a DIFFERENT workflow is not a duplicate.
-    b = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=2)
-    # Same (text, workflow) IS a duplicate.
-    c = store.add_if_absent("alice", PROCEDURAL, "check order number first", workflow_id=1)
+    a = store.add_if_absent("alice", PROCEDURAL, "check order number first", pipeline_id=1)
+    # Same text under a DIFFERENT pipeline is not a duplicate.
+    b = store.add_if_absent("alice", PROCEDURAL, "check order number first", pipeline_id=2)
+    # Same (text, pipeline) IS a duplicate.
+    c = store.add_if_absent("alice", PROCEDURAL, "check order number first", pipeline_id=1)
     assert a is not None and b is not None and c is None
 
 
-def test_opens_pre_workflow_db_and_migrates(tmp_path):
-    # A DB created before workflow scoping (no workflow_id column) must gain the
-    # column in place, keep its existing rows (workflow_id NULL), and work after.
+def test_opens_pre_pipeline_db_and_migrates(tmp_path):
+    # A DB created before pipeline scoping (no pipeline_id column) must gain the
+    # column in place, keep its existing rows (pipeline_id NULL), and work after.
     import sqlite3
 
-    db_path = str(tmp_path / "pre_workflow.db")
+    db_path = str(tmp_path / "pre_pipeline.db")
     conn = sqlite3.connect(db_path)
     conn.execute(
         "CREATE TABLE memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
@@ -1814,60 +1814,60 @@ def test_opens_pre_workflow_db_and_migrates(tmp_path):
     conn.close()
 
     store = SqliteBM25Memory(db_path)
-    legacy = store.all("alice", workflow_id=None)
-    assert len(legacy) == 1 and legacy[0].workflow_id is None
-    store.add("alice", PROCEDURAL, "new workflow note", workflow_id=1)
-    assert [r.content for r in store.all("alice", workflow_id=1)] == ["new workflow note"]
+    legacy = store.all("alice", pipeline_id=None)
+    assert len(legacy) == 1 and legacy[0].pipeline_id is None
+    store.add("alice", PROCEDURAL, "new pipeline note", pipeline_id=1)
+    assert [r.content for r in store.all("alice", pipeline_id=1)] == ["new pipeline note"]
     store.close()
 
 
-def test_recall_semantic_shared_across_workflows():
-    # Personal preferences (semantic) apply no matter which workflow is running.
+def test_recall_semantic_shared_across_pipelines():
+    # Personal preferences (semantic) apply no matter which pipeline is running.
     store = _store()
     store.add("alice", SEMANTIC, "prefers concise answers", org_id=5)
-    mgr_a = MemoryManager(store, org_id=5, workflow_id=1)
-    mgr_b = MemoryManager(store, org_id=5, workflow_id=2)
+    mgr_a = MemoryManager(store, org_id=5, pipeline_id=1)
+    mgr_b = MemoryManager(store, org_id=5, pipeline_id=2)
 
     assert mgr_a.recall("alice", "concise answers").count == 1
     assert mgr_b.recall("alice", "concise answers").count == 1
 
 
-def test_recall_procedural_isolated_per_workflow():
+def test_recall_procedural_isolated_per_pipeline():
     store = _store()
-    store.add("alice", PROCEDURAL, "check the order number first", org_id=5, workflow_id=1)
-    mgr_same = MemoryManager(store, org_id=5, workflow_id=1)
-    mgr_other = MemoryManager(store, org_id=5, workflow_id=2)
+    store.add("alice", PROCEDURAL, "check the order number first", org_id=5, pipeline_id=1)
+    mgr_same = MemoryManager(store, org_id=5, pipeline_id=1)
+    mgr_other = MemoryManager(store, org_id=5, pipeline_id=2)
 
     assert mgr_same.recall("alice", "order number").count == 1
     assert mgr_other.recall("alice", "order number").count == 0
 
 
-def test_recall_episodic_isolated_per_workflow():
+def test_recall_episodic_isolated_per_pipeline():
     store = _store()
-    store.add("alice", EPISODIC, "user asked about the refund policy", org_id=5, workflow_id=1)
-    mgr_other = MemoryManager(store, org_id=5, workflow_id=2)
+    store.add("alice", EPISODIC, "user asked about the refund policy", org_id=5, pipeline_id=1)
+    mgr_other = MemoryManager(store, org_id=5, pipeline_id=2)
 
     assert mgr_other.recall("alice", "refund policy").count == 0
 
 
-def test_recall_workflow_id_none_reproduces_prior_behavior():
-    # Back-compat: no workflow bound (SDK-direct, or a YAML-only demo workflow
-    # with no WorkflowRecord) recalls episodic/procedural across ALL workflows,
+def test_recall_pipeline_id_none_reproduces_prior_behavior():
+    # Back-compat: no pipeline bound (SDK-direct, or a YAML-only demo pipeline
+    # with no PipelineRecord) recalls episodic/procedural across ALL pipelines,
     # exactly like before this scoping dimension existed.
     store = _store()
-    store.add("alice", PROCEDURAL, "check the order number first", workflow_id=1)
-    store.add("alice", PROCEDURAL, "escalate angry customers", workflow_id=2)
+    store.add("alice", PROCEDURAL, "check the order number first", pipeline_id=1)
+    store.add("alice", PROCEDURAL, "escalate angry customers", pipeline_id=2)
 
-    mgr = MemoryManager(store)  # workflow_id defaults None
+    mgr = MemoryManager(store)  # pipeline_id defaults None
     assert mgr.recall("alice", "order number").count == 1
     assert mgr.recall("alice", "escalate angry customers").count == 1
 
 
-def test_recall_combines_semantic_and_workflow_scoped_hits():
+def test_recall_combines_semantic_and_pipeline_scoped_hits():
     store = _store()
     store.add("alice", SEMANTIC, "prefers concise refund answers", org_id=5)
-    store.add("alice", PROCEDURAL, "refund requests: check order number first", org_id=5, workflow_id=1)
-    mgr = MemoryManager(store, org_id=5, workflow_id=1)
+    store.add("alice", PROCEDURAL, "refund requests: check order number first", org_id=5, pipeline_id=1)
+    mgr = MemoryManager(store, org_id=5, pipeline_id=1)
 
     result = mgr.recall("alice", "refund")
     assert result.count == 2
@@ -1875,46 +1875,46 @@ def test_recall_combines_semantic_and_workflow_scoped_hits():
     assert "check order number first" in result.preamble
 
 
-# --- workflow scoping on writes: episodic/procedural only, never semantic ---
+# --- pipeline scoping on writes: episodic/procedural only, never semantic ---
 
 
-def test_record_run_stamps_workflow_id_on_episodic():
+def test_record_run_stamps_pipeline_id_on_episodic():
     store = _store()
-    MemoryManager(store, workflow_id=1).record_run("alice", "q", "a")
+    MemoryManager(store, pipeline_id=1).record_run("alice", "q", "a")
 
-    (record,) = store.all("alice", workflow_id=1)
+    (record,) = store.all("alice", pipeline_id=1)
     assert record.type == EPISODIC
 
 
-def test_record_run_stamps_workflow_id_on_extracted_procedural_not_semantic():
+def test_record_run_stamps_pipeline_id_on_extracted_procedural_not_semantic():
     canned = (
         '{"facts": [{"action": "add", "content": "prefers bullet points"}], '
         '"procedural": "check order number first"}'
     )
     store = _store()
-    MemoryManager(store, workflow_id=1, extraction_model=f"fake:{canned}").record_run(
+    MemoryManager(store, pipeline_id=1, extraction_model=f"fake:{canned}").record_run(
         "alice", "how do refunds work?", "30-day money back"
     )
 
     semantic = [r for r in store.all("alice") if r.type == SEMANTIC][0]
     procedural = [r for r in store.all("alice") if r.type == PROCEDURAL][0]
-    assert semantic.workflow_id is None  # org-wide, not tied to any one workflow
-    assert procedural.workflow_id == 1
+    assert semantic.pipeline_id is None  # org-wide, not tied to any one pipeline
+    assert procedural.pipeline_id == 1
 
 
-def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
+def test_extraction_dedups_procedural_per_pipeline_but_semantic_org_wide():
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
 
     store = _store()
-    store.add("alice", SEMANTIC, "likes bullet points")  # no workflow_id -> org-wide
-    store.add("alice", PROCEDURAL, "check order number first", workflow_id=2)  # a DIFFERENT workflow
+    store.add("alice", SEMANTIC, "likes bullet points")  # no pipeline_id -> org-wide
+    store.add("alice", PROCEDURAL, "check order number first", pipeline_id=2)  # a DIFFERENT pipeline
     canned = AIMessage(
         content='{"facts": [{"action": "add", "content": "likes bullet points"}], '
         '"procedural": "check order number first"}'
     )
     mgr = MemoryManager(
-        store, workflow_id=1, extraction_model=FakeMessagesListChatModel(responses=[canned])
+        store, pipeline_id=1, extraction_model=FakeMessagesListChatModel(responses=[canned])
     )
 
     outcome = mgr.record_run("alice", "q", "a")
@@ -1922,7 +1922,7 @@ def test_extraction_dedups_procedural_per_workflow_but_semantic_org_wide():
     # The semantic fact already exists org-wide -> deduped, not rewritten.
     assert len([r for r in store.all("alice") if r.type == SEMANTIC]) == 1
     assert outcome.recorded.count(SEMANTIC) == 0
-    # The procedural note is new under workflow 1 (workflow 2's note doesn't dedup it).
+    # The procedural note is new under pipeline 1 (pipeline 2's note doesn't dedup it).
     assert len([r for r in store.all("alice") if r.type == PROCEDURAL]) == 2
     assert outcome.recorded.count(PROCEDURAL) == 1
 

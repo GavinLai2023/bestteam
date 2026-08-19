@@ -11,8 +11,8 @@ export default function LandingPage() {
 
   useEffect(() => {
     api
-      .listWorkflows()
-      .then((data) => setDestination(data.workflows.length ? '/activity' : '/wizard'))
+      .listPipelines()
+      .then((data) => setDestination(data.pipelines.length ? '/activity' : '/wizard'))
       .catch(() => setDestination('/activity'))
   }, [])
 

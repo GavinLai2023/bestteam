@@ -8,11 +8,11 @@ overview, architecture, and commands.
 
 - **Specification = loader schema + wizard-only friendly fields**
   (`core/specification.py`): `AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/
-  `WorkflowSpec`/`Specification` are pydantic models that mirror the YAML
-  loader's raw dict (see `core/loader.py::_build_workflow`), plus
+  `PipelineSpec`/`Specification` are pydantic models that mirror the YAML
+  loader's raw dict (see `core/loader.py::_build_pipeline`), plus
   presentation-only fields (`display_name`, `friendly_description`) that
   `to_raw()` strips before validation. `validate_specification()` compiles
-  the stripped dict via `_build_workflow()` and raises `ConfigurationError`
+  the stripped dict via `_build_pipeline()` and raises `ConfigurationError`
   on an invalid design. `generate_specification()` drives a "Solution
   Architect" model via `with_structured_output(Specification)` and
   self-corrects on `ConfigurationError` (up to `max_attempts`) — the
@@ -23,7 +23,7 @@ overview, architecture, and commands.
   clarifying_questions) is the Requirements-stage counterpart to
   `Specification`. `generate_requirements(model, intent_text, as_is_text,
   feedback=...)` calls `model.with_structured_output(Requirements)` —
-  no `_build_workflow` validation applies at this stage (it's a plain-language
+  no `_build_pipeline` validation applies at this stage (it's a plain-language
   summary, not yet a team design). `Requirements.to_prompt()` renders it as
   text for the Solution Architect's `requirements` argument.
 
@@ -35,9 +35,9 @@ the tools it depends on: `{name, description, instructions, tools}`. An
 loader-level field (unlike `display_name`/`friendly_description`, `to_raw()`
 keeps it).
 
-`core/loader.py::_build_workflow` resolves `skills:` via an optional
+`core/loader.py::_build_pipeline` resolves `skills:` via an optional
 `extra_skills: Dict[str, SkillSpec]` parameter (mirrors `extra_tools`;
-`load_workflow(..., skills=[...])` builds it by `.name`). For each agent:
+`load_pipeline(..., skills=[...])` builds it by `.name`). For each agent:
 
 - Each skill name is looked up in `extra_skills`; an unknown name raises
   `ConfigurationError("Unknown skill '<name>'. Available skills: <...>")`.
@@ -49,7 +49,7 @@ keeps it).
   skill in `skills:` order, joined by `"\n\n"`.
 
 `validate_specification()`/`generate_specification()` accept the same
-`extra_skills` parameter, passed through to `_build_workflow()`.
+`extra_skills` parameter, passed through to `_build_pipeline()`.
 
 ## Knowledge bases (`core/knowledge_base.py`, `core/vector_knowledge_base.py`, `core/hybrid_knowledge_base.py`)
 
@@ -72,7 +72,7 @@ backed by a folder of documents (`tools.parse_file` + chunking):
   chunk either method alone would miss (e.g. a semantically relevant chunk
   with zero keyword overlap with the query) can still surface. Requires
   both `pip install 'bestteam[tools-rag,tools-rag-vector]'`. See
-  `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`. The two legs are
+  `ui/backend/pipelines/hybrid_knowledge_base_demo.yaml`. The two legs are
   equal-weighted in the RRF formula itself, but `_rrf_retrieve` builds its
   ranked lists BM25-leg-before-vector-leg, and Python's stable sort keeps
   insertion order on a tie -- so a tied fused score (both legs agreeing
@@ -136,7 +136,7 @@ model can tell an org's collections apart. See `docs/KNOWLEDGE_BASES.md`.
 ```yaml
 knowledge_bases:
   - name: product_docs
-    path: ./docs/product   # relative to the workflow YAML's directory
+    path: ./docs/product   # relative to the pipeline YAML's directory
     # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
 
 agents:
@@ -148,7 +148,7 @@ agents:
 ```
 
 Requires `pip install 'bestteam[tools-rag]'`. See
-`ui/backend/workflows/knowledge_base_demo.yaml` for a runnable example.
+`ui/backend/pipelines/knowledge_base_demo.yaml` for a runnable example.
 
 **YAML usage — `vector`:**
 ```yaml
@@ -162,10 +162,10 @@ knowledge_bases:
     #           chunk meets it, query() returns the same "No results found" message
     # optional: cache_path — JSON file persisting per-chunk embeddings (keyed by a
     #           sha256 of the embedding-model spec + chunk text) across runs, so
-    #           load_workflow() doesn't re-embed unchanged chunks every time. Only
+    #           load_pipeline() doesn't re-embed unchanged chunks every time. Only
     #           applies when embedding_model is a string spec; if you pass a live
     #           Embeddings instance, caching is skipped with a warning. Resolved
-    #           relative to the workflow YAML's directory, like `path`.
+    #           relative to the pipeline YAML's directory, like `path`.
     cache_path: ./.bestteam_cache/product_docs.json
 ```
 
@@ -174,10 +174,10 @@ instance is used as-is, `"fake:<dim>"` (dim optional, default 32) gives a $0
 deterministic embedding for dry runs/tests, and other provider strings (e.g.
 `"openai:..."`) are resolved via `langchain.embeddings.init_embeddings`
 (requires `pip install langchain`). Requires `pip install 'bestteam[tools-rag-vector]'`
-(numpy). See `ui/backend/workflows/vector_knowledge_base_demo.yaml` for a $0
+(numpy). See `ui/backend/pipelines/vector_knowledge_base_demo.yaml` for a $0
 dry-run example using `"fake:"` specs, or
-`ui/backend/workflows/vector_knowledge_base_demo_live.yaml` for the same
-workflow wired to real OpenAI embeddings + chat model
+`ui/backend/pipelines/vector_knowledge_base_demo_live.yaml` for the same
+pipeline wired to real OpenAI embeddings + chat model
 (`text-embedding-3-small` + `gpt-4o-mini`), which demonstrates true semantic
 retrieval (e.g. matching "money back" queries to a "refund" policy doc with
 no shared keywords). The live variant requires `OPENAI_API_KEY`.
@@ -199,7 +199,7 @@ knowledge_bases:
 ```
 
 Requires BOTH `pip install 'bestteam[tools-rag,tools-rag-vector]'` extras
-(BM25 + embeddings). See `ui/backend/workflows/hybrid_knowledge_base_demo.yaml`
+(BM25 + embeddings). See `ui/backend/pipelines/hybrid_knowledge_base_demo.yaml`
 for a $0 dry-run example using `"fake:"` specs.
 
 ## Query expansion (opt-in, all three KB types)
@@ -280,7 +280,7 @@ owns:
 `VectorKnowledgeBase` is also in-memory plus an optional JSON embedding
 cache (`cache_path`) — no external vector store (Chroma/FAISS/Pinecone) and
 no hierarchical/"small-to-big" indexing. Without `cache_path`, every
-workflow load re-embeds all chunks (real embedding APIs incur cost/latency
+pipeline load re-embeds all chunks (real embedding APIs incur cost/latency
 on each run). There's no DMS connector (SharePoint/Confluence/Google Drive)
 for any of the three knowledge base types.
 
@@ -460,7 +460,7 @@ object is per-thread (`threading.local`), because Snowball's `stemWord` mutates
 instance state and the backend queries from a worker pool, and `_stem` is
 memoized (a bounded `lru_cache`) because stemming a token costs ~150x
 tokenizing it and a corpus reuses one small vocabulary — without the cache,
-indexing a chunk went from 0.10 ms to 16 ms, paid on every workflow load.
+indexing a chunk went from 0.10 ms to 16 ms, paid on every pipeline load.
 Tokens are never persisted, so changing any of this needs no migration or
 backfill.
 
@@ -496,26 +496,26 @@ The four memory types: **working** = the live `_TeamState` (not stored here);
 extraction_usage)` and `recall` a `RecallResult(preamble, count)` (`recall_preamble`
 is a thin string wrapper, unchanged). The extraction call's `usage_metadata` is
 captured as a `{model, input_tokens, output_tokens}` entry (mirroring the adapter),
-so `Workflow.stream` can emit it on a `memory_recorded` TraceEvent and the backend
+so `Pipeline.stream` can emit it on a `memory_recorded` TraceEvent and the backend
 meters it (`agent="memory:extraction"`, M-04) — the SDK never touches the backend
-DB. `Workflow.stream` also emits `memory_recalled` (`data`=count, 0 included) and,
+DB. `Pipeline.stream` also emits `memory_recalled` (`data`=count, 0 included) and,
 on a recall/record failure, a sanitized `memory_failed` (`data`=`"recall"`/
 `"record"`) for observability (M-05). Recall events precede the agents; **recording
 events are emitted AFTER `run_completed`** (see the ordering note below), so a
 slow/hung extraction can't wedge the run. Recording stays best-effort (a failure
-yields `memory_failed`, never `run_failed`). `Workflow.run`
-surfaces the same instrumentation on `WorkflowResult` for parity with `stream()`:
+yields `memory_failed`, never `run_failed`). `Pipeline.run`
+surfaces the same instrumentation on `PipelineResult` for parity with `stream()`:
 `.memory` (recording `MemoryOutcome`; `None`=disabled, `ok=False`=recording
 failure) and `.recall` (`RecallResult`; `None`=disabled, `count`=records drawn,
 `ok=False`=recall failure). Provenance is stamped into each record's
-`metadata={run_id, workflow_version_id}` (M-06), bound by `runtime._make_memory`.
+`metadata={run_id, pipeline_version_id}` (M-06), bound by `runtime._make_memory`.
 Extraction usage is captured immediately after the model call, so a failure still
 bills the spend; the usage rides exactly one emitted event (`memory_recorded`, or
 `memory_failed` when *every* write failed) so it's metered once even on total
 failure. Each extracted write is isolated (`MemoryOutcome.ok=False` on any
 partial/total failure → a `memory_failed` event) so one bad write can't skip the
 rest. **Recording (including the extraction LLM call) runs AFTER the terminal
-`run_completed` event** (`Workflow.stream`), so a slow/hung extraction can never
+`run_completed` event** (`Pipeline.stream`), so a slow/hung extraction can never
 delay or wedge a finished run — no timeout machinery needed. The backend still
 meters/records these post-terminal events because `run_in_background` drains the
 whole event stream; a live WebSocket that stops on `run_completed` just won't
@@ -525,7 +525,7 @@ memory event. On the backend, usage persistence goes through `_safe_record_usage
 which isolates a `usage_records` write failure from run status. See
 `docs/MEMORY_REVIEW_TRIAGE.md`.
 
-`Workflow.run/stream(input, *, user_id=None, memory=None)` recall a preamble
+`Pipeline.run/stream(input, *, user_id=None, memory=None)` recall a preamble
 (threaded through the adapter's `_initial_state` → `_TeamState.memory_preamble`
 → each agent's `extra_system_prompt`, so the cached compiled graph is reused
 with no recompile) and record the run afterward. Both kwargs default to None →
@@ -577,7 +577,7 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   sweep are deferred. All three degrade gracefully for a custom store (best-effort
   concrete-store extensions: dedup falls back to a plain `add`, prune is skipped).
 - Memory is best-effort on **both** sides of a run: `record_run` (write) and
-  `recall_preamble` (read, via `Workflow._safe_recall`) are each wrapped so a
+  `recall_preamble` (read, via `Pipeline._safe_recall`) are each wrapped so a
   failure degrades (empty preamble / skipped write) rather than failing the run
   (M-02). On the backend run path the per-run store is closed in
   `run_in_background`'s `finally` (M-03), and that close is itself best-effort —
@@ -643,7 +643,7 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   `agent="memory:query_expansion"` — see `ui/backend/CLAUDE.md`. Preserved
   even when the store search that follows a successful expansion fails (the
   paid call already happened): `recall()` catches that failure internally
-  (not left to `Workflow._safe_recall`'s outer catch) specifically so
+  (not left to `Pipeline._safe_recall`'s outer catch) specifically so
   `expansion_usage` survives on the resulting `ok=False` result.
 - **Reranking (opt-in)** is layered on top of the fused BM25/hybrid recall,
   in `MemoryManager._fused_search` (`core/reranking.py`). Setting
@@ -739,21 +739,23 @@ extraction) — see `ui/backend/runtime.py::_make_memory`.
   escaping/filtering engine — a proportionate mitigation for the disabled-by-
   default, per-user model, not full hardening.
 - Procedural memory is per-user (could be promoted to global/agent-level later).
-- **Memory is workflow-scoped for episodic/procedural, org-scoped for
-  semantic** (cross-workflow memory scoping). Records also carry a
-  `workflow_id` (`WorkflowRecord.id`, the stable team head — survives a
-  redeploy, unlike `workflow_version_id`, which is pure per-deploy
+- **Memory is pipeline-scoped for episodic/procedural, org-scoped for
+  semantic** (cross-pipeline memory scoping). Records also carry a
+  `pipeline_id` (`PipelineRecord.id`, the stable team head — survives a
+  redeploy, unlike `pipeline_version_id`, which is pure per-deploy
   provenance). `add`/`add_if_absent`/`search`/`all` accept it as a
   concrete-store extension exactly like `org_id`/`principal_id` (`None` =
   unfiltered). `MemoryManager.recall()` runs two scoped searches instead of
-  one: `semantic` never receives `workflow_id` (personal preferences stay
-  shared across an org's workflows); `episodic`/`procedural` do (one team's
+  one: `semantic` never receives `pipeline_id` (personal preferences stay
+  shared across an org's pipelines); `episodic`/`procedural` do (one team's
   task experience doesn't leak into an unrelated team's context) —
-  `workflow_id=None` reproduces pre-existing, workflow-agnostic behavior for
-  SDK-direct callers and YAML-only demo workflows (no `WorkflowRecord`).
-  `record_run`/`_extract_and_store` route `workflow_id` into episodic/procedural
+  `pipeline_id=None` reproduces pre-existing, pipeline-agnostic behavior for
+  SDK-direct callers and YAML-only demo pipelines (no `PipelineRecord`).
+  `record_run`/`_extract_and_store` route `pipeline_id` into episodic/procedural
   writes only, never semantic. The backend binds it in
   `main.py::create_run` → `run_in_background` → `_make_memory` — see
   `ui/backend/CLAUDE.md`. No admin-API filter and no backfill of
-  pre-existing (workflow_id-NULL) rows; see
-  `docs/superpowers/specs/2026-08-11-cross-workflow-memory-scoping-design.md`.
+  pre-existing (pipeline_id-NULL) rows; see
+  `docs/superpowers/specs/2026-08-11-cross-workflow-memory-scoping-design.md`
+  (spec filename kept as originally published — see `docs/STATUS.md`'s note on
+  not rewriting history).

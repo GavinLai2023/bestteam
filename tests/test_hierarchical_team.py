@@ -2,7 +2,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, SystemMessage
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Team, Pipeline
 from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
 
 pytestmark = pytest.mark.unit
@@ -57,8 +57,8 @@ def test_manager_system_prompt_includes_delegation_guidance_for_each_subordinate
         mode=CollaborationMode.HIERARCHICAL,
         manager=manager,
     )
-    workflow = Workflow(name="wf", steps=[team])
-    workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    pipeline.run("do the thing")
 
     system_messages = [m for m in manager_model.last_messages if isinstance(m, SystemMessage)]
     assert len(system_messages) == 1
@@ -89,8 +89,8 @@ def test_manager_first_call_forces_tool_choice_when_delegates_available():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
-    workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    pipeline.run("do the thing")
 
     assert "required" in manager_model.bind_tools_calls
 
@@ -122,8 +122,8 @@ def test_delegated_subordinate_with_tools_forces_tool_choice_on_first_call():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
-    workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    pipeline.run("do the thing")
 
     assert "required" in researcher_model.bind_tools_calls
 
@@ -146,8 +146,8 @@ def test_manager_delegates_to_subordinate_and_returns_final_output():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
-    result = workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    result = pipeline.run("do the thing")
 
     assert result.output == "Final report based on: research findings"
     assert result.steps == [{"agent": "manager", "output": "Final report based on: research findings"}]
@@ -187,8 +187,8 @@ def test_manager_can_delegate_to_multiple_subordinates():
         mode=CollaborationMode.HIERARCHICAL,
         manager=manager,
     )
-    workflow = Workflow(name="wf", steps=[team])
-    result = workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    result = pipeline.run("do the thing")
 
     assert result.output == "Combined: research findings + a polished draft"
 
@@ -217,8 +217,8 @@ def test_manager_delegate_loop_is_bounded():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
-    result = workflow.run("do the thing")
+    pipeline = Pipeline(name="wf", steps=[team])
+    result = pipeline.run("do the thing")
 
     # The manager exhausting its delegate loop must surface explicitly rather
     # than as a silent empty success (CR-011).

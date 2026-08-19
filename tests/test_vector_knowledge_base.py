@@ -322,7 +322,7 @@ def test_vector_kb_cache_skipped_for_embeddings_instance(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_loader_resolves_vector_knowledge_base(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
 
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
@@ -348,13 +348,13 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
-    p = tmp_path / "workflow.yaml"
+    p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
-    wf = load_workflow(str(p))
+    wf = load_pipeline(str(p))
     agent = wf.steps[0].agents[0]
 
     assert len(agent.tools) == 1
@@ -364,7 +364,7 @@ workflow:
 
 
 def test_loader_unknown_knowledge_base_type_raises(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
 
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
@@ -386,14 +386,14 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
-    p = tmp_path / "workflow.yaml"
+    p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match="unknown type 'bogus'.*Valid types"):
-        load_workflow(str(p))
+        load_pipeline(str(p))
 
 
 def _vector_kb_with_docs(tmp_path, *texts, **kwargs):
@@ -466,8 +466,8 @@ def test_vector_kb_bad_rerank_spec_raises_at_construction(tmp_path):
         _vector_kb_with_docs(tmp_path, "hello world", rerank_model="not-a-real-spec")
 
 
-def test_loader_resolves_vector_kb_cache_path_relative_to_workflow(tmp_path):
-    from bestteam import load_workflow
+def test_loader_resolves_vector_kb_cache_path_relative_to_pipeline(tmp_path):
+    from bestteam import load_pipeline
 
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
@@ -491,13 +491,13 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
-    p = tmp_path / "workflow.yaml"
+    p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
-    load_workflow(str(p))
+    load_pipeline(str(p))
 
     assert (tmp_path / ".cache" / "embeddings.json").exists()
 

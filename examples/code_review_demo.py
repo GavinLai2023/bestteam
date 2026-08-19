@@ -7,7 +7,7 @@ nothing else in this script changes.
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Pipeline, Team
 
 CODE_TO_REVIEW = '''\
 def calculate_average(numbers):
@@ -66,13 +66,13 @@ qa_team = Team(
     mode=CollaborationMode.SEQUENTIAL,
 )
 
-workflow = Workflow(name="code_review_pipeline", steps=[qa_team])
+pipeline = Pipeline(name="code_review_pipeline", steps=[qa_team])
 
 if __name__ == "__main__":
     print("=== Code under review ===")
     print(CODE_TO_REVIEW)
 
-    result = workflow.run(f"Review this Python code and report any bugs:\n\n{CODE_TO_REVIEW}")
+    result = pipeline.run(f"Review this Python code and report any bugs:\n\n{CODE_TO_REVIEW}")
 
     print("=== Step-by-step ===")
     for step in result.steps:

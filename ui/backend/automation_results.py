@@ -2,7 +2,7 @@
 `automation_item_results` rows (Property Maintenance Inbox, Release 1A).
 
 The Maintenance Response Coordinator agent is instructed to end its turn with
-a strict JSON envelope (see `workflows/property_maintenance_inbox_demo.yaml`
+a strict JSON envelope (see `pipelines/property_maintenance_inbox_demo.yaml`
 and the platform skill `property_maintenance_response_v1`). This module never
 trusts that JSON for identity: `org_id`/`run_id`/`source_key` are always
 derived from the run's own persisted `trigger_context` (the poller-detected
@@ -12,10 +12,10 @@ sections 5.3, 10, 10.1, 11.1.
 
 Scoping note: `normalize_run_result` only engages once a run's output parses
 as JSON carrying `result_type == "property_maintenance_email_batch"`. Every
-other org's existing (unrelated) email-trigger workflow returns free text, so
+other org's existing (unrelated) email-trigger pipeline returns free text, so
 this never fires for them -- see the plan doc's "Normalization decision" for
 why a literal "always synthesize errors for every trigger run" reading would
-have been a correctness regression for those workflows.
+have been a correctness regression for those pipelines.
 """
 
 from __future__ import annotations
@@ -381,7 +381,7 @@ def already_drafted_uids(db: Session, run_row: Run) -> frozenset:
     own results alone (Codex review finding).
 
     Two independent sources of evidence are unioned, because normalized
-    results alone only ever covered ONE workflow template:
+    results alone only ever covered ONE pipeline template:
 
     - `automation_item_results` rows, which `normalize_run_result` writes
       exclusively for the property-maintenance contract; and
@@ -483,14 +483,14 @@ def _normalize(
     raw = _extract_json_object(raw_output_override if raw_output_override is not None else (run_row.output or ""))
     if raw is None or raw.get("result_type") != RESULT_TYPE_BATCH_MARKER:
         if trigger_context.get("result_contract") == RESULT_TYPE_BATCH_MARKER:
-            # This run WAS dispatched against a workflow whose Response agent
+            # This run WAS dispatched against a pipeline whose Response agent
             # carries the property_maintenance_response_v1 skill (stamped into
             # trigger_context at dispatch time -- see
             # email_trigger._declares_property_maintenance_contract), so an
             # unparseable output -- including a plain failure string from a
             # run that crashed before producing any JSON -- is still this
             # vertical's batch, not free text from an unrelated org's
-            # email-trigger workflow. Spec 10.1: every UID in a declared batch
+            # email-trigger pipeline. Spec 10.1: every UID in a declared batch
             # gets a result row even when the run never reached a parseable
             # envelope (Codex review finding).
             _write_error_rows(
@@ -499,8 +499,8 @@ def _normalize(
                 confirmed_draft_message_ids=confirmed_draft_message_ids,
             )
         # Otherwise: the model produced no parseable JSON with this marker,
-        # and this workflow was never marked as using this vertical's
-        # contract -- an unrelated org's email-trigger workflow, left alone
+        # and this pipeline was never marked as using this vertical's
+        # contract -- an unrelated org's email-trigger pipeline, left alone
         # entirely.
         return
 

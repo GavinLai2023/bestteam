@@ -8,7 +8,7 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Team, Pipeline
 from bestteam.core.tool_context import add_usage
 
 pytestmark = pytest.mark.integration
@@ -24,9 +24,9 @@ class _FakeToolCallingChatModel(FakeMessagesListChatModel):
 
 def test_agent_completed_event_has_empty_usage_for_fake_model():
     a = _agent("a", "output from a")
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
 
-    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+    completed = [e for e in pipeline.stream("do the thing") if e.type == "agent_completed"]
 
     assert completed[0].usage == []
 
@@ -36,9 +36,9 @@ def test_agent_completed_event_includes_usage_metadata():
         responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+    completed = [e for e in pipeline.stream("do the thing") if e.type == "agent_completed"]
 
     assert completed[0].usage == [{"model": "FakeMessagesListChatModel", "input_tokens": 10, "output_tokens": 5}]
 
@@ -62,9 +62,9 @@ def test_hierarchical_usage_aggregates_manager_and_subordinate():
     manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
 
     team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
-    workflow = Workflow(name="wf", steps=[team])
+    pipeline = Pipeline(name="wf", steps=[team])
 
-    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+    completed = [e for e in pipeline.stream("do the thing") if e.type == "agent_completed"]
 
     assert len(completed) == 1
     assert completed[0].agent == "manager"
@@ -95,9 +95,9 @@ def test_kb_query_usage_rides_agent_completed_usage():
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+    completed = [e for e in pipeline.stream("do the thing") if e.type == "agent_completed"]
 
     assert {"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0} in completed[0].usage
 
@@ -121,9 +121,9 @@ def test_tool_reported_usage_survives_a_failing_tool_call():
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    completed = [e for e in workflow.stream("do the thing") if e.type == "agent_completed"]
+    completed = [e for e in pipeline.stream("do the thing") if e.type == "agent_completed"]
 
     assert completed[0].usage == [
         {"model": "openai:text-embedding-3-small", "input_tokens": 6, "output_tokens": 0}
@@ -181,11 +181,11 @@ def test_run_in_background_persists_usage_records(db_session_factory):
         responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
     run = registry.create("wf", "do the thing")
 
-    run_in_background(run.id, workflow, "do the thing", engine)
+    run_in_background(run.id, pipeline, "do the thing", engine)
 
     with Session() as db:
         records = list_usage_for_run(db, run.id)
@@ -213,10 +213,10 @@ def test_run_in_background_stamps_usage_and_run_row_with_org(db_session_factory)
         responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
     run = registry.create("wf", "go", org_id=org_id, username="alice")
 
-    run_in_background(run.id, workflow, "go", engine, org_id=org_id, username="alice")
+    run_in_background(run.id, pipeline, "go", engine, org_id=org_id, username="alice")
 
     with Session() as db:
         run_row = db.get(RunRow, run.id)
@@ -230,11 +230,11 @@ def test_run_in_background_stamps_usage_and_run_row_with_org(db_session_factory)
 def test_run_in_background_records_nothing_for_fake_models(db_session_factory):
     engine, Session = db_session_factory
     a = _agent("a", "output from a")
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
 
     run = registry.create("wf", "do the thing")
 
-    run_in_background(run.id, workflow, "do the thing", engine)
+    run_in_background(run.id, pipeline, "do the thing", engine)
 
     with Session() as db:
         assert list_usage_for_run(db, run.id) == []
@@ -243,7 +243,7 @@ def test_run_in_background_records_nothing_for_fake_models(db_session_factory):
 # --- CR-012: usage_records/trace_events must reference a persisted Run row ----
 
 
-class _BoomWorkflow:
+class _BoomPipeline:
     """Stand-in whose .stream() raises before yielding any event."""
 
     name = "boom_wf"
@@ -255,17 +255,17 @@ class _BoomWorkflow:
 def test_run_in_background_persists_completed_run_row(db_session_factory):
     engine, Session = db_session_factory
     a = _agent("a", "output from a")
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)])
 
     run = registry.create("wf", "do the thing")
 
-    run_in_background(run.id, workflow, "do the thing", engine)
+    run_in_background(run.id, pipeline, "do the thing", engine)
 
     with Session() as db:
         row = db.get(Run, run.id)
 
     assert row is not None, "usage/trace FKs would reference a phantom run (CR-012)"
-    assert row.workflow == "wf"
+    assert row.pipeline == "wf"
     assert row.input == "do the thing"
     assert row.status == "completed"
     assert row.output == "output from a"
@@ -287,10 +287,10 @@ def test_run_in_background_persists_run_row_before_usage(db_session_factory):
         responses=[AIMessage(content="hello", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
     run = registry.create("wf", "do the thing")
-    run_in_background(run.id, workflow, "do the thing", engine)
+    run_in_background(run.id, pipeline, "do the thing", engine)
 
     with Session() as db:
         run_ids = {r.run_id for r in list_usage_for_run(db, run.id)}
@@ -302,7 +302,7 @@ def test_run_in_background_marks_run_failed_on_worker_exception(db_session_facto
     engine, Session = db_session_factory
     run = registry.create("boom_wf", "input")
 
-    run_in_background(run.id, _BoomWorkflow(), "input", engine)
+    run_in_background(run.id, _BoomPipeline(), "input", engine)
 
     with Session() as db:
         row = db.get(Run, run.id)
@@ -311,9 +311,9 @@ def test_run_in_background_marks_run_failed_on_worker_exception(db_session_facto
     assert row.status == "failed"
 
 
-class _NamelessWorkflow:
+class _NamelessPipeline:
     """`.name` is None, so the up-front persist itself violates the
-    `runs.workflow` NOT NULL constraint -- reproduces "the up-front persist
+    `runs.pipeline` NOT NULL constraint -- reproduces "the up-front persist
     may itself have failed" without relying on a pre-existing row with the
     same id, which run_in_background no longer treats as an error (it now
     reuses a pre-persisted row instead of double-inserting -- see
@@ -334,7 +334,7 @@ def test_run_in_background_still_publishes_terminal_event_if_run_row_commit_fail
     run = registry.create("wf", "do the thing")
 
     # Must not raise, and must record a terminal state.
-    run_in_background(run.id, _NamelessWorkflow(), "do the thing", engine)
+    run_in_background(run.id, _NamelessPipeline(), "do the thing", engine)
 
     stored = registry.get(run.id)
     assert stored.status == "failed"
@@ -397,10 +397,10 @@ def test_run_in_background_persists_kb_query_usage_rows(db_session_factory):
         ]
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[lookup_docs])
-    workflow = Workflow(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
     run = registry.create("wf", "go")
 
-    run_in_background(run.id, workflow, "go", engine)
+    run_in_background(run.id, pipeline, "go", engine)
 
     with Session() as db:
         records = list_usage_for_run(db, run.id)

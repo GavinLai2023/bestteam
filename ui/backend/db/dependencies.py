@@ -1,8 +1,8 @@
-"""Typed skill/KB dependency records for published workflow versions (P1-04).
+"""Typed skill/KB dependency records for published pipeline versions (P1-04).
 
 `record_version_dependencies` materializes, at deploy, one row per skill/standalone
 KB a version depends on. Skill rows pin immutable content versions;
-`workflows_referencing` answers the reverse query used by delete guards.
+`pipelines_referencing` answers the reverse query used by delete guards.
 """
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from sqlalchemy.orm import Session
 
 from .models import (
     KnowledgeBaseRecord,
+    PipelineDependency,
+    PipelineRecord,
+    PipelineVersion,
     SkillRecord,
-    WorkflowDependency,
-    WorkflowRecord,
-    WorkflowVersion,
 )
 from .skills import ensure_skill_version
 
@@ -61,7 +61,7 @@ def _inline_kb_names(raw: Any) -> set[str]:
 def record_version_dependencies(
     db: Session, *, version_id: int, org_id: Optional[int], raw: dict[str, Any]
 ) -> None:
-    """Insert one WorkflowDependency row per skill and per standalone KB `raw`
+    """Insert one PipelineDependency row per skill and per standalone KB `raw`
     references. Resolves resource_id the way the loader resolves names and pins
     the current immutable SkillVersion: an org
     skill shadows a same-named platform built-in (org_id IS NULL); KBs are
@@ -98,34 +98,34 @@ def record_version_dependencies(
     for name in sorted(skill_names):
         skill = skill_records.get(name)
         skill_version = ensure_skill_version(db, skill) if skill is not None else None
-        db.add(WorkflowDependency(
-            workflow_version_id=version_id, resource_kind="skill",
+        db.add(PipelineDependency(
+            pipeline_version_id=version_id, resource_kind="skill",
             resource_name=name,
             resource_id=skill.id if skill is not None else None,
             resource_version_id=skill_version.id if skill_version is not None else None,
         ))
     for name in sorted(kb_tool_names):
         if name in kb_ids:
-            db.add(WorkflowDependency(
-                workflow_version_id=version_id, resource_kind="knowledge_base",
+            db.add(PipelineDependency(
+                pipeline_version_id=version_id, resource_kind="knowledge_base",
                 resource_name=name, resource_id=kb_ids[name],
             ))
 
 
-def workflows_referencing(db: Session, *, kind: str, resource_id: int) -> list[str]:
-    """Names of `deployed` workflows whose CURRENT version depends on the resource
+def pipelines_referencing(db: Session, *, kind: str, resource_id: int) -> list[str]:
+    """Names of `deployed` pipelines whose CURRENT version depends on the resource
     with id `resource_id` (kind = "skill" | "knowledge_base"). Matches by stable
     id, so a platform built-in skill's referencers across every org are found
     without an all-orgs name scan; the current_version_id join reproduces
     "current deployed config only"."""
     q = (
-        db.query(WorkflowRecord.name)
-        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRecord.current_version_id)
-        .join(WorkflowDependency, WorkflowDependency.workflow_version_id == WorkflowVersion.id)
+        db.query(PipelineRecord.name)
+        .join(PipelineVersion, PipelineVersion.id == PipelineRecord.current_version_id)
+        .join(PipelineDependency, PipelineDependency.pipeline_version_id == PipelineVersion.id)
         .filter(
-            WorkflowRecord.status == "deployed",
-            WorkflowDependency.resource_kind == kind,
-            WorkflowDependency.resource_id == resource_id,
+            PipelineRecord.status == "deployed",
+            PipelineDependency.resource_kind == kind,
+            PipelineDependency.resource_id == resource_id,
         )
     )
     return sorted({name for (name,) in q})

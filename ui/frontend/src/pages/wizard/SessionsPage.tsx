@@ -43,12 +43,12 @@ const AUTOMATION_STATUS_LABELS: Record<string, string> = {
 }
 
 function resumePathFor(session: BuilderSession) {
-  // A deployed workflow with no builder session (deployed straight through
+  // A deployed pipeline with no builder session (deployed straight through
   // the admin Advanced/CRUD page, see builder.py's
-  // _synthetic_session_for_workflow) has no wizard flow to resume into --
+  // _synthetic_session_for_pipeline) has no wizard flow to resume into --
   // send it to Run a Team, pre-selected, instead.
   if (session.id == null) {
-    return `/run?workflow=${encodeURIComponent(session.specification_json?.name ?? '')}`
+    return `/run?pipeline=${encodeURIComponent(session.specification_json?.name ?? '')}`
   }
   return session.status === 'deployed' ? `/wizard/${session.id}/deploy` : `/wizard/${session.id}/confirm`
 }
@@ -132,9 +132,9 @@ export default function SessionsPage() {
               {group.sessions.map((session) => {
                 const teamName = session.specification_json?.name
                 const displayName = session.specification_json?.teams?.[0]?.display_name || teamName
-                const isAutomated = trigger?.enabled && teamName && trigger.workflow_name === teamName
+                const isAutomated = trigger?.enabled && teamName && trigger.pipeline_name === teamName
                 return (
-                  <li key={session.id ?? `workflow:${teamName}`} className="session-item">
+                  <li key={session.id ?? `pipeline:${teamName}`} className="session-item">
                     <button className="wizard-card session-card" onClick={() => navigate(resumePathFor(session))}>
                       <h3>{displayName ?? session.intent_text}</h3>
                       <p className="subtitle">{descriptionFor(session)}</p>
@@ -147,10 +147,10 @@ export default function SessionsPage() {
                         <span className="session-updated">Updated {formatDateTime(session.updated_at)}</span>
                       </div>
                     </button>
-                    {session.status === 'deployed' && session.workflow_id != null && (
-                      <ShareLinksPanel workflowId={session.workflow_id} />
+                    {session.status === 'deployed' && session.pipeline_id != null && (
+                      <ShareLinksPanel pipelineId={session.pipeline_id} />
                     )}
-                    {session.workflow_id == null && (
+                    {session.pipeline_id == null && (
                       <button
                         type="button"
                         className="session-delete-button"

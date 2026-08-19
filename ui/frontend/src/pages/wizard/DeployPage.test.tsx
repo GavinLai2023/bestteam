@@ -53,7 +53,7 @@ describe('DeployPage live automatic-runs mailbox connection', () => {
     mockContext = { session: deployedSession(), setSession: vi.fn(), loading: false, sessionId: 's1' }
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: false,
-      workflow_name: null,
+      pipeline_name: null,
       status: 'off',
       daily_cap: 50,
     })

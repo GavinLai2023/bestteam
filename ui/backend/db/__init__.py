@@ -12,7 +12,7 @@ from .models import (
     TraceEventRecord,
     UsageRecord,
     User,
-    WorkflowRecord,
+    PipelineRecord,
 )
 
 __all__ = [
@@ -25,7 +25,7 @@ __all__ = [
     "KnowledgeBaseRecord",
     "SkillRecord",
     "SkillVersion",
-    "WorkflowRecord",
+    "PipelineRecord",
     "OrgEmailCredential",
     "BuilderSession",
     "Run",

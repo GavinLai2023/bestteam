@@ -50,7 +50,7 @@ function App() {
         <Route element={<Layout />}>
           <Route element={<RequireOrgMember />}>
             {/* The landing route: sends a brand-new org (no deployed
-                workflows yet) to the wizard, and everyone else to the
+                pipelines yet) to the wizard, and everyone else to the
                 Activity dashboard -- see LandingPage.tsx. "Run a team" is
                 a deliberate destination now (/run), not the default one. */}
             <Route path="/" element={<LandingPage />} />

@@ -96,7 +96,7 @@ def test_budget_caps_round_trip_and_clear(db):
 
 
 def _usage(db, org_id, *, cost, created_at, run_id):
-    db.add(Run(id=run_id, workflow="w", input="", status="completed", org_id=org_id))
+    db.add(Run(id=run_id, pipeline="w", input="", status="completed", org_id=org_id))
     db.add(
         UsageRecord(
             run_id=run_id, org_id=org_id, model="openai:gpt-4o-mini",
@@ -138,7 +138,7 @@ def test_the_message_counter_column_starts_at_zero(db):
     from ui.backend.db.email_triggers import upsert_email_trigger
 
     trigger = upsert_email_trigger(
-        db, ORG, workflow_name="triage", enabled=False, last_uid=0, uidvalidity=None,
+        db, ORG, pipeline_name="triage", enabled=False, last_uid=0, uidvalidity=None,
     )
     db.commit()
     assert trigger.messages_today == 0

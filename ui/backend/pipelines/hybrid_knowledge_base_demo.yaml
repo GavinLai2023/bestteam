@@ -1,19 +1,18 @@
-# Single-agent support workflow backed by a vector knowledge base.
-# "support_agent" can call the "company_docs" tool (cosine-similarity search
-# over embeddings of kb_docs/) to ground its answers in the company's policy
-# documents using semantic (not just keyword) matching.
+# Single-agent support pipeline backed by a hybrid (BM25 + vector) knowledge
+# base. "support_agent" can call the "company_docs" tool, which fuses BM25
+# keyword search with cosine-similarity search via Reciprocal Rank Fusion --
+# so it can find a document via a shared keyword OR a semantically related
+# phrase with no shared keywords, whichever method's index has it.
 # Uses "fake:" specs for both the model and the embeddings so the dashboard
-# demo runs with zero cost / no API key. cache_path shows the recommended
-# production pattern of persisting embeddings across runs.
+# demo runs with zero cost / no API key.
 
-name: vector_knowledge_base_demo
+name: hybrid_knowledge_base_demo
 
 knowledge_bases:
   - name: company_docs
-    type: vector
+    type: hybrid
     path: ./kb_docs
     embedding_model: "fake:8"
-    cache_path: ./.bestteam_cache/vector_demo.json
 
 agents:
   - name: support_agent
@@ -28,5 +27,5 @@ teams:
     agents: [support_agent]
     mode: sequential
 
-workflow:
+pipeline:
   steps: [support_team]

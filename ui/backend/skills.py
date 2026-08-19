@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from bestteam import SkillSpec
 
-from .db.models import SkillRecord, SkillVersion, WorkflowDependency
+from .db.models import PipelineDependency, SkillRecord, SkillVersion
 from .db.skills import ensure_skill_version, publish_skill_version
 
 
@@ -16,12 +16,12 @@ def load_skills(
     db: Session,
     org_id: Optional[int] = None,
     *,
-    workflow_version_id: Optional[int] = None,
+    pipeline_version_id: Optional[int] = None,
 ) -> Dict[str, SkillSpec]:
     """Return the skills visible to `org_id` as a name→SkillSpec mapping.
 
-    When ``workflow_version_id`` is supplied, return only the immutable skill
-    versions pinned when that workflow version was deployed. This is the
+    When ``pipeline_version_id`` is supplied, return only the immutable skill
+    versions pinned when that pipeline version was deployed. This is the
     execution path. Without it, return the current visible catalog for builder
     drafts, deploy validation, YAML demos, and SDK compatibility.
 
@@ -30,9 +30,9 @@ def load_skills(
     built-in (built-ins are folded in first). org_id=None returns the
     built-in tier only.
     """
-    if workflow_version_id is not None:
-        dependencies = db.query(WorkflowDependency).filter_by(
-            workflow_version_id=workflow_version_id,
+    if pipeline_version_id is not None:
+        dependencies = db.query(PipelineDependency).filter_by(
+            pipeline_version_id=pipeline_version_id,
             resource_kind="skill",
         ).all()
         result: Dict[str, SkillSpec] = {}
@@ -50,7 +50,7 @@ def load_skills(
 
     # Select only legacy columns: YAML/SDK catalog reads can keep working while
     # an operator is between application update and ``alembic upgrade head``.
-    # Published DB workflows use the version-aware branch above and correctly
+    # Published DB pipelines use the version-aware branch above and correctly
     # require the new schema.
     query = db.query(SkillRecord.name, SkillRecord.config, SkillRecord.org_id)
     if org_id is None:
@@ -124,7 +124,7 @@ DEFAULT_SKILLS: List[SkillSpec] = [
     # overwritten in place -- see seed_default_skills' docstring and spec
     # section 8.3): a
     # new behavior ships as `_v2`, never a silent edit of `_v1`, so a
-    # Workflow Version already in production never drifts. Phase 4b is the
+    # Pipeline Version already in production never drifts. Phase 4b is the
     # first use of that rule: attachment reading ships as
     # property_maintenance_intake_v2, and `_v1` stays exactly as it was for
     # teams already deployed against it. Shipping a new row (rather than
@@ -227,7 +227,7 @@ DEFAULT_SKILLS: List[SkillSpec] = [
             "to have seen an attachment.\n\n"
             "End your turn with a clear, structured write-up of every "
             "message (one block per message id) covering all of the above "
-            "-- the next agent in this workflow drafts replies from your "
+            "-- the next agent in this pipeline drafts replies from your "
             "write-up alone and cannot re-read the mailbox itself, so "
             "include everything it would need."
         ),
@@ -295,7 +295,7 @@ DEFAULT_SKILLS: List[SkillSpec] = [
             "email_read_attachment actually returned.\n\n"
             "End your turn with a clear, structured write-up of every "
             "message (one block per message id) covering all of the above "
-            "-- the next agent in this workflow drafts replies from your "
+            "-- the next agent in this pipeline drafts replies from your "
             "write-up alone and cannot re-read the mailbox itself, so "
             "include everything it would need."
         ),

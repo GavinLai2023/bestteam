@@ -6,7 +6,7 @@ import pytest
 pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
-from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
+from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 from helpers import make_concurrent_safe_engine
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
@@ -19,12 +19,12 @@ def _engine(tmp_path):
     return e
 
 
-def _workflow(tmp_path):
+def _pipeline(tmp_path):
     spec = Specification(
         name="w",
         agents=[AgentSpec(name="a", role="R", goal="g", model="fake:done")],
         teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
     return validate_specification(spec, source=tmp_path / "w.yaml")
 
@@ -38,9 +38,9 @@ def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
     # key, so reuse it here rather than a disconnected literal.
     run = registry.create("w", "in", username="email-trigger")
     with Session() as s:
-        s.add(Run(id=run.id, workflow="w", input="in", status="running", username="email-trigger"))
+        s.add(Run(id=run.id, pipeline="w", input="in", status="running", username="email-trigger"))
         s.commit()
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run_in_background(run.id, wf, "in", engine=engine, username="email-trigger")
     with Session() as s:
         rows = s.query(Run).filter_by(id=run.id).all()
@@ -49,28 +49,28 @@ def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
         assert rows[0].username == "email-trigger"
 
 
-def test_run_in_background_stamps_workflow_version_id(tmp_path):
+def test_run_in_background_stamps_pipeline_version_id(tmp_path):
     engine = _engine(tmp_path)
     Session = session_factory(engine)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run = registry.create("w", "in")
 
-    run_in_background(run.id, wf, "in", engine=engine, workflow_version_id=42)
+    run_in_background(run.id, wf, "in", engine=engine, pipeline_version_id=42)
 
     with Session() as s:
-        assert s.get(Run, run.id).workflow_version_id == 42
+        assert s.get(Run, run.id).pipeline_version_id == 42
 
 
 def test_run_in_background_leaves_version_null_when_absent(tmp_path):
     engine = _engine(tmp_path)
     Session = session_factory(engine)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run = registry.create("w", "in")
 
     run_in_background(run.id, wf, "in", engine=engine)
 
     with Session() as s:
-        assert s.get(Run, run.id).workflow_version_id is None
+        assert s.get(Run, run.id).pipeline_version_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -78,18 +78,18 @@ def test_run_in_background_leaves_version_null_when_absent(tmp_path):
 #
 # runtime.py never referenced EmailTrigger at all: _start_triggered_run cleared
 # last_error on dispatch and nothing ever wrote it back, so a mailbox whose
-# workflow failed on every single run kept reporting "Active" with no error
+# pipeline failed on every single run kept reporting "Active" with no error
 # indefinitely. Only the mailbox connectivity path could ever set a fault.
 # ---------------------------------------------------------------------------
 
 
-def _failing_workflow(tmp_path):
-    """A workflow whose only agent raises, so the run reaches `failed`."""
+def _failing_pipeline(tmp_path):
+    """A pipeline whose only agent raises, so the run reaches `failed`."""
     spec = Specification(
         name="w",
         agents=[AgentSpec(name="a", role="R", goal="g", model="fake:done")],
         teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
     wf = validate_specification(spec, source=tmp_path / "w.yaml")
 
@@ -106,7 +106,7 @@ def _org_with_trigger(session):
 
     org = get_or_create_org(session, "acme")
     trigger = upsert_email_trigger(
-        session, org.id, workflow_name="w", enabled=True, last_uid=1, uidvalidity=3
+        session, org.id, pipeline_name="w", enabled=True, last_uid=1, uidvalidity=3
     )
     session.commit()
     return org, trigger
@@ -114,7 +114,7 @@ def _org_with_trigger(session):
 
 def _triggered_run_row(run_id, org_id):
     return Run(
-        id=run_id, workflow="w", input="in", status="running", org_id=org_id,
+        id=run_id, pipeline="w", input="in", status="running", org_id=org_id,
         username="email-trigger",
         trigger_context={"trigger_type": "email", "uids": [42], "uidvalidity": 3},
     )
@@ -134,7 +134,7 @@ def test_a_failed_triggered_run_records_a_fault_on_the_trigger(tmp_path):
         s.commit()
 
     run_in_background(
-        run.id, _failing_workflow(tmp_path), "in",
+        run.id, _failing_pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -145,7 +145,7 @@ def test_a_failed_triggered_run_records_a_fault_on_the_trigger(tmp_path):
         assert s.get(Run, run.id).status == "failed"
 
 
-def test_a_successful_triggered_run_clears_a_workflow_fault(tmp_path):
+def test_a_successful_triggered_run_clears_a_pipeline_fault(tmp_path):
     from ui.backend.db.email_triggers import get_email_trigger
 
     engine = _engine(tmp_path)
@@ -162,7 +162,7 @@ def test_a_successful_triggered_run_clears_a_workflow_fault(tmp_path):
         s.commit()
 
     run_in_background(
-        run.id, _workflow(tmp_path), "in",
+        run.id, _pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -174,7 +174,7 @@ def test_a_successful_triggered_run_clears_a_workflow_fault(tmp_path):
 
 def test_a_successful_triggered_run_leaves_a_mailbox_fault_alone(tmp_path):
     # A mailbox-kind fault is owned by the poller's own connectivity check and
-    # auto-clears there; a workflow outcome says nothing about it.
+    # auto-clears there; a pipeline outcome says nothing about it.
     from ui.backend.db.email_triggers import get_email_trigger
 
     engine = _engine(tmp_path)
@@ -191,7 +191,7 @@ def test_a_successful_triggered_run_leaves_a_mailbox_fault_alone(tmp_path):
         s.commit()
 
     run_in_background(
-        run.id, _workflow(tmp_path), "in",
+        run.id, _pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -221,7 +221,7 @@ def test_a_superseded_run_never_touches_trigger_health(tmp_path):
         s.commit()
 
     run_in_background(
-        run.id, _failing_workflow(tmp_path), "in",
+        run.id, _failing_pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -248,7 +248,7 @@ def test_the_run_the_trigger_is_waiting_on_still_updates_health(tmp_path):
         s.commit()
 
     run_in_background(
-        run.id, _failing_workflow(tmp_path), "in",
+        run.id, _failing_pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -271,11 +271,11 @@ def test_a_non_triggered_run_never_touches_trigger_health(tmp_path):
     run = registry.create("w", "in", org_id=org_id, username="alice")
     with Session() as s:
         # No trigger_context: an ordinary human-started run.
-        s.add(Run(id=run.id, workflow="w", input="in", status="running",
+        s.add(Run(id=run.id, pipeline="w", input="in", status="running",
                   org_id=org_id, username="alice"))
         s.commit()
 
-    run_in_background(run.id, _workflow(tmp_path), "in", engine=engine, org_id=org_id)
+    run_in_background(run.id, _pipeline(tmp_path), "in", engine=engine, org_id=org_id)
 
     with Session() as s:
         trigger = get_email_trigger(s, org_id)
@@ -379,7 +379,7 @@ def test_a_real_triggered_run_completes_its_events_end_to_end(tmp_path):
         _claimed_events(s, org_id, run.id, ["42"])
 
     run_in_background(
-        run.id, _workflow(tmp_path), "in",
+        run.id, _pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -406,7 +406,7 @@ def test_repeated_run_failures_notify_once_at_the_threshold(tmp_path, monkeypatc
             s.add(_triggered_run_row(run.id, org_id))
             s.commit()
         run_in_background(
-            run.id, _failing_workflow(tmp_path), "in",
+            run.id, _failing_pipeline(tmp_path), "in",
             engine=engine, org_id=org_id, username="email-trigger",
         )
 
@@ -436,7 +436,7 @@ def test_a_successful_run_announces_the_recovery(tmp_path, monkeypatch):
         s.add(_triggered_run_row(failing.id, org_id))
         s.commit()
     run_in_background(
-        failing.id, _failing_workflow(tmp_path), "in",
+        failing.id, _failing_pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 
@@ -446,7 +446,7 @@ def test_a_successful_run_announces_the_recovery(tmp_path, monkeypatch):
         s.add(_triggered_run_row(good.id, org_id))
         s.commit()
     run_in_background(
-        good.id, _workflow(tmp_path), "in",
+        good.id, _pipeline(tmp_path), "in",
         engine=engine, org_id=org_id, username="email-trigger",
     )
 

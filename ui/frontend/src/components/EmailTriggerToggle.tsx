@@ -3,12 +3,12 @@ import { api } from '../lib/api'
 import type { EmailTrigger } from '../lib/types'
 
 interface EmailTriggerToggleProps {
-  workflowName: string
+  pipelineName: string
 }
 
 // Org-level opt-in: run this deployed email team automatically on new mail.
 // Off by default; shown on the Deploy page once the team is live.
-export default function EmailTriggerToggle({ workflowName }: EmailTriggerToggleProps) {
+export default function EmailTriggerToggle({ pipelineName }: EmailTriggerToggleProps) {
   const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -19,13 +19,13 @@ export default function EmailTriggerToggle({ workflowName }: EmailTriggerToggleP
 
   if (!trigger) return error ? <p className="banner banner-error">{error}</p> : null
 
-  const onForThis = trigger.enabled && trigger.workflow_name === workflowName
+  const onForThis = trigger.enabled && trigger.pipeline_name === pipelineName
 
   const toggle = async () => {
     setBusy(true)
     setError(null)
     try {
-      setTrigger(await api.setEmailTrigger({ workflow_name: workflowName, enabled: !onForThis }))
+      setTrigger(await api.setEmailTrigger({ pipeline_name: pipelineName, enabled: !onForThis }))
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -37,7 +37,7 @@ export default function EmailTriggerToggle({ workflowName }: EmailTriggerToggleP
     <div className="wizard-card" style={{ background: '#f9fafb' }}>
       <h3>Automatic runs</h3>
       <p className="subtitle">
-        Let "{workflowName}" watch the inbox on its own: it checks for new email every few minutes
+        Let "{pipelineName}" watch the inbox on its own: it checks for new email every few minutes
         and drafts replies without you having to start it — up to {trigger.daily_cap} automatic runs
         per day. It still only ever saves drafts; it never sends.
       </p>

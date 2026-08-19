@@ -22,7 +22,7 @@ def upsert_email_trigger(
     db: Session,
     org_id: int,
     *,
-    workflow_name: str,
+    pipeline_name: str,
     enabled: bool,
     last_uid: int,
     uidvalidity: Optional[int],
@@ -36,7 +36,7 @@ def upsert_email_trigger(
     if row is None:
         row = EmailTrigger(org_id=org_id)
         db.add(row)
-    row.workflow_name = workflow_name
+    row.pipeline_name = pipeline_name
     row.enabled = enabled
     row.last_uid = last_uid
     row.uidvalidity = uidvalidity

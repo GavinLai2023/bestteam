@@ -525,8 +525,8 @@ def test_document_error_does_not_leak_the_server_upload_path(db, engine, tmp_pat
     assert "doc.txt" in failed_doc.error
 
 
-def test_completed_job_invalidates_the_workflow_cache(db, engine, tmp_path):
-    # CR-005 recurring through the async path: a workflow using this KB may
+def test_completed_job_invalidates_the_pipeline_cache(db, engine, tmp_path):
+    # CR-005 recurring through the async path: a pipeline using this KB may
     # have been cached against its prior (or, on a first upload, not-yet-
     # servable) document set. The upload-dispatch request commits the KB
     # record's own `updated_at` (correctly busting the freshness key for the
@@ -540,9 +540,9 @@ def test_completed_job_invalidates_the_workflow_cache(db, engine, tmp_path):
     version_dir.mkdir()
     (version_dir / "doc.txt").write_text("Refunds are allowed within 30 days.", encoding="utf-8")
 
-    backend_main._workflow_cache.clear()
-    backend_main._workflow_cache[(kb.org_id, "some_workflow")] = ("stale-workflow", "key")
-    generation_before = backend_main._workflow_cache_generation
+    backend_main._pipeline_cache.clear()
+    backend_main._pipeline_cache[(kb.org_id, "some_pipeline")] = ("stale-pipeline", "key")
+    generation_before = backend_main._pipeline_cache_generation
 
     ingestion.run_ingestion_job(
         job.id, kb.id, kb.org_id, version_dir,
@@ -552,11 +552,11 @@ def test_completed_job_invalidates_the_workflow_cache(db, engine, tmp_path):
 
     db.expire_all()
     assert db.get(IngestionJob, job.id).status == "completed"
-    assert backend_main._workflow_cache == {}
-    assert backend_main._workflow_cache_generation != generation_before
+    assert backend_main._pipeline_cache == {}
+    assert backend_main._pipeline_cache_generation != generation_before
 
 
-def test_failed_job_does_not_invalidate_the_workflow_cache(db, engine, tmp_path):
+def test_failed_job_does_not_invalidate_the_pipeline_cache(db, engine, tmp_path):
     # A failed job never changes what's servable (the prior completed
     # generation, if any, is still the live one) -- no cache invalidation is
     # needed or expected on this path.
@@ -566,9 +566,9 @@ def test_failed_job_does_not_invalidate_the_workflow_cache(db, engine, tmp_path)
     version_dir.mkdir()
     (version_dir / "bad.pdf").write_bytes(b"not a real pdf")
 
-    backend_main._workflow_cache.clear()
-    backend_main._workflow_cache[(kb.org_id, "some_workflow")] = ("still-fresh-workflow", "key")
-    generation_before = backend_main._workflow_cache_generation
+    backend_main._pipeline_cache.clear()
+    backend_main._pipeline_cache[(kb.org_id, "some_pipeline")] = ("still-fresh-pipeline", "key")
+    generation_before = backend_main._pipeline_cache_generation
 
     ingestion.run_ingestion_job(
         job.id, kb.id, kb.org_id, version_dir,
@@ -578,8 +578,8 @@ def test_failed_job_does_not_invalidate_the_workflow_cache(db, engine, tmp_path)
 
     db.expire_all()
     assert db.get(IngestionJob, job.id).status == "failed"
-    assert backend_main._workflow_cache == {(kb.org_id, "some_workflow"): ("still-fresh-workflow", "key")}
-    assert backend_main._workflow_cache_generation == generation_before
+    assert backend_main._pipeline_cache == {(kb.org_id, "some_pipeline"): ("still-fresh-pipeline", "key")}
+    assert backend_main._pipeline_cache_generation == generation_before
 
 
 def test_cache_invalidation_failure_does_not_revert_completed_job_status(db, engine, tmp_path, monkeypatch):
@@ -599,7 +599,7 @@ def test_cache_invalidation_failure_does_not_revert_completed_job_status(db, eng
     def _boom():
         raise RuntimeError("simulated cache invalidation failure")
 
-    monkeypatch.setattr(knowledge_bases, "_invalidate_workflow_cache", _boom)
+    monkeypatch.setattr(knowledge_bases, "_invalidate_pipeline_cache", _boom)
 
     ingestion.run_ingestion_job(
         job.id, kb.id, kb.org_id, version_dir,

@@ -109,7 +109,7 @@ def db(monkeypatch):
     session = TestSession()
     # `_declares_property_maintenance_contract` resolves `property_maintenance_
     # response_v1` against the actual platform SkillRecord (Codex review
-    # finding) -- several tests below declare that name in a workflow config
+    # finding) -- several tests below declare that name in a pipeline config
     # and expect the contract to be recognized, which now requires the row
     # to actually exist.
     from ui.backend.skills import seed_default_skills
@@ -151,20 +151,20 @@ def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
     org = get_or_create_org(db, "acme")
     set_email_credentials(db, org.id, host="imap.acme.com", username="u@acme.com",
                           password="pw")
-    trigger = upsert_email_trigger(db, org.id, workflow_name="triage",
+    trigger = upsert_email_trigger(db, org.id, pipeline_name="triage",
                                    enabled=enabled, last_uid=last_uid,
                                    uidvalidity=uidvalidity)
     return org, trigger
 
 
-def _no_workflow(name, db, org_id, allowed_uids, backend):  # must NOT be called
-    raise AssertionError("build_trigger_workflow should not be called in this test")
+def _no_pipeline(name, db, org_id, allowed_uids, backend):  # must NOT be called
+    raise AssertionError("build_trigger_pipeline should not be called in this test")
 
 
 def test_poll_org_no_new_mail_updates_health_only(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=45)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_checked_at is not None
     assert trigger.last_error is None
     assert trigger.last_uid == 45 and trigger.runs_today == 0
@@ -175,7 +175,7 @@ def test_poll_org_uidvalidity_change_rebaselines_without_running(db, monkeypatch
     # New validity 9, and the "new" mailbox reports max_uid 200 with new uids --
     # they must be skipped and the baseline reset instead.
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (9, 200, [199, 200]))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.uidvalidity == 9
     assert trigger.last_uid == 200
     assert trigger.runs_today == 0
@@ -191,7 +191,7 @@ def test_poll_org_cap_reached_skips_mailbox_entirely(db, monkeypatch):
         raise AssertionError("must not touch the mailbox when capped")
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
-    poll_org(db, trigger, _no_workflow)  # must not raise
+    poll_org(db, trigger, _no_pipeline)  # must not raise
 
 
 def test_poll_org_cap_resets_on_new_day(db, monkeypatch):
@@ -200,7 +200,7 @@ def test_poll_org_cap_resets_on_new_day(db, monkeypatch):
     trigger.runs_date = "2020-01-01"  # stale date -> counter must reset
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.runs_today == 0
     assert trigger.runs_date == datetime.now(timezone.utc).date().isoformat()
 
@@ -212,7 +212,7 @@ def test_poll_org_mailbox_failure_stores_friendly_error(db, monkeypatch):
         raise OSError("[WinError 10060] connection attempt failed")
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _fail)
-    poll_org(db, trigger, _no_workflow)  # must not raise
+    poll_org(db, trigger, _no_pipeline)  # must not raise
     assert trigger.last_error is not None
     assert "WinError" not in trigger.last_error  # no internals to customers
     assert trigger.last_checked_at is not None
@@ -220,30 +220,30 @@ def test_poll_org_mailbox_failure_stores_friendly_error(db, monkeypatch):
 
 def test_poll_org_mailbox_error_clears_on_next_successful_check(db, monkeypatch):
     # A resolved mailbox outage must not keep showing "error" forever -- only
-    # a *workflow*-kind error must survive an empty poll (F5, unchanged).
+    # a *pipeline*-kind error must survive an empty poll (F5, unchanged).
     org, trigger = _org_with_trigger(db, last_uid=41)
 
     def _fail(backend, last_uid):
         raise OSError("[WinError 10060] connection attempt failed")
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _fail)
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_error is not None
     assert trigger.last_error_kind == "mailbox"
 
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_error is None
     assert trigger.last_error_kind is None
 
 
-def test_poll_org_workflow_error_kind_survives_empty_poll(db, monkeypatch):
+def test_poll_org_pipeline_error_kind_survives_empty_poll(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41)
     trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
     trigger.last_error_kind = "workflow"
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))  # no new mail
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_error is not None
     assert trigger.last_error_kind == "workflow"
 
@@ -259,7 +259,7 @@ class _SubmitRecorder:
         self.calls.append((fn, args, kwargs))
 
 
-def _fake_workflow_getter(calls, version_id=None):
+def _fake_pipeline_getter(calls, version_id=None):
     def build(name, db, org_id, allowed_uids, backend):
         calls.append((name, org_id, set(allowed_uids)))
         return object(), version_id
@@ -267,17 +267,17 @@ def _fake_workflow_getter(calls, version_id=None):
 
 
 def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
-    from ui.backend.db.workflows import current_version_id, publish_workflow_version
+    from ui.backend.db.pipelines import current_version_id, publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41)
-    _, version = publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    _, version = publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     db.commit()
 
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls, version_id=version.id))
+    poll_org(db, trigger, _fake_pipeline_getter(calls, version_id=version.id))
 
     assert calls == [("triage", org.id, {42, 43, 45})]  # scoped to the batch
     assert len(recorder.calls) == 1
@@ -289,7 +289,7 @@ def test_poll_org_new_mail_starts_one_run(db, monkeypatch):
     from ui.backend.db.models import Run
     run_row = db.get(Run, run_id)
     assert run_row is not None
-    assert run_row.workflow_version_id == version.id == current_version_id(db, org.id, "triage")
+    assert run_row.pipeline_version_id == version.id == current_version_id(db, org.id, "triage")
     assert trigger.last_uid == 45 and trigger.runs_today == 1 and trigger.last_run_id == run_id
 
 
@@ -305,7 +305,7 @@ def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
@@ -322,18 +322,18 @@ def test_poll_org_stamps_trigger_context_for_normalization(db, monkeypatch):
     assert run_row.trigger_context["triggered_at"]  # non-empty
 
 
-def test_poll_org_stamps_result_contract_when_workflow_declares_the_maintenance_skill(db, monkeypatch):
+def test_poll_org_stamps_result_contract_when_pipeline_declares_the_maintenance_skill(db, monkeypatch):
     """automation_results._normalize needs a positive, persisted signal that a
     run belongs to the Property Maintenance Inbox vertical for the case where
     it crashes before producing any JSON output (indistinguishable, from the
-    output alone, from any other org's unrelated email-trigger workflow) --
+    output alone, from any other org's unrelated email-trigger pipeline) --
     trigger_context['result_contract'] is that signal, stamped from the
-    deployed workflow's own config at dispatch time (Codex review finding)."""
+    deployed pipeline's own config at dispatch time (Codex review finding)."""
     from ui.backend.db.models import Run
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -341,7 +341,7 @@ def test_poll_org_stamps_result_contract_when_workflow_declares_the_maintenance_
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
@@ -356,14 +356,14 @@ def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_plat
     maintenance error rows (Codex review finding) -- the org-shadowed skill
     must NOT count as the platform contract."""
     from ui.backend.db.models import Run, SkillRecord
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     db.add(SkillRecord(
         name="property_maintenance_response_v1", org_id=org.id,
         config={"description": "unrelated org skill", "instructions": "do something else"},
     ))
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -371,19 +371,19 @@ def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_plat
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
     assert "result_contract" not in run_row.trigger_context
 
 
-def test_poll_org_does_not_stamp_result_contract_for_a_workflow_without_the_skill(db, monkeypatch):
+def test_poll_org_does_not_stamp_result_contract_for_a_pipeline_without_the_skill(db, monkeypatch):
     from ui.backend.db.models import Run
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["email_triage_reply"]}]},
     )
@@ -391,7 +391,7 @@ def test_poll_org_does_not_stamp_result_contract_for_a_workflow_without_the_skil
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
@@ -402,11 +402,11 @@ def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeyp
     """_start_triggered_run records the version the builder returned (bound to the
     config it built), NOT a fresh current_version_id re-query -- so a redeploy
     committing between build and stamp can't mislabel the run's version."""
-    from ui.backend.db.workflows import current_version_id, publish_workflow_version
+    from ui.backend.db.pipelines import current_version_id, publish_pipeline_version
     from ui.backend.db.models import Run
 
     org, trigger = _org_with_trigger(db, last_uid=41)
-    _, version = publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    _, version = publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     db.commit()
     assert current_version_id(db, org.id, "triage") == version.id
 
@@ -416,11 +416,11 @@ def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeyp
     # The builder reports a DIFFERENT version than the current pointer -- as if a
     # redeploy landed after the build read. The run must record the built one.
     stale = version.id + 999
-    poll_org(db, trigger, _fake_workflow_getter([], version_id=stale))
+    poll_org(db, trigger, _fake_pipeline_getter([], version_id=stale))
 
     run_id = recorder.calls[0][1][0]
     run_row = db.get(Run, run_id)
-    assert run_row.workflow_version_id == stale  # builder's value, not the re-query
+    assert run_row.pipeline_version_id == stale  # builder's value, not the re-query
 
 
 def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch):
@@ -436,7 +436,7 @@ def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch
 
     monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = trigger.last_run_id
     assert run_id is not None
@@ -451,7 +451,7 @@ def test_start_triggered_run_marks_run_failed_when_submit_raises(db, monkeypatch
         return (3, 45, [])
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _track)
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert calls == [1]  # mailbox was actually checked -- guard didn't wedge
 
 
@@ -462,10 +462,10 @@ def test_start_triggered_run_normalizes_a_declared_batch_when_submit_raises(db, 
     batch would be marked failed with no automation_item_results rows at all
     and silently vanish from Needs-attention (Codex review finding)."""
     from ui.backend.automation_results import AutomationItemResult
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -478,7 +478,7 @@ def test_start_triggered_run_normalizes_a_declared_batch_when_submit_raises(db, 
 
     monkeypatch.setattr(email_trigger, "_executor", _BoomExecutor())
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     run_id = trigger.last_run_id
     rows = db.query(AutomationItemResult).filter_by(run_id=run_id).all()
@@ -493,11 +493,11 @@ def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit
     otherwise it can fetch zero automation rows with no later terminal
     transition to prompt a re-fetch (Codex review finding)."""
     from ui.backend.automation_results import AutomationItemResult
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
     from ui.backend.runtime import registry
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -522,14 +522,14 @@ def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit
 
     monkeypatch.setattr(registry, "publish", spy_publish)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
 
 
 def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     # If the customer disconnects/replaces the mailbox WHILE this cycle's
-    # workflow is being built, org_settings.py/admin.py disable the trigger
+    # pipeline is being built, org_settings.py/admin.py disable the trigger
     # in a separate commit. A concurrent session is used here (StaticPool
     # shares one in-memory DB) to simulate that race precisely.
     from ui.backend.db import session_factory
@@ -590,7 +590,7 @@ def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkey
 
     monkeypatch.setattr(email_trigger.registry, "create", create_then_disable)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert recorder.calls == []       # never dispatched
     assert trigger.runs_today == 0    # cap NOT burned
@@ -603,8 +603,8 @@ def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkey
     assert all(e.status == "pending" and e.attempts == 0 for e in rows)
 
 
-def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
-    # Fix 1: poll_org must not let workflow-building re-fetch credentials --
+def test_poll_org_reuses_the_same_backend_for_pipeline_build(db, monkeypatch):
+    # Fix 1: poll_org must not let pipeline-building re-fetch credentials --
     # a credential change mid-cycle must not produce a run that detects mail
     # on one mailbox and builds tools against another.
     org, trigger = _org_with_trigger(db, last_uid=41)
@@ -618,17 +618,17 @@ def test_poll_org_reuses_the_same_backend_for_workflow_build(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    seen_workflow_backends = []
+    seen_pipeline_backends = []
 
     def build(name, db_, org_id, allowed_uids, backend):
-        seen_workflow_backends.append(backend)
+        seen_pipeline_backends.append(backend)
         return object(), None
 
     poll_org(db, trigger, build)
 
     assert len(seen_check_backends) == 1
-    assert len(seen_workflow_backends) == 1
-    assert seen_workflow_backends[0] is seen_check_backends[0]
+    assert len(seen_pipeline_backends) == 1
+    assert seen_pipeline_backends[0] is seen_check_backends[0]
 
 
 def test_poll_org_dispatch_clears_prior_error(db, monkeypatch):
@@ -638,7 +638,7 @@ def test_poll_org_dispatch_clears_prior_error(db, monkeypatch):
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
     assert len(recorder.calls) == 1          # a run was dispatched
     assert trigger.last_error is None        # prior fault cleared on dispatch
 
@@ -650,7 +650,7 @@ def test_poll_org_bounded_batch_carries_remainder(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls))
+    poll_org(db, trigger, _fake_pipeline_getter(calls))
     assert calls[0][2] == {41, 42}          # oldest 2 only
     assert trigger.runs_today == 1
     # The remainder is now carried by the durable ledger rather than by leaving
@@ -686,13 +686,13 @@ def test_poll_org_build_failure_advances_nothing(db, monkeypatch):
     assert all(e.status == "pending" and e.attempts == 0 for e in rows)
 
 
-def test_poll_org_workflow_error_survives_empty_poll(db, monkeypatch):
-    # F5: a workflow fault must not be cleared by a later successful empty poll.
+def test_poll_org_pipeline_error_survives_empty_poll(db, monkeypatch):
+    # F5: a pipeline fault must not be cleared by a later successful empty poll.
     org, trigger = _org_with_trigger(db, last_uid=41)
     trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 41, []))  # no new mail
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_checked_at is not None
     assert trigger.last_error is not None   # NOT cleared by an empty successful poll
 
@@ -712,7 +712,7 @@ def test_poll_org_skips_while_previous_run_still_running(db, monkeypatch):
         return (3, 41, [])
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _track)
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert calls == []  # mailbox never touched
     assert trigger.last_uid == 41  # untouched
 
@@ -724,24 +724,24 @@ def test_poll_org_recovers_when_registry_lost_the_run(db, monkeypatch):
     from ui.backend.db.models import Run as RunRow
 
     org, trigger = _org_with_trigger(db, last_uid=41)
-    db.add(RunRow(id="r-prev", workflow="triage", input="x", status="running",
+    db.add(RunRow(id="r-prev", pipeline="triage", input="x", status="running",
                   org_id=org.id, username="email-trigger"))
     trigger.last_run_id = "r-prev"
     db.commit()
 
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     assert trigger.last_checked_at is not None  # polling proceeded -- no wedge
 
 
-def test_poll_org_workflow_load_failure_recorded_not_raised(db, monkeypatch):
+def test_poll_org_pipeline_load_failure_recorded_not_raised(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
     def _missing(name, db_, org_id, allowed_uids, backend):
-        raise Exception("Unknown workflow 'triage'")
+        raise Exception("Unknown pipeline 'triage'")
 
     poll_org(db, trigger, _missing)
     assert recorder.calls == []
@@ -761,11 +761,11 @@ def test_poll_once_covers_enabled_orgs_and_survives_failures(db, monkeypatch):
     b = get_or_create_org(db, "org_b")
     for org in (a, b):
         set_email_credentials(db, org.id, host="h", username="u", password="p")
-        upsert_email_trigger(db, org.id, workflow_name="w", enabled=True,
+        upsert_email_trigger(db, org.id, pipeline_name="w", enabled=True,
                              last_uid=0, uidvalidity=1)
     polled = []
 
-    def fake_poll_org(session, trigger, get_workflow):
+    def fake_poll_org(session, trigger, get_pipeline):
         polled.append(trigger.org_id)
         if trigger.org_id == a.id:
             raise RuntimeError("org A explodes")  # must not stop org B
@@ -782,7 +782,7 @@ def test_poll_once_covers_enabled_orgs_and_survives_failures(db, monkeypatch):
         def __exit__(self, *exc):
             return False
 
-    poll_once(_no_workflow, session_factory=_Factory())
+    poll_once(_no_pipeline, session_factory=_Factory())
     assert polled == [a.id, b.id]
 
 
@@ -791,17 +791,17 @@ def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
     b = get_or_create_org(db, "org_b")
     for org in (a, b):
         set_email_credentials(db, org.id, host="h", username="u", password="p")
-        upsert_email_trigger(db, org.id, workflow_name="w", enabled=True, last_uid=0, uidvalidity=1)
+        upsert_email_trigger(db, org.id, pipeline_name="w", enabled=True, last_uid=0, uidvalidity=1)
     seen = []
 
-    def fake_poll_org(session, trigger, get_workflow):
+    def fake_poll_org(session, trigger, get_pipeline):
         seen.append(trigger.org_id)
         if trigger.org_id == a.id:
             from ui.backend.db.models import EmailTrigger
             # org_id is unique -- a second row for org A raises IntegrityError
             # from the session itself on flush, leaving the shared session in
             # a pending-rollback state until poll_once rolls it back.
-            session.add(EmailTrigger(org_id=a.id, workflow_name="dup", enabled=True,
+            session.add(EmailTrigger(org_id=a.id, pipeline_name="dup", enabled=True,
                                      last_uid=0, uidvalidity=1))
             session.flush()
 
@@ -812,7 +812,7 @@ def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
         def __enter__(self): return db
         def __exit__(self, *exc): return False
 
-    email_trigger.poll_once(_no_workflow, session_factory=_Factory())
+    email_trigger.poll_once(_no_pipeline, session_factory=_Factory())
     # Org A really dirtied the shared session (IntegrityError on flush);
     # poll_once must roll back before org B's list_enabled_triggers query,
     # or that query raises PendingRollbackError and org B never runs.
@@ -827,7 +827,7 @@ def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):
     async def run_briefly(disabled):
         monkeypatch.setenv("BESTTEAM_TRIGGERS_DISABLED", "1" if disabled else "")
         stop = asyncio.Event()
-        task = asyncio.ensure_future(poll_forever(stop, _no_workflow))
+        task = asyncio.ensure_future(poll_forever(stop, _no_pipeline))
         await asyncio.sleep(0.05)
         stop.set()
         await task
@@ -877,7 +877,7 @@ def test_poll_forever_still_maintains_while_triggers_are_disabled(monkeypatch):
 
     async def run_briefly():
         stop = asyncio.Event()
-        task = asyncio.ensure_future(poll_forever(stop, _no_workflow))
+        task = asyncio.ensure_future(poll_forever(stop, _no_pipeline))
         await asyncio.sleep(0.05)
         stop.set()
         await task
@@ -945,10 +945,10 @@ def test_validate_trigger_env_rejects_poll_seconds_below_minimum(monkeypatch):
 
 def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypatch):
     from ui.backend.db.orgs import set_org_active
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     db.commit()
     # deactivation landed after trigger enumeration (poll_org already holds it)
     set_org_active(db, "acme", False)
@@ -956,7 +956,7 @@ def test_poll_org_does_not_dispatch_when_org_deactivated_before_cas(db, monkeypa
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert recorder.calls == []          # no run dispatched
     assert trigger.runs_today == 0
@@ -980,7 +980,7 @@ def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig
     if mailbox_credential_id is None:
         mailbox_credential_id = get_email_credentials(db, org.id).id
     row = _RunRow(
-        id=run_id, workflow="triage", input="triage this batch",
+        id=run_id, pipeline="triage", input="triage this batch",
         status=status, org_id=org.id, username="email-trigger",
         trigger_context={
             "trigger_type": "email",
@@ -999,14 +999,14 @@ def _completed_triggered_run(db, org, *, uids=(42,), uidvalidity=3, run_id="orig
 
 
 def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
@@ -1023,17 +1023,17 @@ def test_retry_dispatches_a_new_run_and_preserves_history(db, monkeypatch):
     assert len(recorder.calls) == 1
 
 
-def test_retry_recomputes_result_contract_from_the_currently_deployed_workflow(db, monkeypatch):
+def test_retry_recomputes_result_contract_from_the_currently_deployed_pipeline(db, monkeypatch):
     """retry_triggered_run must NOT blindly spread the original run's
     result_contract into the new one -- it has to re-derive it from the
-    workflow's CURRENT deployed config, the same way _start_triggered_run
+    pipeline's CURRENT deployed config, the same way _start_triggered_run
     does for a fresh dispatch, or a retry can carry a stale signal (Codex
     review finding: see the next two tests for the drift directions this
     guards against). This test is the steady-state case: still declared."""
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -1042,7 +1042,7 @@ def test_retry_recomputes_result_contract_from_the_currently_deployed_workflow(d
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1050,26 +1050,26 @@ def test_retry_recomputes_result_contract_from_the_currently_deployed_workflow(d
     assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
 
 
-def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_workflow(db, monkeypatch):
-    """The original run dispatched BEFORE the workflow declared the platform
+def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_pipeline(db, monkeypatch):
+    """The original run dispatched BEFORE the pipeline declared the platform
     maintenance skill (no result_contract stamped). By retry time the
-    workflow was redeployed to add that skill -- the retry must pick up the
+    pipeline was redeployed to add that skill -- the retry must pick up the
     contract, not silently keep the original run's unstamped state, or its
     output would go unredacted despite now being a real maintenance run
     (Codex review finding)."""
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     assert "result_contract" not in run_row.trigger_context
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1077,25 +1077,25 @@ def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_workfl
     assert new_row.trigger_context["result_contract"] == "property_maintenance_email_batch"
 
 
-def test_retry_drops_a_stale_maintenance_contract_when_the_workflow_no_longer_declares_it(db, monkeypatch):
+def test_retry_drops_a_stale_maintenance_contract_when_the_pipeline_no_longer_declares_it(db, monkeypatch):
     """The original run was stamped result_contract, but by retry time the
-    workflow was redeployed to a config that no longer declares the platform
+    pipeline was redeployed to a config that no longer declares the platform
     maintenance skill -- the retry must NOT carry the stale contract
     forward, or an unrelated run's output would be wrongly redacted and
     normalized as a maintenance batch (Codex review finding)."""
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["some_other_skill"]}]},
     )
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1108,11 +1108,11 @@ def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, mo
     review finding): normalize_run_result must commit before run_failed is
     published when the retry's own dispatch submission fails."""
     from ui.backend.automation_results import AutomationItemResult
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
     from ui.backend.runtime import registry
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
     )
@@ -1121,7 +1121,7 @@ def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, mo
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
 
     class _BoomExecutor:
         def submit(self, *a, **kw):
@@ -1180,14 +1180,14 @@ def test_retry_rejects_when_the_mailbox_identity_has_changed(db, monkeypatch):
 
 
 def test_retry_registers_itself_with_the_overlap_guard(db, monkeypatch):
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1226,12 +1226,12 @@ def test_retry_proceeds_once_the_registered_run_is_no_longer_running(db, monkeyp
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     finished = registry.create("triage", "x", org_id=org.id, username="email-trigger")
-    registry.publish(finished.id, {"type": "run_completed", "workflow": "triage", "data": "done"})
+    registry.publish(finished.id, {"type": "run_completed", "pipeline": "triage", "data": "done"})
     trigger.last_run_id = finished.id
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)  # must not raise
@@ -1241,7 +1241,7 @@ def test_retry_proceeds_once_the_registered_run_is_no_longer_running(db, monkeyp
 def test_retry_clears_a_sticky_trigger_error_on_successful_dispatch(db, monkeypatch):
     # _start_triggered_run clears last_error/last_error_kind on a successful
     # dispatch ("a run is going out: clear any prior fault") -- a successful
-    # retry dispatch must do the same, or a resolved workflow-kind error keeps
+    # retry dispatch must do the same, or a resolved pipeline-kind error keeps
     # showing indefinitely despite the successful retry (Codex review finding).
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     trigger.last_error = "Couldn't start the team 'triage' -- it may have been removed."
@@ -1250,7 +1250,7 @@ def test_retry_clears_a_sticky_trigger_error_on_successful_dispatch(db, monkeypa
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     retry_triggered_run(db, run_row)
@@ -1261,7 +1261,7 @@ def test_retry_clears_a_sticky_trigger_error_on_successful_dispatch(db, monkeypa
 
 def test_retry_rejects_a_run_with_no_trigger_context(db):
     org, trigger = _org_with_trigger(db, last_uid=45)
-    row = _RunRow(id="manual-1", workflow="triage", input="hi", status="failed", org_id=org.id)
+    row = _RunRow(id="manual-1", pipeline="triage", input="hi", status="failed", org_id=org.id)
     db.add(row)
     db.commit()
     with pytest.raises(RetryError, match="no recorded email batch"):
@@ -1279,7 +1279,7 @@ def test_retry_rejects_when_a_retry_is_already_running(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=45)
     run_row = _completed_triggered_run(db, org)
     db.add(_RunRow(
-        id="retry-in-flight", workflow="triage", input="x", status="running",
+        id="retry-in-flight", pipeline="triage", input="x", status="running",
         org_id=org.id, retry_of_run_id=run_row.id,
     ))
     db.commit()
@@ -1299,7 +1299,7 @@ def test_retry_respects_daily_cap(db, monkeypatch):
         retry_triggered_run(db, run_row)
 
 
-def test_retry_reports_unbuildable_workflow(db, monkeypatch):
+def test_retry_reports_unbuildable_pipeline(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
@@ -1307,7 +1307,7 @@ def test_retry_reports_unbuildable_workflow(db, monkeypatch):
     def _boom(name, db_, org_id, allowed_uids, backend):
         raise ValueError("team not found")
 
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _boom)
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _boom)
     with pytest.raises(RetryError, match="triage"):
         retry_triggered_run(db, run_row)
     assert trigger.last_run_id is None
@@ -1345,14 +1345,14 @@ def test_retry_excludes_uids_with_a_confirmed_draft_from_the_previous_attempt(db
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
     calls = []
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
 
     new_row = db.get(_RunRow, new_run_id)
     assert new_row.trigger_context["uids"] == [43]
-    assert calls[0][2] == {43}  # allowed_uids passed to build_trigger_workflow
+    assert calls[0][2] == {43}  # allowed_uids passed to build_trigger_pipeline
 
 
 def test_retry_rejects_when_every_uid_already_has_a_confirmed_draft(db, monkeypatch):
@@ -1380,7 +1380,7 @@ def test_retry_input_text_reflects_the_narrowed_batch_not_the_original(db, monke
     _confirm_draft(db, run_row, "42")
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
@@ -1396,7 +1396,7 @@ def test_retry_input_text_reflects_the_narrowed_batch_not_the_original(db, monke
 
 
 def test_retry_daily_cap_recheck_inside_lock_catches_a_stale_early_pass(db, monkeypatch):
-    """The early cap check (before mailbox/workflow work, a fast-path
+    """The early cap check (before mailbox/pipeline work, a fast-path
     optimization only) reads whatever `trigger.runs_today` this call's own
     ORM object was loaded with -- it can pass on a stale snapshot. Only the
     fresh, uncached recheck taken inside the dispatch lock right before
@@ -1434,10 +1434,10 @@ def test_poll_org_daily_cap_recheck_inside_lock_catches_a_stale_early_pass(db, m
     """Symmetric to the retry-side test above, for poll_org's own early
     cap check vs. its fresh recheck inside the dispatch lock."""
     from ui.backend.db.models import EmailTrigger
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     today = datetime.now(timezone.utc).date().isoformat()
     trigger.runs_today = daily_cap() - 1
     trigger.runs_date = today
@@ -1453,7 +1453,7 @@ def test_poll_org_daily_cap_recheck_inside_lock_catches_a_stale_early_pass(db, m
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert recorder.calls == []
     assert trigger.last_run_id is None
@@ -1472,7 +1472,7 @@ def test_retry_dispatch_blocks_on_the_same_per_org_lock_poll_org_uses(db, monkey
     run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     lock = email_trigger._dispatch_lock(org.id)
@@ -1501,10 +1501,10 @@ def test_poll_org_blocks_on_the_per_org_dispatch_lock(db, monkeypatch):
     mid-flight, unobserved by the guard (Codex review finding)."""
     import threading
 
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
 
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
     recorder = _SubmitRecorder()
@@ -1514,7 +1514,7 @@ def test_poll_org_blocks_on_the_per_org_dispatch_lock(db, monkeypatch):
     lock.acquire()
 
     def do_poll():
-        poll_org(db, trigger, _fake_workflow_getter([]))
+        poll_org(db, trigger, _fake_pipeline_getter([]))
 
     t = threading.Thread(target=do_poll)
     t.start()
@@ -1545,7 +1545,7 @@ def test_retry_discards_if_the_trigger_is_disabled_before_the_atomic_advance(db,
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
@@ -1606,7 +1606,7 @@ def test_retry_rechecks_retry_already_running_freshly_inside_the_lock(db, monkey
 
     def mailbox_state_then_start_concurrent_retry(backend):
         db.add(_RunRow(
-            id="concurrent-retry", workflow="triage", input="x", status="running",
+            id="concurrent-retry", pipeline="triage", input="x", status="running",
             org_id=org.id, retry_of_run_id=run_row.id,
         ))
         db.commit()
@@ -1628,7 +1628,7 @@ def test_retry_rechecks_retry_already_running_freshly_inside_the_lock(db, monkey
 
 def _trace_draft(db, run_id, message_id, seq=0):
     """A persisted `tool_completed` trace row proving a real draft call -- the
-    evidence every run records regardless of workflow template."""
+    evidence every run records regardless of pipeline template."""
     import json
 
     from ui.backend.db.models import TraceEventRecord
@@ -1656,7 +1656,7 @@ def test_retry_of_a_generic_email_run_excludes_trace_confirmed_drafts(db, monkey
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
     calls = []
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1678,7 +1678,7 @@ def test_retry_excludes_uids_the_mailbox_itself_still_has_a_draft_for(db, monkey
         lambda backend, trigger_context, uids: {"42"},
     )
     calls = []
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
@@ -1700,19 +1700,19 @@ def test_a_failing_mailbox_scan_never_blocks_a_legitimate_retry(db, monkeypatch)
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
     monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: _ScanFails())
     calls = []
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter(calls))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
 
     new_run_id = retry_triggered_run(db, run_row)
     assert db.get(_RunRow, new_run_id).trigger_context["uids"] == [42]
 
 
-def test_build_trigger_workflow_stamps_a_deterministic_draft_marker(db, monkeypatch):
+def test_build_trigger_pipeline_stamps_a_deterministic_draft_marker(db, monkeypatch):
     from ui.backend.db.email_credentials import get_email_credentials
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(
+    publish_pipeline_version(
         db, org_id=org.id, name="triage",
         config={"agents": [{"name": "a", "model": "fake:x", "tools": ["email_read"]}]},
     )
@@ -1724,13 +1724,13 @@ def test_build_trigger_workflow_stamps_a_deterministic_draft_marker(db, monkeypa
         return {}
 
     monkeypatch.setattr(email_trigger, "make_email_tools", _fake_make_email_tools)
-    monkeypatch.setattr(email_trigger, "_build_workflow", lambda *a, **k: object())
+    monkeypatch.setattr(email_trigger, "_build_pipeline", lambda *a, **k: object())
     monkeypatch.setattr(email_trigger, "load_knowledge_base_tools", lambda *a, **k: {})
     monkeypatch.setattr(email_trigger, "load_skills", lambda *a, **k: {})
     monkeypatch.setattr(email_trigger, "spec_uses_email", lambda *a, **k: True)
 
     cred_id = get_email_credentials(db, org.id).id
-    email_trigger.build_trigger_workflow("triage", db, org.id, {42}, object())
+    email_trigger.build_trigger_pipeline("triage", db, org.id, {42}, object())
 
     # Same shape automation_results._source_key generates, so the mailbox
     # marker and the stored source keys agree by construction.
@@ -1743,12 +1743,12 @@ def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
     # empty so nothing in the UI reports a fault.
     from datetime import datetime, timedelta, timezone
 
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     stale = _RunRow(
-        id="stuck-1", workflow="triage", input="x", status="running",
+        id="stuck-1", pipeline="triage", input="x", status="running",
         org_id=org.id, username="email-trigger",
         created_at=datetime.now(timezone.utc) - timedelta(hours=5),
         trigger_context={"trigger_type": "email", "uids": [40]},
@@ -1771,7 +1771,7 @@ def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    email_trigger.poll_org(db, trigger, _fake_workflow_getter(calls))
+    email_trigger.poll_org(db, trigger, _fake_pipeline_getter(calls))
 
     assert cancelled == ["stuck-1"]
     assert db.get(_RunRow, "stuck-1").status == "failed"
@@ -1784,7 +1784,7 @@ def test_a_fresh_running_run_still_blocks_the_trigger(db, monkeypatch):
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     fresh = _RunRow(
-        id="live-1", workflow="triage", input="x", status="running",
+        id="live-1", pipeline="triage", input="x", status="running",
         org_id=org.id, username="email-trigger",
         created_at=datetime.now(timezone.utc),
     )
@@ -1799,7 +1799,7 @@ def test_a_fresh_running_run_still_blocks_the_trigger(db, monkeypatch):
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    email_trigger.poll_org(db, trigger, _no_workflow)
+    email_trigger.poll_org(db, trigger, _no_pipeline)
 
     assert recorder.calls == []
     assert db.get(_RunRow, "live-1").status == "running"
@@ -1845,7 +1845,7 @@ def test_detection_records_events_and_advances_the_cursor_together(db, monkeypat
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 43, 45]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events(db)
     assert [r.external_id for r in rows] == ["42", "43", "45"]
@@ -1858,13 +1858,13 @@ def test_detection_is_idempotent_across_polls(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     # The same message seen again (e.g. the cursor write was lost): the unique
     # key must make this a no-op rather than a second event.
     trigger.last_uid = 41
     db.commit()
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
     assert len(_events(db)) == 1
 
 
@@ -1877,7 +1877,7 @@ def test_detection_is_bounded_per_cycle(db, monkeypatch):
         email_trigger, "check_mailbox", lambda b, u: (3, 100, list(range(1, 101)))
     )
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events(db)
     assert len(rows) == 2 * email_trigger._DETECT_MULTIPLIER
@@ -1888,7 +1888,7 @@ def test_dispatch_claims_events_and_charges_one_attempt(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 43, [42, 43]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events(db)
     assert {r.status for r in rows} == {"claimed"}
@@ -1896,7 +1896,7 @@ def test_dispatch_claims_events_and_charges_one_attempt(db, monkeypatch):
     assert all(r.run_id == trigger.last_run_id for r in rows)
 
 
-def test_a_workflow_build_failure_releases_the_events_without_penalty(db, monkeypatch):
+def test_a_pipeline_build_failure_releases_the_events_without_penalty(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
@@ -1922,7 +1922,7 @@ def test_a_dispatch_failure_releases_the_events(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
     monkeypatch.setattr(email_trigger, "_executor", _DispatchBoom())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     row = _events(db)[0]
     # An attempt WAS charged (the run really was dispatched), but the message
@@ -1935,7 +1935,7 @@ def test_a_dispatch_failure_dead_letters_at_the_attempt_limit(db, monkeypatch):
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
     monkeypatch.setattr(email_trigger, "_executor", _DispatchBoom())
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert _events(db)[0].status == "failed"
     # A dead-lettered message must not be invisible to the customer.
@@ -1951,7 +1951,7 @@ def _hung_run(db, org, trigger, *, uids, age_seconds=4000):
 
     run_id = "hung-run"
     db.add(_R(
-        id=run_id, workflow="triage", input="x", status="running", org_id=org.id,
+        id=run_id, pipeline="triage", input="x", status="running", org_id=org.id,
         created_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
         trigger_context={"trigger_type": "email", "uids": [int(u) for u in uids]},
     ))
@@ -1973,7 +1973,7 @@ def _hung_run_named(db, org, trigger, *, uids, run_id, age_seconds=4000):
     from ui.backend.db.models import Run as _R
 
     db.add(_R(
-        id=run_id, workflow="triage", input="x", status="running", org_id=org.id,
+        id=run_id, pipeline="triage", input="x", status="running", org_id=org.id,
         created_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
         trigger_context={"trigger_type": "email", "uids": [int(u) for u in uids]},
     ))
@@ -2011,10 +2011,10 @@ def test_the_watchdog_dead_letters_at_the_attempt_limit(db, monkeypatch):
 def test_retry_hands_the_original_runs_failed_events_to_the_new_run(db, monkeypatch):
     from ui.backend.db import inbox_events as store
     from ui.backend.db.models import InboxEvent
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
     store.record_events(db, org_id=org.id, mailbox_identity="m",
                         mailbox_generation="3", external_ids=["42", "43"])
@@ -2025,7 +2025,7 @@ def test_retry_hands_the_original_runs_failed_events_to_the_new_run(db, monkeypa
     db.commit()
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
     new_run_id = retry_triggered_run(db, run_row)
 
@@ -2040,15 +2040,15 @@ def test_a_run_predating_the_ledger_still_retries_via_trigger_context(db, monkey
     # Runs in flight at upgrade time have no events at all; the pre-ledger path
     # must still work rather than raising "nothing left to retry".
     from ui.backend.db.models import InboxEvent
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     run_row = _completed_triggered_run(db, org, uids=(42,), uidvalidity=3)
     assert db.query(InboxEvent).count() == 0
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "build_trigger_workflow", _fake_workflow_getter([]))
+    monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter([]))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
     assert retry_triggered_run(db, run_row)
 
@@ -2091,10 +2091,10 @@ def test_mailbox_failures_notify_only_at_the_threshold(db, monkeypatch):
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
     for _ in range(2):
-        poll_org(db, trigger, _fake_workflow_getter([]))
+        poll_org(db, trigger, _fake_pipeline_getter([]))
     assert _notifications(db, org.id) == []
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
     emitted = _notifications(db, org.id)
     assert [n.fingerprint for n in emitted] == ["mailbox"]
     assert emitted[0].severity == "error"
@@ -2108,10 +2108,10 @@ def test_a_recovered_mailbox_announces_the_recovery(db, monkeypatch):
         raise OSError("connection refused")
 
     monkeypatch.setattr(email_trigger, "check_mailbox", _boom)
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     # Newest first, the order the notifications page renders.
     assert [n.fingerprint for n in _notifications(db, org.id)] == ["recovered", "mailbox"]
@@ -2126,7 +2126,7 @@ def test_a_failing_health_evaluation_never_breaks_the_poll(db, monkeypatch):
         email_trigger.trigger_health, "evaluate",
         lambda **kw: (_ for _ in ()).throw(RuntimeError("evaluator exploded")),
     )
-    poll_org(db, trigger, _fake_workflow_getter([]))  # must not raise
+    poll_org(db, trigger, _fake_pipeline_getter([]))  # must not raise
     assert trigger.last_checked_at is not None
 
 
@@ -2264,10 +2264,10 @@ class _SummaryBackend:
 
 def _filtering_org(db, monkeypatch, backend, *, new_uids=(42, 43)):
     """One org whose next poll cycle detects `new_uids` through `backend`."""
-    from ui.backend.db.workflows import publish_workflow_version
+    from ui.backend.db.pipelines import publish_pipeline_version
 
     org, trigger = _org_with_trigger(db, last_uid=41)
-    publish_workflow_version(db, org_id=org.id, name="triage", config={"v": 1})
+    publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 1})
     db.commit()
     monkeypatch.setattr(
         email_trigger, "check_mailbox",
@@ -2294,7 +2294,7 @@ def test_bulk_mail_is_recorded_filtered_and_never_reaches_a_run(db, monkeypatch)
     org, trigger = _filtering_org(db, monkeypatch, backend)
 
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls))
+    poll_org(db, trigger, _fake_pipeline_getter(calls))
 
     rows = _events_by_id(db, org.id)
     assert rows["43"].status == "filtered"
@@ -2316,7 +2316,7 @@ def test_filtering_still_advances_the_cursor_over_every_detected_uid(db, monkeyp
     ])
     org, trigger = _filtering_org(db, monkeypatch, backend)
 
-    poll_org(db, trigger, _no_workflow)  # nothing claimable -> never builds
+    poll_org(db, trigger, _no_pipeline)  # nothing claimable -> never builds
 
     assert trigger.last_uid == 43
     assert len(_events_by_id(db, org.id)) == 2
@@ -2329,7 +2329,7 @@ def test_a_header_fetch_failure_fails_open(db, monkeypatch):
     backend = _SummaryBackend([], raises=True)
     org, trigger = _filtering_org(db, monkeypatch, backend)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events_by_id(db, org.id)
     assert {e.status for e in rows.values()} <= {"pending", "claimed"}
@@ -2344,7 +2344,7 @@ def test_a_uid_with_no_summary_returned_is_processed(db, monkeypatch):
     ])
     org, trigger = _filtering_org(db, monkeypatch, backend)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events_by_id(db, org.id)
     assert rows["42"].status == "filtered"
@@ -2363,7 +2363,7 @@ def test_an_org_that_turned_the_bulk_rule_off_keeps_its_bulk_mail(db, monkeypatc
                         sender_allowlist=[], subject_blocklist=[])
     db.commit()
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert all(e.status != "filtered" for e in _events_by_id(db, org.id).values())
 def test_a_backend_without_summaries_for_at_all_fails_open(db, monkeypatch):
@@ -2376,7 +2376,7 @@ def test_a_backend_without_summaries_for_at_all_fails_open(db, monkeypatch):
 
     org, trigger = _filtering_org(db, monkeypatch, _NoSummaries())
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     rows = _events_by_id(db, org.id)
     assert set(rows) == {"42", "43"}
@@ -2427,7 +2427,7 @@ def _budget_org(db, monkeypatch, *, new_uids):
 
 def _spend(db, org_id, amount, when):
     from ui.backend.db.models import Run, UsageRecord
-    db.add(Run(id=f"spent-{amount}-{when.isoformat()}", workflow="w", input="",
+    db.add(Run(id=f"spent-{amount}-{when.isoformat()}", pipeline="w", input="",
                status="completed", org_id=org_id))
     db.add(UsageRecord(run_id=f"spent-{amount}-{when.isoformat()}", org_id=org_id,
                        model="openai:gpt-4o-mini", input_tokens=1, output_tokens=1,
@@ -2442,7 +2442,7 @@ def test_the_message_cap_truncates_the_claim(db, monkeypatch):
     set_budget_caps(db, org.id, daily_message_cap=3, monthly_cost_cap=None)
     db.commit()
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert len(recorder.calls) == 1
     _, args, _kwargs = recorder.calls[0]
@@ -2453,8 +2453,8 @@ def test_the_message_cap_truncates_the_claim(db, monkeypatch):
 
 
 def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
-    # Deliberately given a workflow getter that WOULD succeed if it were
-    # reached: with `_no_workflow` the build-failure branch produces the same
+    # Deliberately given a pipeline getter that WOULD succeed if it were
+    # reached: with `_no_pipeline` the build-failure branch produces the same
     # observable outcome as the cap working (no run, no Run row, events handed
     # back pending), so the test would pass with the cap removed. The
     # notification is the other half -- truncating the claim to zero would also
@@ -2469,7 +2469,7 @@ def test_a_reached_message_cap_dispatches_nothing(db, monkeypatch):
     trigger.runs_date = email_trigger._today()
     db.commit()
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert recorder.calls == []
     assert db.query(Run).count() == 0
@@ -2492,7 +2492,7 @@ def test_the_message_counter_resets_with_the_date(db, monkeypatch):
     trigger.runs_date = "2020-01-01"
     db.commit()
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert trigger.messages_today == 1  # reset to 0, then this cycle's one
     assert trigger.runs_today == 1
@@ -2509,7 +2509,7 @@ def test_a_reached_spend_cap_blocks_dispatch(db, monkeypatch):
     set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
     _spend(db, org.id, 10.0, datetime.now(timezone.utc))
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert recorder.calls == []
     assert db.query(Run).count() == 1  # only the spend fixture's own row
@@ -2524,8 +2524,8 @@ def test_a_budget_alert_is_raised_once_per_period(db, monkeypatch):
     set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=10.0)
     _spend(db, org.id, 10.0, datetime.now(timezone.utc))
 
-    poll_org(db, trigger, _no_workflow)
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
+    poll_org(db, trigger, _no_pipeline)
 
     assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 1
 
@@ -2544,10 +2544,10 @@ def test_a_new_month_alerts_again(db, monkeypatch):
 
     monkeypatch.setattr(email_trigger, "_utcnow",
                         lambda: datetime(2026, 7, 20, tzinfo=timezone.utc))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
     monkeypatch.setattr(email_trigger, "_utcnow",
                         lambda: datetime(2026, 8, 20, tzinfo=timezone.utc))
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
 
     assert db.query(Notification).filter_by(org_id=org.id, kind="budget").count() == 2
 
@@ -2557,7 +2557,7 @@ def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
     # through trigger_health.evaluate would corrupt consecutive_faults and
     # compete with real faults for alerted_fingerprint.
     #
-    # `_no_workflow` is load-bearing here, and this is the exact INVERSE of the
+    # `_no_pipeline` is load-bearing here, and this is the exact INVERSE of the
     # two tests above, which need a getter that WOULD succeed: these assertions
     # are all absences, so with the spend cap removed a succeeding getter would
     # dispatch, the CAS would clear `last_error`, and all three would still
@@ -2570,7 +2570,7 @@ def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
     set_budget_caps(db, org.id, daily_message_cap=None, monthly_cost_cap=1.0)
     _spend(db, org.id, 5.0, datetime.now(timezone.utc))
 
-    poll_org(db, trigger, _no_workflow)
+    poll_org(db, trigger, _no_pipeline)
 
     assert trigger.consecutive_faults == 0
     assert trigger.alerted_fingerprint is None
@@ -2580,7 +2580,7 @@ def test_a_budget_pause_does_not_disturb_the_fault_evaluator(db, monkeypatch):
 def test_an_org_with_no_caps_behaves_exactly_as_before(db, monkeypatch):
     org, trigger, recorder = _budget_org(db, monkeypatch, new_uids=(42, 43, 44))
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
 
     assert len(recorder.calls) == 1
     assert trigger.messages_today == 3
@@ -2621,7 +2621,7 @@ def test_a_released_message_is_processed_on_the_next_quiet_cycle(db, monkeypatch
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
     assert _events_by_id(db, org.id)["42"].status == "filtered"
     assert recorder.calls == []
 
@@ -2632,7 +2632,7 @@ def test_a_released_message_is_processed_on_the_next_quiet_cycle(db, monkeypatch
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, []))
 
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls))
+    poll_org(db, trigger, _fake_pipeline_getter(calls))
 
     assert calls == [("triage", org.id, {42})]
     assert len(recorder.calls) == 1
@@ -2646,7 +2646,7 @@ def test_a_capped_backlog_drains_on_a_quiet_cycle_once_the_cap_allows(db, monkey
     set_budget_caps(db, org.id, daily_message_cap=1, monthly_cost_cap=None)
     db.commit()
 
-    poll_org(db, trigger, _fake_workflow_getter([]))
+    poll_org(db, trigger, _fake_pipeline_getter([]))
     assert trigger.messages_today == 1
     assert sorted(e.status for e in _events_by_id(db, org.id).values()) == [
         "claimed", "pending", "pending",
@@ -2660,7 +2660,7 @@ def test_a_capped_backlog_drains_on_a_quiet_cycle_once_the_cap_allows(db, monkey
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 44, []))
 
     calls = []
-    poll_org(db, trigger, _fake_workflow_getter(calls))
+    poll_org(db, trigger, _fake_pipeline_getter(calls))
 
     assert calls == [("triage", org.id, {43, 44})]
     assert trigger.messages_today == 3
@@ -2670,14 +2670,14 @@ def test_a_capped_backlog_drains_on_a_quiet_cycle_once_the_cap_allows(db, monkey
 def test_a_quiet_cycle_with_nothing_pending_still_dispatches_nothing(db, monkeypatch):
     # The other half of the change: proceeding past an empty detection is
     # conditional on there being something claimable. Without the condition an
-    # idle mailbox -- the overwhelmingly common case -- would build a workflow
+    # idle mailbox -- the overwhelmingly common case -- would build a pipeline
     # and create-then-discard a registry entry on every single cycle.
     org, trigger = _org_with_trigger(db, last_uid=45)
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
 
-    poll_org(db, trigger, _no_workflow)  # _no_workflow raises if it is reached
+    poll_org(db, trigger, _no_pipeline)  # _no_pipeline raises if it is reached
 
     from ui.backend.db.models import Run
 

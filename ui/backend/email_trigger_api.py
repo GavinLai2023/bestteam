@@ -22,7 +22,7 @@ from .auth_api import get_current_org
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger, upsert_email_trigger
 from .db.inbox_events import list_filtered_events, release_filtered_event
-from .db.models import EmailTrigger, Organization, Run, WorkflowRecord, iso_utc
+from .db.models import EmailTrigger, Organization, PipelineRecord, Run, iso_utc
 from .db_session import get_db
 from .email_tools import spec_uses_email
 from .email_trigger import daily_cap, mailbox_state, triggers_disabled, TRIGGER_USERNAME, _today
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/org", tags=["email-trigger"])
 
 
 class EmailTriggerRequest(BaseModel):
-    workflow_name: str
+    pipeline_name: str
     enabled: bool
 
 
@@ -55,7 +55,7 @@ def _payload(trigger: EmailTrigger | None) -> Dict[str, Any]:
         runs_today = trigger.runs_today
     return {
         "enabled": bool(trigger is not None and trigger.enabled),
-        "workflow_name": trigger.workflow_name if trigger is not None else None,
+        "pipeline_name": trigger.pipeline_name if trigger is not None else None,
         "status": _status_of(trigger),
         "runs_today": runs_today,
         "daily_cap": daily_cap(),
@@ -91,8 +91,8 @@ def set_trigger(
         return _payload(get_email_trigger(db, org.id))
 
     record = (
-        db.query(WorkflowRecord)
-        .filter_by(name=req.workflow_name, org_id=org.id)
+        db.query(PipelineRecord)
+        .filter_by(name=req.pipeline_name, org_id=org.id)
         .one_or_none()
     )
     if record is None or record.status != "deployed":
@@ -104,7 +104,7 @@ def set_trigger(
         db,
         record.config,
         org.id,
-        workflow_version_id=record.current_version_id,
+        pipeline_version_id=record.current_version_id,
     ):
         raise HTTPException(
             status_code=400,
@@ -135,7 +135,7 @@ def set_trigger(
             ),
         ) from exc
     trigger = upsert_email_trigger(
-        db, org.id, workflow_name=req.workflow_name, enabled=True,
+        db, org.id, pipeline_name=req.pipeline_name, enabled=True,
         last_uid=max_uid, uidvalidity=uidvalidity,
     )
     # This enable just proved the mailbox reachable -- don't let a stale poll
@@ -164,7 +164,7 @@ def trigger_activity(
         "runs": [
             {
                 "id": r.id,
-                "workflow": r.workflow,
+                "pipeline": r.pipeline,
                 "status": r.status,
                 # SQLite drops tzinfo -- reattach UTC so the browser doesn't
                 # parse this as local time.

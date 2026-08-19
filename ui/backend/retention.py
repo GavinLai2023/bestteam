@@ -190,7 +190,7 @@ def export_org_runs(
         )
         runs.append({
             "id": run.id,
-            "workflow": run.workflow,
+            "pipeline": run.pipeline,
             "status": run.status,
             "input": run.input,
             "output": run.output,

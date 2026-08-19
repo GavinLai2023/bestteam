@@ -887,7 +887,7 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
     """Wrap a :class:`KnowledgeBase` as a single-argument agent tool.
 
     The returned callable's ``__name__`` matches ``kb.name``, so it can be
-    referenced directly by name in a workflow's ``tools:`` list — exactly
+    referenced directly by name in a pipeline's ``tools:`` list — exactly
     like a built-in tool.
 
     The tool searches and formats separately (rather than calling
