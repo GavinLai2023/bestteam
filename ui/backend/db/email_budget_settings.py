@@ -178,7 +178,11 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     the same blind spot. From each record: every agent's non-empty string
     `model` that has no `model_catalog` entry, plus the billable
     embedding/query-expansion specs of the knowledge bases that team searches
-    (`_knowledge_base_specs`).
+    (`_knowledge_base_specs`). Then **every** standalone `KnowledgeBaseRecord`
+    the org owns, deployed team or not: the "Try a search" panel spends against
+    any of them, and its `kb:search` row carries no `run_id`, so neither
+    `unpriced_run_count` nor the deployed-team walk would ever name that
+    collection's embedding model.
 
     `status="deployed"` is intended, not an oversight: a draft cannot run, so
     it cannot spend, so it has no models the cap fails to cover. Do not widen
@@ -212,6 +216,8 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
                 and agent.get("model")
             }
             specs |= _knowledge_base_specs(db, org_id, raw)
+        for kb_record in db.query(KnowledgeBaseRecord).filter_by(org_id=org_id).all():
+            specs |= _kb_config_specs(kb_record.config)
         if not specs:
             return []
         # `list_entries`, not `list_chat_entries`: an embedding model's row is

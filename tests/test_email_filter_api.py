@@ -374,3 +374,19 @@ def test_an_org_sees_only_its_own_budget(client, automated_team):
     assert body["spent_this_month"] is None
     assert body["unpriced_runs_this_month"] == 0
     assert body["unpriced_models"] == []
+
+
+def test_unpriced_models_include_the_orgs_standalone_knowledge_bases(client):
+    # "Try a search" spends against any of the org's own knowledge bases with
+    # no deployed team involved, and its `kb:search` row has no run_id -- so
+    # neither `unpriced_run_count` nor a deployed-team walk would ever name
+    # the collection's unpriced embedding model. The org's own records are
+    # part of the advisory too.
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        assert db.query(WorkflowRecord).filter_by(org_id=org_id, status="deployed").count() == 0
+        db.add(KnowledgeBaseRecord(name="lonely", org_id=org_id, config={
+            "type": "hybrid", "path": "x", "embedding_model": "acme:embed-2",
+        }))
+        db.commit()
+        assert "acme:embed-2" in unpriced_models_for_org(db, org_id)

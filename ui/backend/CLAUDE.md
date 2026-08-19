@@ -437,17 +437,19 @@ agent models of **every `status="deployed"` team in the org** -- not only the
 one the trigger points at, since the cap it advises is an org-level `SUM` over
 the whole ledger and a team deployed without a trigger spends into it just the
 same -- **and the billable `embedding_model`/`query_expansion_model` of the
-knowledge bases those teams search, plus the operator's
-`BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
-the catalogue, and the budget routes return a non-blocking `unpriced_models`
+knowledge bases those teams search, every standalone knowledge base the
+org owns (the "Try a search" panel spends against any of them with no team
+involved), plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** --
+against the catalogue, and the budget routes return a non-blocking `unpriced_models`
 list (**the cap saves either
 way** -- the admin may be about to fix the catalogue); at runtime NULL
 contributes 0, so the cap is a floor on reality rather than a phantom ceiling;
 and the UI reports how many runs this month were unpriced. Knowledge bases are
 in that list because they are the one spender the run-shaped half of this
-answer cannot see at all: an *ingestion* row is written with `run_id = NULL`,
-so `unpriced_run_count`'s `count(distinct run_id)` never counts it, and an
-unpriced embedding model would otherwise be silent in both halves. `fake:`
+answer cannot see at all: an *ingestion* row and a `kb:search` row are both
+written with `run_id = NULL`, so `unpriced_run_count`'s `count(distinct
+run_id)` never counts them, and an unpriced embedding model would otherwise be
+silent in both halves. `fake:`
 specs are excluded there (`core/embeddings.py::billable_spec`, the same
 definition the metering uses) even though an agent's `fake:` model is not --
 an unmetered $0 call is not a blind spot. `rerank_model` is absent for the same
