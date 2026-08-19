@@ -16,6 +16,7 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin set-email acme --host imap.gmail.com --user support@acme.com --test
     docker compose exec backend python -m ui.backend.admin set-email acme --auth microsoft-oauth --user support@acme.com --tenant <directory-id> --client-id <application-id>
     docker compose exec backend python -m ui.backend.admin clear-email acme
+    docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 `create-user --platform` creates a platform operator (no org); org members
 are created with `--org <name>` (default: the `default` org). Admin rights
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 from typing import Optional, Sequence
 
 from . import email_trigger
@@ -61,6 +63,7 @@ from .db.users import (
     set_user_org,
 )
 from .db_session import SessionLocal
+from .env_check import check_environment, has_failures
 
 
 def _prompt_password(parser: argparse.ArgumentParser, label: str = "Password") -> str:
@@ -153,7 +156,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     clear_email_p = sub.add_parser("clear-email", help="disconnect an org's mailbox")
     clear_email_p.add_argument("org", help="organization name")
 
+    sub.add_parser(
+        "check-env",
+        help="print the launch checklist for this process's environment "
+             "(FAIL/WARN/OK per variable); exit 1 on any FAIL. Reads only.",
+    )
+
     args = parser.parse_args(argv)
+
+    if args.command == "check-env":
+        # Deliberately before the database is opened: the checklist must run
+        # on a box whose database does not exist yet.
+        findings = check_environment(os.environ)
+        for finding in findings:
+            print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
+        failures = sum(1 for f in findings if f.level == "FAIL")
+        warnings = sum(1 for f in findings if f.level == "WARN")
+        print(f"{failures} failure(s), {warnings} warning(s)" if failures else f"no failures, {warnings} warning(s)")
+        return 1 if has_failures(findings) else 0
 
     with SessionLocal() as db:
         if args.command == "list":

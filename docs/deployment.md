@@ -71,6 +71,35 @@ the backend port is reachable only from the proxy) -- otherwise every login
 appears to come from the proxy and the per-address budget is shared by all
 users. The per-username budget holds either way.
 
+### Beta launch checklist
+
+Before the first `docker compose up -d` for a beta organisation, run the
+checklist against the *actual* environment the backend will see:
+
+```bash
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+```
+
+It prints one line per variable and exits 1 on any `[FAIL]`. What it holds you
+to, and why:
+
+| Item | Level | Why it is on the list |
+|------|-------|-----------------------|
+| `BESTTEAM_SECRET_KEY` set, not a placeholder | FAIL | The backend refuses to start otherwise; better to learn that here than from a crash loop. |
+| `BESTTEAM_SECRETS_KEY` set, a real Fernet key, **different** from the signing key | WARN if unset, FAIL if equal/invalid | Required the moment a mailbox is connected; reusing the signing key would make one leak two. |
+| `BESTTEAM_CORS_ORIGINS` exact origins, no `*`, no trailing slash | FAIL | A wildcard is refused; a wrong origin means the frontend cannot call the API at all. |
+| `VITE_API_BASE` / `VITE_WS_BASE` set, `https://` / `wss://` | FAIL if unset | Baked into the frontend image at build time — wrong values mean a rebuild. |
+| `BESTTEAM_DEMO_WORKFLOWS` **off** | FAIL | Every org user would otherwise see and run the shipped demo teams. |
+| `BESTTEAM_EMAIL_*` unset | WARN | Configures one process-wide mailbox; use per-org `admin set-email` instead. |
+| `BESTTEAM_RUN_RETENTION_DAYS` set (e.g. `90`) **before** creating the org | WARN | Otherwise the org keeps run history forever, and existing orgs are never retro-fitted. |
+| `BESTTEAM_SENTRY_DSN` set | WARN | Without it the container log is the only record of a failure. |
+| `FORWARDED_ALLOW_IPS` set to your proxy | WARN | Otherwise the per-address login budget is shared by everyone behind the proxy. |
+
+Then, once the org exists: connect its mailbox with `--test`
+(§4c), and if it is on Microsoft 365, walk `docs/email-smoke-test.md` §9
+against the live tenant with the customer before go-live. Hand the customer
+`docs/BETA_NOTES.md`.
+
 ## 2. Build and start
 
 ```bash
