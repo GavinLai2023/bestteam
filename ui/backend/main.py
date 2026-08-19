@@ -40,6 +40,7 @@ from . import error_reporting
 from . import ingestion
 from . import interview
 from . import retention
+from . import runtime
 from . import secret_store
 from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
 from .builder import router as builder_router
@@ -161,6 +162,14 @@ async def _lifespan(_app):
                 logger.warning(
                     "Marked %s interrupted knowledge-base ingestion job(s) as failed "
                     "on startup; those uploads need to be retried", interrupted,
+                )
+            # Same reasoning for runs: the run executor is per-process too, so
+            # a row still `running` now was orphaned by the last shutdown and
+            # would otherwise show as running forever (beta B1).
+            orphaned = runtime.fail_interrupted_runs(session.get_bind())
+            if orphaned:
+                logger.warning(
+                    "Marked %s interrupted run(s) as failed on startup", orphaned,
                 )
         except OperationalError:
             pass  # pre-migration schema (no users table yet); nothing to enforce

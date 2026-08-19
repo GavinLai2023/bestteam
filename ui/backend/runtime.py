@@ -40,6 +40,37 @@ _logger = logging.getLogger(__name__)
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
+INTERRUPTED_RUN_MESSAGE = (
+    "The run was interrupted by a server restart before it finished."
+)
+
+
+def fail_interrupted_runs(engine: Engine) -> int:
+    """Resolve every `running` row to `failed` and return how many.
+
+    Called once from `main.py::_lifespan`, beside
+    `ingestion.fail_interrupted_jobs`. The run executor lives in this process,
+    so a row still `running` when the app starts belongs to a worker that no
+    longer exists and will never reach a terminal event. Left alone it is
+    permanent: the Activity page shows it running forever and its retry path
+    (gated on `failed`) never appears. One bulk UPDATE, no ORM objects
+    loaded -- this runs on the startup path, before anything is served.
+    Nothing else is touched: usage rows, trace events and any inbox ledger
+    state the run claimed stay as they are (the latter is a known gap, see
+    docs/STATUS.md).
+    """
+    with Session(engine) as db:
+        updated = (
+            db.query(Run)
+            .filter(Run.status == "running")
+            .update(
+                {Run.status: "failed", Run.output: INTERRUPTED_RUN_MESSAGE},
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+    return updated
+
 # A property-maintenance-batch run's agent output is derived from customer
 # email content (the envelope's free-text `extracted`/`missing_information`/
 # `risk_reasons` fields can quote it directly) -- the same trust boundary that

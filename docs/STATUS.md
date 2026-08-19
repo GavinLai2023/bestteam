@@ -1886,10 +1886,15 @@
   not the current 4-stage flow introduced in commit `0d2490a` (flagged in
   that file already).
 - **Hard-restart orphans** — `runs` rows left `status="running"` by a killed
-  process are never swept. The email trigger's overlap guard now consults
-  the in-process registry instead of that row, so the trigger self-recovers
-  and doesn't wedge, but the activity list can still show a stale "running"
-  run. A startup sweep is future work.
+  process are now swept at startup (`runtime.fail_interrupted_runs`, called
+  from `_lifespan` beside `ingestion.fail_interrupted_jobs`): each becomes
+  `failed` with a fixed "interrupted by a server restart" output, so the
+  Activity page no longer shows it running forever and a triggered run's
+  Retry path becomes available. What the sweep deliberately does **not** do:
+  write a terminal trace event, release the `inbox_events` the run had
+  claimed, or normalise `automation_item_results` for its batch — those
+  messages stay `claimed` until a human retries the run (the existing
+  reconciliation gap, see the autonomous-trigger residuals below).
 - **Autonomous trigger residuals:** `asyncio.to_thread` poll cycles aren't
   awaited on shutdown, so a mailbox check/commit/dispatch already in flight
   can keep running briefly after the ASGI shutdown handler returns; a process
