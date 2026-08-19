@@ -97,8 +97,9 @@ implemented** — don't assume they exist:
   so it is not recorded.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
-  `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or
-  reranking either way. Semantic records get exact-dedup on write plus
+  `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — query expansion and reranking are
+  opt-in too, via `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` /
+  `BESTTEAM_MEMORY_RERANK_MODEL`. Semantic records get exact-dedup on write plus
   LLM-mediated near-duplicate/update resolution; procedural records still
   have no dedup/consolidation.
   Admins can view/search/delete a user's memory via the admin-only Memory page

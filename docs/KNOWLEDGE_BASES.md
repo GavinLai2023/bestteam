@@ -518,8 +518,10 @@ re-chunking files (and, for `vector`, calling an embedding model).
 (`ui/backend/org_knowledge_bases.py`) runs one query against the org's own
 collection and returns up to `top_k` of the passages an agent would rank
 first — the "Try a search" panel behind each row of the "My documents" list.
-Not quite the agent's own result set: the panel always sends `top_k=5`,
-whatever the collection's configured `top_k` is. Body:
+Not quite the agent's own result set — the panel always sends `top_k=5`,
+whatever the collection's configured `top_k` is — but that is the only
+divergence: this is the same `search()` an agent's tool calls, so the
+collection's own query expansion and reranking run here too. Body:
 `{"query": "...", "top_k": 5}`, with `query` between 1 and 500 characters and
 `top_k` between 1 and 10; anything else is a `422`. Response:
 

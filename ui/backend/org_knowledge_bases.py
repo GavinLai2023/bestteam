@@ -411,10 +411,11 @@ def search_own_knowledge_base(
 ) -> Dict[str, Any]:
     """Run one query against the org's own collection and return up to
     `top_k` of the passages an agent would rank first, each with the citation
-    the agent sees. Not the agent's own result set: the panel sends `top_k=5`
-    whatever the collection's configured `top_k` is, and an agent's tool call
-    also runs whatever reranking and expansion the collection is configured
-    for.
+    the agent sees. `top_k` is the one divergence from what an agent's own
+    tool call sees: the panel sends 5 whatever the collection is configured
+    for. Everything else is the same retrieval -- this calls the very
+    `kb.search()` the tool calls, so the collection's own query expansion and
+    reranking run here too (which is why there is spend to meter below).
 
     Deliberately **uncached and unthrottled**. The money at stake is
     negligible -- one short query embedding, and metering *records* that, it
