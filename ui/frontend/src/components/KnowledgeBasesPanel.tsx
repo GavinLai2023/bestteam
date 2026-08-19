@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import KnowledgeBaseSearch from './KnowledgeBaseSearch'
 import { api } from '../lib/api'
 import type { OrgKnowledgeBase } from '../lib/types'
 
@@ -41,6 +42,17 @@ function deleteBlockedReason(kb: OrgKnowledgeBase): string | null {
   return null
 }
 
+// Why "Try a search" is refused, in the reader's own terms, or null when it's
+// allowed. Mirrors the endpoint's own 409 cases, which it cannot resolve for
+// them: nothing has finished indexing yet, or something still is. A legacy
+// collection served from disk reports `servable`, so its own refusal only
+// surfaces once the search is actually run -- the list has no way to tell.
+function searchBlockedReason(kb: OrgKnowledgeBase): string | null {
+  if (isProcessing(kb)) return 'This upload is still processing. Wait for it to finish, then try a search.'
+  if (!kb.servable) return 'There is nothing to search yet — no upload has finished successfully.'
+  return null
+}
+
 // The org's own document collections, listed under "My teams" so a customer
 // can see what they uploaded, whether it worked, which teams depend on it,
 // and remove one -- none of which previously existed outside the admin
@@ -50,6 +62,7 @@ export default function KnowledgeBasesPanel() {
   const [error, setError] = useState<string | null>(null)
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
   const [openSkipped, setOpenSkipped] = useState<string | null>(null)
+  const [openSearch, setOpenSearch] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -106,6 +119,7 @@ export default function KnowledgeBasesPanel() {
           const skipped = job?.status === 'completed' ? job.errors : []
           const skippedCount = job?.status === 'completed' ? job.documents_failed : 0
           const blocked = deleteBlockedReason(kb)
+          const searchBlocked = searchBlockedReason(kb)
           return (
             <li key={kb.name} className="session-item">
               <h3>{kb.name}</h3>
@@ -133,12 +147,21 @@ export default function KnowledgeBasesPanel() {
               {rowErrors[kb.name] && <p className="banner banner-error">{rowErrors[kb.name]}</p>}
               <button
                 type="button"
+                disabled={searchBlocked !== null}
+                title={searchBlocked ?? 'Try a search'}
+                onClick={() => setOpenSearch((n) => (n === kb.name ? null : kb.name))}
+              >
+                Try a search
+              </button>
+              <button
+                type="button"
                 disabled={blocked !== null}
                 title={blocked ?? 'Delete'}
                 onClick={() => void handleDelete(kb)}
               >
                 Delete
               </button>
+              {openSearch === kb.name && <KnowledgeBaseSearch name={kb.name} />}
             </li>
           )
         })}

@@ -1,6 +1,7 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
 fine-tuning agents/teams/knowledge_bases/workflows directly."""
 
+import io
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -492,6 +493,44 @@ def test_reupload_replaces_files_and_drops_omitted_ones(client, tmp_path):
     assert resp.status_code == 200
     # The active version resolves to only the new file; omitted ones are gone.
     assert sorted(p.name for p in _active_kb_dir(uploads, "kb").iterdir()) == ["doc3.txt"]
+
+
+def test_admin_reupload_does_not_downgrade_a_hybrid_kb(client):
+    """The admin upload route has no way to send a `kb_type`, so before the
+    shape group was inherited, an operator re-uploading documents for an
+    Enhanced (hybrid) collection silently rebuilt it as a plain
+    `local_folder` one -- and blanked the customer's description with it."""
+    org_id = get_org_id("default")
+    with patch.object(backend_ingestion._executor, "submit", lambda *args, **kwargs: None):
+        with open_test_db() as db:
+            backend_knowledge_bases.upload_knowledge_base(
+                db,
+                org_id,
+                "kb",
+                [fastapi.UploadFile(io.BytesIO(b"first document content"), filename="doc1.txt")],
+                kb_type="hybrid",
+                description="Our refund and shipping policies",
+                embedding_model="fake:16",
+                rerank_model="fake:",
+                query_expansion_model="fake:expansion",
+            )
+
+        resp = client.post(
+            "/api/config/knowledge_bases/kb/upload?org=default",
+            files=[("files", ("doc2.txt", b"second document content", "text/plain"))],
+        )
+
+    assert resp.status_code == 200
+    with open_test_db() as db:
+        config = db.query(KnowledgeBaseRecord).filter_by(name="kb", org_id=org_id).one().config
+        assert config["type"] == "hybrid"
+        assert config["embedding_model"] == "fake:16"
+        assert config["rerank_model"] == "fake:"
+        assert config["query_expansion_model"] == "fake:expansion"
+        assert config["description"] == "Our refund and shipping policies"
+        job = db.get(IngestionJob, resp.json()["job_id"])
+        assert job.kb_type == "hybrid"
+        assert job.embedding_model == "fake:16"
 
 
 def test_failed_reupload_preserves_prior_kb(client, tmp_path):

@@ -1321,6 +1321,135 @@
   known-issues entries below. Spec:
   `docs/superpowers/specs/2026-08-18-email-phase-4b-attachments-design.md`.
 
+- **The BM25 tokeniser stems English and segments kana/Hangul** (P1-1):
+  `core/text_tokenize.py` now stems every Latin/digit token with
+  `snowballstemmer`'s English stemmer (added to the `tools-rag` and `tools`
+  extras; a **soft import**, so an install without it falls back to the identity
+  and simply retrieves less forgivingly), so a query for "refund" reaches a
+  document that only says "refunds". `_STOPWORDS` is stemmed with the same
+  stemmer — otherwise "does" → "doe" would stop matching its own stopword entry.
+  `_CJK_RUN_RE` gains Hiragana/Katakana (U+3040–U+30FF) and Hangul Syllables
+  (U+AC00–U+D7AF), so Japanese and Korean finally get the bigram fallback the
+  entry above already claimed for them, and a kanji+kana word is **one** run
+  rather than two fragments. Tokens are never persisted and the same `tokenize`
+  runs on both the index and the query side, so this needed no migration or
+  backfill. **Per-user memory recall shares the tokeniser**, so English memory
+  recall is stemmed too. The golden-set eval is unchanged at recall@3 / MRR /
+  hit@1 = 80% (16/16 lexical queries still rank their document first). One
+  side effect: `estimate_embedding_tokens` now counts kana and Hangul per
+  character instead of per four characters — the right direction for Japanese
+  and Korean, which run near one token per character.
+
+- **A provider hiccup now costs one batch, not a whole upload** (P1-2):
+  `core/embeddings.py::embed_documents_in_batches` is the one way this codebase
+  embeds a *list* of documents (both `_embed_chunks` copies and
+  `ui/backend/ingestion.py`; `memory.py`'s single-record write and every
+  `embed_query` are untouched). It sends 100 texts per provider call and gives
+  each batch up to three attempts — two retries, 1s then 2s apart —
+  re-raising the original exception if the third fails, and **only the failing
+  batch is
+  retried**, so a rate limit on the 37th request no longer throws away the 36
+  batches already embedded and paid for. Any exception retries: classifying
+  provider exceptions would mean tracking every provider's error taxonomy, so
+  an authentication failure waits 3s before surfacing, which is the price of
+  not silently giving up on a rate limit. A batch that comes back with the
+  wrong number of vectors raises `ConfigurationError` immediately, without
+  retrying — a deterministic answer will not change on a second ask. Neither
+  the batch size nor the attempt count is a parameter; no caller has a reason
+  to differ. Metering is unaffected: the `kb:ingest` estimate is computed once
+  from the chunk texts, so a retried batch is never billed twice (and, the
+  other way, the estimate under-counts a retry the provider did charge for —
+  one more reason it is an estimate, not a bill).
+
+- **A re-upload keeps the collection's shape, and the panel reports the one
+  that serves** (P1-3): `upload_knowledge_base()`'s `kb_type` is now optional
+  and, when a caller names none, inherits the whole shape group
+  (`type`/`embedding_model`/`rerank_model`/`query_expansion_model`) plus the
+  `description` from the existing record — `local_folder` only for a name that
+  doesn't exist yet. The admin route (`crud.py`) is exactly such a caller: it
+  has no way to send a shape, so replacing an Enhanced (`hybrid`) collection's
+  documents used to silently rebuild it as Standard and blank the customer's
+  description. `chunk_size`/`chunk_overlap`/`top_k` are still per-upload, never
+  inherited. The other half is the config-vs-job divergence this exposed:
+  `KnowledgeBaseRecord.config` advances at dispatch and stays advanced if the
+  job fails, so it says what the *next* upload would build, not what a search
+  runs against. `org_knowledge_bases.py::_live_kb_type(db, record)` (the latest
+  completed job's own `kb_type`, falling back to `config`) now backs both the
+  "My documents" panel's `type` and the replace `409`, which names it in the
+  wizard's own words ("It currently uses Standard search."); the wizard's
+  confirmation adds what it would become ("They will be indexed with Enhanced
+  search."), so one dialog carries both halves and no mount-time probe is
+  needed. `job_status_payload.config` is deliberately unchanged — that one is
+  the configuration intent. See `ui/backend/CLAUDE.md`,
+  `docs/KNOWLEDGE_BASES.md`.
+
+- **A customer can try a search against their own documents** (P1-4):
+  `POST /api/org/knowledge-bases/{name}/search` (`query` 1–500 chars, `top_k`
+  1–10) returns `{"query", "hit_count", "results": [{"citation", "source",
+  "page", "heading", "text"}]}`, each `text` capped at 1,500 characters, and a
+  "Try a search" toggle on every row of the "My documents" panel
+  (`components/KnowledgeBaseSearch.tsx`) shows them under the same citation
+  label the agent's own tool output cites. Retrieval quality was previously
+  only knowable by deploying a team and watching what it answered.
+  The route resolves the collection through `resolve_knowledge_base(db,
+  record)` with **no `source`**, which is what switches the legacy file-based
+  fallback off here: rebuilding a disk-backed collection would re-parse every
+  file, and re-embed a `vector` one unmetered, on every click. That refusal
+  joins "still processing" and "the last upload failed" as
+  `KnowledgeBaseNotReady` (a new `ConfigurationError` subclass raised at
+  exactly those three sites), and the route maps **only** that subclass to
+  `409` — any other `ConfigurationError` out of `_build_knowledge_base_from_job`
+  is an operator's deployment problem and stays a logged `500`. Another org's
+  name is a `404`, a provider failure inside the search is a `502`, a bad body
+  is a `422`. **Metering**: the search runs inside `tool_call_context()` and
+  whatever it reports (a query embedding, a query expansion) is written to
+  `usage_records` as `agent="kb:search"` with **both** foreign keys NULL, which
+  makes that ledger a three-source one (run / ingestion job / ad-hoc search) —
+  the wording was corrected in `db/models.py`, `db/usage.py`, `db/CLAUDE.md`
+  and migration `n1o2p3q4r5s6`'s docstring; no new migration, and the
+  downgrade's `DELETE ... WHERE run_id IS NULL` already covers these rows.
+  Recording is best-effort and also runs on the failure path, since a query
+  expansion is paid for before an embedding call that raises. Deliberately
+  **no cache and no rate limit** — see `docs/KNOWLEDGE_BASES.md`, "Trying a
+  search".
+
+- **A spreadsheet's column headers now reach every chunk of the sheet**
+  (P1-5): a 200-row sheet split into ten chunks used to leave nine of them as
+  bare comma-separated values, with the header row (and the sheet's own name)
+  only in the first — so a retrieved passage told neither the model nor the
+  customer which column was which. `_chunk_tabular_document` dispatches
+  `.xlsx`/`.xlsm`/`.docx` on the parsers' own `[Sheet: …]`/`[Table N]` marker
+  lines: one block per sheet or table, each chunk of an over-long block
+  prefixed with the marker plus the block's first row, and `heading` set to the
+  marker's text so a citation reads `sales.xlsx § Sheet: Q1`. "The first row is
+  the column header" is a heuristic, stated as one in the docstring and the
+  docs. A marker-only or empty block is dropped rather than chunked into a
+  content-free row. Two consequences worth knowing: a workbook of many small
+  sheets now yields one chunk per sheet (more chunks ⇒ more embedding spend on
+  a `vector`/`hybrid` collection), and the repeated header row slightly dilutes
+  BM25's IDF for column names. `PAGE_BREAK` moved to its producer
+  (`tools/file_parser.py`) in the same pass, so the sentinel is defined once
+  where it is written rather than copied where it is read.
+
+- **The P1 wrap-up: stale limitations, downgrade coverage, and a cap advisory
+  that sees every deployed team** (P1-6): the "Known issues" entry claiming
+  knowledge-base retrieval is single-stage contradicted four other places in
+  this file and is now scoped to what is genuinely absent (no external vector
+  store, no DMS connectors); the memory entry is in the past tense the
+  `DECISIONS.md` record already used. `tests/test_migrations.py` extends the
+  two knowledge-base migrations' upgrade-side tests into full round trips —
+  `m0n1o2p3q4r5`'s columns drop while the chunk survives, `n1o2p3q4r5s6`'s
+  downgrade deletes a `run_id IS NULL` row and *only* that row, and both
+  re-upgrade to head idempotently. (Downgrading past `m0n1o2p3q4r5` from head
+  necessarily runs `n1o2p3q4r5s6`'s downgrade first, so one test drags both
+  migrations through both directions.) And `unpriced_models_for_org` now unions
+  over **every** `status="deployed"` workflow in the org rather than the single
+  one an email trigger points at: the cap it advises is an org-level `SUM` over
+  the whole ledger, so an org that never configured a trigger — or that
+  deployed a second team the trigger doesn't name — had exactly the same blind
+  spot with none of the warning. Drafts are still excluded (a draft cannot run,
+  so it cannot spend).
+
 - **An org manages its own knowledge bases** (P0-2): `GET /api/org/knowledge-bases`,
   `GET`/`DELETE /api/org/knowledge-bases/{name}` plus a "My documents" panel on
   My teams — each collection's latest ingestion attempt (a failed upload's error
@@ -1607,13 +1736,20 @@
   Never observed failing (uploads are separated by a full ingestion job) and
   shared by five tests. `IngestionJob.version` records the directory name and
   would make it exact.
-- **Vector knowledge base retrieval is single-stage** — no query
-  rewriting/expansion or reranking, no external vector store, no DMS
-  connectors. See `src/bestteam/core/CLAUDE.md`.
-- **Per-user memory recall is single-stage BM25** — no rerank/expansion.
-  Semantic records get exact-dedup on write plus LLM-mediated near-duplicate/
-  update resolution (M-08); procedural records still have no dedup/
-  consolidation. Admin view/search/delete UI exists (`/api/memory`), but
+- **Knowledge base retrieval has no external vector store and no DMS
+  connectors** — all three types are served from this deployment's own SQLite
+  rows, and documents reach a collection only by being uploaded to it. Query
+  expansion and reranking are no longer part of this gap: both are opt-in on
+  every type (`query_expansion_model`/`rerank_model`), as is hybrid BM25+vector
+  fusion. See `src/bestteam/core/CLAUDE.md`.
+- **Per-user memory recall *started* as single-stage BM25** — it is still BM25
+  by default, but hybrid BM25+vector (RRF-fused, with type-aware recency
+  decay), query expansion and reranking are each opt-in now
+  (`BESTTEAM_MEMORY_EMBEDDING_MODEL`, `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL`,
+  `BESTTEAM_MEMORY_RERANK_MODEL`), so what remains of this entry is the dedup
+  half. Semantic records get exact-dedup on write plus LLM-mediated
+  near-duplicate/update resolution (M-08); procedural records still have no
+  dedup/consolidation. Admin view/search/delete UI exists (`/api/memory`), but
   there's no manual add/edit and no retention/quota
   policy. `GET /api/memory/users` is unpaginated (CR-029, deferred P3): fine
   today (admin-only, opt-in, operator-provisioned accounts), but the

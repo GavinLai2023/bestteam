@@ -802,8 +802,16 @@ def test_the_secret_expiry_column_upgrades_and_downgrades(tmp_path, monkeypatch)
         engine.dispose()
 
 
-def test_knowledge_chunks_carry_page_and_heading_columns(tmp_path, monkeypatch):
-    """m0n1o2p3q4r5: the two chunk-location columns citations are built from."""
+def test_knowledge_chunks_page_heading_migration_downgrades_and_reupgrades(tmp_path, monkeypatch):
+    """m0n1o2p3q4r5: the two chunk-location columns citations are built from.
+
+    Purely additive, so the round trip has to keep the chunk itself: an
+    operator rolling back reads a database whose chunks cite their filename
+    alone, exactly as they did before the columns existed. Downgrading to
+    this revision's parent from head necessarily runs `n1o2p3q4r5s6`'s own
+    downgrade first, so both knowledge-base migrations are dragged through
+    both directions here.
+    """
     db_path = tmp_path / "chunk_metadata.db"
     cfg = _alembic_config(db_path, monkeypatch)
     command.upgrade(cfg, "head")
@@ -812,13 +820,49 @@ def test_knowledge_chunks_carry_page_and_heading_columns(tmp_path, monkeypatch):
     try:
         columns = {c["name"] for c in sa.inspect(engine).get_columns("knowledge_chunks")}
         assert {"page", "heading"} <= columns
+
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO knowledge_chunks "
+                "(id, document_id, kb_id, chunk_index, text, page, heading, created_at) "
+                "VALUES (1, 1, 1, 0, 'Refunds are accepted within 14 days.', 3, "
+                " 'Refunds', CURRENT_TIMESTAMP)"
+            ))
+
+        command.downgrade(cfg, "l9m0n1o2p3q4")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("knowledge_chunks")}
+            surviving = conn.execute(
+                sa.text("SELECT text FROM knowledge_chunks WHERE id = 1")
+            ).scalar()
+        assert "page" not in columns
+        assert "heading" not in columns
+        assert surviving == "Refunds are accepted within 14 days."
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("knowledge_chunks")}
+            row = conn.execute(
+                sa.text("SELECT page, heading FROM knowledge_chunks WHERE id = 1")
+            ).one()
+        assert {"page", "heading"} <= columns
+        # Re-upgrading is idempotent, and the columns come back empty: there is
+        # no backfill, because a page and a heading can only be recovered by
+        # re-parsing the original document, which a re-upload already does.
+        assert row.page is None
+        assert row.heading is None
     finally:
         engine.dispose()
 
 
-def test_usage_records_run_id_is_nullable_with_an_ingestion_job_id(tmp_path, monkeypatch):
+def test_usage_records_nullable_run_id_downgrade_deletes_only_rows_without_a_run(tmp_path, monkeypatch):
     """n1o2p3q4r5s6: knowledge-base ingestion spend lives in the same ledger,
-    so `run_id` has to be nullable and `ingestion_job_id` has to exist."""
+    so `run_id` has to be nullable and `ingestion_job_id` has to exist.
+
+    The downgrade is lossy by design, and this pins *how far*: a row that
+    belongs to a run survives, and only a row the old NOT NULL schema has no
+    way to express is deleted rather than given a fabricated run id.
+    """
     db_path = tmp_path / "usage_ingestion.db"
     cfg = _alembic_config(db_path, monkeypatch)
     command.upgrade(cfg, "head")
@@ -830,5 +874,43 @@ def test_usage_records_run_id_is_nullable_with_an_ingestion_job_id(tmp_path, mon
         assert "ingestion_job_id" in columns
         assert columns["run_id"]["nullable"] is True
         assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO usage_records "
+                "(id, run_id, agent, model, input_tokens, output_tokens, created_at) "
+                "VALUES (1, 'run-1', 'writer', 'openai:gpt-4o-mini', 10, 5, "
+                " CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO usage_records "
+                "(id, run_id, ingestion_job_id, agent, model, input_tokens, "
+                " output_tokens, created_at) "
+                "VALUES (2, NULL, 7, 'kb:ingest', "
+                " 'openai:text-embedding-3-small', 400, 0, CURRENT_TIMESTAMP)"
+            ))
+
+        command.downgrade(cfg, "m0n1o2p3q4r5")
+        with engine.connect() as conn:
+            columns = {c["name"]: c for c in sa.inspect(conn).get_columns("usage_records")}
+            ids = [row[0] for row in conn.execute(
+                sa.text("SELECT id FROM usage_records ORDER BY id")
+            )]
+        assert ids == [1]  # the run's row stays, the ingestion row goes
+        assert "ingestion_job_id" not in columns
+        assert columns["run_id"]["nullable"] is False
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as conn:
+            columns = {c["name"]: c for c in sa.inspect(conn).get_columns("usage_records")}
+            ids = [row[0] for row in conn.execute(
+                sa.text("SELECT id FROM usage_records ORDER BY id")
+            )]
+        # Idempotent on the way back up, and it does not resurrect what the
+        # downgrade deleted -- the spend is gone from the ledger for good.
+        assert "ingestion_job_id" in columns
+        assert columns["run_id"]["nullable"] is True
+        assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+        assert ids == [1]
     finally:
         engine.dispose()

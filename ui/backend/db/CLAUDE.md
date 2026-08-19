@@ -285,11 +285,15 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   entry (Phase 3, `db/usage.py::record_usage`). One ledger for every kind of
   spend an org incurs, which is what lets the monthly cap be a single `SUM`
   over `org_id`. **`run_id` is nullable** (migration `n1o2p3q4r5s6`) and a
-  nullable `ingestion_job_id` FK sits beside it: exactly one of the two is
-  set. Almost every row belongs to a run; a knowledge base's *ingestion*
-  embedding spend belongs to an upload instead and is written as one
-  `agent="kb:ingest"` row per job. A KB's *query-time* spend is an ordinary
-  run row — it rides the calling agent's `agent_completed.usage`. Consumers
+  nullable `ingestion_job_id` FK sits beside it, so a row names **one of
+  three** sources. Almost every row belongs to a run (`run_id` set); a
+  knowledge base's *ingestion* embedding spend belongs to an upload instead
+  and is written as one `agent="kb:ingest"` row per job (`ingestion_job_id`
+  set); and an ad-hoc `agent="kb:search"` row — one test search from the "Try
+  a search" panel (`org_knowledge_bases.py`) — has **both FKs NULL**, because
+  it belongs to no run and no upload. A KB's *query-time* spend inside a run
+  is an ordinary run row — it rides the calling agent's
+  `agent_completed.usage`. Consumers
   that key on runs (`run_analytics_api.py`, `GET /api/runs/{id}`,
   `unpriced_run_count`'s `count(distinct run_id)`) filter or count by run id,
   so NULL-`run_id` rows drop out of them naturally; the monthly

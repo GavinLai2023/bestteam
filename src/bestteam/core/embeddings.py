@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+import time
+from typing import Any, Callable, List, Optional, Sequence
 
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 
@@ -10,6 +11,12 @@ from .text_tokenize import _CJK_RUN_RE
 from .tool_context import add_usage
 
 _DEFAULT_FAKE_EMBEDDING_DIM = 32
+
+# 100 chunks of ~1000 characters is roughly 25k tokens -- far below any
+# provider's per-request limit, and small enough that a failed batch is cheap
+# to redo. Deliberately not a parameter: no caller has a reason to differ.
+_EMBED_BATCH_SIZE = 100
+_EMBED_ATTEMPTS = 3
 
 
 def resolve_embedding_model(model: Any) -> Embeddings:
@@ -62,6 +69,53 @@ def resolve_embedding_model(model: Any) -> Embeddings:
     )
 
 
+def embed_documents_in_batches(
+    embeddings: Embeddings,
+    texts: Sequence[str],
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> List[List[float]]:
+    """Embed `texts` in batches of `_EMBED_BATCH_SIZE`, retrying a failed batch.
+
+    A provider client already splits one `embed_documents` call into several
+    requests internally, but to the *caller* that is still one all-or-nothing
+    Python call: a hiccup on the 37th request throws away the 36 that were
+    computed and paid for. Batching here makes a failure cost one batch, and
+    **only the failing batch is retried** -- up to `_EMBED_ATTEMPTS` attempts,
+    backing off 1s then 2s, after which the original exception is re-raised
+    for the caller to report. Any exception retries: classifying provider
+    exceptions would mean tracking every provider's error taxonomy, so an
+    authentication failure waits 3 seconds before surfacing, which is an
+    acceptable price for not silently giving up on a rate limit.
+
+    A batch that comes back with the wrong number of vectors raises
+    `ConfigurationError` immediately, without retrying -- a deterministic
+    answer will not change on a second ask, and a model whose response is the
+    wrong shape is a misconfiguration like any other in this module.
+
+    `sleep` is injectable so tests need not actually wait. Empty input makes
+    no provider call at all.
+    """
+    vectors: List[List[float]] = []
+    for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = list(texts[start : start + _EMBED_BATCH_SIZE])
+        for attempt in range(1, _EMBED_ATTEMPTS + 1):
+            try:
+                result = embeddings.embed_documents(batch)
+            except Exception:
+                if attempt == _EMBED_ATTEMPTS:
+                    raise
+                sleep(float(attempt))  # 1.0s, then 2.0s
+            else:
+                break
+        if len(result) != len(batch):
+            raise ConfigurationError(
+                f"embedding model returned {len(result)} vectors for {len(batch)} texts"
+            )
+        vectors.extend(result)
+    return vectors
+
+
 def normalize_rows(matrix: Any) -> Any:
     """L2-normalize each row; rows with zero norm are left as all-zeros.
 
@@ -85,11 +139,10 @@ def estimate_embedding_tokens(text: str) -> int:
     here is one token per CJK character plus one per four other characters,
     which is roughly where the mainstream BPE tokenizers land for each
     script. Expect the estimate to be within about **±30%** of a provider's
-    own count *for Han and Latin text*: enough to keep a spend cap honest, not
-    enough to reconcile against a bill. Kana and Hangul are outside
-    `_CJK_RUN_RE`'s ranges, so they are counted at the four-characters-per-token
-    rate and under-estimated by roughly 4x -- a known limit of reusing the BM25
-    tokenizer's definition rather than adding a second one.
+    own count: enough to keep a spend cap honest, not enough to reconcile
+    against a bill. Kana and Hangul are inside `_CJK_RUN_RE`'s ranges too, so
+    they are counted per character, which is roughly where Japanese and Korean
+    land as well.
 
     Deterministic and dependency-free (no `tiktoken`), and it reuses
     `text_tokenize._CJK_RUN_RE` so "CJK" means exactly what the BM25

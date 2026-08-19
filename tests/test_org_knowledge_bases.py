@@ -4,6 +4,7 @@ step. Mirrors `test_org_settings.py`'s auth/org-scoping patterns and reuses
 `test_crud_api.py`'s upload-endpoint assertions for the shared
 `knowledge_bases.upload_knowledge_base()` implementation."""
 
+import io
 import time
 from pathlib import Path
 
@@ -583,9 +584,9 @@ def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_pat
     zero IngestionJob rows."""
     legacy_dir = tmp_path / "legacy_kb"
     legacy_dir.mkdir()
-    # BM25 keyword search requires literal term overlap with the query
-    # ("refund policy") -- no stemming, so this must share those exact words,
-    # not just paraphrase them ("Refunds" alone wouldn't match "refund").
+    # BM25 keyword search requires term overlap with the query
+    # ("refund policy"), so this shares those words rather than paraphrasing
+    # them.
     (legacy_dir / "doc.txt").write_text("Refund policy: returns accepted within 14 days.", encoding="utf-8")
 
     with open_test_db() as db:
@@ -797,3 +798,414 @@ def test_upload_description_lands_in_config_and_tool_docstring(client, tmp_path)
     resp = client.get("/api/org/knowledge-bases/policies")
     assert resp.status_code == 200
     assert resp.json()["description"] == "Our refund and shipping policies"
+
+
+# --- P1-3: shape inheritance, and reporting the shape that actually serves ---
+
+def _upload_file(name="doc.txt", content=b"The refund policy allows returns within 30 days."):
+    """One `UploadFile` for calling `upload_knowledge_base()` directly.
+
+    The admin route is the caller that names no shape, and it isn't reachable
+    from this file's org-scoped client -- so the inheritance branch is driven
+    through the shared function itself here, and end to end over the admin
+    route in `test_crud_api.py`.
+    """
+    return fastapi.UploadFile(io.BytesIO(content), filename=name)
+
+
+def test_summary_type_reports_the_live_generation_not_the_pending_config(client, monkeypatch):
+    """`config` advances to the new shape the moment a re-upload is
+    dispatched, and stays there forever if that job fails -- so reading the
+    customer's panel off `config` told them a failed Enhanced upgrade had
+    taken effect while every search still ran against the old Standard
+    generation."""
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    # Upgrade to Enhanced with a document that has no extractable text, so
+    # the new generation never becomes servable.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true", "smart_search": "true"},
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one()
+        # The config records the intent -- what the next upload would use.
+        assert record.config["type"] == "hybrid"
+
+    body = client.get("/api/org/knowledge-bases/policies").json()
+    # ...but the panel reports what a search runs against today.
+    assert body["type"] == "local_folder"
+    assert body["servable"] is True
+    assert body["latest_job"]["status"] == "failed"
+
+
+def test_replace_conflict_names_the_current_search_quality(client, monkeypatch):
+    """The 409 is the only moment the wizard can tell a customer what the
+    collection they are about to replace is like today, so it names it."""
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    resp = client.post(
+        "/api/org/knowledge-bases/handbook/upload",
+        data={"smart_search": "true"},
+        files=_files(),
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(name="other.txt"))
+    assert resp.status_code == 409
+    assert "currently uses Standard search" in resp.json()["detail"]
+
+    resp = client.post("/api/org/knowledge-bases/handbook/upload", files=_files(name="other.txt"))
+    assert resp.status_code == 409
+    assert "currently uses Enhanced search" in resp.json()["detail"]
+
+
+def test_upload_without_a_shape_inherits_the_existing_configuration_and_description(client, monkeypatch):
+    """A caller naming no `kb_type` is replacing a collection's documents,
+    not redesigning it: the shape group and the description carry over from
+    what the last upload asked for."""
+    from ui.backend import ingestion as backend_ingestion
+
+    # Nothing here needs the documents indexed -- the assertions are about
+    # the record and the job row the upload writes.
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *args, **kwargs: None)
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(
+            db,
+            org_id,
+            "policies",
+            [_upload_file()],
+            chunk_size=500,
+            kb_type="hybrid",
+            description="Our refund and shipping policies",
+            embedding_model="fake:16",
+            rerank_model="fake:",
+            query_expansion_model="fake:expansion",
+        )
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        result = backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="v2.txt")]
+        )
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "hybrid"
+        assert config["embedding_model"] == "fake:16"
+        assert config["rerank_model"] == "fake:"
+        assert config["query_expansion_model"] == "fake:expansion"
+        assert config["description"] == "Our refund and shipping policies"
+        # Chunking and top_k are per-upload knobs every route always sends,
+        # so they take this call's values rather than the previous upload's.
+        assert config["chunk_size"] == 1000
+        # And the job that will do the indexing agrees with the record.
+        job = db.get(IngestionJob, result["job_id"])
+        assert job.kb_type == "hybrid"
+        assert job.embedding_model == "fake:16"
+
+
+def test_upload_without_a_shape_on_a_new_name_is_a_standard_collection(client, monkeypatch):
+    """There is nothing to inherit from, so the historical default stands."""
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *args, **kwargs: None)
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(db, org_id, "policies", [_upload_file()])
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "local_folder"
+        assert config.get("description") is None
+
+
+# --- P1-4: the "Try a search" endpoint -------------------------------------
+
+def test_search_returns_citations_and_capped_text(client):
+    """The panel's whole point is showing a customer the passages an agent
+    would retrieve, each labelled with the citation the agent sees -- and
+    only enough of each to judge it by."""
+    # One chunk far longer than the response cap, so the truncation is
+    # exercised rather than assumed: this surface shows a passage, it is not
+    # a document reader.
+    long_text = "The refund policy allows returns within 30 days. " * 60
+    assert len(long_text) > 1500
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        result = backend_knowledge_bases.upload_knowledge_base(
+            db,
+            org_id,
+            "policies",
+            [_upload_file(content=long_text.encode())],
+            chunk_size=4000,
+            chunk_overlap=0,
+        )
+    assert _wait_for_job_status(result["job_id"]) == "completed"
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/search",
+        json={"query": "refund policy", "top_k": 3},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["query"] == "refund policy"
+    assert body["hit_count"] == 1
+    assert len(body["results"]) == 1
+    hit = body["results"][0]
+    assert hit["source"] == "doc.txt"
+    assert hit["citation"] == "doc.txt"
+    assert hit["page"] is None
+    assert hit["heading"] is None
+    assert len(hit["text"]) == 1500
+    assert hit["text"].startswith("The refund policy allows returns within 30 days.")
+
+
+def test_search_404_for_other_org(client):
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_files()
+    ).status_code == 200
+
+    other = create_user_and_login(client, username="bob", org="org_b")
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/search",
+        json={"query": "refund policy"},
+        headers={"Authorization": f"Bearer {other}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_search_409_while_processing_and_after_a_failed_upload(client, monkeypatch):
+    """Neither state can answer a query, and both are the customer's own to
+    resolve -- so each says which one it is instead of a bare 500."""
+    from ui.backend import ingestion as backend_ingestion
+
+    submitted = []
+    monkeypatch.setattr(
+        backend_ingestion._executor,
+        "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_files()
+    ).status_code == 200
+
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund"})
+    assert resp.status_code == 409
+    assert "no completed ingestion yet" in resp.json()["detail"]
+
+    # Let that held job run, then fail a second upload outright.
+    args, kwargs = submitted[0]
+    args[0](*args[1:], **kwargs)
+    monkeypatch.undo()
+
+    resp = client.post(
+        "/api/org/knowledge-bases/broken/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+
+    resp = client.post("/api/org/knowledge-bases/broken/search", json={"query": "refund"})
+    assert resp.status_code == 409
+    assert "could not be indexed" in resp.json()["detail"]
+
+
+def test_search_409_for_a_legacy_file_backed_kb(client, tmp_path):
+    """A knowledge base with no ingestion job at all is served from a folder
+    on disk. Rebuilding it would re-parse every file (and, for a `vector`
+    one, re-embed it unmetered) on every click, so this surface refuses it
+    rather than offering a search that silently spends."""
+    folder = tmp_path / "legacy_docs"
+    folder.mkdir()
+    (folder / "doc.txt").write_text("The refund policy allows returns within 30 days.")
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        db.add(
+            KnowledgeBaseRecord(
+                name="legacy",
+                org_id=org_id,
+                config={"name": "legacy", "type": "local_folder", "path": str(folder)},
+            )
+        )
+        db.commit()
+
+    resp = client.post("/api/org/knowledge-bases/legacy/search", json={"query": "refund"})
+    assert resp.status_code == 409
+    assert "was not uploaded through the app" in resp.json()["detail"]
+
+
+def test_resolve_without_source_refuses_the_legacy_fallback_with_not_ready(client, tmp_path):
+    """The same refusal at the function boundary: an omitted `source` is what
+    turns the legacy disk fallback off. Both existing callers still pass a
+    path, so their behaviour is unchanged."""
+    folder = tmp_path / "legacy_docs"
+    folder.mkdir()
+    (folder / "doc.txt").write_text("The refund policy allows returns within 30 days.")
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = KnowledgeBaseRecord(
+            name="legacy",
+            org_id=org_id,
+            config={"name": "legacy", "type": "local_folder", "path": str(folder)},
+        )
+        db.add(record)
+        db.commit()
+
+        with pytest.raises(backend_knowledge_bases.KnowledgeBaseNotReady):
+            backend_knowledge_bases.resolve_knowledge_base(db, record)
+
+        # With a source, the disk fallback still builds exactly as before.
+        kb = backend_knowledge_bases.resolve_knowledge_base(db, record, tmp_path)
+        assert "30 days" in kb.query("refund policy")
+
+
+def test_search_records_kb_search_usage_for_a_hybrid_kb(client, monkeypatch):
+    """A test search spends real money on a hybrid collection (it embeds the
+    query), so it lands in the same ledger the org's monthly cap sums over --
+    with both foreign keys null, because it belongs to no run and no upload."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    from bestteam.core import hybrid_knowledge_base
+    from ui.backend import ingestion as backend_ingestion
+    from ui.backend.db.models import UsageRecord
+
+    # A *billable* spec (not `fake:`) resolved to a $0 deterministic model:
+    # `billable_spec` keys off the string, which is what decides whether
+    # anything is metered at all, so this exercises the real path for free.
+    monkeypatch.setattr(
+        backend_ingestion, "resolve_embedding_model", lambda spec: DeterministicFakeEmbedding(size=8)
+    )
+    monkeypatch.setattr(
+        hybrid_knowledge_base, "resolve_embedding_model", lambda spec: DeterministicFakeEmbedding(size=8)
+    )
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        result = backend_knowledge_bases.upload_knowledge_base(
+            db,
+            org_id,
+            "policies",
+            [_upload_file()],
+            kb_type="hybrid",
+            embedding_model="openai:text-embedding-3-small",
+        )
+    assert _wait_for_job_status(result["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund policy"})
+    assert resp.status_code == 200, resp.text
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        rows = db.query(UsageRecord).filter_by(agent="kb:search").all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.run_id is None
+        assert row.ingestion_job_id is None
+        assert row.org_id == org_id
+        assert row.model == "openai:text-embedding-3-small"
+        assert row.input_tokens > 0
+
+        # The ingestion spend is still its own, separately attributed row.
+        ingest = db.query(UsageRecord).filter_by(agent="kb:ingest").all()
+        assert len(ingest) == 1
+        assert ingest[0].ingestion_job_id == result["job_id"]
+
+
+def test_search_502s_and_still_meters_what_the_failed_search_spent(client, monkeypatch):
+    """A query expansion is paid for *before* the embedding call that raises,
+    so the money is gone whether or not the search returns anything. The 502
+    tells the customer what to do about it; the ledger row still says what it
+    cost."""
+    from bestteam.core.tool_context import add_usage
+    from ui.backend.db.models import UsageRecord
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    class _SpendsThenFails:
+        def search(self, query, top_k):
+            add_usage({
+                "model": "openai:gpt-4o-mini",
+                "input_tokens": 12,
+                "output_tokens": 30,
+            })
+            raise RuntimeError("the provider hung up mid-search")
+
+    monkeypatch.setattr(
+        backend_org_kb, "resolve_knowledge_base", lambda *a, **k: _SpendsThenFails()
+    )
+
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund"})
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail.startswith("The search could not be run:")
+    # The provider's own words never reach the customer.
+    assert "hung up" not in detail
+
+    with open_test_db() as db:
+        rows = db.query(UsageRecord).filter_by(agent="kb:search").all()
+        assert len(rows) == 1
+        assert rows[0].model == "openai:gpt-4o-mini"
+        assert rows[0].input_tokens == 12
+        assert rows[0].run_id is None
+        assert rows[0].ingestion_job_id is None
+
+
+def test_search_rejects_empty_query_and_top_k_out_of_range(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    for body in (
+        {"query": ""},
+        # Whitespace-only clears `min_length` but retrieves nothing, and on a
+        # `vector`/`hybrid` collection it would still cost a query embedding.
+        {"query": "   "},
+        {"query": "x" * 501},
+        {"query": "refund", "top_k": 0},
+        {"query": "refund", "top_k": 11},
+    ):
+        resp = client.post("/api/org/knowledge-bases/policies/search", json=body)
+        assert resp.status_code == 422, body
+
+
+def test_search_500s_not_409s_on_a_non_readiness_configuration_error(client, monkeypatch):
+    """Only a not-ready knowledge base is the customer's own conflict to
+    resolve. A missing `rank-bm25` extra or a bad `rerank_model` is an
+    operator's deployment problem, so it stays a logged 500 rather than a
+    409 telling the customer to wait for something that has already
+    finished."""
+    from bestteam.exceptions import ConfigurationError
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    def boom(*args, **kwargs):
+        raise ConfigurationError("the optional 'rank-bm25' package is not installed")
+
+    monkeypatch.setattr(backend_knowledge_bases, "_build_knowledge_base_from_job", boom)
+
+    quiet = TestClient(backend_main.app, raise_server_exceptions=False)
+    quiet.headers["Authorization"] = client.headers["Authorization"]
+    resp = quiet.post("/api/org/knowledge-bases/policies/search", json={"query": "refund"})
+    assert resp.status_code == 500
+    # The generic handler's body, not the operator's own configuration detail.
+    assert "rank-bm25" not in resp.text

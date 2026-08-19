@@ -1,7 +1,8 @@
 import type {
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
   EmailFilterSettings, EmailTrigger, FilteredMessage,
-  IngestionJobStatus, KnowledgeBaseCapabilities, Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
+  IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
+  Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
   Requirements, ShareLink, ShareMessage, ShareSessionSummary,
@@ -394,6 +395,15 @@ export const api = {
     request<OrgKnowledgeBase>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`),
   deleteOwnKnowledgeBase: (name: string) =>
     request<void>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  // "Try a search": one query against the org's own collection, returning the
+  // passages an agent would have retrieved. A collection that can't answer
+  // yet (still processing, last upload failed, or never uploaded through the
+  // app) is a 409 whose detail says which.
+  searchOwnKnowledgeBase: (name: string, query: string, topK = 5) =>
+    request<KnowledgeBaseSearchResponse>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/search`,
+      { method: 'POST', body: JSON.stringify({ query, top_k: topK }) },
+    ),
 
   // Org self-service settings: the org's mailbox for the email tools.
   getOrgEmail: () => request<OrgEmailStatus>('/api/org/email'),

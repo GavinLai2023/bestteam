@@ -9,7 +9,7 @@ from typing import Any, Callable, List, NamedTuple, Optional
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
-from ..tools.file_parser import SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES
+from ..tools.file_parser import PAGE_BREAK, SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES
 from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
     _MAX_RERANK_CANDIDATE_K,
@@ -394,10 +394,6 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
     return _apply_overlap(_split_pieces(text, chunk_size, suffix), chunk_overlap, chunk_size)
 
 
-# `_parse_pdf_bytes` joins a PDF's pages with this, so a page boundary is
-# still visible in the parsed text (see `tools/file_parser.py`).
-_PAGE_BREAK = "\f"
-
 _MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
 
 # A heading is a citation label, not an excerpt -- a pathological one-line
@@ -426,6 +422,106 @@ def _headings_for(pieces: List[str]) -> List[Optional[str]]:
     return headings
 
 
+# The bracketed line every tabular parser puts ahead of a block of CSV-style
+# rows -- one per Excel sheet, one per Word table (`tools/file_parser.py`).
+_TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|Table \d+)\]$", re.M)
+
+# Formats whose parsed text is, or contains, such blocks.
+_TABULAR_SUFFIXES = {".xlsx", ".xlsm", ".docx"}
+
+
+def _row_has_text(row: str) -> bool:
+    """True when a CSV-style table row holds anything beyond its own commas.
+
+    `read_only` openpyxl renders an empty row as its delimiters alone (`,,`),
+    which survives `.strip()` but is not a row anybody can read. Deliberately
+    local to the tabular path: `_has_extractable_text` answers a different
+    question (did the *document* contribute anything) for every format.
+    """
+    return bool(row.replace(",", "").strip())
+
+
+def _chunk_table_block(
+    source: str, block: str, chunk_size: int, chunk_overlap: int, suffix: str
+) -> List[_Chunk]:
+    """Chunk one `[Sheet: ...]`/`[Table N]` block, repeating its marker line
+    and header row at the top of every chunk it produces.
+
+    The first body line with text in it is *assumed* to be the column header
+    -- a heuristic. Leading rows that are empty once commas and whitespace are
+    removed are skipped, because the spacer row so many workbooks put above
+    their headers would otherwise be repeated instead of the headers. A table
+    whose first real row is already data gets that row repeated, which wastes
+    a little room but says nothing untrue.
+    """
+    stripped = block.strip()
+    lines = stripped.split("\n")
+    marker = lines[0]
+    header_index = next((i for i in range(1, len(lines)) if _row_has_text(lines[i])), None)
+    # A block with no readable row under its marker -- the trailing
+    # `Sheet2`/`Sheet3` of a real workbook, a table that parsed to nothing, or
+    # a formatted-but-empty sheet whose rows are bare commas -- is exactly the
+    # content-free chunk P0-6 stopped indexing: it matches no query and reports
+    # no problem, so it contributes nothing here either.
+    if header_index is None:
+        return []
+
+    # Same 80-character cap as a Markdown heading: a sheet name is a citation
+    # label, and a long one must not reach `_Chunk.heading` unbounded.
+    heading = marker[1:-1][:_MAX_HEADING_CHARS]
+    header_row = lines[header_index]
+    prefix = marker + "\n" + header_row + "\n"
+    body = "\n".join(lines[header_index + 1 :])
+
+    # Repeat only when there is something to repeat over: a block that already
+    # fits is one chunk, and a marker+header that leaves no room for a body
+    # row would make `chunk_size - len(prefix)` zero or negative. Either way
+    # the block goes through the ordinary path -- but still carries `heading`.
+    if len(stripped) <= chunk_size or len(prefix) >= chunk_size:
+        texts = _chunk_text(stripped, chunk_size, chunk_overlap, suffix)
+    else:
+        # `_apply_overlap` clamps the borrowed tail to the room left inside
+        # the reduced size, so a long prefix quietly shrinks overlap towards
+        # zero. Accepted: the repeated header is worth more than the overlap,
+        # and the total still never exceeds `chunk_size`.
+        texts = [
+            prefix + piece
+            for piece in _chunk_text(body, chunk_size - len(prefix), chunk_overlap, suffix)
+        ]
+    return [_Chunk(source=source, text=text, heading=heading) for text in texts]
+
+
+def _chunk_tabular_document(
+    source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str
+) -> List[_Chunk]:
+    """Chunk a spreadsheet or a Word document, table block by table block.
+
+    Packed through the generic path, a long table loses both its sheet/table
+    name and its column header from the second chunk on: the rows survive but
+    nothing says where they came from or what the columns mean, and the chunk
+    cites the filename alone. Splitting on the parser's own marker lines fixes
+    both -- every chunk is readable, searchable and citable on its own.
+    """
+    starts = [match.start() for match in _TABLE_MARKER_RE.finditer(text)]
+    chunks: List[_Chunk] = []
+
+    # Whatever precedes the first marker: a Word document's body paragraphs
+    # (real content, chunked the ordinary way) or a spreadsheet's `[Excel: ...]`
+    # header line alone (nothing worth a chunk).
+    preamble = text[: starts[0]] if starts else text
+    if _has_extractable_text(preamble):
+        chunks.extend(
+            _Chunk(source=source, text=piece)
+            for piece in _chunk_text(preamble, chunk_size, chunk_overlap, suffix)
+        )
+
+    for start, end in zip(starts, starts[1:] + [len(text)]):
+        chunks.extend(
+            _chunk_table_block(source, text[start:end], chunk_size, chunk_overlap, suffix)
+        )
+    return chunks
+
+
 def _chunk_document(
     source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
 ) -> List[_Chunk]:
@@ -436,17 +532,23 @@ def _chunk_document(
     `p.N` is precise. The cost is that a paragraph running across a page
     boundary loses the overlap it would otherwise borrow -- accepted, because
     a citation an operator can check beats an extra hundred characters of
-    context. Every other format is chunked exactly as before; `.md` chunks
+    context. A `.xlsx`/`.xlsm`/`.docx` goes to `_chunk_tabular_document`,
+    which splits on the parser's own `[Sheet: …]`/`[Table N]` markers and
+    repeats the marker and header row in every chunk of an over-long block.
+    Every other format is chunked exactly as before; `.md` chunks
     additionally carry the section heading they open under.
     """
     if suffix == ".pdf":
         chunks: List[_Chunk] = []
-        for page, page_text in enumerate(text.split(_PAGE_BREAK), start=1):
+        for page, page_text in enumerate(text.split(PAGE_BREAK), start=1):
             chunks.extend(
                 _Chunk(source=source, text=piece, page=page)
                 for piece in _chunk_text(page_text, chunk_size, chunk_overlap, suffix=suffix)
             )
         return chunks
+
+    if suffix in _TABULAR_SUFFIXES:
+        return _chunk_tabular_document(source, text, chunk_size, chunk_overlap, suffix)
 
     pieces = _split_pieces(text, chunk_size, suffix)
     headings = _headings_for(pieces) if suffix == ".md" else [None] * len(pieces)

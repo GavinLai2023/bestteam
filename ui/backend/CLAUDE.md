@@ -433,18 +433,23 @@ has no `model_catalog` entry, so a naive `SUM` under-counts and the customer
 believes in a ceiling that does not hold. Three-part answer, chosen over
 "refuse to run" (one missing catalogue row would wedge a customer's automation)
 and over silence: at configuration time `unpriced_models_for_org` resolves the
-org's trigger workflow's agent models -- **and the billable
-`embedding_model`/`query_expansion_model` of the knowledge bases that team
-searches, plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
-the catalogue, and the budget routes return a non-blocking `unpriced_models`
+agent models of **every `status="deployed"` team in the org** -- not only the
+one the trigger points at, since the cap it advises is an org-level `SUM` over
+the whole ledger and a team deployed without a trigger spends into it just the
+same -- **and the billable `embedding_model`/`query_expansion_model` of the
+knowledge bases those teams search, every standalone knowledge base the
+org owns (the "Try a search" panel spends against any of them with no team
+involved), plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** --
+against the catalogue, and the budget routes return a non-blocking `unpriced_models`
 list (**the cap saves either
 way** -- the admin may be about to fix the catalogue); at runtime NULL
 contributes 0, so the cap is a floor on reality rather than a phantom ceiling;
 and the UI reports how many runs this month were unpriced. Knowledge bases are
 in that list because they are the one spender the run-shaped half of this
-answer cannot see at all: an *ingestion* row is written with `run_id = NULL`,
-so `unpriced_run_count`'s `count(distinct run_id)` never counts it, and an
-unpriced embedding model would otherwise be silent in both halves. `fake:`
+answer cannot see at all: an *ingestion* row and a `kb:search` row are both
+written with `run_id = NULL`, so `unpriced_run_count`'s `count(distinct
+run_id)` never counts them, and an unpriced embedding model would otherwise be
+silent in both halves. `fake:`
 specs are excluded there (`core/embeddings.py::billable_spec`, the same
 definition the metering uses) even though an agent's `fake:` model is not --
 an unmetered $0 call is not a blind spot. `rerank_model` is absent for the same
@@ -1231,6 +1236,36 @@ the agent tool's own docstring, `builder._with_knowledge_base_catalog`'s
 listing (`- name (type: X): description`), and `_kb_summary`'s
 customer-facing payload.
 
+**Changing a KB's shape, and reporting the shape that serves** (P1-3).
+`upload_knowledge_base()`'s `kb_type` is `Optional[str] = None`, meaning
+"whatever this collection already is": before the type validation (and
+outside the per-KB lock -- the in-lock re-query still decides what is
+written), it reads the existing `KnowledgeBaseRecord` and inherits the whole
+shape group `type`/`embedding_model`/`rerank_model`/`query_expansion_model`,
+falling back to `local_folder` for a name that doesn't exist yet;
+`description` is inherited independently on `None`. That is what `crud.py`'s
+admin upload route sends -- it has no way to name a shape -- so before this,
+an operator replacing a `hybrid` collection's documents silently rebuilt it
+as `local_folder` and blanked the customer's description with it. A caller
+that passes `kb_type` names the whole group from that call
+(`org_knowledge_bases.py` always does, derived from the wizard's toggle), and
+`chunk_size`/`chunk_overlap`/`top_k` are never inherited -- both routes
+always send them, so there is no `None` to interpret.
+
+The flip side is reporting: `config` is the *next* upload's shape, so
+`org_knowledge_bases.py::_live_kb_type(db, record)` answers "what can be
+searched today" from the latest **completed** job's own `kb_type`, falling
+back to `config` when there is none. `_kb_summary`'s `type` and `servable`
+both derive from that same completed job, and the self-service upload's
+replace `409` names it in words the wizard's audience can act on ("It
+currently uses Enhanced search.", `hybrid` -> Enhanced). The wizard's own
+confirmation adds what the collection would *become*
+(`DocumentsPage.tsx`), so one dialog carries both halves of the change and
+cancelling to flip the toggle is an informed choice -- there is deliberately
+no mount-time probe of the KB's shape, because the wizard has no name to
+probe with until the customer types a label. `job_status_payload`'s `config`
+is unchanged: that one is the configuration intent, by design.
+
 **Per-document partial-failure model.** One bad file (unsupported file type,
 parse error, no extractable text, or zero chunks produced) doesn't fail the
 whole job — it's recorded as a `failed` `KnowledgeDocument` row with a capped
@@ -1249,7 +1284,16 @@ failed (zero chunks total) or, for `vector`/`hybrid`, if the embedding call
 itself raises — in which case the job's already-flushed-but-uncommitted
 document/chunk objects are discarded before anything is written (a
 vector/hybrid KB with no embeddings can't serve queries, so a total
-embedding failure must leave no partial rows behind). A document's error
+embedding failure must leave no partial rows behind). That embedding call is
+`bestteam.core.embeddings.embed_documents_in_batches` (P1-2): 100 chunks per
+provider call, each batch given up to three attempts (two retries, a 1s then
+2s backoff),
+and **only the failing batch is retried** — a provider hiccup partway through a
+large upload now costs one batch rather than every chunk embedded before it.
+Only an exception that survives all three attempts, or a batch that comes back
+with the wrong number of vectors (rejected immediately, no retry), fails the
+job. Metering is unchanged: the `kb:ingest` token estimate is computed once
+from the chunk texts, so a retried batch is never billed twice. A document's error
 text is scrubbed of the server's absolute upload path before it's stored
 (`ingestion._scrubbed`) — third-party parsers embed the path they were
 handed, and `job_status_payload` returns that text verbatim to a
@@ -1284,6 +1328,7 @@ schema.
 
 **An org manages its own knowledge bases** (`org_knowledge_bases.py`:
 `GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
+`POST /api/org/knowledge-bases/{name}/search`,
 all `get_current_org`-scoped). `_kb_summary` reports `used_by`
 (`workflows_referencing`), `servable` and `latest_job` -- the newest attempt of
 *any* status, `config` stripped, since that field carries the server's absolute
@@ -1298,6 +1343,28 @@ warning) with `_with_knowledge_base_catalog(..., names=)` listing only the ones
 that built -- it runs over every KB in the org, so one unparseable upload used
 to 4xx spec generation for everybody. `load_knowledge_base_tools` still fails
 closed, because there the KB is one an agent actually references.
+
+**A customer can try a search against their own collection** (P1-4):
+`POST /api/org/knowledge-bases/{name}/search`, body
+`{"query": <1..500 chars>, "top_k": <1..10>}`, returning
+`{"query", "hit_count", "results": [{"citation", "source", "page", "heading",
+"text"}]}` with each `text` capped at 1,500 characters -- enough to judge the
+retrieval by, not a document reader. It resolves the knowledge base through
+`resolve_knowledge_base(db, record)` with **no `source`**, which is what
+turns the legacy file-based fallback off for this surface: rebuilding a
+disk-backed collection would re-parse every file, and re-embed a `vector` one
+unmetered, on every click. That refusal, "still processing" and "the last
+upload failed" are all `KnowledgeBaseNotReady` (a `ConfigurationError`
+subclass raised at exactly those three sites in `knowledge_bases.py`), and
+the route maps **only** that subclass to `409`. Any other
+`ConfigurationError` out of `_build_knowledge_base_from_job` -- a missing
+`rank-bm25` extra, a bad `rerank_model` -- is an operator's deployment
+problem the customer cannot act on, so it falls through to the app's generic
+logged `500` rather than masquerading as a conflict to wait out. A provider
+failure inside `kb.search` is a `502`; another org's name is the usual `404`.
+The search runs inside `tool_call_context()` and whatever the knowledge base
+reports there is metered (see the usage section below). No cache and no rate
+limit, deliberately -- see `docs/KNOWLEDGE_BASES.md`, "Trying a search".
 
 **Deleting a knowledge base is refused (`409`) while an upload is still
 processing**, and the whole sequence lives in
@@ -1414,8 +1481,8 @@ that KB permanently undeletable.
   usage persistence goes through `_safe_record_usage`, which isolates a
   `usage_records` write failure (logs + rolls back) so metering can never
   flip a successful run to `run_failed`.
-- **Knowledge-base spend** (P0-4) reaches the same ledger by two routes, and
-  `runtime.py` needed no change for either:
+- **Knowledge-base spend** (P0-4, extended by P1-4) reaches the same ledger by
+  three routes, and `runtime.py` needed no change for any of them:
   - *Query time* (the query embedding for `vector`/`hybrid`, and the
     query-expansion LLM call for all three types) rides the **existing**
     `agent_completed.usage` list. A KB tool reports its spend through
@@ -1430,6 +1497,18 @@ that KB permanently undeletable.
     after the job's own commit and is best-effort in its own `try/except`,
     like the cache invalidation and pruning beside it: a metering failure
     must never turn a completed ingestion into a failed one.
+  - *A test search* (`org_knowledge_bases.py::_safe_record_search_usage`)
+    drains the same `tool_call_context()` the run-time path uses, but writes
+    `agent="kb:search"` rows with **both** `run_id` and `ingestion_job_id`
+    NULL: a customer clicking "Try a search" spends against no run and no
+    upload. That makes `usage_records` a three-source ledger (run / ingestion
+    job / ad-hoc `kb:search`), which is the wording to keep consistent in
+    `db/models.py`, `db/usage.py`, `db/CLAUDE.md` and migration
+    `n1o2p3q4r5s6`. The org's monthly `SUM(cost_estimate) WHERE org_id`
+    counts these naturally; every run-keyed consumer drops them the same way
+    it drops ingestion rows. Best-effort in its own `try/except`, and applied
+    on the search's failure path too -- a query expansion is paid for before
+    the embedding call that raised.
 
   Two things to keep in mind. **Embedding token counts are estimated**
   (`core/embeddings.py::estimate_embedding_tokens`, ±30%) because no provider

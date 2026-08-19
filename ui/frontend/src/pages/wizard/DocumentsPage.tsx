@@ -117,7 +117,16 @@ export default function DocumentsPage() {
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
-          if (!window.confirm(`${err.message}\n\nReplace it with these documents?`)) {
+          // The 409 detail says what the existing collection is like today;
+          // this says what it would become, so both halves of the change are
+          // in the one dialog the customer has to answer.
+          if (
+            !window.confirm(
+              `${err.message}\n\nReplace it with these documents? They will be indexed with ${
+                smartSearchEnabled ? 'Enhanced' : 'Standard'
+              } search.`,
+            )
+          ) {
             setBusy(false)
             setStage(null)
             return

@@ -368,4 +368,36 @@ describe('DocumentsPage', () => {
       ),
     )
   })
+
+  it('the replace confirmation names the search quality that will be used', async () => {
+    // The 409 detail says what the existing collection is like today; the
+    // confirmation adds what it would become, so both halves of the change
+    // are in the one dialog the customer has to answer.
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockRejectedValueOnce(
+      Object.assign(new Error("'policies' already exists and may be used by another team. It currently uses Standard search. Choose a different name, or confirm to replace its documents."), { status: 409 }),
+    )
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    renderPage()
+    await screen.findByText('Search quality')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+    const prompt = confirmSpy.mock.calls[0][0] as string
+    expect(prompt).toContain('It currently uses Standard search.')
+    expect(prompt).toContain('They will be indexed with Enhanced search.')
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenLastCalledWith('policies', [file], true, true, undefined),
+    )
+    confirmSpy.mockRestore()
+  })
 })

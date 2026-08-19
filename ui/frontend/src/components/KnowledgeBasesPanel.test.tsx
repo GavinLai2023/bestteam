@@ -4,10 +4,14 @@ import KnowledgeBasesPanel from './KnowledgeBasesPanel'
 import { api } from '../lib/api'
 import type { OrgKnowledgeBase } from '../lib/types'
 
+// `searchOwnKnowledgeBase` belongs here even though no assertion below reads
+// it: the row's "Try a search" toggle renders `KnowledgeBaseSearch`, which
+// calls it -- an omitted key would throw "is not a function" on first render.
 vi.mock('../lib/api', () => ({
   api: {
     listOwnKnowledgeBases: vi.fn(),
     deleteOwnKnowledgeBase: vi.fn(),
+    searchOwnKnowledgeBase: vi.fn(),
   },
 }))
 
@@ -267,6 +271,57 @@ describe('KnowledgeBasesPanel', () => {
       fireEvent.click(refreshButton)
     })
     expect(mockedApi.listOwnKnowledgeBases).toHaveBeenCalledTimes(2)
+  })
+
+  it('offers Try a search only for ready collections, and explains why not', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({ name: 'ready' }),
+      kb({
+        name: 'processing',
+        latest_job: {
+          job_id: 3, status: 'running', file_count: 1, documents_succeeded: 0,
+          documents_failed: 0, chunk_count: 0, errors: [],
+        },
+      }),
+      kb({
+        name: 'never-worked',
+        servable: false,
+        latest_job: {
+          job_id: 4, status: 'failed', file_count: 1, documents_succeeded: 0,
+          documents_failed: 1, chunk_count: 0,
+          errors: [{ filename: null, error: 'Knowledge base has no readable documents' }],
+        },
+      }),
+    ])
+    vi.useFakeTimers()
+    render(<KnowledgeBasesPanel />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    const [ready, processing, neverWorked] = screen.getAllByRole('button', { name: /try a search/i })
+    expect(ready).toBeEnabled()
+    expect(processing).toBeDisabled()
+    expect(processing).toHaveAttribute('title', expect.stringMatching(/still processing/i))
+    expect(neverWorked).toBeDisabled()
+    expect(neverWorked).toHaveAttribute('title', expect.stringMatching(/nothing to search/i))
+  })
+
+  it('toggles the search box for a row', async () => {
+    render(<KnowledgeBasesPanel />)
+
+    const toggle = await screen.findByRole('button', { name: /try a search/i })
+    expect(screen.queryByLabelText(/search/i)).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+    expect(screen.getByLabelText(/search/i)).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+    expect(screen.queryByLabelText(/search/i)).not.toBeInTheDocument()
   })
 
   it('shows a banner when the list itself cannot be loaded', async () => {

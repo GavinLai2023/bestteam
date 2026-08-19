@@ -664,11 +664,14 @@ class UsageRecord(Base):
 
     One ledger for every kind of spend an org can incur, which is what lets
     `db/email_budget_settings.py`'s monthly cap be a single `SUM` over
-    `org_id`. Most rows belong to a `Run`, but a knowledge base's *ingestion*
-    embedding spend belongs to an upload rather than a run, so exactly one of
-    `run_id`/`ingestion_job_id` is set (`agent="kb:ingest"` for the latter).
-    A KB's *query-time* spend is a normal run row -- it rides the calling
-    agent's `agent_completed.usage` (see `core/tool_context.py`).
+    `org_id`. A row names one of three sources: a `Run` (`run_id` set, almost
+    every row); an upload, for a knowledge base's *ingestion* embedding spend
+    (`ingestion_job_id` set, `agent="kb:ingest"`); or neither, for an ad-hoc
+    `agent="kb:search"` row -- one test search from the "Try a search" panel
+    (`org_knowledge_bases.py`), which belongs to no run and no upload, so
+    both FKs are NULL. A KB's query-time spend *inside a run* is a normal run
+    row -- it rides the calling agent's `agent_completed.usage` (see
+    `core/tool_context.py`).
     """
 
     __tablename__ = "usage_records"

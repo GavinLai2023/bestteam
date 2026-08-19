@@ -87,6 +87,33 @@ from (see "Citations", below):
   parses Markdown, so a `#` line inside a fenced code block reads as a
   heading, and a chunk spanning two sections is labelled with the one it
   starts in.
+- **Table `heading`, plus a repeated header row.** `.xlsx`/`.xlsm`/`.docx`
+  are chunked table block by table block, splitting on the marker lines the
+  parser itself writes (`[Sheet: Q1]`, `[Table 2]`). A block that fits inside
+  `chunk_size` stays one chunk; a longer one has its marker line **and its
+  first body row repeated at the top of every chunk**, so a row in the tenth
+  chunk still says which sheet it came from and what its columns mean. The
+  marker also becomes the chunk's `heading` (`Sheet: Q1`, `Table 2`), capped
+  at the same 80 characters, so the chunk cites `sales.xlsx § Sheet: Q1`
+  rather than the filename alone. Two caveats: the first body row *with
+  anything in it* is *assumed* to be the column header — leading rows that
+  are empty once commas and whitespace are removed are skipped, because a
+  spacer row above the headers parses to `,,` and repeating that would say
+  nothing, but a **non-empty title row** above the headers can't be told from
+  a header row and does get repeated, as does a table whose first row is
+  already data — and the repeated prefix comes out of the
+  chunk's budget, so the body of each chunk is smaller and the overlap
+  borrowed from the previous chunk shrinks (to zero if the prefix is long).
+  A `.docx`'s body paragraphs, before its first table, chunk the ordinary way
+  and carry no heading. A block with no readable row under its marker — an
+  empty sheet, such as a workbook's untouched trailing `Sheet2`, or a
+  formatted-but-empty one whose rows are bare commas — yields no chunk
+  at all, so it can't become the content-free chunk described above. Two
+  knock-on effects: a workbook of many small sheets now yields at least one
+  chunk per sheet where the sheets used to be packed together, so a
+  `vector`/`hybrid` collection embeds (and pays for) more chunks than before,
+  and repeating the header row in every chunk of a long sheet makes the column
+  names common across the corpus, slightly diluting their BM25 IDF.
 
 Every other format supplies neither, and such a chunk cites its filename
 alone.
@@ -106,8 +133,9 @@ Refunds are issued within 30 days of purchase…
 ```
 
 The tag is `[source: <filename>]`, plus `, p.<N>` when the chunk carries a
-page and ` § <heading>` when it carries a section — so a chunk with neither
-renders exactly as it always did. The tool's own description tells the model
+page and ` § <heading>` when it carries a section — a Markdown heading, or a
+spreadsheet sheet / Word table (`[source: sales.xlsx § Sheet: Q1]`). A chunk
+with neither renders exactly as it always did. The tool's own description tells the model
 to quote that same tag back when it uses an excerpt, which is what makes a
 model's answer checkable against the document.
 
@@ -129,7 +157,11 @@ embeddings or external services involved.
 
 Querying:
 1. Tokenize the query into lowercase alphanumeric words, dropping common
-   English stopwords ("the", "and", "is", …).
+   English stopwords ("the", "and", "is", …). Latin/digit words are **stemmed**
+   ("refunds" → "refund"), and each run of Han, kana or Hangul characters is
+   split into overlapping bigrams — the same `core/text_tokenize.py` that
+   indexed the chunks, so the index and the query always agree (see
+   "Evaluating retrieval" below for what that does and doesn't conflate).
 2. Score every chunk with BM25.
 3. Rank candidates by *(number of shared significant terms, BM25 score)* —
    chunks that share zero significant terms with the query are excluded
@@ -252,6 +284,17 @@ about **±30%** of the provider's own count: enough to keep a spend cap
 honest, not enough to reconcile against a bill. Query-expansion tokens are
 *not* estimated — that is a chat model, and its reported `usage_metadata` is
 used directly.
+
+**A retried batch is not billed twice.** Document embedding goes out 100
+chunks at a time, and a batch that fails gets up to three attempts — two
+retries, 1s then 2s apart — with only the failing batch retried, so a
+provider hiccup partway through a large upload no longer throws away the
+chunks already embedded and paid for. The ingestion row's token estimate is computed once from the chunk
+texts (in `ui/backend/ingestion.py`, after the embedding call returns), so a
+retry adds nothing to it. That cuts the
+other way too: the estimate counts each chunk once even though a retried batch
+was genuinely charged more than once by the provider — one more reason it is an
+estimate, not a bill.
 
 **Nothing billable, nothing recorded.** A `"fake:"` spec is $0 by
 construction and an `Embeddings`/`BaseChatModel` instance passed in from code
@@ -474,6 +517,77 @@ builds the standalone knowledge bases its agents actually reference by name
 knowledge base in the database — since building one means re-reading and
 re-chunking files (and, for `vector`, calling an embedding model).
 
+### Trying a search
+
+`POST /api/org/knowledge-bases/{name}/search`
+(`ui/backend/org_knowledge_bases.py`) runs one query against the org's own
+collection and returns up to `top_k` of the passages an agent would rank
+first — the "Try a search" panel behind each row of the "My documents" list.
+Not quite the agent's own result set — the panel always sends `top_k=5`,
+whatever the collection's configured `top_k` is — but that is the only
+divergence: this is the same `search()` an agent's tool calls, so the
+collection's own query expansion and reranking run here too. Body:
+`{"query": "...", "top_k": 5}`, with `query` between 1 and 500 characters and
+`top_k` between 1 and 10; anything else is a `422`. Response:
+
+```json
+{
+  "query": "refund policy",
+  "hit_count": 2,
+  "results": [
+    {
+      "citation": "handbook.pdf, p.3 § Refunds",
+      "source": "handbook.pdf",
+      "page": 3,
+      "heading": "Refunds",
+      "text": "…at most 1500 characters of the passage…"
+    }
+  ]
+}
+```
+
+`citation` is exactly what an agent's own tool output cites (see "Citations"
+above), so the panel and the model name the same passage. `text` is capped at
+1,500 characters: enough to judge the retrieval by, and not a way to page a
+whole collection out through a search box.
+
+The other status codes: a name belonging to another org is a `404` (never a
+`403` — existence is never revealed); a collection that cannot answer yet is
+a `409` whose message says which case it is (still processing, the last
+upload failed, or — for a legacy knowledge base never uploaded through the
+app — it cannot be searched here at all, since rebuilding it would re-parse
+every file from disk, and re-embed a `vector` one unmetered, on every click);
+and a provider failure during the search itself is a `502`. A
+`ConfigurationError` that is *not* one of those readiness cases (a missing
+optional extra, a bad `rerank_model`) stays a logged `500` — it is an
+operator's deployment problem, and answering it with "wait and try again"
+would be wrong.
+
+**A test search is metered like any other spend.** A `vector`/`hybrid`
+collection embeds the query, and any of the three types may make a
+query-expansion call, so whatever the knowledge base reports through
+`core/tool_context.py` is written to `usage_records` with `agent="kb:search"`
+and **both** `run_id` and `ingestion_job_id` NULL — the row belongs to no run
+and to no upload, and the org's monthly spend cap
+(`SUM(cost_estimate) WHERE org_id`) counts it without a second query. The
+spend is recorded on the failure path too, because a query expansion is paid
+for before the embedding call that raised. Recording is best-effort: a
+metering failure is logged and never turns a successful search into an error.
+
+There is deliberately **no cache and no rate limit**. The money at stake is
+negligible — one short query embedding — and the metering above *records*
+that spend, it does not bound it. The real cost is CPU: every call rebuilds
+the knowledge base from its `KnowledgeChunk` rows (a `hybrid` one also
+`json.loads`es every stored vector) on the backend's sync threadpool, which
+is sub-second to a few seconds at the tens-to-hundreds-of-documents scale
+this beta is sized for, with a person clicking a button rather than an agent
+loop on the other end. A cache would have to be invalidated by every
+re-upload to buy correctness this does not need. Both are worth revisiting if
+the button is ever abused.
+
+This answers one query at a time. For judging a collection as a whole — and
+for telling whether a change to it helped — see "Evaluating retrieval" below.
+
 ### Uploads are asynchronous (ingestion jobs)
 
 Both upload endpoints (admin `/api/config/knowledge_bases/{name}/upload` and
@@ -558,6 +672,35 @@ job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
 `query_expansion_count`) still come from `config` — they apply uniformly
 whichever generation is live.
 
+**Changing the search quality re-indexes; a re-upload that names no shape
+keeps the existing one.** `upload_knowledge_base()`'s `kb_type` is optional.
+A caller that doesn't send one — the admin route can't — inherits the whole
+shape group (`type`, `embedding_model`, `rerank_model`,
+`query_expansion_model`) from the existing record's `config`, plus its
+`description` if this upload didn't give one, so replacing an Enhanced
+collection's documents never silently rebuilds it as a Standard one. A name
+that doesn't exist yet has nothing to inherit and gets `local_folder`, the
+historical default. Only the shape group and the description are inherited:
+`chunk_size`/`chunk_overlap`/`top_k` come from the caller's own arguments on
+every upload, and `candidate_k`/`query_expansion_count`/`score_threshold`
+aren't upload parameters at all — so **every upload resets all six to their
+defaults**, discarding whatever a YAML or admin-API config had set for them.
+The description inherits in one direction only: an empty one is read as
+"didn't say", so an upload can replace a description but cannot clear it (do
+that through the config path). A caller that *does* send `kb_type` (the
+org self-service route always does, from the wizard's Standard/Enhanced
+toggle) names the whole group itself, and switching it re-embeds every
+document from scratch: the new generation is a full re-index, and the
+previous one keeps serving until it completes.
+
+Because of that, the customer-facing surfaces report the shape that is
+*serving*, not the one `config` holds: `_kb_summary`'s `type` and the
+self-service upload's replace `409` ("It currently uses Enhanced search.")
+both come from `org_knowledge_bases.py::_live_kb_type()` — the latest
+completed job's own `kb_type`, falling back to `config` for a knowledge base
+that has never completed one. `job_status_payload`'s `config` is unchanged;
+that one is the configuration *intent*, i.e. what the next upload builds.
+
 Deleting a knowledge base cascades to delete its `IngestionJob`/
 `KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`),
 and is **refused with `409` while that knowledge base has a `queued` or
@@ -579,11 +722,13 @@ for the full design.
 
 ## Evaluating retrieval
 
-Retrieval quality is otherwise judged by whoever last tried a query and
-thought the answer looked reasonable. `scripts/kb_eval.py` turns that into a
-number: it runs a fixed set of queries whose right answer is known against a
-knowledge base, and reports how often the expected document came back and how
-highly it ranked.
+The "Try a search" panel (above) answers one query at a time: did *this*
+question return the right passage? Judging a whole collection by clicking
+through queries until the answers look reasonable does not scale, and it
+cannot tell you whether a change helped. `scripts/kb_eval.py` turns the
+question into a number: it runs a fixed set of queries whose right answer is
+known against a knowledge base, and reports how often the expected document
+came back and how highly it ranked.
 
 ```powershell
 # The bundled golden set through the default BM25 knowledge base
@@ -671,9 +816,10 @@ the same commit. For a *client's* corpus, leave the fixture alone and pass
 `--docs`/`--queries`; nothing in the harness is specific to the bundled set.
 
 Keep new lexical queries honest against the tokeniser (`core/text_tokenize.py`):
-it lowercases English into alphanumeric tokens with no stemming, so "cost"
-does not match "costs", and it has no Chinese word segmenter, so Chinese
-matches on character bigrams.
+it lowercases English into alphanumeric tokens and stems them, so "cost" does
+match "costs" but only inflections of one word conflate (never synonyms), and
+it has no word segmenter for Chinese, Japanese or Korean, so those match on
+character bigrams.
 
 ### What it does not measure
 
@@ -715,9 +861,9 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   enough for a person to find the passage — but there is no chunk id in the
   tag, no click-through to the document, and no "which version of which page"
   audit trail: a re-upload replaces a collection's chunks wholesale, so a
-  citation names a location in *today's* documents. Every other format
-  (`.docx`, `.xlsx`, `.xml`, plain text) still cites its filename alone, and
-  the Markdown heading is an approximation — see "Chunk location metadata"
+  citation names a location in *today's* documents. `.xml` and plain text
+  still cite their filename alone, and both the Markdown heading and the
+  spreadsheet/table one are approximations — see "Chunk location metadata"
   above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose

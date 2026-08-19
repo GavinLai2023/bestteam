@@ -200,6 +200,50 @@ def test_a_knowledge_bases_unpriced_embedding_model_is_named_too(client, automat
         assert "acme:embed-1" not in unpriced_models_for_org(db, org_id)
 
 
+def test_unpriced_models_cover_every_deployed_team_not_only_the_trigger(client, automated_team):
+    # The monthly cap is an org-level `SUM` over the whole ledger, so every
+    # deployed team's spend lands in it -- not just the one an email trigger
+    # happens to point at. A second deployed team on an unpriced model is the
+    # same blind spot as the first.
+    org_id = automated_team
+    with open_test_db() as db:
+        db.add(WorkflowRecord(name="reports", org_id=org_id, status="deployed", config={
+            "name": "reports",
+            "agents": [{"name": "r", "role": "Reporter", "goal": "report",
+                        "model": "acme:llm-9"}],
+            "teams": [{"name": "rt", "agents": ["r"], "mode": "sequential"}],
+            "workflow": {"steps": ["rt"]},
+        }))
+        # A draft is still excluded: it cannot run, so it cannot spend.
+        db.add(WorkflowRecord(name="sketch", org_id=org_id, status="draft", config={
+            "name": "sketch",
+            "agents": [{"name": "s", "role": "Sketcher", "goal": "sketch",
+                        "model": "acme:draft-only"}],
+            "teams": [{"name": "st", "agents": ["s"], "mode": "sequential"}],
+            "workflow": {"steps": ["st"]},
+        }))
+        db.commit()
+        models = unpriced_models_for_org(db, org_id)
+
+    assert "acme:llm-9" in models
+    # ...and the trigger team's own unpriced model is still named.
+    assert "fake:demo" in models
+    assert "acme:draft-only" not in models
+
+
+def test_unpriced_models_are_named_even_without_an_email_trigger(client):
+    # An org with no trigger configured still runs its deployed teams -- from
+    # the wizard, the API or a share link -- and every one of those runs is in
+    # the ledger the cap sums. The advisory has to see them too.
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        db.add(WorkflowRecord(name="triage", org_id=org_id, config=_TEAM_CONFIG,
+                              status="deployed"))
+        db.commit()
+        assert get_email_trigger(db, org_id) is None
+        assert "fake:demo" in unpriced_models_for_org(db, org_id)
+
+
 def test_an_org_with_no_automation_names_no_models(client):
     assert client.get("/api/org/email-budget").json()["unpriced_models"] == []
 
@@ -330,3 +374,19 @@ def test_an_org_sees_only_its_own_budget(client, automated_team):
     assert body["spent_this_month"] is None
     assert body["unpriced_runs_this_month"] == 0
     assert body["unpriced_models"] == []
+
+
+def test_unpriced_models_include_the_orgs_standalone_knowledge_bases(client):
+    # "Try a search" spends against any of the org's own knowledge bases with
+    # no deployed team involved, and its `kb:search` row has no run_id -- so
+    # neither `unpriced_run_count` nor a deployed-team walk would ever name
+    # the collection's unpriced embedding model. The org's own records are
+    # part of the advisory too.
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        assert db.query(WorkflowRecord).filter_by(org_id=org_id, status="deployed").count() == 0
+        db.add(KnowledgeBaseRecord(name="lonely", org_id=org_id, config={
+            "type": "hybrid", "path": "x", "embedding_model": "acme:embed-2",
+        }))
+        db.commit()
+        assert "acme:embed-2" in unpriced_models_for_org(db, org_id)

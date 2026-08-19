@@ -110,6 +110,14 @@ def _decode_text(data: bytes, *, lenient: bool = False) -> str:
     decoded = data.decode("utf-8", errors=errors)
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
+
+# The delimiter `_parse_pdf_bytes` joins a PDF's pages with, so a page boundary
+# survives into the extracted text. Public and owned by the producer, because
+# the consumer (`core/knowledge_base.py`, which chunks a PDF per page) has to
+# split on exactly what was written here.
+PAGE_BREAK = "\f"
+
+
 def _parse_pdf_bytes(data: bytes, name: str) -> str:
     try:
         import pypdf
@@ -131,9 +139,9 @@ def _parse_pdf_bytes(data: bytes, name: str) -> str:
     # The email attachment path reads the same string; a form feed is
     # whitespace, so nothing there changes but the separator a model sees
     # between two pages.
-    pages = [(page.extract_text() or "").replace("\f", " ") for page in reader.pages]
+    pages = [(page.extract_text() or "").replace(PAGE_BREAK, " ") for page in reader.pages]
     header = f"[PDF: {name} — {len(pages)} page(s)]\n"
-    return header + "\f".join(pages)
+    return header + PAGE_BREAK.join(pages)
 
 
 def _parse_docx_bytes(data: bytes, name: str) -> str:

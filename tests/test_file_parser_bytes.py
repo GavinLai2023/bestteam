@@ -212,3 +212,22 @@ def test_a_form_feed_inside_a_page_does_not_shift_page_numbers():
     assert [chunk.page for chunk in chunks] == [1, 2]
     warranty = next(chunk for chunk in chunks if "Warranty" in chunk.text)
     assert _citation(warranty) == "doc.pdf, p.2"
+
+
+def test_pdf_pages_are_joined_by_the_page_break_constant():
+    """The delimiter is one named constant owned by the producer, so the
+    knowledge base's per-page chunking cannot drift from what the parser
+    actually writes."""
+    import types
+    from unittest.mock import patch
+
+    from bestteam.tools.file_parser import PAGE_BREAK
+
+    pages = [types.SimpleNamespace(extract_text=lambda text=text: text) for text in ("one", "two")]
+    fake_pypdf = types.SimpleNamespace(PdfReader=lambda _stream: types.SimpleNamespace(pages=pages))
+
+    with patch.dict("sys.modules", {"pypdf": fake_pypdf}):
+        result = parse_bytes(b"%PDF-1.4", "doc.pdf")
+
+    assert PAGE_BREAK == "\f"
+    assert result == f"[PDF: doc.pdf — 2 page(s)]\none{PAGE_BREAK}two"

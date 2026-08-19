@@ -89,13 +89,17 @@ implemented** — don't assume they exist:
   `agent_completed.usage` into `usage_records`, and a `vector`/`hybrid`
   ingestion job with a billable embedding spec (a non-`fake:` string) and a
   non-zero token estimate writes one `agent="kb:ingest"` row with a NULL
-  `run_id` — a path-constructed KB embeds at load time and is not metered. Embedding token counts are
+  `run_id` — a path-constructed KB embeds at load time and is not metered.
+  An ad-hoc "Try a search" from the "My documents" panel is the third source:
+  one `agent="kb:search"` row with **both** foreign keys NULL, written on the
+  failure path too. Embedding token counts are
   *estimated* (±30%) — no provider reports them — and a local reranker is $0,
   so it is not recorded.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
-  `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — still no query rewriting/expansion or
-  reranking either way. Semantic records get exact-dedup on write plus
+  `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — query expansion and reranking are
+  opt-in too, via `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` /
+  `BESTTEAM_MEMORY_RERANK_MODEL`. Semantic records get exact-dedup on write plus
   LLM-mediated near-duplicate/update resolution; procedural records still
   have no dedup/consolidation.
   Admins can view/search/delete a user's memory via the admin-only Memory page

@@ -4,9 +4,13 @@
 usage entry on an `agent_completed` `TraceEvent` (see
 `adapters/langgraph_adapter.py::_record_usage`), converting token counts into
 a `cost_estimate` via the `model_catalog` (when a matching `spec` is found).
-It is also called from `ui/backend/ingestion.py` for a knowledge base's
-document-embedding spend, which belongs to an upload rather than a run and so
-carries a NULL `run_id` and an `ingestion_job_id` instead.
+A row names one of three sources. It is also called from
+`ui/backend/ingestion.py` for a knowledge base's document-embedding spend,
+which belongs to an upload rather than a run and so carries a NULL `run_id`
+and an `ingestion_job_id` instead; and from
+`ui/backend/org_knowledge_bases.py` for one ad-hoc test search from the "Try
+a search" panel (`agent="kb:search"`), which belongs to neither and so
+carries both FKs NULL.
 """
 
 from __future__ import annotations
@@ -30,9 +34,11 @@ def record_usage(
     org_id: Optional[int] = None,
     ingestion_job_id: Optional[int] = None,
 ) -> UsageRecord:
-    """Persist one metered call. `run_id` is None only for spend that belongs
-    to no run -- today, a knowledge base's ingestion embeddings, which pass
-    `ingestion_job_id` instead (see `ui/backend/ingestion.py`)."""
+    """Persist one metered call. `run_id` is None for spend that belongs to no
+    run: a knowledge base's ingestion embeddings, which pass
+    `ingestion_job_id` instead (see `ui/backend/ingestion.py`), and one
+    `agent="kb:search"` test search, which passes neither and so writes both
+    FKs NULL (see `ui/backend/org_knowledge_bases.py`)."""
     cost_estimate = None
     if model:
         entry = get_entry(db, model)

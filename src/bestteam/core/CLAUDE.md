@@ -123,8 +123,8 @@ it onto the calling agent's `agent_completed.usage` so a KB's query embedding
 and query-expansion calls are metered -- see "Metering a knowledge base's
 spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
-`heading` (Markdown, the section a chunk opens under, an 80-char
-approximation) — which `_citation()` renders as
+`heading` (a Markdown section, or a spreadsheet sheet / Word table, that a
+chunk opens under — an 80-char approximation) — which `_citation()` renders as
 `[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
 two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
 and render byte-for-byte as before. All three types also take an
@@ -247,6 +247,24 @@ owns:
   variants are billed as the extra calls they are. `self._embedding_spec` is
   the `billable_spec()` result stashed at construction (both the folder
   constructor and `from_chunks`).
+- `core/embeddings.py::embed_documents_in_batches(embeddings, texts)` -- the
+  one way this codebase embeds a *list* of documents (both `_embed_chunks`
+  copies and `ui/backend/ingestion.py`; `memory.py`'s single-record write and
+  every `embed_query` are untouched). It sends `_EMBED_BATCH_SIZE` = 100 texts
+  per provider call and gives a failed batch up to `_EMBED_ATTEMPTS` = 3
+  attempts -- i.e. two retries -- backing off 1s then 2s, re-raising the
+  original exception if the third attempt still fails. **Only the failing batch is retried**, so a hiccup
+  partway through a large corpus no longer discards the chunks already embedded
+  and paid for. Any exception retries -- classifying provider exceptions would
+  mean tracking every provider's taxonomy, so an auth failure waits 3s before
+  surfacing. A batch returning the wrong number of vectors raises immediately,
+  without retrying (a deterministic answer won't change on a second ask) --
+  as `ConfigurationError`, the same type `resolve_embedding_model` raises for
+  every other provider-shape problem, and the type both KB constructors have
+  always raised for a mis-sized response. Neither the batch
+  size nor the attempt count is a parameter -- no caller has a reason to differ.
+  Metering is unaffected: ingestion estimates its `kb:ingest` tokens once from
+  the chunk texts, so a retried batch is never billed twice.
 - Reranking is **not** metered: a cross-encoder runs locally, in-process,
   with no provider call to bill.
 - **Document embeddings are metered only on the upload/ingestion path**
@@ -296,9 +314,33 @@ cannot disagree about why a file was rejected.
 
 **Chunking is format-aware, not hierarchical.** `_chunk_document` (shared by
 all three KB types, and by `ui/backend/ingestion.py`) is the per-document
-entry point. A `.pdf` is split on `_PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
-now joins pages with) and each page chunked through `_chunk_text` on its own,
-so a chunk never straddles a page. Every other format goes through
+entry point. A `.pdf` is split on `PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
+now joins pages with -- the constant lives in `tools/file_parser.py`, with the
+producer that writes it, and is imported here) and each page chunked through
+`_chunk_text` on its own, so a chunk never straddles a page. An
+`.xlsx`/`.xlsm`/`.docx` goes through `_chunk_tabular_document`, which splits on
+the parser's own `[Sheet: ...]`/`[Table N]` marker lines and, for a block too
+long to fit one chunk, repeats the marker and the first body row with anything
+in it (**assumed** to be the column header) at the top of every chunk of that
+block -- otherwise the second chunk on has neither the sheet name nor the
+columns, and cites the filename alone. Leading rows that are empty once commas
+and whitespace are removed (`_row_has_text`) are skipped when choosing that
+header: `read_only` openpyxl renders the spacer row above a sheet's headers as
+`,,`, and repeating *that* would make the feature silently do nothing for a
+very common workbook layout. The residual limit is a **non-empty title row**
+above the headers, which nothing here can tell apart from a header row. The marker also becomes the chunk's `heading`, under the same
+`_MAX_HEADING_CHARS` cap, so a long sheet name can't bypass it into a citation.
+The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
+for the body), so overlap shrinks and can reach zero; a prefix that would leave
+no room at all falls back to the ordinary path, still tagged with the heading.
+A `.docx`'s body paragraphs (before its first table) chunk normally, and a block
+with no readable row under its marker -- a workbook's untouched trailing
+`Sheet2`, or a formatted-but-empty sheet whose rows are bare commas -- yields no
+chunk at all, so table awareness can't reintroduce the content-free chunk P0-6
+removed. That emptiness test is `_row_has_text` per row rather than P0-6's own
+`_has_extractable_text`, which counts a `,,` row as content and is left alone
+because every other format goes through it. Every
+other format goes through
 `_split_pieces` then `_apply_overlap` directly — the two halves `_chunk_text`
 is composed of — so a `.md` chunk's section heading (`_headings_for`) can be
 read off the pieces *before* overlap prefixes each one with the previous
@@ -362,6 +404,31 @@ callers use. See
 an end-user across sessions. It shares the CJK-aware tokenizer with the
 knowledge base — both now import `tokenize`/`significant_terms` from
 `core/text_tokenize.py` (extracted so the BM25 logic lives in one place).
+
+**What the tokenizer does** (P1-1): it lowercases text, stems each Latin/digit
+token with `snowballstemmer`'s English stemmer, and splits each maximal run of
+Han, kana or Hangul characters into overlapping bigrams (a lone character
+becomes its own token). Stemming means only inflections of one word conflate
+("refund"/"refunds"/"refunded"), never synonyms — that headroom is still the
+`vector`/`hybrid` types' job. `_STOPWORDS` is stemmed with the same stemmer so
+a stemmed query token still matches its stopword entry -- which also means a
+word that stems *into* a stopword ("willing" -> "will", "doing" -> "do") is
+dropped from `significant_terms`, and so stops counting towards the overlap
+gate. That is standard IR behaviour rather than a defect, and BM25 scoring is
+unaffected either way. Kana and Hangul sit in
+the *same* character class as Han, so a kanji+kana Japanese word is one run
+rather than two fragments cut at the script boundary. `snowballstemmer` is a
+**soft import** (in the `tools-rag` and `tools` extras): without it `_stem` is
+the identity, which keeps `core/embeddings.py` — which imports this module only
+for `_CJK_RUN_RE` — working in an install with no RAG extra, and keeps one
+process symmetric on both the index and the query side either way. The stemmer
+object is per-thread (`threading.local`), because Snowball's `stemWord` mutates
+instance state and the backend queries from a worker pool, and `_stem` is
+memoized (a bounded `lru_cache`) because stemming a token costs ~150x
+tokenizing it and a corpus reuses one small vocabulary — without the cache,
+indexing a chunk went from 0.10 ms to 16 ms, paid on every workflow load.
+Tokens are never persisted, so changing any of this needs no migration or
+backfill.
 
 - **`Memory` ABC** — `add`/`search`/`all`/`delete` over `MemoryRecord`
   (`id, user_id, type, content, metadata, created_at`). The old
