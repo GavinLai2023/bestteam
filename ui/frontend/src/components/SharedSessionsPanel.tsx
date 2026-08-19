@@ -4,13 +4,13 @@ import { formatDateTime } from '../lib/dateFormat'
 import type { ShareLink, ShareMessage, ShareSessionSummary } from '../lib/types'
 
 interface SharedSessionsPanelProps {
-  workflowId: number
+  pipelineId: number
 }
 
 // Read-only audit view: every anonymous visitor session against every share
 // link for one team, with a drill-in transcript. See docs/superpowers/specs/
 // 2026-08-14-team-sharing-continuous-chat-design.md ("Frontend").
-export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelProps) {
+export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelProps) {
   const [links, setLinks] = useState<ShareLink[]>([])
   const [sessionsByLink, setSessionsByLink] = useState<Record<number, ShareSessionSummary[]>>({})
   const [transcript, setTranscript] = useState<{ linkId: number; sessionId: number; messages: ShareMessage[] } | null>(
@@ -19,13 +19,13 @@ export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelP
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    // Reset stale state left over from the previous `workflowId` -- this
+    // Reset stale state left over from the previous `pipelineId` -- this
     // component isn't remounted on a team-switch (no `key` from
     // ActivityPage.tsx), so without this the old team's links/sessions (not
     // just an open transcript or error banner) would otherwise keep showing
     // while the new team's request is still in flight, silently mislabeled
     // as if they belonged to the newly-selected team (Codex review finding).
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset all panel state on workflow change
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset all panel state on pipeline change
     setTranscript(null)
     setError(null)
     setLinks([])
@@ -35,7 +35,7 @@ export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelP
     // TracePage.tsx's own `ignore` flag for its fetch-on-selection effect).
     let ignore = false
     api
-      .listShareLinks(workflowId)
+      .listShareLinks(pipelineId)
       .then(async (fetchedLinks) => {
         const entries = await Promise.all(
           fetchedLinks.map(async (link) => [link.id, await api.listShareSessions(link.id)] as const),
@@ -50,7 +50,7 @@ export default function SharedSessionsPanel({ workflowId }: SharedSessionsPanelP
     return () => {
       ignore = true
     }
-  }, [workflowId])
+  }, [pipelineId])
 
   const openTranscript = async (linkId: number, sessionId: number) => {
     try {

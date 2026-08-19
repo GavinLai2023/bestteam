@@ -6,7 +6,7 @@ import type {
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
   Requirements, ShareLink, ShareMessage, ShareSessionSummary,
-  UsageRecord, WorkflowAnalyticsDetail, WorkflowAnalyticsSummary,
+  UsageRecord, PipelineAnalyticsDetail, PipelineAnalyticsSummary,
 } from './types'
 
 // `localhost`, NOT `127.0.0.1` -- do not "simplify" this back. The anonymous
@@ -228,10 +228,10 @@ export const api = {
     request<void>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
 
   // Monitoring
-  listWorkflows: () => request<{ workflows: string[]; workflow_ids?: Record<string, number> }>('/api/workflows'),
-  workflowGraph: (name: string) => request<{ mermaid: string }>(`/api/workflows/${encodeURIComponent(name)}/graph`),
-  createRun: (workflow: string, input: string) =>
-    request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ workflow, input }) }),
+  listPipelines: () => request<{ pipelines: string[]; pipeline_ids?: Record<string, number> }>('/api/pipelines'),
+  pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
+  createRun: (pipeline: string, input: string) =>
+    request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ pipeline, input }) }),
   getRun: (id: string) => request<RunListItem>(`/api/runs/${id}`),
   // Short-lived, single-use ticket for authenticating the stream WebSocket
   // (CR-013) -- only the ticket goes in the ws URL, never the bearer token.
@@ -268,8 +268,8 @@ export const api = {
       content_purged_at?: string | null
     }>(`/api/runs/${id}/trace`),
 
-  // Admin: cross-org workflow-run analytics (Trace page).
-  listWorkflowAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
+  // Admin: cross-org pipeline-run analytics (Trace page).
+  listPipelineAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
     const params = new URLSearchParams(
       Object.fromEntries(
         Object.entries(filters)
@@ -278,7 +278,7 @@ export const api = {
       ),
     )
     const qs = params.toString()
-    return request<{ workflows: WorkflowAnalyticsSummary[] }>(`/api/admin/analytics/workflows${qs ? `?${qs}` : ''}`)
+    return request<{ pipelines: PipelineAnalyticsSummary[] }>(`/api/admin/analytics/pipelines${qs ? `?${qs}` : ''}`)
   },
   listModelAnalytics: (filters: Record<string, string | number | undefined | null> = {}) => {
     const params = new URLSearchParams(
@@ -291,7 +291,7 @@ export const api = {
     const qs = params.toString()
     return request<{ models: ModelAnalyticsSummary[] }>(`/api/admin/analytics/models${qs ? `?${qs}` : ''}`)
   },
-  getWorkflowAnalytics: (name: string, filters: Record<string, string | number | undefined | null> = {}) => {
+  getPipelineAnalytics: (name: string, filters: Record<string, string | number | undefined | null> = {}) => {
     const params = new URLSearchParams(
       Object.fromEntries(
         Object.entries(filters)
@@ -300,7 +300,7 @@ export const api = {
       ),
     )
     const qs = params.toString()
-    return request<WorkflowAnalyticsDetail>(`/api/admin/analytics/workflows/${encodeURIComponent(name)}${qs ? `?${qs}` : ''}`)
+    return request<PipelineAnalyticsDetail>(`/api/admin/analytics/pipelines/${encodeURIComponent(name)}${qs ? `?${qs}` : ''}`)
   },
 
   // Property Maintenance Inbox: structured, org-scoped automation results.
@@ -473,13 +473,13 @@ export const api = {
   // Org self-service: share a deployed team with colleagues via a
   // revocable, anonymous link (see docs/superpowers/specs/
   // 2026-08-14-team-sharing-continuous-chat-design.md).
-  createShareLink: (workflowId: number, payload: { daily_cap?: number; expires_at?: string | null }) =>
-    request<ShareLink>(`/api/workflows/${workflowId}/share-links`, {
+  createShareLink: (pipelineId: number, payload: { daily_cap?: number; expires_at?: string | null }) =>
+    request<ShareLink>(`/api/pipelines/${pipelineId}/share-links`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  listShareLinks: (workflowId: number) =>
-    request<ShareLink[]>(`/api/workflows/${workflowId}/share-links`),
+  listShareLinks: (pipelineId: number) =>
+    request<ShareLink[]>(`/api/pipelines/${pipelineId}/share-links`),
   patchShareLink: (
     linkId: number,
     payload: { active?: boolean; daily_cap?: number; expires_at?: string | null; clear_expiry?: boolean },
@@ -492,7 +492,7 @@ export const api = {
 
   // Autonomous email trigger: org-level "run on new mail" opt-in + activity.
   getEmailTrigger: () => request<EmailTrigger>('/api/org/email-trigger'),
-  setEmailTrigger: (payload: { workflow_name: string; enabled: boolean }) =>
+  setEmailTrigger: (payload: { pipeline_name: string; enabled: boolean }) =>
     request<EmailTrigger>('/api/org/email-trigger', { method: 'PUT', body: JSON.stringify(payload) }),
   emailTriggerActivity: () => request<unknown>('/api/org/email-trigger/activity'),
 

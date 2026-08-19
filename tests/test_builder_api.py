@@ -12,7 +12,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec
+from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec
 from helpers import create_user_and_login, get_user_principal_id, make_concurrent_safe_engine
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
@@ -74,8 +74,8 @@ def test_with_knowledge_base_catalog_appends_kb_list(db_session):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     # Two tests in here drive real concurrency on purpose -- the deploy/
     # skill-edit lock snapshot and the delete-during-sandbox-run test -- and
@@ -115,7 +115,7 @@ def _admin_headers(client):
 
 
 _VALID_SPEC = {
-    "name": "support_workflow",
+    "name": "support_pipeline",
     "knowledge_bases": [],
     "agents": [
         {
@@ -139,13 +139,13 @@ _VALID_SPEC = {
             "friendly_description": "The support specialist handles every request.",
         }
     ],
-    "workflow": {"steps": ["support_team"]},
+    "pipeline": {"steps": ["support_team"]},
 }
 
 _INVALID_SPEC = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "tools": ["does_not_exist"]}]}
 
 
-def _make_deployable_session(client, *, name="support_workflow", marker=None):
+def _make_deployable_session(client, *, name="support_pipeline", marker=None):
     """Create a session and store a deployable spec named `name`; `marker`
     (embedded in the agent's backstory) lets two sessions with the same name
     be told apart."""
@@ -197,16 +197,16 @@ def test_specification_generation_with_fake_model_returns_clear_error(client):
     assert "real AI model" in resp.json()["detail"]
 
 
-def test_deploy_stamps_workflow_with_session_org(client):
+def test_deploy_stamps_pipeline_with_session_org(client):
     from helpers import get_org_id, open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     session_id = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
     assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
 
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="support_workflow").one()
+        record = db.query(PipelineRecord).filter_by(name="support_pipeline").one()
         assert record.org_id == get_org_id()
 
 
@@ -248,11 +248,11 @@ def test_list_sessions_returns_most_recently_updated_first(client):
     assert ids.index(second["id"]) < ids.index(first["id"])
 
 
-def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client):
+def test_combined_session_and_advanced_pipeline_list_is_most_recent_first(client):
     from datetime import datetime
 
     from helpers import open_test_db
-    from ui.backend.db.models import BuilderSession, WorkflowRecord
+    from ui.backend.db.models import BuilderSession, PipelineRecord
 
     session_id = client.post(
         "/api/builder/sessions", json={"intent_text": "Older wizard team"}
@@ -263,10 +263,10 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
             "model": "fake:hello",
         }],
         "teams": [{"name": "team", "agents": ["agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
     assert client.put(
-        "/api/config/workflows/newer_advanced_team?org=default",
+        "/api/config/pipelines/newer_advanced_team?org=default",
         json=advanced_config,
         headers=_admin_headers(client),
     ).status_code == 200
@@ -274,9 +274,9 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
     principal_id = get_user_principal_id()
     with open_test_db() as db:
         db.get(BuilderSession, session_id).updated_at = datetime(2020, 1, 1)
-        advanced = db.query(WorkflowRecord).filter_by(name="newer_advanced_team").one()
+        advanced = db.query(PipelineRecord).filter_by(name="newer_advanced_team").one()
         advanced.updated_at = datetime(2030, 1, 1)
-        # An orphan (no-session) workflow only shows on My Teams for the user
+        # An orphan (no-session) pipeline only shows on My Teams for the user
         # who owns it -- simulate an admin deploying this one on behalf of the
         # test client's own user, so this test can focus on ordering.
         advanced.created_by = principal_id
@@ -287,18 +287,18 @@ def test_combined_session_and_advanced_workflow_list_is_most_recent_first(client
     assert sessions[0]["specification_json"]["name"] == "newer_advanced_team"
 
 
-def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
-    # A workflow with no recorded creator (a legacy pre-migration row, or one
+def test_list_sessions_excludes_admin_deployed_pipeline_with_no_owner(client):
+    # A pipeline with no recorded creator (a legacy pre-migration row, or one
     # deployed to an org before it had a member) must NOT clutter an org
     # member's My Teams list -- that list should only ever show teams the
     # member personally built. It remains runnable from Run a Team (see
-    # /api/workflows' own creator filter, which treats an unowned workflow as
+    # /api/pipelines' own creator filter, which treats an unowned pipeline as
     # an admin-shared template). A normal CRUD deploy to an org that already
     # has its one member auto-attributes to them (see
-    # test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member
+    # test_admin_deployed_pipeline_auto_attributes_to_the_orgs_sole_member
     # below), so the no-owner state is simulated directly here rather than
     # via that path.
-    raw_workflow_config = {
+    raw_pipeline_config = {
         "knowledge_bases": [],
         "agents": [
             {
@@ -309,20 +309,20 @@ def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
             }
         ],
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["support_team"]},
+        "pipeline": {"steps": ["support_team"]},
     }
     resp = client.put(
-        "/api/config/workflows/orphan_team?org=default",
-        json=raw_workflow_config,
+        "/api/config/pipelines/orphan_team?org=default",
+        json=raw_pipeline_config,
         headers=_admin_headers(client),
     )
     assert resp.status_code == 200
 
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="orphan_team").one()
+        record = db.query(PipelineRecord).filter_by(name="orphan_team").one()
         record.created_by = None
         db.commit()
 
@@ -333,13 +333,13 @@ def test_list_sessions_excludes_admin_deployed_workflow_with_no_owner(client):
     assert "orphan_team" not in names
 
 
-def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client):
+def test_admin_deployed_pipeline_auto_attributes_to_the_orgs_sole_member(client):
     # A CRUD-page deploy to an org that already has its one member (the
     # "one member per org" invariant, ui/backend/db/CLAUDE.md) auto-stamps
-    # created_by to that member (crud.py::upsert_workflow_config) -- so it
+    # created_by to that member (crud.py::upsert_pipeline_config) -- so it
     # shows up on their My Teams instead of being permanently invisible
     # there, without needing any manual attribution step.
-    raw_workflow_config = {
+    raw_pipeline_config = {
         "knowledge_bases": [],
         "agents": [
             {
@@ -350,11 +350,11 @@ def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client)
             }
         ],
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["support_team"]},
+        "pipeline": {"steps": ["support_team"]},
     }
     resp = client.put(
-        "/api/config/workflows/auto_owned_team?org=default",
-        json=raw_workflow_config,
+        "/api/config/pipelines/auto_owned_team?org=default",
+        json=raw_pipeline_config,
         headers=_admin_headers(client),
     )
     assert resp.status_code == 200
@@ -366,16 +366,16 @@ def test_admin_deployed_workflow_auto_attributes_to_the_orgs_sole_member(client)
     assert "auto_owned_team" in names
 
 
-def test_workflow_owned_by_a_stale_username_string_is_not_visible_to_the_current_principal(client):
-    # Regression test (Codex review finding): WorkflowRecord.created_by must
+def test_pipeline_owned_by_a_stale_username_string_is_not_visible_to_the_current_principal(client):
+    # Regression test (Codex review finding): PipelineRecord.created_by must
     # bind to the immutable User.principal_id, not the reusable username --
     # otherwise deleting an account and creating a new one with the same
     # username would let the new account see/run the old account's personal
-    # workflows. A row whose created_by is literally the plain username
+    # pipelines. A row whose created_by is literally the plain username
     # string "test" (as it would be under the old, vulnerable comparison, or
     # if left over from before this fix) must NOT match the current "test"
     # user's own principal_id (a random, unrelated string).
-    raw_workflow_config = {
+    raw_pipeline_config = {
         "knowledge_bases": [],
         "agents": [
             {
@@ -386,20 +386,20 @@ def test_workflow_owned_by_a_stale_username_string_is_not_visible_to_the_current
             }
         ],
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["support_team"]},
+        "pipeline": {"steps": ["support_team"]},
     }
     resp = client.put(
-        "/api/config/workflows/legacy_owned_team?org=default",
-        json=raw_workflow_config,
+        "/api/config/pipelines/legacy_owned_team?org=default",
+        json=raw_pipeline_config,
         headers=_admin_headers(client),
     )
     assert resp.status_code == 200
 
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="legacy_owned_team").one()
+        record = db.query(PipelineRecord).filter_by(name="legacy_owned_team").one()
         record.created_by = "test"  # a plain username string, not a principal_id
         db.commit()
 
@@ -409,11 +409,11 @@ def test_workflow_owned_by_a_stale_username_string_is_not_visible_to_the_current
     assert "legacy_owned_team" not in names
 
 
-def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
-    # An orphan workflow (no matching BuilderSession) that DOES carry this
+def test_list_sessions_includes_orphan_pipeline_owned_by_this_user(client):
+    # An orphan pipeline (no matching BuilderSession) that DOES carry this
     # user's own username as its creator -- e.g. its session was removed out
     # of band -- should still show up, unlike the no-owner case above.
-    raw_workflow_config = {
+    raw_pipeline_config = {
         "knowledge_bases": [],
         "agents": [
             {
@@ -424,20 +424,20 @@ def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
             }
         ],
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["support_team"]},
+        "pipeline": {"steps": ["support_team"]},
     }
     assert client.put(
-        "/api/config/workflows/owned_orphan_team?org=default",
-        json=raw_workflow_config,
+        "/api/config/pipelines/owned_orphan_team?org=default",
+        json=raw_pipeline_config,
         headers=_admin_headers(client),
     ).status_code == 200
 
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     principal_id = get_user_principal_id()
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="owned_orphan_team").one()
+        record = db.query(PipelineRecord).filter_by(name="owned_orphan_team").one()
         record.created_by = principal_id
         db.commit()
 
@@ -448,15 +448,15 @@ def test_list_sessions_includes_orphan_workflow_owned_by_this_user(client):
     orphan = next(s for s in sessions if s["specification_json"]["name"] == "owned_orphan_team")
     assert orphan["id"] is None
     assert orphan["status"] == "deployed"
-    assert orphan["workflow_id"] is not None
+    assert orphan["pipeline_id"] is not None
 
 
-def test_list_sessions_does_not_duplicate_a_deployed_workflow_that_has_a_session(client):
+def test_list_sessions_does_not_duplicate_a_deployed_pipeline_that_has_a_session(client):
     session_id = _make_deployable_session(client)
     assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
 
     sessions = client.get("/api/builder/sessions").json()["sessions"]
-    matches = [s for s in sessions if s.get("specification_json", {}).get("name") == "support_workflow"]
+    matches = [s for s in sessions if s.get("specification_json", {}).get("name") == "support_pipeline"]
     assert len(matches) == 1
     assert matches[0]["id"] == session_id
 
@@ -506,10 +506,10 @@ def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
             "model": "fake:hello", "skills": ["email_capability"],
         }],
         "teams": [{"name": "team", "agents": ["agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
     assert client.put(
-        "/api/config/workflows/advanced_email_team?org=default",
+        "/api/config/pipelines/advanced_email_team?org=default",
         json=spec,
         headers=admin,
     ).status_code == 200
@@ -520,11 +520,11 @@ def test_advanced_deployed_team_uses_email_comes_from_pinned_skill(client):
     ).status_code == 200
 
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     principal_id = get_user_principal_id()
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="advanced_email_team").one()
+        record = db.query(PipelineRecord).filter_by(name="advanced_email_team").one()
         record.created_by = principal_id
         db.commit()
 
@@ -566,7 +566,7 @@ def test_submit_specification_with_valid_payload(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "spec"
-    assert body["specification_json"]["name"] == "support_workflow"
+    assert body["specification_json"]["name"] == "support_pipeline"
 
 
 def test_submit_specification_rejects_invalid_payload(client):
@@ -738,7 +738,7 @@ def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client
     any model internally; every agent in the *resulting* spec must end up on
     the model the customer picked."""
     architect_drafted_spec = Specification(
-        name="support_workflow",
+        name="support_pipeline",
         agents=[
             AgentSpec(
                 name="support_agent",
@@ -754,7 +754,7 @@ def test_solution_feedback_pins_every_agent_to_the_customers_chosen_model(client
             ),
         ],
         teams=[TeamSpec(name="support_team", agents=["support_agent", "drafting_agent"])],
-        workflow=WorkflowSpec(steps=["support_team"]),
+        pipeline=PipelineSpec(steps=["support_team"]),
     )
 
     class _FakeArchitectChatModel:
@@ -821,7 +821,7 @@ def test_test_run_executes_validated_specification(client):
     assert session["status"] == "testing"
 
     run = client.get(f"/api/runs/{run_id}").json()
-    assert run["workflow"] == "support_workflow"
+    assert run["pipeline"] == "support_pipeline"
     # Sandbox runs record who started them (CR-032) -- user_id stays None
     # (test runs never touch per-user memory), but the initiator is kept.
     assert run["username"] == "test"
@@ -854,10 +854,10 @@ def test_deploy_requires_specification(client):
     assert resp.status_code == 400
 
 
-def test_deploy_is_atomic_across_workflow_and_session_updates(client, monkeypatch):
-    # deploy_session persists a WorkflowRecord and then marks the
+def test_deploy_is_atomic_across_pipeline_and_session_updates(client, monkeypatch):
+    # deploy_session persists a PipelineRecord and then marks the
     # BuilderSession deployed as two separate writes. A failure completing
-    # the second must not leave a durably-committed "deployed" WorkflowRecord
+    # the second must not leave a durably-committed "deployed" PipelineRecord
     # behind -- both belong to one transaction (P1-14).
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
@@ -871,7 +871,7 @@ def test_deploy_is_atomic_across_workflow_and_session_updates(client, monkeypatc
         client.post(f"/api/builder/sessions/{session_id}/deploy")
 
     resp = client.get(
-        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+        "/api/config/pipelines/support_pipeline?org=default", headers=_admin_headers(client)
     )
     assert resp.status_code == 404
 
@@ -883,7 +883,7 @@ def test_deploy_mailbox_gate_and_skill_pin_share_one_lock_snapshot(client, monke
 
     from helpers import open_test_db
     from ui.backend import builder
-    from ui.backend.db.models import SkillRecord, SkillVersion, WorkflowDependency, WorkflowRecord
+    from ui.backend.db.models import SkillRecord, SkillVersion, PipelineDependency, PipelineRecord
 
     admin = _admin_headers(client)
     assert client.put(
@@ -943,9 +943,9 @@ def test_deploy_mailbox_gate_and_skill_pin_share_one_lock_snapshot(client, monke
     assert results == {"deploy": 200, "edit": 200}
 
     with open_test_db() as db:
-        workflow = db.query(WorkflowRecord).filter_by(name="race_team").one()
-        dependency = db.query(WorkflowDependency).filter_by(
-            workflow_version_id=workflow.current_version_id,
+        pipeline = db.query(PipelineRecord).filter_by(name="race_team").one()
+        dependency = db.query(PipelineDependency).filter_by(
+            pipeline_version_id=pipeline.current_version_id,
             resource_kind="skill",
             resource_name="race_capability",
         ).one()
@@ -956,31 +956,31 @@ def test_deploy_mailbox_gate_and_skill_pin_share_one_lock_snapshot(client, monke
 
 
 def test_redeploy_same_session_keeps_head_and_bumps_version(client):
-    """One session deployed twice -> same workflow_id, versions 1 then 2."""
+    """One session deployed twice -> same pipeline_id, versions 1 then 2."""
     from helpers import open_test_db
-    from ui.backend.db.models import BuilderSession, WorkflowVersion
+    from ui.backend.db.models import BuilderSession, PipelineVersion
 
     session_id = _make_deployable_session(client, name="Acme")
 
     client.post(f"/api/builder/sessions/{session_id}/deploy").raise_for_status()
     with open_test_db() as db:
         sess = db.get(BuilderSession, session_id)
-        head_id = sess.workflow_id
+        head_id = sess.pipeline_id
         assert head_id is not None
-        assert db.query(WorkflowVersion).filter_by(workflow_id=head_id).count() == 1
+        assert db.query(PipelineVersion).filter_by(pipeline_id=head_id).count() == 1
 
     client.post(f"/api/builder/sessions/{session_id}/deploy").raise_for_status()
     with open_test_db() as db:
         sess2 = db.get(BuilderSession, session_id)
-        assert sess2.workflow_id == head_id  # same head
-        assert db.query(WorkflowVersion).filter_by(workflow_id=head_id).count() == 2
+        assert sess2.pipeline_id == head_id  # same head
+        assert db.query(PipelineVersion).filter_by(pipeline_id=head_id).count() == 2
 
 
 def test_two_sessions_same_name_converge_on_one_head_v1_preserved(client):
     """P1-02: two sessions with the same team name deploy to the SAME head;
     the first config survives as v1 (no silent clobber)."""
     from helpers import open_test_db
-    from ui.backend.db.models import BuilderSession, WorkflowVersion
+    from ui.backend.db.models import BuilderSession, PipelineVersion
 
     s_a = _make_deployable_session(client, name="Dup", marker="A")
     s_b = _make_deployable_session(client, name="Dup", marker="B")
@@ -989,13 +989,13 @@ def test_two_sessions_same_name_converge_on_one_head_v1_preserved(client):
     client.post(f"/api/builder/sessions/{s_b}/deploy").raise_for_status()
 
     with open_test_db() as db:
-        head_a = db.get(BuilderSession, s_a).workflow_id
-        head_b = db.get(BuilderSession, s_b).workflow_id
+        head_a = db.get(BuilderSession, s_a).pipeline_id
+        head_b = db.get(BuilderSession, s_b).pipeline_id
         assert head_a == head_b and head_a is not None  # one shared head
         versions = (
-            db.query(WorkflowVersion)
-            .filter_by(workflow_id=head_a)
-            .order_by(WorkflowVersion.version_number)
+            db.query(PipelineVersion)
+            .filter_by(pipeline_id=head_a)
+            .order_by(PipelineVersion.version_number)
             .all()
         )
         assert [v.version_number for v in versions] == [1, 2]  # both preserved
@@ -1003,7 +1003,7 @@ def test_two_sessions_same_name_converge_on_one_head_v1_preserved(client):
         assert versions[1].config["agents"][0]["backstory"] == "B"
 
 
-def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
+def test_deploy_persists_pipeline_record_and_marks_session_deployed(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
 
@@ -1013,14 +1013,14 @@ def test_deploy_persists_workflow_record_and_marks_session_deployed(client):
     body = resp.json()
     assert body["status"] == "deployed"
 
-    workflows = client.get("/api/workflows").json()["workflows"]
-    assert "support_workflow" in workflows
+    pipelines = client.get("/api/pipelines").json()["pipelines"]
+    assert "support_pipeline" in pipelines
 
     config = client.get(
-        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+        "/api/config/pipelines/support_pipeline?org=default", headers=_admin_headers(client)
     ).json()
     assert config["status"] == "deployed"
-    assert config["config"]["name"] == "support_workflow"
+    assert config["config"]["name"] == "support_pipeline"
 
 
 def test_deployed_config_preserves_team_display_name(client):
@@ -1038,18 +1038,18 @@ def test_deployed_config_preserves_team_display_name(client):
     assert resp.status_code == 200
 
     config = client.get(
-        "/api/config/workflows/support_workflow?org=default", headers=_admin_headers(client)
+        "/api/config/pipelines/support_pipeline?org=default", headers=_admin_headers(client)
     ).json()["config"]
     assert config["teams"][0]["display_name"] == "Support Team"
     assert config["teams"][0]["friendly_description"] == "The support specialist handles every request."
 
 
-def test_deployed_workflow_can_be_run_via_get_workflow(client):
+def test_deployed_pipeline_can_be_run_via_get_pipeline(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
     client.post(f"/api/builder/sessions/{session_id}/deploy")
 
-    resp = client.post("/api/runs", json={"workflow": "support_workflow", "input": "hi"})
+    resp = client.post("/api/runs", json={"pipeline": "support_pipeline", "input": "hi"})
 
     assert resp.status_code == 200
 
@@ -1120,7 +1120,7 @@ def test_delete_session_with_in_flight_sandbox_run_does_not_disrupt_the_run(clie
     # run may still be executing when the request completes); the customer
     # can delete the never-deployed draft the instant that response lands.
     # Deletion must succeed regardless, and the already-dispatched run --
-    # its `Workflow` was fully built and handed to the executor before the
+    # its `Pipeline` was fully built and handed to the executor before the
     # delete request even arrived, and a `Run` row carries no session_id --
     # must still reach a normal terminal state rather than erroring out from
     # under the just-removed session row/workspace directory.
@@ -1175,12 +1175,12 @@ def test_delete_another_orgs_session_is_404(client):
     assert client.get(f"/api/builder/sessions/{session_id}").status_code == 200
 
 
-def test_session_dict_exposes_workflow_id(client):
+def test_session_dict_exposes_pipeline_id(client):
     session_id = _make_deployable_session(client)
-    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is None
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["pipeline_id"] is None
 
     client.post(f"/api/builder/sessions/{session_id}/deploy")
-    assert client.get(f"/api/builder/sessions/{session_id}").json()["workflow_id"] is not None
+    assert client.get(f"/api/builder/sessions/{session_id}").json()["pipeline_id"] is not None
 
 
 def test_with_knowledge_base_catalog_includes_description(db_session):

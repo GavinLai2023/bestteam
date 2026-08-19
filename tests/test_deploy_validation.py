@@ -42,7 +42,7 @@ def test_missing_none_empty_and_nonstring_models_are_flagged():
 
 
 def test_non_dict_agents_left_to_structural_validation():
-    # Structural validation (_build_workflow) owns non-dict agents; not our job.
+    # Structural validation (_build_pipeline) owns non-dict agents; not our job.
     assert validate_agent_models({"agents": [42]}, set()) == []
     assert validate_agent_models({}, set()) == []
 
@@ -146,8 +146,8 @@ def test_every_tool_the_email_toolkit_returns_is_treated_as_an_email_tool():
     assert set(make_email_tools(_Backend())) <= EMAIL_TOOL_NAMES
 
 
-def test_the_conflict_is_reported_once_for_the_whole_workflow():
-    # One problem, not one per agent: the fault is the workflow holding both
+def test_the_conflict_is_reported_once_for_the_whole_pipeline():
+    # One problem, not one per agent: the fault is the pipeline holding both
     # capabilities, and naming every pairing would just be noise.
     problems = find_email_egress_conflicts([
         ("a", {"email_read", "http_get"}),

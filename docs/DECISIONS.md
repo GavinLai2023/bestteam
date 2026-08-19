@@ -21,7 +21,7 @@ Append new entries at the bottom using this template:
 ## Engine: LangGraph (not CrewAI) as the orchestration engine
 
 - **Status**: Accepted
-- **Context**: bestteam needs an engine to execute `Agent`/`Team`/`Workflow`
+- **Context**: bestteam needs an engine to execute `Agent`/`Team`/`Pipeline`
   under the SEQUENTIAL/PARALLEL/HIERARCHICAL collaboration modes, with
   tool-calling, structured outputs, and streaming trace events for the
   monitoring dashboard. LangGraph and CrewAI were both viable candidates.
@@ -29,7 +29,7 @@ Append new entries at the bottom using this template:
   commit.
 - **Reasons**:
   - LangGraph's graph/state-machine model maps directly onto the
-    `Agent`/`Team`/`Workflow` design and its collaboration modes — a team's
+    `Agent`/`Team`/`Pipeline` design and its collaboration modes — a team's
     "who talks to whom, in what order" is naturally a graph, which fits
     SEQUENTIAL/PARALLEL/HIERARCHICAL better than CrewAI's crew/task
     abstraction.
@@ -63,7 +63,7 @@ Append new entries at the bottom using this template:
   giving up the existing per-customer-instance option.
 - **Decision**: row-level multi-tenancy via an `organizations` table and
   `org_id` columns on every org-owned resource (users, agents, teams,
-  knowledge bases, skills, workflows, builder sessions, runs, usage), with
+  knowledge bases, skills, pipelines, builder sessions, runs, usage), with
   API-layer scoping through a `get_current_org` dependency. **The same code
   serves both deployment models** — a per-customer instance is simply a
   deployment with one org (the migration backfills `default`), a shared
@@ -263,26 +263,26 @@ Append new entries at the bottom using this template:
   so a webhook cannot become an email-content exfiltration path. There are no
   per-user preferences, digests or quiet hours until a customer asks.
 
-## Email and egress tools are refused per WORKFLOW, not per agent (email Phase 3a)
+## Email and egress tools are refused per PIPELINE, not per agent (email Phase 3a)
 
 - **Date**: 17 Aug 2026
 - **Status**: accepted, supersedes the per-agent rule shipped in Phase 0 (0.6)
 - **Context**: Phase 0 refused an agent holding both an email tool and
   `http_get`/`web_search`, and documented "split them across two agents" as the
   remedy. A review pointed out that the split contains nothing.
-- **Decision**: Refuse the combination anywhere in a workflow, regardless of
+- **Decision**: Refuse the combination anywhere in a pipeline, regardless of
   which agent holds what, and drop the splitting advice.
 - **Why**:
   - `_agent_node` (`adapters/langgraph_adapter.py`) feeds each agent's output
-    into the next agent's context, and a workflow's steps share state. An
+    into the next agent's context, and a pipeline's steps share state. An
     injected instruction the mail agent reads therefore arrives in the egress
     agent's prompt as ordinary text.
   - The check is deliberately blunt — it does not reason about ordering or
     collaboration mode. That reasoning would have to be redone, correctly,
     every time routing changes, and a wrong answer is an exfiltration path.
-  - Nothing legitimate is refused: no shipped workflow combines the two.
+  - Nothing legitimate is refused: no shipped pipeline combines the two.
 - **Consequences**: A customer who genuinely needs both must run them as
-  separate workflows against separate deployments. The old advice is gone from
+  separate pipelines against separate deployments. The old advice is gone from
   the rejection message and from `tests/test_deploy_validation.py`, whose
   `..._is_fine` test now asserts the opposite.
 
@@ -292,7 +292,7 @@ Append new entries at the bottom using this template:
 - **Status**: accepted
 - **Context**: Phase 0's watchdog marks a run that outlived the run timeout as
   failed so the trigger stops being blocked, but it cannot stop the worker — a
-  node inside `workflow.stream()` is not interruptible. A review found that the
+  node inside `pipeline.stream()` is not interruptible. A review found that the
   released run is therefore retriable while its worker may still draft, and
   proposed keeping it non-retriable until the worker acknowledges cancellation.
 - **Decision**: Rejected that proposal. Instead, `email_draft_reply` checks the

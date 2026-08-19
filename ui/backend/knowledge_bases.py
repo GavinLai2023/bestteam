@@ -1,4 +1,4 @@
-"""Build extra_tools for workflow loading from standalone KnowledgeBaseRecords
+"""Build extra_tools for pipeline loading from standalone KnowledgeBaseRecords
 (created via /api/config/knowledge_bases, manually or via file upload)."""
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from bestteam.tools import REGISTRY
 
 from . import ingestion
 from .component_lock import component_mutation_lock
-from .db.dependencies import workflows_referencing
+from .db.dependencies import pipelines_referencing
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 from .deploy_validation import find_kb_tool_collisions
 
@@ -59,7 +59,7 @@ class KnowledgeBaseNotReady(ConfigurationError):
 # they manage), and instead constrain every *backend* boundary + load path so a
 # caller can never influence the write location beyond a filename: the cache is
 # forced into an application-owned `_kb_cache/` subdirectory that holds no source
-# files, so it can't clobber a workflow YAML or escape the app roots.
+# files, so it can't clobber a pipeline YAML or escape the app roots.
 
 _KB_CACHE_DIRNAME = "_kb_cache"
 
@@ -125,24 +125,24 @@ def _reject_builtin_kb_name(name: str) -> None:
         )
 
 
-def _invalidate_workflow_cache() -> None:
-    """Drop every cached Workflow after a KB/skill mutation.
+def _invalidate_pipeline_cache() -> None:
+    """Drop every cached Pipeline after a KB/skill mutation.
 
-    A cached Workflow may embed a knowledge-base tool or skill by value. The
-    global `max(updated_at)` freshness key in `main._get_workflow` misses a
+    A cached Pipeline may embed a knowledge-base tool or skill by value. The
+    global `max(updated_at)` freshness key in `main._get_pipeline` misses a
     *delete* (removing a non-latest record leaves the maximum unchanged), so a
-    cached workflow could keep serving a deleted KB's documents (CR-005).
+    cached pipeline could keep serving a deleted KB's documents (CR-005).
     Clearing the cache on every KB/skill create/update/delete is the simple,
     correct invalidation. Bumping the generation under the cache lock makes a
-    concurrent `_get_workflow` that started before this call skip caching its
+    concurrent `_get_pipeline` that started before this call skip caching its
     now-stale result instead of repopulating the cache (CR-005). Imported
     lazily to avoid a knowledge_bases<->main import cycle.
     """
     from . import main
 
-    with main._workflow_cache_lock:
-        main._workflow_cache.clear()
-        main._workflow_cache_generation += 1
+    with main._pipeline_cache_lock:
+        main._pipeline_cache.clear()
+        main._pipeline_cache_generation += 1
 
 
 def upload_knowledge_base(
@@ -402,7 +402,7 @@ def delete_knowledge_base(db: Session, org_id: Optional[int], item_name: str) ->
         item = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail=f"Unknown knowledge_base '{item_name}'")
-        used_by = workflows_referencing(db, kind="knowledge_base", resource_id=item.id)
+        used_by = pipelines_referencing(db, kind="knowledge_base", resource_id=item.id)
         if used_by:
             raise HTTPException(
                 status_code=409,
@@ -445,7 +445,7 @@ def delete_knowledge_base(db: Session, org_id: Optional[int], item_name: str) ->
                         "directory couldn't be removed: %s",
                         item_name, org_id, exc,
                     )
-    _invalidate_workflow_cache()
+    _invalidate_pipeline_cache()
 
 
 def resolve_kb_upload_path(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -522,8 +522,8 @@ def contain_kb_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
-def contain_workflow_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
-    """As above, for a workflow config's inline `knowledge_bases` list."""
+def contain_pipeline_config_for_load(config: Dict[str, Any]) -> Dict[str, Any]:
+    """As above, for a pipeline config's inline `knowledge_bases` list."""
     kbs = config.get("knowledge_bases")
     if not isinstance(kbs, list):
         return config
@@ -540,7 +540,7 @@ def ensure_contained_cache_path_for_source(config: Dict[str, Any], source: Path)
 
     ``contained_cache_path`` removes lexical traversal, but an existing
     ``_kb_cache`` directory could itself be a symlink/junction. Resolve both
-    sides before the vector KB creates its cache so backend-managed workflows
+    sides before the vector KB creates its cache so backend-managed pipelines
     never turn that into an arbitrary server-file write (CR-001).
     """
     cache_path = config.get("cache_path")
@@ -559,7 +559,7 @@ def ensure_contained_cache_path_for_source(config: Dict[str, Any], source: Path)
         ) from exc
 
 
-def ensure_workflow_cache_paths_for_source(config: Dict[str, Any], source: Path) -> None:
+def ensure_pipeline_cache_paths_for_source(config: Dict[str, Any], source: Path) -> None:
     """Apply resolved-target containment to every inline knowledge base."""
     knowledge_bases = config.get("knowledge_bases")
     if not isinstance(knowledge_bases, list):
@@ -581,7 +581,7 @@ def load_knowledge_base_tools(
     a manual-path KB, or an upload predating this feature -- falls back to
     re-reading and re-chunking every file from disk (and, for type: vector,
     calling an embedding model). This only pays either cost for knowledge
-    bases the workflow being loaded actually uses, not every standalone
+    bases the pipeline being loaded actually uses, not every standalone
     knowledge base in the database.
 
     Name resolution is org-scoped: only `org_id`'s knowledge bases resolve
@@ -609,7 +609,7 @@ def load_knowledge_base_tools(
         # Fail closed on a legacy KB whose name shadows a built-in tool (F4).
         # New collisions are blocked at KB PUT/upload, but a record predating
         # that guard would silently replace the built-in at load; refuse instead
-        # (covers both `_get_workflow` and the autonomous trigger, which share
+        # (covers both `_get_pipeline` and the autonomous trigger, which share
         # this loader).
         if record.name in REGISTRY:
             raise ConfigurationError(
@@ -632,9 +632,9 @@ def resolve_knowledge_base(
     (the pre-Specification "every standalone KB" catalog builder), so both
     resolve a KB's live content the same way.
 
-    `source` is the workflow file the file-based fallback resolves relative
+    `source` is the pipeline file the file-based fallback resolves relative
     paths against, so omitting it turns that fallback **off**: a caller with
-    no workflow in hand (the "Try a search" endpoint, which resolves a
+    no pipeline in hand (the "Try a search" endpoint, which resolves a
     collection on its own) gets `KnowledgeBaseNotReady` for a legacy
     file-backed KB rather than a rebuild that re-parses every file -- and, for
     a `vector` one, re-embeds all of them unmetered -- on every click."""

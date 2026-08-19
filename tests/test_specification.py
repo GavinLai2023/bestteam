@@ -8,10 +8,10 @@ from pydantic import Field, ValidationError
 from bestteam import (
     AgentSpec,
     KnowledgeBaseSpec,
+    PipelineSpec,
     Specification,
     SkillSpec,
     TeamSpec,
-    WorkflowSpec,
     calculator,
     generate_specification,
     validate_specification,
@@ -80,7 +80,7 @@ def _basic_spec(
                 friendly_description="The support specialist handles every request.",
             )
         ],
-        workflow=WorkflowSpec(steps=["support_team"]),
+        pipeline=PipelineSpec(steps=["support_team"]),
     )
 
 
@@ -100,7 +100,7 @@ def test_to_raw_strips_friendly_fields_and_matches_loader_shape():
             }
         ],
         "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["support_team"]},
+        "pipeline": {"steps": ["support_team"]},
     }
 
 
@@ -143,9 +143,9 @@ def test_agent_spec_to_raw_includes_skills_when_set():
 
 def test_validate_specification_accepts_a_valid_spec_and_runs(tmp_path):
     spec = _basic_spec()
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml")
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml")
 
-    result = workflow.run("hi")
+    result = pipeline.run("hi")
     assert result.output == "hello"
 
 
@@ -153,7 +153,7 @@ def test_validate_specification_rejects_unknown_tool(tmp_path):
     spec = _basic_spec(agent_tools=["does_not_exist"])
 
     with pytest.raises(ConfigurationError, match="Unknown tool"):
-        validate_specification(spec, source=tmp_path / "workflow.yaml")
+        validate_specification(spec, source=tmp_path / "pipeline.yaml")
 
 
 def test_validate_specification_resolves_skill_into_tools_and_backstory(tmp_path):
@@ -166,8 +166,8 @@ def test_validate_specification_resolves_skill_into_tools_and_backstory(tmp_path
         )
     }
 
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
-    agent = workflow.steps[0].agents[0]
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=extra_skills)
+    agent = pipeline.steps[0].agents[0]
 
     assert calculator in agent.tools
     assert "Use the calculator for any math in the customer's question." in agent.backstory
@@ -183,8 +183,8 @@ def test_validate_specification_dedupes_skill_tools_with_agent_tools(tmp_path):
         )
     }
 
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
-    agent = workflow.steps[0].agents[0]
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=extra_skills)
+    agent = pipeline.steps[0].agents[0]
 
     assert agent.tools.count(calculator) == 1
 
@@ -196,8 +196,8 @@ def test_validate_specification_concatenates_multiple_skill_instructions_in_orde
         "skill_b": SkillSpec(name="skill_b", instructions="Then follow step B."),
     }
 
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
-    agent = workflow.steps[0].agents[0]
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=extra_skills)
+    agent = pipeline.steps[0].agents[0]
 
     assert agent.backstory.index("Follow step A first.") < agent.backstory.index("Then follow step B.")
 
@@ -206,7 +206,7 @@ def test_validate_specification_rejects_unknown_skill(tmp_path):
     spec = _basic_spec(agent_skills=["does_not_exist"])
 
     with pytest.raises(ConfigurationError, match="Unknown skill"):
-        validate_specification(spec, source=tmp_path / "workflow.yaml")
+        validate_specification(spec, source=tmp_path / "pipeline.yaml")
 
 
 def test_validate_specification_rejects_skill_with_unknown_tool(tmp_path):
@@ -220,14 +220,14 @@ def test_validate_specification_rejects_skill_with_unknown_tool(tmp_path):
     }
 
     with pytest.raises(ConfigurationError, match="Unknown tool"):
-        validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=extra_skills)
+        validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=extra_skills)
 
 
 def test_validate_specification_rejects_hierarchical_team_without_manager(tmp_path):
     spec = _basic_spec(mode="hierarchical")
 
     with pytest.raises(ConfigurationError, match="manager"):
-        validate_specification(spec, source=tmp_path / "workflow.yaml")
+        validate_specification(spec, source=tmp_path / "pipeline.yaml")
 
 
 def test_knowledge_base_spec_omits_vector_only_fields_for_local_folder():
@@ -296,7 +296,7 @@ def test_knowledge_base_spec_hybrid_emits_vector_only_fields():
 
 
 def test_validate_specification_accepts_hybrid_knowledge_base(tmp_path):
-    from bestteam.core.specification import AgentSpec, Specification, TeamSpec, WorkflowSpec
+    from bestteam.core.specification import AgentSpec, PipelineSpec, Specification, TeamSpec
     from bestteam.core.specification import KnowledgeBaseSpec as KBSpec
 
     docs_dir = tmp_path / "docs"
@@ -310,11 +310,11 @@ def test_validate_specification_accepts_hybrid_knowledge_base(tmp_path):
         ],
         agents=[AgentSpec(name="a", role="r", goal="g", model="fake:done", tools=["kb"])],
         teams=[TeamSpec(name="t", agents=["a"])],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
 
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml")
-    assert workflow.name == "wf"
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml")
+    assert pipeline.name == "wf"
 
 
 def test_knowledge_base_spec_rejects_name_with_spaces():
@@ -326,7 +326,7 @@ def test_generate_specification_returns_first_valid_spec(tmp_path):
     valid = _basic_spec()
     model = _FakeArchitectChatModel(responses=[valid])
 
-    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml")
 
     assert spec == valid
 
@@ -338,7 +338,7 @@ def test_generate_specification_with_fake_model_raises_clear_error(tmp_path):
 
     fake = FakeListChatModel(responses=["anything"])
     with pytest.raises(ConfigurationError, match="real AI model"):
-        generate_specification(fake, "We need help answering emails.", source=tmp_path / "workflow.yaml")
+        generate_specification(fake, "We need help answering emails.", source=tmp_path / "pipeline.yaml")
 
 
 class _ThinkingModeRejectsForcedToolChoice(BaseChatModel):
@@ -371,7 +371,7 @@ def test_generate_specification_falls_back_to_json_mode_when_model_rejects_force
     valid = _basic_spec()
     model = _ThinkingModeRejectsForcedToolChoice(response=valid)
 
-    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml")
 
     assert spec == valid
 
@@ -384,7 +384,7 @@ def test_generate_specification_calls_pre_validation(tmp_path):
     spec = generate_specification(
         model,
         "We need help answering customer questions.",
-        source=tmp_path / "workflow.yaml",
+        source=tmp_path / "pipeline.yaml",
         pre_validate=candidates.append,
     )
 
@@ -397,7 +397,7 @@ def test_generate_specification_retries_after_validation_error(tmp_path):
     valid = _basic_spec()
     model = _FakeArchitectChatModel(responses=[invalid, valid])
 
-    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml")
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml")
 
     assert spec == valid
 
@@ -408,7 +408,7 @@ def test_generate_specification_raises_after_max_attempts(tmp_path):
 
     with pytest.raises(ConfigurationError, match="could not produce a valid specification"):
         generate_specification(
-            model, "We need help answering customer questions.", source=tmp_path / "workflow.yaml", max_attempts=2
+            model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml", max_attempts=2
         )
 
 

@@ -1,6 +1,6 @@
 # bestteam — `src/bestteam/` (SDK core)
 
-Directory-scoped notes for the SDK layer — `Agent`/`Team`/`Workflow` and the
+Directory-scoped notes for the SDK layer — `Agent`/`Team`/`Pipeline` and the
 LangGraph adapter. See the root `CLAUDE.md` for project overview,
 architecture, and commands. For the Specification/Requirements
 structured-output stages and knowledge bases, see
@@ -9,12 +9,12 @@ structured-output stages and knowledge bases, see
 
 ## SDK layer
 
-`Agent`/`Team`/`Workflow` are business-facing dataclasses, decoupled from the
+`Agent`/`Team`/`Pipeline` are business-facing dataclasses, decoupled from the
 engine via an `EngineAdapter` ABC (`adapters/base.py`). The only
 implementation today is `LangGraphAdapter` (`adapters/langgraph_adapter.py`);
 the seam exists so a CrewAI (or other) adapter could be added later without
-touching the public API. Workflows are declarative YAML (parsed by
-`core/loader.py`) — see `ui/backend/workflows/*.yaml` for examples of
+touching the public API. Pipelines are declarative YAML (parsed by
+`core/loader.py`) — see `ui/backend/pipelines/*.yaml` for examples of
 sequential and parallel collaboration modes.
 
 ## Key design decisions worth knowing
@@ -23,10 +23,10 @@ sequential and parallel collaboration modes.
   `Annotated[Dict[str, str], operator.or_]` so concurrent node writes merge
   instead of raising `InvalidUpdateError`.
 - **`fake:<response>` model spec**: a custom convenience added to
-  `_resolve_model()` so YAML workflows can declare zero-cost,
+  `_resolve_model()` so YAML pipelines can declare zero-cost,
   deterministic dry-run models (`FakeListChatModel` under the hood) without
   needing real API keys. Use this for demos/tests — see
-  `ui/backend/workflows/*.yaml`.
+  `ui/backend/pipelines/*.yaml`.
 - **Preserve `BestTeamError` subtypes through adapter boundaries**: always
   `except BestTeamError: raise` *before* a broad `except Exception` in
   adapter code, otherwise `ConfigurationError`/etc. get masked as a generic

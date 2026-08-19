@@ -1766,7 +1766,7 @@
   old three-tool definition (seeding never overwrites a row that is present).
   A team **already deployed** against `property_maintenance_intake_v1` keeps
   `_v1` — the versioning rule working as intended, not a gap: a running team's
-  behaviour must not change underneath it, and its `workflow_dependencies` row
+  behaviour must not change underneath it, and its `pipeline_dependencies` row
   pins the exact version it deployed with. To move such a team onto attachment
   reading, edit its skills list to `_v2` and redeploy; to adopt the updated
   `email_triage_reply` on an existing deployment, an admin saves the new skill
@@ -1798,7 +1798,7 @@
   catalogue row contributes NULL, i.e. 0. The budget API and UI name the
   unpriced models and count the unpriced runs so the blind spot is visible
   rather than inferred — but `unpriced_models_for_org` scopes to
-  `status="deployed"` workflows, so an undeployed team's models are not warned
+  `status="deployed"` pipelines, so an undeployed team's models are not warned
   about. Anyone quoting the figure to a customer should say "at least".
 - **The spend cap is enforced between runs, not within one.** A single run that
   blows through a customer's monthly cap is not interrupted; the cap stops the
@@ -1817,7 +1817,7 @@
   arguably right (a human asking to redo one batch is not autonomous spend),
   but it is a real hole in the number the customer is shown.
 - **The Filtered ("Mail we skipped") UI section renders only when a trigger
-  with a `workflow_name` is configured**, because it lives inside
+  with a `pipeline_name` is configured**, because it lives inside
   `EmailTriggerActivity` after its two early returns. Correct today — filtered
   rows cannot exist before a trigger has polled — but a customer who later
   disconnects their mailbox loses the only route to their historical filtered
@@ -1914,7 +1914,7 @@
   Needs a retention/erasure story before a customer with a real privacy
   policy uses this at volume.
 - **No general-purpose cache layer** — only local per-process caches
-  (`_workflow_cache`, `Workflow._compiled`). See `ui/backend/CLAUDE.md`.
+  (`_pipeline_cache`, `Pipeline._compiled`). See `ui/backend/CLAUDE.md`.
 - **`ui/frontend/CLAUDE.md`'s wizard section describes the old 6-stage
   wizard** (`/wizard/:sessionId/{requirements|team|refine|test|deploy}`),
   not the current 4-stage flow introduced in commit `0d2490a` (flagged in

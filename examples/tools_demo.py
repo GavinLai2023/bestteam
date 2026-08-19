@@ -7,7 +7,7 @@ web_search is registered on the agent but not actually called by FakeListChatMod
 """
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from bestteam import Agent, CollaborationMode, Team, Workflow, calculator, web_search
+from bestteam import Agent, CollaborationMode, Pipeline, Team, calculator, web_search
 
 fake = FakeListChatModel(responses=[
     "I'll search for the latest AI news and crunch the numbers.",
@@ -36,10 +36,10 @@ team = Team(
     mode=CollaborationMode.SEQUENTIAL,
 )
 
-workflow = Workflow(name="research_brief", steps=[team])
+pipeline = Pipeline(name="research_brief", steps=[team])
 
-print("=== Running research brief workflow ===\n")
-result = workflow.run("What are the biggest AI breakthroughs this week?")
+print("=== Running research brief pipeline ===\n")
+result = pipeline.run("What are the biggest AI breakthroughs this week?")
 print("Final output:\n", result.output)
 
 print("\n=== calculator tool (runs standalone) ===")

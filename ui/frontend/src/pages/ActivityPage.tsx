@@ -30,7 +30,7 @@ const RUN_POLL_INTERVAL_MS = 5000
 const ALERT_POLL_INTERVAL_MS = 60000
 
 interface Filters {
-  workflow: string
+  pipeline: string
   manual: '' | 'true' | 'false'
   status: string
 }
@@ -43,7 +43,7 @@ interface SelectedRun {
 
 function runsQueryParams(filters: Filters) {
   const params: Record<string, string | boolean> = {}
-  if (filters.workflow) params.workflow = filters.workflow
+  if (filters.pipeline) params.pipeline = filters.pipeline
   if (filters.manual === 'true') params.manual = true
   if (filters.manual === 'false') params.manual = false
   if (filters.status) params.status = filters.status
@@ -59,16 +59,16 @@ export default function ActivityPage() {
   // gone looking -- which is the one thing it exists to save them (Codex
   // review finding).
   const [unreadAlerts, setUnreadAlerts] = useState(0)
-  const [workflows, setWorkflows] = useState<string[]>([])
+  const [pipelines, setPipelines] = useState<string[]>([])
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [filters, setFilters] = useState<Filters>({ workflow: '', manual: '', status: '' })
+  const [filters, setFilters] = useState<Filters>({ pipeline: '', manual: '', status: '' })
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState({ total: 0, limit: 50 })
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
-  const [sharedWorkflowId, setSharedWorkflowId] = useState<number | null>(null)
-  const [workflowIds, setWorkflowIds] = useState<Record<string, number>>({})
+  const [sharedPipelineId, setSharedPipelineId] = useState<number | null>(null)
+  const [pipelineIds, setPipelineIds] = useState<Record<string, number>>({})
   const hasRunningRun = runs.some((run) => run.status === 'running')
   const runDetailRef = useRef<HTMLElement>(null)
 
@@ -107,10 +107,10 @@ export default function ActivityPage() {
 
   useEffect(() => {
     api
-      .listWorkflows()
+      .listPipelines()
       .then((d) => {
-        setWorkflows(d.workflows)
-        setWorkflowIds(d.workflow_ids ?? {})
+        setPipelines(d.pipelines)
+        setPipelineIds(d.pipeline_ids ?? {})
       })
       .catch(() => {})
   }, [])
@@ -239,25 +239,25 @@ export default function ActivityPage() {
           <label>
             Team
             <select
-              value={sharedWorkflowId ?? ''}
-              onChange={(e) => setSharedWorkflowId(e.target.value ? Number(e.target.value) : null)}
+              value={sharedPipelineId ?? ''}
+              onChange={(e) => setSharedPipelineId(e.target.value ? Number(e.target.value) : null)}
             >
               <option value="">Pick a team…</option>
-              {/* Only teams with a real DB id: a YAML-only demo workflow has
-                  no `workflow_ids` entry, so it rendered with value="" --
+              {/* Only teams with a real DB id: a YAML-only demo pipeline has
+                  no `pipeline_ids` entry, so it rendered with value="" --
                   indistinguishable from the placeholder and silently doing
-                  nothing when picked. Such a workflow can't have share links
-                  at all (no WorkflowRecord.id to hang one off). */}
-              {workflows
-                .filter((name) => workflowIds[name] != null)
+                  nothing when picked. Such a pipeline can't have share links
+                  at all (no PipelineRecord.id to hang one off). */}
+              {pipelines
+                .filter((name) => pipelineIds[name] != null)
                 .map((name) => (
-                  <option key={name} value={workflowIds[name]}>
+                  <option key={name} value={pipelineIds[name]}>
                     {name}
                   </option>
                 ))}
             </select>
           </label>
-          {sharedWorkflowId != null && <SharedSessionsPanel workflowId={sharedWorkflowId} />}
+          {sharedPipelineId != null && <SharedSessionsPanel pipelineId={sharedPipelineId} />}
         </section>
       )}
 
@@ -267,11 +267,11 @@ export default function ActivityPage() {
             <label>
               Team
               <select
-                value={filters.workflow}
-                onChange={(e) => setFilters((f) => ({ ...f, workflow: e.target.value }))}
+                value={filters.pipeline}
+                onChange={(e) => setFilters((f) => ({ ...f, pipeline: e.target.value }))}
               >
                 <option value="">All teams</option>
-                {workflows.map((name) => (
+                {pipelines.map((name) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
@@ -313,7 +313,7 @@ export default function ActivityPage() {
                     className="wizard-card session-card"
                     onClick={() => setSelectedRun({ id: run.id, status: run.status, autonomous: run.autonomous })}
                   >
-                    <h2>{run.team_display_name ?? run.workflow}</h2>
+                    <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
                       <span className="status-badge">{run.status}</span>
                       <span className="session-updated">

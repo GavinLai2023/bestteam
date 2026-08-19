@@ -3,7 +3,7 @@ class BestTeamError(Exception):
 
 
 class ConfigurationError(BestTeamError):
-    """Raised when an Agent, Team, or Workflow is misconfigured."""
+    """Raised when an Agent, Team, or Pipeline is misconfigured."""
 
 
 class EngineError(BestTeamError):

@@ -22,5 +22,5 @@ teams:
     agents: [reviewer, fixer]
     mode: sequential
 
-workflow:
+pipeline:
   steps: [qa_team]

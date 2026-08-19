@@ -17,7 +17,7 @@ from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 from ui.backend.db.model_catalog import upsert_entry
-from ui.backend.db.models import KnowledgeBaseRecord, Run, UsageRecord, WorkflowRecord
+from ui.backend.db.models import KnowledgeBaseRecord, Run, UsageRecord, PipelineRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 from ui.backend.email_budget import day_key
@@ -25,8 +25,8 @@ from ui.backend.email_budget import day_key
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -56,7 +56,7 @@ _TEAM_CONFIG = {
         {"name": "w", "role": "Writer", "goal": "reply", "model": "openai:gpt-4o-mini"},
     ],
     "teams": [{"name": "tm", "agents": ["t", "w"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 
 
@@ -69,9 +69,9 @@ def automated_team(client):
     """
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
-        db.add(WorkflowRecord(name="triage", org_id=org_id, config=_TEAM_CONFIG,
+        db.add(PipelineRecord(name="triage", org_id=org_id, config=_TEAM_CONFIG,
                               status="deployed"))
-        upsert_email_trigger(db, org_id, workflow_name="triage", enabled=True,
+        upsert_email_trigger(db, org_id, pipeline_name="triage", enabled=True,
                              last_uid=0, uidvalidity=1)
         upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant",
                      tier="fast", input_price_per_1k=0.00015,
@@ -179,7 +179,7 @@ def test_a_knowledge_bases_unpriced_embedding_model_is_named_too(client, automat
             "embedding_model": "acme:embed-1",
             "query_expansion_model": "fake:expand",
         }))
-        record = db.query(WorkflowRecord).filter_by(name="triage", org_id=org_id).one()
+        record = db.query(PipelineRecord).filter_by(name="triage", org_id=org_id).one()
         record.config = {
             **_TEAM_CONFIG,
             "agents": [
@@ -207,20 +207,20 @@ def test_unpriced_models_cover_every_deployed_team_not_only_the_trigger(client, 
     # same blind spot as the first.
     org_id = automated_team
     with open_test_db() as db:
-        db.add(WorkflowRecord(name="reports", org_id=org_id, status="deployed", config={
+        db.add(PipelineRecord(name="reports", org_id=org_id, status="deployed", config={
             "name": "reports",
             "agents": [{"name": "r", "role": "Reporter", "goal": "report",
                         "model": "acme:llm-9"}],
             "teams": [{"name": "rt", "agents": ["r"], "mode": "sequential"}],
-            "workflow": {"steps": ["rt"]},
+            "pipeline": {"steps": ["rt"]},
         }))
         # A draft is still excluded: it cannot run, so it cannot spend.
-        db.add(WorkflowRecord(name="sketch", org_id=org_id, status="draft", config={
+        db.add(PipelineRecord(name="sketch", org_id=org_id, status="draft", config={
             "name": "sketch",
             "agents": [{"name": "s", "role": "Sketcher", "goal": "sketch",
                         "model": "acme:draft-only"}],
             "teams": [{"name": "st", "agents": ["s"], "mode": "sequential"}],
-            "workflow": {"steps": ["st"]},
+            "pipeline": {"steps": ["st"]},
         }))
         db.commit()
         models = unpriced_models_for_org(db, org_id)
@@ -237,7 +237,7 @@ def test_unpriced_models_are_named_even_without_an_email_trigger(client):
     # the ledger the cap sums. The advisory has to see them too.
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
-        db.add(WorkflowRecord(name="triage", org_id=org_id, config=_TEAM_CONFIG,
+        db.add(PipelineRecord(name="triage", org_id=org_id, config=_TEAM_CONFIG,
                               status="deployed"))
         db.commit()
         assert get_email_trigger(db, org_id) is None
@@ -265,7 +265,7 @@ def test_a_corrupt_config_still_lets_the_cap_be_saved(client, automated_team):
     # `config` makes `.get("agents")` raise AttributeError inside the `try`.
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
-        record = db.query(WorkflowRecord).filter_by(name="triage", org_id=org_id).one()
+        record = db.query(PipelineRecord).filter_by(name="triage", org_id=org_id).one()
         record.config = "not-a-mapping"
         db.commit()
         assert unpriced_models_for_org(db, org_id) == []
@@ -354,7 +354,7 @@ def test_an_org_sees_only_its_own_budget(client, automated_team):
     _set_message_count(automated_team, count=7,
                        runs_date=day_key(datetime.now(timezone.utc)))
     with open_test_db() as db:
-        db.add(Run(id="a-1", workflow="triage", input="x", status="completed",
+        db.add(Run(id="a-1", pipeline="triage", input="x", status="completed",
                    org_id=automated_team))
         db.add(UsageRecord(run_id="a-1", agent="t", model="openai:gpt-4o-mini",
                            input_tokens=1000, output_tokens=100,
@@ -384,7 +384,7 @@ def test_unpriced_models_include_the_orgs_standalone_knowledge_bases(client):
     # part of the advisory too.
     with open_test_db() as db:
         org_id = get_or_create_org(db, "default").id
-        assert db.query(WorkflowRecord).filter_by(org_id=org_id, status="deployed").count() == 0
+        assert db.query(PipelineRecord).filter_by(org_id=org_id, status="deployed").count() == 0
         db.add(KnowledgeBaseRecord(name="lonely", org_id=org_id, config={
             "type": "hybrid", "path": "x", "embedding_model": "acme:embed-2",
         }))

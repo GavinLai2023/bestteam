@@ -48,8 +48,8 @@ _EXPECTED_HEAD_TABLES = {
     "knowledge_chunks",
     "skills",
     "skill_versions",
-    "workflows",
-    "workflow_dependencies",
+    "pipelines",
+    "pipeline_dependencies",
     "builder_sessions",
     "email_triggers",
     "model_catalog",
@@ -115,7 +115,7 @@ def test_create_all_then_upgrade_head_is_idempotent(tmp_path, monkeypatch):
         assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
         assert _has_fk(
             engine,
-            "workflow_dependencies",
+            "pipeline_dependencies",
             "resource_version_id",
             "skill_versions",
         )
@@ -260,7 +260,7 @@ def test_existing_non_deployed_workflow_backfilled_to_deployed(tmp_path, monkeyp
     engine = make_engine(db_path)
     try:
         with engine.connect() as conn:
-            status = conn.execute(sa.text("SELECT status FROM workflows WHERE name='legacy'")).scalar()
+            status = conn.execute(sa.text("SELECT status FROM pipelines WHERE name='legacy'")).scalar()
             assert status == "deployed"
     finally:
         engine.dispose()
@@ -301,10 +301,10 @@ def test_workflow_created_by_backfilled_from_username_to_principal_id(tmp_path, 
     try:
         with engine.connect() as conn:
             legacy = conn.execute(sa.text(
-                "SELECT created_by FROM workflows WHERE name = 'legacy'"
+                "SELECT created_by FROM pipelines WHERE name = 'legacy'"
             )).scalar()
             shared = conn.execute(sa.text(
-                "SELECT created_by FROM workflows WHERE name = 'shared'"
+                "SELECT created_by FROM pipelines WHERE name = 'shared'"
             )).scalar()
     finally:
         engine.dispose()
@@ -317,7 +317,7 @@ def test_workflow_created_by_backfilled_from_username_to_principal_id(tmp_path, 
     try:
         with engine.connect() as conn:
             legacy = conn.execute(sa.text(
-                "SELECT created_by FROM workflows WHERE name = 'legacy'"
+                "SELECT created_by FROM pipelines WHERE name = 'legacy'"
             )).scalar()
     finally:
         engine.dispose()
@@ -355,7 +355,7 @@ def test_workflow_created_by_backfill_skips_workflow_older_than_username_holder(
     try:
         with engine.connect() as conn:
             created_by = conn.execute(sa.text(
-                "SELECT created_by FROM workflows WHERE name = 'old-bobs-team'"
+                "SELECT created_by FROM pipelines WHERE name = 'old-bobs-team'"
             )).scalar()
     finally:
         engine.dispose()
@@ -374,7 +374,7 @@ def test_status_check_rejects_invalid_value(tmp_path, monkeypatch):
         with engine.begin() as conn:
             with pytest.raises(Exception):  # IntegrityError/OperationalError on CHECK
                 conn.execute(sa.text(
-                    "INSERT INTO workflows (name, org_id, config, status, created_at, updated_at) "
+                    "INSERT INTO pipelines (name, org_id, config, status, created_at, updated_at) "
                     "VALUES ('bad', NULL, '{}', 'bogus', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ))
     finally:
@@ -431,12 +431,12 @@ def test_skill_version_migration_backfills_heads_and_workflow_pins(tmp_path, mon
                 "SELECT current_version_id FROM skills WHERE id = 3"
             )).scalar() == version[0]
             assert conn.execute(sa.text(
-                "SELECT resource_version_id FROM workflow_dependencies WHERE id = 6"
+                "SELECT resource_version_id FROM pipeline_dependencies WHERE id = 6"
             )).scalar() == version[0]
         assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
         assert _has_fk(
             engine,
-            "workflow_dependencies",
+            "pipeline_dependencies",
             "resource_version_id",
             "skill_versions",
         )
@@ -473,7 +473,7 @@ def test_skill_version_migration_repairs_existing_columns_missing_fks(tmp_path, 
         assert _has_fk(engine, "skills", "current_version_id", "skill_versions")
         assert _has_fk(
             engine,
-            "workflow_dependencies",
+            "pipeline_dependencies",
             "resource_version_id",
             "skill_versions",
         )
@@ -506,25 +506,25 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
     try:
         with engine.connect() as conn:
             rows = conn.execute(sa.text(
-                "SELECT workflow_id, version_number, config FROM workflow_versions"
+                "SELECT pipeline_id, version_number, config FROM pipeline_versions"
             )).all()
             assert rows == [(7, 1, '{"name": "wf"}')]
             ptr = conn.execute(sa.text(
-                "SELECT current_version_id FROM workflows WHERE id = 7"
+                "SELECT current_version_id FROM pipelines WHERE id = 7"
             )).scalar()
             vid = conn.execute(sa.text(
-                "SELECT id FROM workflow_versions WHERE workflow_id = 7"
+                "SELECT id FROM pipeline_versions WHERE pipeline_id = 7"
             )).scalar()
             assert ptr == vid
             # Exactly one v1 -- the backfill did not duplicate.
-            count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_versions")).scalar()
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM pipeline_versions")).scalar()
             assert count == 1
     finally:
         engine.dispose()
 
     # Schema parity with the ORM: created_at is NOT NULL on the migrated table
     # (matching Mapped[datetime]), not the nullable column the first draft added.
-    cols = {c["name"]: c for c in sa.inspect(make_engine(db_path)).get_columns("workflow_versions")}
+    cols = {c["name"]: c for c in sa.inspect(make_engine(db_path)).get_columns("pipeline_versions")}
     assert cols["created_at"]["nullable"] is False
 
     # Idempotent: re-running upgrade head does not duplicate the v1 row.
@@ -532,7 +532,7 @@ def test_workflow_versions_backfill_creates_one_v1_per_workflow(tmp_path, monkey
     engine = make_engine(db_path)
     try:
         with engine.connect() as conn:
-            count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_versions")).scalar()
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM pipeline_versions")).scalar()
             assert count == 1
     finally:
         engine.dispose()
@@ -575,8 +575,8 @@ def test_workflow_dependencies_backfill_resolves_current_version(tmp_path, monke
     engine = make_engine(db_path)
     with engine.begin() as conn:
         deps = set(conn.execute(sa.text(
-            "SELECT workflow_version_id, resource_kind, resource_name, resource_id "
-            "FROM workflow_dependencies"
+            "SELECT pipeline_version_id, resource_kind, resource_name, resource_id "
+            "FROM pipeline_dependencies"
         )).fetchall())
     engine.dispose()
     assert deps == {
@@ -588,7 +588,7 @@ def test_workflow_dependencies_backfill_resolves_current_version(tmp_path, monke
     command.upgrade(cfg, "head")
     engine = make_engine(db_path)
     with engine.begin() as conn:
-        count = conn.execute(sa.text("SELECT COUNT(*) FROM workflow_dependencies")).scalar()
+        count = conn.execute(sa.text("SELECT COUNT(*) FROM pipeline_dependencies")).scalar()
     engine.dispose()
     assert count == 2
 
@@ -626,7 +626,7 @@ def test_workflow_dependencies_backfill_tolerates_mixed_type_refs(tmp_path, monk
     engine = make_engine(db_path)
     with engine.begin() as conn:
         deps = set(conn.execute(sa.text(
-            "SELECT resource_kind, resource_name, resource_id FROM workflow_dependencies"
+            "SELECT resource_kind, resource_name, resource_id FROM pipeline_dependencies"
         )).fetchall())
     engine.dispose()
     # int refs dropped; http_get is a built-in tool, not a standalone KB.
@@ -666,7 +666,7 @@ def test_workflow_dependencies_backfill_inline_kb_shadows_standalone(tmp_path, m
     engine = make_engine(db_path)
     with engine.begin() as conn:
         count = conn.execute(sa.text(
-            "SELECT COUNT(*) FROM workflow_dependencies WHERE resource_kind = 'knowledge_base'"
+            "SELECT COUNT(*) FROM pipeline_dependencies WHERE resource_kind = 'knowledge_base'"
         )).scalar()
     engine.dispose()
     assert count == 0  # inline KB shadows the standalone -> no dependency row
@@ -912,5 +912,143 @@ def test_usage_records_nullable_run_id_downgrade_deletes_only_rows_without_a_run
         assert columns["run_id"]["nullable"] is True
         assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
         assert ids == [1]
+    finally:
+        engine.dispose()
+
+
+# Revision just before the Workflow -> Pipeline rename (the previous head).
+_PRE_PIPELINE_RENAME = "n1o2p3q4r5s6"
+
+
+def test_workflow_to_pipeline_rename_preserves_data_and_rewrites_config(tmp_path, monkeypatch):
+    """o2p3q4r5s6t7: tables/columns renamed, FKs follow, and the `"workflow"`
+    key inside `config` JSON becomes `"pipeline"` -- all without losing rows."""
+    db_path = tmp_path / "rename.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_PIPELINE_RENAME)  # old workflow* names, no rename yet
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at) "
+            "VALUES (9, 'wf', NULL, "
+            "'{\"name\": \"wf\", \"agents\": [], \"teams\": [], \"workflow\": {\"steps\": []}}', "
+            "'deployed', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO workflow_versions (id, workflow_id, version_number, config, created_by, created_at) "
+            "VALUES (10, 9, 1, "
+            "'{\"name\": \"wf\", \"agents\": [], \"teams\": [], \"workflow\": {\"steps\": []}}', "
+            "NULL, '2026-01-01')"
+        ))
+        conn.execute(sa.text("UPDATE workflows SET current_version_id = 10 WHERE id = 9"))
+        conn.execute(sa.text(
+            "INSERT INTO workflow_dependencies "
+            "(id, workflow_version_id, resource_kind, resource_name, resource_id) "
+            "VALUES (11, 10, 'skill', 'greet', NULL)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO runs (id, workflow, input, status, workflow_version_id, created_at) "
+            "VALUES ('run-9', 'wf', 'hi', 'completed', 10, CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO organizations (name, active) VALUES ('acme', 1)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO email_triggers (org_id, workflow_name, enabled, last_uid, runs_today, "
+            "messages_today, created_at, updated_at) "
+            "VALUES (1, 'wf', 1, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+        # A wizard session's in-progress draft (builder_sessions.specification_json)
+        # is the same Specification.to_raw() shape as pipelines/pipeline_versions.config
+        # and must be rewritten too, or a pre-upgrade session silently loses its steps
+        # the next time it's opened (Codex review finding).
+        conn.execute(sa.text(
+            "INSERT INTO builder_sessions (id, intent_text, as_is_text, specification_json, "
+            "status, feedback_history, created_at, updated_at) "
+            "VALUES ('sess-1', 'hi', '', "
+            "'{\"name\": \"wf\", \"agents\": [], \"teams\": [], \"workflow\": {\"steps\": []}}', "
+            "'spec', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        tables = set(sa.inspect(engine).get_table_names())
+        assert {"pipelines", "pipeline_versions", "pipeline_dependencies"} <= tables
+        assert not ({"workflows", "workflow_versions", "workflow_dependencies"} & tables)
+
+        with engine.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT config, current_version_id FROM pipelines WHERE id = 9"
+            )).one()
+            assert '"pipeline"' in row.config and '"workflow"' not in row.config
+
+            version = conn.execute(sa.text(
+                "SELECT pipeline_id, config FROM pipeline_versions WHERE id = 10"
+            )).one()
+            assert version.pipeline_id == 9
+            assert '"pipeline"' in version.config and '"workflow"' not in version.config
+            assert row.current_version_id == 10
+
+            dep = conn.execute(sa.text(
+                "SELECT pipeline_version_id, resource_kind FROM pipeline_dependencies WHERE id = 11"
+            )).one()
+            assert dep.pipeline_version_id == 10 and dep.resource_kind == "skill"
+
+            run = conn.execute(sa.text(
+                "SELECT pipeline, pipeline_version_id FROM runs WHERE id = 'run-9'"
+            )).one()
+            assert run.pipeline == "wf" and run.pipeline_version_id == 10
+
+            trigger = conn.execute(sa.text(
+                "SELECT pipeline_name FROM email_triggers WHERE org_id = 1"
+            )).one()
+            assert trigger.pipeline_name == "wf"
+
+            session = conn.execute(sa.text(
+                "SELECT specification_json FROM builder_sessions WHERE id = 'sess-1'"
+            )).one()
+            assert '"pipeline"' in session.specification_json
+            assert '"workflow"' not in session.specification_json
+    finally:
+        engine.dispose()
+
+    # Idempotent: re-running upgrade head is a no-op, not a second rename attempt.
+    command.upgrade(cfg, "head")
+
+
+def test_workflow_to_pipeline_rename_absorbs_a_create_all_race(tmp_path, monkeypatch):
+    """If `create_all()` (the `db_session.py` safety net) runs before this
+    migration and creates the new tables empty, the migration must absorb
+    them rather than fail with 'table already exists'."""
+    from ui.backend.db.database import init_db as _init_db
+
+    db_path = tmp_path / "race.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_PIPELINE_RENAME)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id, name, org_id, config, status, created_at, updated_at) "
+            "VALUES (1, 'wf', NULL, '{}', 'deployed', '2026-01-01', '2026-01-01')"
+        ))
+    # Simulate a process booting (and running create_all) before this migration --
+    # the renamed models declare empty `pipelines`/`pipeline_versions`/
+    # `pipeline_dependencies` tables that create_all() will happily create
+    # alongside the still-populated old ones.
+    _init_db(engine)
+    engine.dispose()
+
+    command.upgrade(cfg, "head")  # must absorb the empty shells, not raise
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            name = conn.execute(sa.text("SELECT name FROM pipelines WHERE id = 1")).scalar()
+        assert name == "wf"
     finally:
         engine.dispose()

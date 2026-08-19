@@ -47,7 +47,7 @@ def _org(db, name="acme"):
 def _notify(db, org_id):
     row = create_notification(
         db, org_id=org_id, kind="trigger_health", severity="error",
-        title="Automatic email replies are failing", body="b", fingerprint="workflow",
+        title="Automatic email replies are failing", body="b", fingerprint="pipeline",
     )
     db.commit()
     return row

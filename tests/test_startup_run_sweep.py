@@ -24,10 +24,10 @@ from ui.backend.runtime import INTERRUPTED_RUN_MESSAGE, fail_interrupted_runs
 
 def _seed(Session):
     with Session() as db:
-        db.add(Run(id="r-running", workflow="w", input="in", status="running"))
-        db.add(Run(id="r-done", workflow="w", input="in", status="completed", output="ok"))
-        db.add(Run(id="r-failed", workflow="w", input="in", status="failed", output="boom"))
-        db.add(Run(id="r-cancelled", workflow="w", input="in", status="cancelled", output="stop"))
+        db.add(Run(id="r-running", pipeline="w", input="in", status="running"))
+        db.add(Run(id="r-done", pipeline="w", input="in", status="completed", output="ok"))
+        db.add(Run(id="r-failed", pipeline="w", input="in", status="failed", output="boom"))
+        db.add(Run(id="r-cancelled", pipeline="w", input="in", status="cancelled", output="stop"))
         db.commit()
 
 
@@ -61,7 +61,7 @@ def test_fail_interrupted_runs_releases_the_inbox_events_the_dead_run_had_claime
     Session = session_factory(engine)
     with Session() as db:
         org = get_or_create_org(db, "acme")
-        db.add(Run(id="r-triggered", workflow="w", input="in", status="running", org_id=org.id))
+        db.add(Run(id="r-triggered", pipeline="w", input="in", status="running", org_id=org.id))
         db.add(InboxEvent(
             org_id=org.id, mailbox_identity="inbox@acme.test", external_id="101",
             status="claimed", run_id="r-triggered", attempts=1,

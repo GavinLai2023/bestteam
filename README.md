@@ -4,18 +4,18 @@
 
 **GitHub:** https://github.com/GavinLai2023/bestteam
 
-A commercial multi-agent framework that wraps [LangGraph](https://github.com/langchain-ai/langgraph) behind a clean, business-friendly API. Clients define agents and workflows in a few lines of Python or a YAML file — the framework handles all orchestration complexity.
+A commercial multi-agent framework that wraps [LangGraph](https://github.com/langchain-ai/langgraph) behind a clean, business-friendly API. Clients define agents and pipelines in a few lines of Python or a YAML file — the framework handles all orchestration complexity.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Layer 1 · SDK          src/bestteam/               │
-│  Agent / Team / Workflow / ToolKit / Memory         │
+│  Agent / Team / Pipeline / ToolKit / Memory         │
 │  ↕ EngineAdapter (swap LangGraph ↔ CrewAI)         │
 ├─────────────────────────────────────────────────────┤
 │  Layer 2 · CLI          bestteam init/run/graph     │
-│  Scaffold projects, run YAML workflows, render DAG  │
+│  Scaffold projects, run YAML pipelines, render DAG  │
 ├─────────────────────────────────────────────────────┤
 │  Layer 3 · UI           ui/backend + ui/frontend    │
 │  FastAPI + WebSocket backend · React live dashboard │
@@ -38,11 +38,11 @@ export OPENAI_API_KEY=sk-...
 bestteam init my_project
 cd my_project
 
-# 4. Run a workflow
-bestteam run workflow.yaml "Review this Python function for bugs"
+# 4. Run a pipeline
+bestteam run pipeline.yaml "Review this Python function for bugs"
 
 # 5. Visualise the agent graph
-bestteam graph workflow.yaml
+bestteam graph pipeline.yaml
 ```
 
 ### Updating the lockfile
@@ -67,7 +67,7 @@ uv pip compile ... --upgrade -o requirements.lock
 ## SDK usage
 
 ```python
-from bestteam import Agent, Team, CollaborationMode, Workflow
+from bestteam import Agent, Team, CollaborationMode, Pipeline
 from bestteam import web_search, calculator
 
 researcher = Agent(
@@ -88,13 +88,13 @@ writer = Agent(
 team = Team(name="brief_team", agents=[researcher, writer],
             mode=CollaborationMode.SEQUENTIAL)
 
-result = Workflow(name="research_brief", steps=[team]).run(
+result = Pipeline(name="research_brief", steps=[team]).run(
     "What are the biggest AI breakthroughs this week?"
 )
 print(result.output)
 ```
 
-## YAML workflow
+## YAML pipeline
 
 ```yaml
 name: code_review
@@ -112,7 +112,7 @@ teams:
   - name: qa_team
     agents: [reviewer, fixer]
     mode: sequential
-workflow:
+pipeline:
   steps: [qa_team]
 ```
 
@@ -164,7 +164,7 @@ All three types support opt-in query expansion (`query_expansion_model`) and
 opt-in reranking (`rerank_model`).
 
 Requires `pip install 'bestteam[tools-rag]'`. See
-`ui/backend/workflows/knowledge_base_demo.yaml` for a runnable example.
+`ui/backend/pipelines/knowledge_base_demo.yaml` for a runnable example.
 
 ## Email automation
 
@@ -213,18 +213,18 @@ mailboxes, and the trigger's environment variables.
 # real one. Generate it with:
 #   python -c "import secrets; print(secrets.token_hex(32))"
 #
-# BESTTEAM_DEMO_WORKFLOWS=1 exposes the bundled example workflows in
-# ui/backend/workflows/ so the dropdown has something to pick on a fresh
+# BESTTEAM_DEMO_PIPELINES=1 exposes the bundled example pipelines in
+# ui/backend/pipelines/ so the dropdown has something to pick on a fresh
 # database. It is off by default (those are demo fixtures, not tenant data) —
 # leave it unset on a real deployment. See docs/deployment.md.
-BESTTEAM_SECRET_KEY=... BESTTEAM_DEMO_WORKFLOWS=1 python -m uvicorn ui.backend.main:app --port 8000
+BESTTEAM_SECRET_KEY=... BESTTEAM_DEMO_PIPELINES=1 python -m uvicorn ui.backend.main:app --port 8000
 
 # Terminal 2 — frontend
 cd ui/frontend && npm run dev
 ```
 
 Open **http://localhost:5173**. The UI is two things: a live dashboard, where
-you pick a workflow, enter an input, and watch agents hand off over WebSocket;
+you pick a pipeline, enter an input, and watch agents hand off over WebSocket;
 and a guided **Team Builder** wizard that walks a non-technical customer from a
 description of their problem to a deployed team.
 
@@ -232,7 +232,7 @@ description of their problem to a deployed team.
 
 ```
 src/bestteam/
-├── core/          Agent, Team, Workflow, Memory, ToolKit, TraceEvent
+├── core/          Agent, Team, Pipeline, Memory, ToolKit, TraceEvent
 ├── adapters/      EngineAdapter ABC + LangGraphAdapter
 ├── tools/         Built-in tools (web_search, parse_file, http_get,
 │                  calculator, local_business_search, email toolkit)
@@ -240,7 +240,7 @@ src/bestteam/
 
 ui/
 ├── backend/       FastAPI + WebSocket monitoring backend
-│   └── workflows/ Example YAML workflows
+│   └── pipelines/ Example YAML pipelines
 └── frontend/      React + Vite live dashboard
 
 examples/          Runnable demo scripts

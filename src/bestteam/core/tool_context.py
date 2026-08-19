@@ -19,7 +19,7 @@ facts into while it runs:
 Every reporting function is a **no-op when no context is active**, so a tool
 called directly from the SDK (`kb.query(...)` in a script, or a unit test)
 behaves exactly as it did before. A contextvar rather than a thread-local
-because the backend runs workflows in a worker pool and LangGraph may run
+because the backend runs pipelines in a worker pool and LangGraph may run
 nodes in their own contexts; each `tool_call_context()` sets and resets its
 own token, so nested or concurrent calls never see each other's box.
 """

@@ -2,29 +2,32 @@
 
 A commercial multi-agent framework wrapper around LangGraph (package name
 `bestteam`). Philosophy: **把复杂留给自己，把简单留给客户** — wrap LangGraph's
-power behind a simple, business-friendly surface so clients write workflows,
+power behind a simple, business-friendly surface so clients write pipelines,
 not orchestration code.
 
 ## Architecture (three layers)
 
-1. **SDK** (`src/bestteam/`) — `Agent`/`Team`/`Workflow` business-facing
+1. **SDK** (`src/bestteam/`) — `Agent`/`Team`/`Pipeline` business-facing
    dataclasses, decoupled from the engine via an `EngineAdapter` ABC
    (`adapters/base.py`). The only implementation today is
    `LangGraphAdapter` (`adapters/langgraph_adapter.py`); the seam exists so a
    CrewAI (or other) adapter could be added later without touching the
    public API. Details: `src/bestteam/CLAUDE.md`.
 2. **CLI** (`src/bestteam/cli/`) — Typer + Rich. Commands: `init` (scaffold a
-   project), `run` (execute a YAML workflow), `graph` (render Mermaid).
-   Thin wrappers over `load_workflow()` + `Workflow.run()/.visualize()`.
+   project), `run` (execute a YAML pipeline), `graph` (render Mermaid).
+   Thin wrappers over `load_pipeline()` + `Pipeline.run()/.visualize()`.
 3. **UI** (`ui/`) — runtime monitoring dashboard *and* a guided "Team
    Builder" wizard for non-technical customers. FastAPI + WebSocket backend
    (`ui/backend/`) reuses the SDK directly (no duplicated logic); React +
    Vite frontend (`ui/frontend/`) streams live agent trace events and drives
    the wizard. Details: `ui/backend/CLAUDE.md`, `ui/frontend/CLAUDE.md`.
 
-Workflows are declarative YAML (parsed by `core/loader.py`) — see
-`ui/backend/workflows/*.yaml` for examples of sequential and parallel
-collaboration modes.
+Pipelines are declarative YAML (parsed by `core/loader.py`) — see
+`ui/backend/pipelines/*.yaml` for examples of sequential and parallel
+collaboration modes. A **Pipeline is what the customer-facing UI and Team
+Builder wizard call an "AI team"** — the SDK/admin docs use the technical
+noun because it matches the class name, the YAML key, and the API/DB
+schema (see `ui/frontend/CLAUDE.md`).
 
 ## Common commands
 
@@ -40,10 +43,10 @@ uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --ext
 # Tests
 .\.venv\Scripts\python.exe -m pytest
 
-# CLI: scaffold / run / visualize a workflow
+# CLI: scaffold / run / visualize a pipeline
 .\.venv\Scripts\python.exe -m bestteam init my_project
-.\.venv\Scripts\python.exe -m bestteam run workflow.yaml "some input"
-.\.venv\Scripts\python.exe -m bestteam graph workflow.yaml
+.\.venv\Scripts\python.exe -m bestteam run pipeline.yaml "some input"
+.\.venv\Scripts\python.exe -m bestteam graph pipeline.yaml
 
 # Launch checklist for a deployment's environment (FAIL/WARN/OK per variable)
 .\.venv\Scripts\python.exe -m ui.backend.admin check-env
@@ -59,7 +62,7 @@ cd ui\frontend && npm run dev   # http://localhost:5173, talks to backend on :80
 This file covers project-wide context. Claude Code automatically loads the
 relevant file below the first time it reads a file in that directory:
 
-- `src/bestteam/CLAUDE.md` — SDK core: `Agent`/`Team`/`Workflow`, the
+- `src/bestteam/CLAUDE.md` — SDK core: `Agent`/`Team`/`Pipeline`, the
   `EngineAdapter`/`LangGraphAdapter` seam, state-reducer / `fake:` model spec
   / error-handling design decisions, HIERARCHICAL collaboration mode.
 - `src/bestteam/core/CLAUDE.md` — `Specification`/`Requirements` structured
@@ -187,7 +190,7 @@ implemented** — don't assume they exist:
 
 - All current tests use `FakeListChatModel` / `fake:` specs — zero API cost,
   deterministic. Live-model examples (`examples/code_review_demo_live.py` and
-  `ui/backend/workflows/vector_knowledge_base_demo_live.yaml`, both
+  `ui/backend/pipelines/vector_knowledge_base_demo_live.yaml`, both
   `ChatOpenAI`/OpenAI-embeddings-based) exist but require real API quota to
   run.
 - Every test file needs a `pytestmark` (`unit`/`integration`/`e2e`/

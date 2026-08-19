@@ -87,7 +87,7 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
 
   if (trigger === undefined) return null // still loading -- avoid a flash
 
-  if (!trigger.workflow_name) {
+  if (!trigger.pipeline_name) {
     return (
       <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
         <h3>Automatic runs</h3>
@@ -105,7 +105,7 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
     <>
       <div className="wizard-card" style={{ background: '#f9fafb', marginBottom: '1rem' }}>
         <div className="trigger-status-header">
-          <h3>Automatic runs — "{trigger.workflow_name}"</h3>
+          <h3>Automatic runs — "{trigger.pipeline_name}"</h3>
           <span className="status-badge">{meta.badge}</span>
         </div>
         <p className="subtitle">{meta.text}</p>

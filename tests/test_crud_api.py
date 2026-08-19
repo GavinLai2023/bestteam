@@ -1,5 +1,5 @@
 """Tests for the `/api/config` CRUD API (Phase 2) -- the "advanced view" for
-fine-tuning agents/teams/knowledge_bases/workflows directly."""
+fine-tuning agents/teams/knowledge_bases/pipelines directly."""
 
 import io
 import threading
@@ -24,7 +24,7 @@ from ui.backend import ingestion as backend_ingestion
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, SkillRecord, WorkflowRecord
+from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, SkillRecord, PipelineRecord
 from ui.backend.db_session import get_db
 
 
@@ -78,7 +78,7 @@ def _ingestion_futures():
     """Record the `Future` of every ingestion job dispatched inside the block.
 
     `run_ingestion_job` commits `IngestionJob.status = "completed"` *before*
-    it invalidates the workflow cache and prunes older generations -- both
+    it invalidates the pipeline cache and prunes older generations -- both
     are deliberately best-effort steps that must never be able to
     retroactively un-complete a durable job (see ui/backend/ingestion.py).
     So a terminal status is the right signal for an assertion about the job
@@ -116,12 +116,12 @@ def _await_ingestion(future, deadline_seconds=10):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     # `_KB_UPLOADS_DIR` is defined in knowledge_bases.py, which owns every
     # read and write of it (upload, and the delete-on-disk in
     # `delete_knowledge_base`) -- so one binding is the whole surface.
     monkeypatch.setattr(backend_knowledge_bases, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
-    backend_main._workflow_cache.clear()
+    backend_main._pipeline_cache.clear()
 
     # A file database, not `:memory:`: every upload here dispatches an
     # ingestion job onto `ingestion.py`'s executor, and that worker thread
@@ -273,9 +273,9 @@ def test_skills_without_org_hit_platform_tier(client):
 
 
 def test_standalone_agents_and_teams_are_not_a_config_resource(client):
-    # Nothing ever consumed AgentRecord/TeamRecord -- `_build_workflow` takes
+    # Nothing ever consumed AgentRecord/TeamRecord -- `_build_pipeline` takes
     # only extra_tools/extra_skills, so a standalone agent or team could never
-    # reach a running workflow. A workflow carries its agents/teams inline.
+    # reach a running pipeline. A pipeline carries its agents/teams inline.
     for kind in ("agents", "teams"):
         assert client.get(f"/api/config/{kind}").status_code == 404
         assert client.put(f"/api/config/{kind}/x?org=default", json={}).status_code == 404
@@ -362,7 +362,7 @@ def test_knowledge_base_put_still_allows_absolute_local_folder_path(client, tmp_
 def test_knowledge_base_put_contains_relative_cache_path(client, tmp_path):
     # CR-001: a clean relative cache_path is accepted but rewritten into the
     # app-owned _kb_cache/ subdir, so it can only write there (never over a
-    # workflow YAML). Stored via KnowledgeBaseSpec, no build triggered.
+    # pipeline YAML). Stored via KnowledgeBaseSpec, no build triggered.
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     config = {
@@ -394,13 +394,13 @@ def test_knowledge_base_put_contains_windows_rooted_cache_path(client, tmp_path)
     assert resp.json()["config"]["cache_path"] == "_kb_cache/pwned.json"
 
 
-def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
-    # The inline `knowledge_bases` list in a workflow config is a second API
+def test_pipeline_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
+    # The inline `knowledge_bases` list in a pipeline config is a second API
     # boundary that accepts KB paths (it bypasses KnowledgeBaseSpec). It must
     # enforce the same containment as the standalone endpoint.
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
-    workflow_config = {
+    pipeline_config = {
         "knowledge_bases": [
             {
                 "name": "evil_kb",
@@ -414,10 +414,10 @@ def test_workflow_put_rejects_inline_kb_absolute_cache_path(client, tmp_path):
             {"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["evil_kb"]}
         ],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
 
-    resp = client.put("/api/config/workflows/evil_wf?org=default", json=workflow_config)
+    resp = client.put("/api/config/pipelines/evil_wf?org=default", json=pipeline_config)
 
     assert resp.status_code == 400
     assert "cache_path" in resp.json()["detail"]
@@ -441,23 +441,23 @@ def test_contain_kb_config_for_load_confines_legacy_cache_path():
     assert original["cache_path"] == "/etc/cron.d/pwned"  # copy, not in-place
 
 
-def test_contain_workflow_config_for_load_confines_inline_kb():
-    from ui.backend.knowledge_bases import contain_workflow_config_for_load
+def test_contain_pipeline_config_for_load_confines_inline_kb():
+    from ui.backend.knowledge_bases import contain_pipeline_config_for_load
 
     cfg = {"knowledge_bases": [{"name": "k", "path": "/d", "type": "vector", "cache_path": "../../evil.json"}]}
-    out = contain_workflow_config_for_load(cfg)
+    out = contain_pipeline_config_for_load(cfg)
 
     assert out["knowledge_bases"][0]["cache_path"] == "_kb_cache/evil.json"
 
 
 def test_resolved_cache_path_must_stay_in_the_owned_cache_directory(tmp_path, monkeypatch):
     # CR-001: lexical containment alone is insufficient if _kb_cache is a
-    # symlink/junction. Simulate a resolved target outside the workflow root
+    # symlink/junction. Simulate a resolved target outside the pipeline root
     # without requiring Windows symlink-creation privileges in the test runner.
     from fastapi import HTTPException
     from ui.backend import knowledge_bases
 
-    source = tmp_path / "workflow.yaml"
+    source = tmp_path / "pipeline.yaml"
     outside = tmp_path.parent / "outside" / "embeddings.json"
     original_resolve = knowledge_bases.Path.resolve
 
@@ -555,46 +555,46 @@ def test_failed_reupload_preserves_prior_kb(client, tmp_path):
     assert client.get("/api/config/knowledge_bases/kb?org=default").status_code == 200  # DB record preserved
 
 
-def test_deleting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
-    # CR-005: deleting a KB must drop any cached workflow that might embed it --
+def test_deleting_knowledge_base_invalidates_pipeline_cache(client, tmp_path):
+    # CR-005: deleting a KB must drop any cached pipeline that might embed it --
     # the global max(updated_at) freshness key does not change on a delete.
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "a.md").write_text("hello", encoding="utf-8")
     client.put("/api/config/knowledge_bases/kb1?org=default", json={"path": str(docs_dir), "type": "local_folder"})
-    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+    backend_main._pipeline_cache["cached_wf"] = ("stale-pipeline", "key")
 
     assert client.delete("/api/config/knowledge_bases/kb1?org=default").status_code == 204
 
-    assert backend_main._workflow_cache == {}
+    assert backend_main._pipeline_cache == {}
 
 
-def test_deleting_skill_invalidates_workflow_cache(client):
+def test_deleting_skill_invalidates_pipeline_cache(client):
     client.put(
         "/api/config/skills/research",
         json={"description": "Research", "instructions": "Search.", "tools": []},
     )
-    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+    backend_main._pipeline_cache["cached_wf"] = ("stale-pipeline", "key")
 
     assert client.delete("/api/config/skills/research").status_code == 204
 
-    assert backend_main._workflow_cache == {}
+    assert backend_main._pipeline_cache == {}
 
 
-def test_upserting_knowledge_base_invalidates_workflow_cache(client, tmp_path):
+def test_upserting_knowledge_base_invalidates_pipeline_cache(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "a.md").write_text("hello", encoding="utf-8")
-    backend_main._workflow_cache["cached_wf"] = ("stale-workflow", "key")
+    backend_main._pipeline_cache["cached_wf"] = ("stale-pipeline", "key")
 
     client.put("/api/config/knowledge_bases/kb1?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
-    assert backend_main._workflow_cache == {}
+    assert backend_main._pipeline_cache == {}
 
 
 def test_dependency_freshness_changes_when_non_latest_kb_deleted():
     # CR-005 root cause: deleting a KB whose updated_at is NOT the maximum must
-    # still change the dependency fingerprint, so a cached workflow can't keep
+    # still change the dependency fingerprint, so a cached pipeline can't keep
     # serving the deleted KB even in the pre-invalidation window. A
     # max(updated_at)-only fingerprint (the old behavior) missed this.
     from datetime import datetime
@@ -622,15 +622,15 @@ def test_dependency_freshness_changes_when_non_latest_kb_deleted():
 def test_stale_load_does_not_repopulate_cache_after_invalidation():
     # CR-005: a load that snapshotted the generation, then had the cache
     # invalidated mid-build, must not write its now-stale result back.
-    backend_main._workflow_cache.clear()
-    generation = backend_main._workflow_cache_generation
+    backend_main._pipeline_cache.clear()
+    generation = backend_main._pipeline_cache_generation
 
-    with backend_main._workflow_cache_lock:  # simulate a concurrent invalidation
-        backend_main._workflow_cache_generation += 1
+    with backend_main._pipeline_cache_lock:  # simulate a concurrent invalidation
+        backend_main._pipeline_cache_generation += 1
 
-    backend_main._store_workflow_in_cache("wf", object(), "key", generation)
+    backend_main._store_pipeline_in_cache("wf", object(), "key", generation)
 
-    assert "wf" not in backend_main._workflow_cache
+    assert "wf" not in backend_main._pipeline_cache
 
 
 def test_failed_commit_during_upload_preserves_prior_kb(client, tmp_path):
@@ -733,7 +733,7 @@ def test_concurrent_upload_promotion_is_serialized_per_kb(client, tmp_path):
 
 
 def test_skill_version_publish_is_serialized_with_team_deploys(client):
-    # Skill PUT and both workflow deploy paths share this lock. Holding it must
+    # Skill PUT and both pipeline deploy paths share this lock. Holding it must
     # block publication, preventing a deploy from pairing one skill head id
     # with another content version during a concurrent admin edit.
     import threading
@@ -983,7 +983,7 @@ def test_upload_of_unparseable_file_fails_the_ingestion_job(client):
     assert get_resp.status_code == 200
 
 
-def test_uploaded_kb_is_queryable_by_a_workflow(client):
+def test_uploaded_kb_is_queryable_by_a_pipeline(client):
     files = [("files", ("policy.txt", b"Refunds are processed within 5 business days of approval.", "text/plain"))]
     upload_resp = client.post("/api/config/knowledge_bases/policy_kb/upload?org=default", files=files)
     assert upload_resp.status_code == 200
@@ -995,10 +995,10 @@ def test_uploaded_kb_is_queryable_by_a_workflow(client):
     uploaded_path = get_kb_resp.json()["config"]["path"]
 
     # Standalone knowledge_bases created via /api/config aren't auto-wired into a
-    # workflow's tools (see module docstring) -- a workflow only sees knowledge_bases
-    # it embeds inline itself. Point the workflow's own entry at the same uploaded
+    # pipeline's tools (see module docstring) -- a pipeline only sees knowledge_bases
+    # it embeds inline itself. Point the pipeline's own entry at the same uploaded
     # directory to prove the uploaded content is real, indexed, and queryable.
-    workflow_config = {
+    pipeline_config = {
         "knowledge_bases": [{"name": "policy_kb", "path": uploaded_path, "type": "local_folder"}],
         "agents": [
             {
@@ -1010,14 +1010,14 @@ def test_uploaded_kb_is_queryable_by_a_workflow(client):
             }
         ],
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    put_resp = client.put("/api/config/workflows/policy_test_wf?org=default", json=workflow_config)
+    put_resp = client.put("/api/config/pipelines/policy_test_wf?org=default", json=pipeline_config)
     assert put_resp.status_code == 200
 
     run_resp = client.post(
         "/api/runs",
-        json={"workflow": "policy_test_wf", "input": "How long do refunds take?"},
+        json={"pipeline": "policy_test_wf", "input": "How long do refunds take?"},
         headers=_org_user_headers(client),
     )
     assert run_resp.status_code == 200
@@ -1147,7 +1147,7 @@ def test_delete_kb_after_job_completes_leaves_no_orphan_rows(client):
     assert not upload_dir.exists()
 
 
-_VALID_WORKFLOW_CONFIG = {
+_VALID_PIPELINE_CONFIG = {
     "knowledge_bases": [],
     "agents": [
         {
@@ -1158,64 +1158,64 @@ _VALID_WORKFLOW_CONFIG = {
         }
     ],
     "teams": [{"name": "support_team", "agents": ["support_agent"], "mode": "sequential"}],
-    "workflow": {"steps": ["support_team"]},
+    "pipeline": {"steps": ["support_team"]},
 }
 
 
-def test_workflow_crud_round_trip_and_validation(client):
-    create = client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
+def test_pipeline_crud_round_trip_and_validation(client):
+    create = client.put("/api/config/pipelines/support_pipeline?org=default", json=_VALID_PIPELINE_CONFIG)
     assert create.status_code == 200
     body = create.json()
     assert body["status"] == "deployed"
-    assert body["config"]["name"] == "support_workflow"
+    assert body["config"]["name"] == "support_pipeline"
 
-    listed = client.get("/api/config/workflows")
-    assert [item["name"] for item in listed.json()] == ["support_workflow"]
+    listed = client.get("/api/config/pipelines")
+    assert [item["name"] for item in listed.json()] == ["support_pipeline"]
 
-    fetched = client.get("/api/config/workflows/support_workflow?org=default")
+    fetched = client.get("/api/config/pipelines/support_pipeline?org=default")
     assert fetched.status_code == 200
 
-    assert client.delete("/api/config/workflows/support_workflow?org=default").status_code == 204
-    assert client.get("/api/config/workflows/support_workflow?org=default").status_code == 404
+    assert client.delete("/api/config/pipelines/support_pipeline?org=default").status_code == 204
+    assert client.get("/api/config/pipelines/support_pipeline?org=default").status_code == 404
 
 
-def test_workflow_put_appends_immutable_versions(client):
-    """Two PUTs of the same workflow -> versions 1 then 2; v1 config frozen."""
+def test_pipeline_put_appends_immutable_versions(client):
+    """Two PUTs of the same pipeline -> versions 1 then 2; v1 config frozen."""
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+    from ui.backend.db.models import PipelineRecord, PipelineVersion
 
     def _config(marker):
-        return {**_VALID_WORKFLOW_CONFIG,
-                 "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "goal": marker}]}
+        return {**_VALID_PIPELINE_CONFIG,
+                 "agents": [{**_VALID_PIPELINE_CONFIG["agents"][0], "goal": marker}]}
 
-    assert client.put("/api/config/workflows/wf?org=default",
+    assert client.put("/api/config/pipelines/wf?org=default",
                        json=_config("one")).status_code == 200
-    assert client.put("/api/config/workflows/wf?org=default",
+    assert client.put("/api/config/pipelines/wf?org=default",
                        json=_config("two")).status_code == 200
 
     with open_test_db() as db:
-        head = db.query(WorkflowRecord).filter_by(name="wf").one()
-        versions = (db.query(WorkflowVersion)
-                      .filter_by(workflow_id=head.id)
-                      .order_by(WorkflowVersion.version_number).all())
+        head = db.query(PipelineRecord).filter_by(name="wf").one()
+        versions = (db.query(PipelineVersion)
+                      .filter_by(pipeline_id=head.id)
+                      .order_by(PipelineVersion.version_number).all())
         assert [v.version_number for v in versions] == [1, 2]
         assert versions[0].config != versions[1].config  # v1 preserved distinctly
         assert head.current_version_id == versions[1].id  # pointer at latest
 
 
-def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
-    """POST /api/runs dispatches run_in_background with workflow_version_id set to
-    the deployed workflow's current version (the /api/runs -> stamp glue). The
+def test_create_run_stamps_the_deployed_pipeline_version(client, monkeypatch):
+    """POST /api/runs dispatches run_in_background with pipeline_version_id set to
+    the deployed pipeline's current version (the /api/runs -> stamp glue). The
     executor submit is captured so the assertion is deterministic (no threadpool
     wait) and no background run actually executes."""
     import ui.backend.main as main
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
-    assert client.put("/api/config/workflows/stamp_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/stamp_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        expected = db.query(WorkflowRecord).filter_by(name="stamp_wf").one().current_version_id
+        expected = db.query(PipelineRecord).filter_by(name="stamp_wf").one().current_version_id
     assert expected is not None
 
     captured = {}
@@ -1225,24 +1225,24 @@ def test_create_run_stamps_the_deployed_workflow_version(client, monkeypatch):
         return None
 
     monkeypatch.setattr(main._executor, "submit", _fake_submit)
-    resp = client.post("/api/runs", json={"workflow": "stamp_wf", "input": "hi"},
+    resp = client.post("/api/runs", json={"pipeline": "stamp_wf", "input": "hi"},
                        headers=_org_user_headers(client))
     assert resp.status_code == 200
-    assert captured["workflow_version_id"] == expected
+    assert captured["pipeline_version_id"] == expected
 
 
-def test_create_run_stamps_the_deployed_workflow_id(client, monkeypatch):
-    """POST /api/runs dispatches run_in_background with workflow_id set to the
-    deployed workflow's stable head id (WorkflowRecord.id) -- the cross-workflow
-    memory-scoping key, distinct from workflow_version_id."""
+def test_create_run_stamps_the_deployed_pipeline_id(client, monkeypatch):
+    """POST /api/runs dispatches run_in_background with pipeline_id set to the
+    deployed pipeline's stable head id (PipelineRecord.id) -- the cross-pipeline
+    memory-scoping key, distinct from pipeline_version_id."""
     import ui.backend.main as main
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
-    assert client.put("/api/config/workflows/id_stamp_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/id_stamp_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        expected = db.query(WorkflowRecord).filter_by(name="id_stamp_wf").one().id
+        expected = db.query(PipelineRecord).filter_by(name="id_stamp_wf").one().id
 
     captured = {}
 
@@ -1251,129 +1251,129 @@ def test_create_run_stamps_the_deployed_workflow_id(client, monkeypatch):
         return None
 
     monkeypatch.setattr(main._executor, "submit", _fake_submit)
-    resp = client.post("/api/runs", json={"workflow": "id_stamp_wf", "input": "hi"},
+    resp = client.post("/api/runs", json={"pipeline": "id_stamp_wf", "input": "hi"},
                        headers=_org_user_headers(client))
     assert resp.status_code == 200
-    assert captured["workflow_id"] == expected
+    assert captured["pipeline_id"] == expected
 
 
-def test_resolve_workflow_and_version_binds_version_to_the_built_record(client):
-    """_resolve_workflow_and_version returns the current_version_id of the same
-    record it built the workflow from (one read), so a run stamps the version it
+def test_resolve_pipeline_and_version_binds_version_to_the_built_record(client):
+    """_resolve_pipeline_and_version returns the current_version_id of the same
+    record it built the pipeline from (one read), so a run stamps the version it
     actually executed rather than a separately-queried, possibly-newer one."""
     import ui.backend.main as main
     from helpers import open_test_db, get_org_id
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
-    assert client.put("/api/config/workflows/rv_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/rv_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        record = db.query(WorkflowRecord).filter_by(name="rv_wf").one()
-        expected_version, expected_workflow_id = record.current_version_id, record.id
-        workflow, version_id, workflow_id = main._resolve_workflow_and_version(
+        record = db.query(PipelineRecord).filter_by(name="rv_wf").one()
+        expected_version, expected_pipeline_id = record.current_version_id, record.id
+        pipeline, version_id, pipeline_id = main._resolve_pipeline_and_version(
             "rv_wf", db, get_org_id("default")
         )
-    assert workflow is not None
+    assert pipeline is not None
     assert version_id == expected_version
-    assert workflow_id == expected_workflow_id
+    assert pipeline_id == expected_pipeline_id
 
 
-def test_delete_workflow_also_deletes_its_version_history(client):
-    """Deleting a workflow head removes its immutable versions too -- no orphaned
-    workflow_versions rows survive a deleted head (FK enforcement is off)."""
+def test_delete_pipeline_also_deletes_its_version_history(client):
+    """Deleting a pipeline head removes its immutable versions too -- no orphaned
+    pipeline_versions rows survive a deleted head (FK enforcement is off)."""
     from helpers import open_test_db
-    from ui.backend.db.models import WorkflowRecord, WorkflowVersion
+    from ui.backend.db.models import PipelineRecord, PipelineVersion
 
-    assert client.put("/api/config/workflows/del_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/del_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        head = db.query(WorkflowRecord).filter_by(name="del_wf").one()
+        head = db.query(PipelineRecord).filter_by(name="del_wf").one()
         wf_id = head.id
-        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 1
+        assert db.query(PipelineVersion).filter_by(pipeline_id=wf_id).count() == 1
 
-    assert client.delete("/api/config/workflows/del_wf?org=default").status_code == 204
+    assert client.delete("/api/config/pipelines/del_wf?org=default").status_code == 204
 
     with open_test_db() as db:
-        assert db.query(WorkflowRecord).filter_by(name="del_wf").one_or_none() is None
-        assert db.query(WorkflowVersion).filter_by(workflow_id=wf_id).count() == 0
+        assert db.query(PipelineRecord).filter_by(name="del_wf").one_or_none() is None
+        assert db.query(PipelineVersion).filter_by(pipeline_id=wf_id).count() == 0
 
 
-def test_delete_workflow_refused_when_a_run_references_its_version(client):
-    """A workflow whose version a run recorded can't be hard-deleted (409) --
+def test_delete_pipeline_refused_when_a_run_references_its_version(client):
+    """A pipeline whose version a run recorded can't be hard-deleted (409) --
     deleting would orphan that run's provenance. History is preserved."""
     from helpers import open_test_db, get_org_id
-    from ui.backend.db.models import WorkflowRecord, WorkflowVersion, Run
+    from ui.backend.db.models import PipelineRecord, PipelineVersion, Run
 
-    assert client.put("/api/config/workflows/run_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/run_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        head = db.query(WorkflowRecord).filter_by(name="run_wf").one()
-        db.add(Run(id="run-ref-1", workflow="run_wf", input="hi",
-                   org_id=get_org_id("default"), workflow_version_id=head.current_version_id))
+        head = db.query(PipelineRecord).filter_by(name="run_wf").one()
+        db.add(Run(id="run-ref-1", pipeline="run_wf", input="hi",
+                   org_id=get_org_id("default"), pipeline_version_id=head.current_version_id))
         db.commit()
 
-    resp = client.delete("/api/config/workflows/run_wf?org=default")
+    resp = client.delete("/api/config/pipelines/run_wf?org=default")
     assert resp.status_code == 409
     assert "run" in resp.json()["detail"].lower()
     with open_test_db() as db:
-        head = db.query(WorkflowRecord).filter_by(name="run_wf").one_or_none()
+        head = db.query(PipelineRecord).filter_by(name="run_wf").one_or_none()
         assert head is not None  # head preserved
-        assert db.query(WorkflowVersion).filter_by(workflow_id=head.id).count() == 1  # history intact
+        assert db.query(PipelineVersion).filter_by(pipeline_id=head.id).count() == 1  # history intact
 
 
-def test_delete_workflow_detaches_builder_sessions(client):
-    """Deleting a never-run workflow nulls any builder session's workflow_id, so
+def test_delete_pipeline_detaches_builder_sessions(client):
+    """Deleting a never-run pipeline nulls any builder session's pipeline_id, so
     none is left pointing at a deleted head (it self-heals on next deploy)."""
     from helpers import open_test_db, get_org_id
-    from ui.backend.db.models import WorkflowRecord, BuilderSession
+    from ui.backend.db.models import PipelineRecord, BuilderSession
 
-    assert client.put("/api/config/workflows/sess_wf?org=default",
-                      json=_VALID_WORKFLOW_CONFIG).status_code == 200
+    assert client.put("/api/config/pipelines/sess_wf?org=default",
+                      json=_VALID_PIPELINE_CONFIG).status_code == 200
     with open_test_db() as db:
-        head = db.query(WorkflowRecord).filter_by(name="sess_wf").one()
+        head = db.query(PipelineRecord).filter_by(name="sess_wf").one()
         db.add(BuilderSession(id="sess-detach-1", org_id=get_org_id("default"),
-                              status="deployed", workflow_id=head.id))
+                              status="deployed", pipeline_id=head.id))
         db.commit()
 
-    assert client.delete("/api/config/workflows/sess_wf?org=default").status_code == 204
+    assert client.delete("/api/config/pipelines/sess_wf?org=default").status_code == 204
     with open_test_db() as db:
         sess = db.get(BuilderSession, "sess-detach-1")
-        assert sess is not None and sess.workflow_id is None
+        assert sess is not None and sess.pipeline_id is None
 
 
-def test_only_deployed_workflows_are_listed_and_runnable(client):
+def test_only_deployed_pipelines_are_listed_and_runnable(client):
     from helpers import open_test_db, get_org_id
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
 
     # crud save = deploy -> runnable immediately
-    client.put("/api/config/workflows/live_wf?org=default", json=_VALID_WORKFLOW_CONFIG)
+    client.put("/api/config/pipelines/live_wf?org=default", json=_VALID_PIPELINE_CONFIG)
     # a draft can only exist as a legacy/direct row now
     with open_test_db() as db:
         org_id = get_org_id("default")
-        db.add(WorkflowRecord(name="draft_wf",
-                              config={**_VALID_WORKFLOW_CONFIG, "name": "draft_wf"},
+        db.add(PipelineRecord(name="draft_wf",
+                              config={**_VALID_PIPELINE_CONFIG, "name": "draft_wf"},
                               status="draft", org_id=org_id))
         db.commit()
 
     headers = _org_user_headers(client)
-    workflows = client.get("/api/workflows", headers=headers).json()["workflows"]
-    assert "live_wf" in workflows
-    assert "draft_wf" not in workflows
-    assert client.post("/api/runs", json={"workflow": "live_wf", "input": "hi"},
+    pipelines = client.get("/api/pipelines", headers=headers).json()["pipelines"]
+    assert "live_wf" in pipelines
+    assert "draft_wf" not in pipelines
+    assert client.post("/api/runs", json={"pipeline": "live_wf", "input": "hi"},
                        headers=headers).status_code == 200
-    assert client.post("/api/runs", json={"workflow": "draft_wf", "input": "hi"},
+    assert client.post("/api/runs", json={"pipeline": "draft_wf", "input": "hi"},
                        headers=headers).status_code == 404
 
 
-def test_workflow_put_rejects_agent_model_not_in_catalog(client):
-    bad_config = {**_VALID_WORKFLOW_CONFIG,
-                  "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "model": "openai:gpt-nope"}]}
-    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
+def test_pipeline_put_rejects_agent_model_not_in_catalog(client):
+    bad_config = {**_VALID_PIPELINE_CONFIG,
+                  "agents": [{**_VALID_PIPELINE_CONFIG["agents"][0], "model": "openai:gpt-nope"}]}
+    resp = client.put("/api/config/pipelines/support_pipeline?org=default", json=bad_config)
     assert resp.status_code == 400
     assert "openai:gpt-nope" in resp.json()["detail"]
 
 
-def test_workflow_put_rejects_an_embedding_model_as_an_agent_model(client):
+def test_pipeline_put_rejects_an_embedding_model_as_an_agent_model(client):
     """A `tier="embedding"` catalog entry prices a knowledge base's embedding
     calls; it is not a chat model. Deploy validation resolves the catalog
     through `list_chat_entries`, so such a spec is as unknown here as one with
@@ -1384,19 +1384,19 @@ def test_workflow_put_rejects_an_embedding_model_as_an_agent_model(client):
         json={"display_name": spec, "tier": "embedding"},
     ).status_code == 200
 
-    bad_config = {**_VALID_WORKFLOW_CONFIG,
-                  "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "model": spec}]}
-    resp = client.put("/api/config/workflows/embedding_model_wf?org=default", json=bad_config)
+    bad_config = {**_VALID_PIPELINE_CONFIG,
+                  "agents": [{**_VALID_PIPELINE_CONFIG["agents"][0], "model": spec}]}
+    resp = client.put("/api/config/pipelines/embedding_model_wf?org=default", json=bad_config)
     assert resp.status_code == 400
     assert spec in resp.json()["detail"]
     assert "Pick a model from the catalog" in resp.json()["detail"]
 
 
-def test_workflow_put_rejects_agent_with_missing_none_empty_or_nonstring_model(client):
+def test_pipeline_put_rejects_agent_with_missing_none_empty_or_nonstring_model(client):
     # The operator CRUD path builds Agent(**spec) directly, bypassing the
     # AgentSpec.model:str check -- so a missing/None/empty/non-string model must
     # be rejected at save, not persisted as deployed and failing at first run.
-    base_agent = _VALID_WORKFLOW_CONFIG["agents"][0]
+    base_agent = _VALID_PIPELINE_CONFIG["agents"][0]
     cases = [
         {k: v for k, v in base_agent.items() if k != "model"},  # missing
         {**base_agent, "model": None},
@@ -1405,42 +1405,42 @@ def test_workflow_put_rejects_agent_with_missing_none_empty_or_nonstring_model(c
     ]
     headers = _org_user_headers(client)
     for i, agent in enumerate(cases):
-        bad_config = {**_VALID_WORKFLOW_CONFIG, "agents": [agent]}
-        resp = client.put(f"/api/config/workflows/no_model_{i}?org=default", json=bad_config)
+        bad_config = {**_VALID_PIPELINE_CONFIG, "agents": [agent]}
+        resp = client.put(f"/api/config/pipelines/no_model_{i}?org=default", json=bad_config)
         assert resp.status_code == 400, f"case {i} should be rejected"
         # nothing persisted -> not runnable/listed
         assert f"no_model_{i}" not in client.get(
-            "/api/workflows", headers=headers
-        ).json()["workflows"]
+            "/api/pipelines", headers=headers
+        ).json()["pipelines"]
 
 
-def test_workflow_put_rejects_invalid_config(client):
-    bad_config = {**_VALID_WORKFLOW_CONFIG, "teams": [{"name": "support_team", "agents": ["does_not_exist"], "mode": "sequential"}]}
+def test_pipeline_put_rejects_invalid_config(client):
+    bad_config = {**_VALID_PIPELINE_CONFIG, "teams": [{"name": "support_team", "agents": ["does_not_exist"], "mode": "sequential"}]}
 
-    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
+    resp = client.put("/api/config/pipelines/support_pipeline?org=default", json=bad_config)
 
     assert resp.status_code == 400
     assert "unknown agent" in resp.json()["detail"]
 
 
-def test_workflow_put_non_list_knowledge_bases_returns_400(client):
+def test_pipeline_put_non_list_knowledge_bases_returns_400(client):
     # Regression: a malformed non-list `knowledge_bases` value must be rejected
-    # with 400 by the workflow validator, not crash the request with an
+    # with 400 by the pipeline validator, not crash the request with an
     # uncaught TypeError (500). The CR-001 path-guard iteration must run inside
-    # the error-handling try block, like the baseline _build_workflow did.
-    bad_config = {**_VALID_WORKFLOW_CONFIG, "knowledge_bases": 1}
+    # the error-handling try block, like the baseline _build_pipeline did.
+    bad_config = {**_VALID_PIPELINE_CONFIG, "knowledge_bases": 1}
 
-    resp = client.put("/api/config/workflows/support_workflow?org=default", json=bad_config)
+    resp = client.put("/api/config/pipelines/support_pipeline?org=default", json=bad_config)
 
     assert resp.status_code == 400
 
 
-def test_workflow_config_is_runnable_via_get_workflow(client):
-    client.put("/api/config/workflows/support_workflow?org=default", json=_VALID_WORKFLOW_CONFIG)
+def test_pipeline_config_is_runnable_via_get_pipeline(client):
+    client.put("/api/config/pipelines/support_pipeline?org=default", json=_VALID_PIPELINE_CONFIG)
 
     resp = client.post(
         "/api/runs",
-        json={"workflow": "support_workflow", "input": "hi"},
+        json={"pipeline": "support_pipeline", "input": "hi"},
         headers=_org_user_headers(client),
     )
 
@@ -1498,7 +1498,7 @@ def test_skill_put_rejects_missing_instructions(client):
     assert resp.status_code == 400
 
 
-def test_workflow_put_accepts_skill_reference_when_skill_exists(client):
+def test_pipeline_put_accepts_skill_reference_when_skill_exists(client):
     client.put("/api/config/skills/research_skill", json={
         "instructions": "Research topics thoroughly.",
         "tools": [],
@@ -1514,13 +1514,13 @@ def test_workflow_put_accepts_skill_reference_when_skill_exists(client):
             "skills": ["research_skill"],
         }],
         "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
-        "workflow": {"steps": ["team1"]},
+        "pipeline": {"steps": ["team1"]},
     }
-    resp = client.put("/api/config/workflows/my_workflow?org=default", json=config)
+    resp = client.put("/api/config/pipelines/my_pipeline?org=default", json=config)
     assert resp.status_code == 200
 
 
-def test_workflow_put_rejects_unknown_skill_reference(client):
+def test_pipeline_put_rejects_unknown_skill_reference(client):
     config = {
         "knowledge_bases": [],
         "agents": [{
@@ -1532,9 +1532,9 @@ def test_workflow_put_rejects_unknown_skill_reference(client):
             "skills": ["nonexistent_skill"],
         }],
         "teams": [{"name": "team1", "agents": ["agent1"], "mode": "sequential"}],
-        "workflow": {"steps": ["team1"]},
+        "pipeline": {"steps": ["team1"]},
     }
-    resp = client.put("/api/config/workflows/my_workflow?org=default", json=config)
+    resp = client.put("/api/config/pipelines/my_pipeline?org=default", json=config)
     assert resp.status_code == 400
     assert "Unknown skill" in resp.json()["detail"]
 
@@ -1574,13 +1574,13 @@ def test_load_knowledge_base_tools_builds_only_referenced_kbs(client, tmp_path):
     assert "Refund" in tools["policy_kb"]("refund processing")
 
 
-def test_workflow_put_resolves_standalone_knowledge_base_by_name(client, tmp_path):
+def test_pipeline_put_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
     client.put("/api/config/knowledge_bases/policy_kb?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
-    workflow_config = {
+    pipeline_config = {
         "agents": [
             {
                 "name": "support_agent",
@@ -1591,9 +1591,9 @@ def test_workflow_put_resolves_standalone_knowledge_base_by_name(client, tmp_pat
             }
         ],
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
+    resp = client.put("/api/config/pipelines/policy_wf?org=default", json=pipeline_config)
 
     assert resp.status_code == 200
 
@@ -1604,7 +1604,7 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
     client.put("/api/config/knowledge_bases/policy_kb?org=default", json={"path": str(docs_dir), "type": "local_folder"})
 
-    workflow_config = {
+    pipeline_config = {
         "agents": [
             {
                 "name": "support_agent",
@@ -1615,23 +1615,23 @@ def test_run_resolves_standalone_knowledge_base_by_name(client, tmp_path):
             }
         ],
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    put_resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
+    put_resp = client.put("/api/config/pipelines/policy_wf?org=default", json=pipeline_config)
     assert put_resp.status_code == 200
 
     # Defensive only: the `client` fixture already clears the cache at setup,
-    # and the workflow PUT route never populates `_workflow_cache` itself.
-    backend_main._workflow_cache.clear()
+    # and the pipeline PUT route never populates `_pipeline_cache` itself.
+    backend_main._pipeline_cache.clear()
     run_resp = client.post(
         "/api/runs",
-        json={"workflow": "policy_wf", "input": "How long do refunds take?"},
+        json={"pipeline": "policy_wf", "input": "How long do refunds take?"},
         headers=_org_user_headers(client),
     )
     assert run_resp.status_code == 200
 
 
-def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, tmp_path):
+def test_pipeline_put_resolves_standalone_vector_knowledge_base_by_name(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "policy.txt").write_text("Refunds are processed within 5 business days.")
@@ -1640,7 +1640,7 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
         json={"path": str(docs_dir), "type": "vector", "embedding_model": "fake:8"},
     )
 
-    workflow_config = {
+    pipeline_config = {
         "agents": [
             {
                 "name": "support_agent",
@@ -1651,26 +1651,26 @@ def test_workflow_put_resolves_standalone_vector_knowledge_base_by_name(client, 
             }
         ],
         "teams": [{"name": "team", "agents": ["support_agent"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/policy_wf?org=default", json=workflow_config)
+    resp = client.put("/api/config/pipelines/policy_wf?org=default", json=pipeline_config)
 
     assert resp.status_code == 200
 
 
-def test_deployed_workflow_keeps_pinned_skill_until_redeploy(client):
+def test_deployed_pipeline_keeps_pinned_skill_until_redeploy(client):
     client.put(
         "/api/config/skills/greeting",
         json={"description": "How to greet", "instructions": "Say hello warmly.", "tools": []},
     )
-    workflow_config = {
+    pipeline_config = {
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "skills": ["greeting"]}],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    client.put("/api/config/workflows/skill_wf?org=default", json=workflow_config)
+    client.put("/api/config/pipelines/skill_wf?org=default", json=pipeline_config)
 
-    from ui.backend.main import _get_workflow
+    from ui.backend.main import _get_pipeline
     from ui.backend.db_session import get_db as real_get_db
 
     from helpers import get_org_id
@@ -1678,7 +1678,7 @@ def test_deployed_workflow_keeps_pinned_skill_until_redeploy(client):
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        wf1 = _get_workflow("skill_wf", db, get_org_id())
+        wf1 = _get_pipeline("skill_wf", db, get_org_id())
         assert "Say hello warmly." in wf1.steps[0].agents[0].backstory
 
         client.put(
@@ -1686,24 +1686,24 @@ def test_deployed_workflow_keeps_pinned_skill_until_redeploy(client):
             json={"description": "How to greet", "instructions": "Say hello formally.", "tools": []},
         )
 
-        wf2 = _get_workflow("skill_wf", db, get_org_id())
+        wf2 = _get_pipeline("skill_wf", db, get_org_id())
         assert "Say hello warmly." in wf2.steps[0].agents[0].backstory
         assert wf2 is not wf1
 
-        client.put("/api/config/workflows/skill_wf?org=default", json=workflow_config)
-        wf3 = _get_workflow("skill_wf", db, get_org_id())
+        client.put("/api/config/pipelines/skill_wf?org=default", json=pipeline_config)
+        wf3 = _get_pipeline("skill_wf", db, get_org_id())
         assert "Say hello formally." in wf3.steps[0].agents[0].backstory
     finally:
         db_gen.close()
 
 
-def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
-    workflow_config = {
+def test_load_skills_only_runs_on_pipeline_cache_miss(client, monkeypatch):
+    pipeline_config = {
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    client.put("/api/config/workflows/cached_wf?org=default", json=workflow_config)
+    client.put("/api/config/pipelines/cached_wf?org=default", json=pipeline_config)
 
     calls = []
     original = backend_main.load_skills
@@ -1714,7 +1714,7 @@ def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
 
     monkeypatch.setattr(backend_main, "load_skills", counting_load_skills)
 
-    from ui.backend.main import _get_workflow
+    from ui.backend.main import _get_pipeline
     from ui.backend.db_session import get_db as real_get_db
 
     from helpers import get_org_id
@@ -1722,8 +1722,8 @@ def test_load_skills_only_runs_on_workflow_cache_miss(client, monkeypatch):
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        _get_workflow("cached_wf", db, get_org_id())
-        _get_workflow("cached_wf", db, get_org_id())
+        _get_pipeline("cached_wf", db, get_org_id())
+        _get_pipeline("cached_wf", db, get_org_id())
     finally:
         db_gen.close()
 
@@ -1740,7 +1740,7 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     inline_dir.mkdir()
     (inline_dir / "doc.txt").write_text("INLINE: policy")
 
-    workflow_config = {
+    pipeline_config = {
         "knowledge_bases": [{"name": "shared_name", "path": str(inline_dir), "type": "local_folder"}],
         "agents": [
             {
@@ -1752,12 +1752,12 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
             }
         ],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/priority_wf?org=default", json=workflow_config)
+    resp = client.put("/api/config/pipelines/priority_wf?org=default", json=pipeline_config)
     assert resp.status_code == 200
 
-    from ui.backend.main import _get_workflow
+    from ui.backend.main import _get_pipeline
     from ui.backend.db_session import get_db as real_get_db
 
     from helpers import get_org_id
@@ -1765,42 +1765,42 @@ def test_inline_knowledge_base_wins_over_standalone_of_same_name(client, tmp_pat
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        workflow = _get_workflow("priority_wf", db, get_org_id())
+        pipeline = _get_pipeline("priority_wf", db, get_org_id())
     finally:
         db_gen.close()
 
-    team = workflow.steps[0]
+    team = pipeline.steps[0]
     agent = team.agents[0]
     tool = next(t for t in agent.tools if t.__name__ == "shared_name")
     assert "INLINE" in tool("policy")
 
 
-def test_same_named_workflow_in_two_orgs_resolves_independently(client):
-    # The workflow cache is keyed by (org_id, name): two orgs' same-named
-    # workflows must build and cache as separate entries.
+def test_same_named_pipeline_in_two_orgs_resolves_independently(client):
+    # The pipeline cache is keyed by (org_id, name): two orgs' same-named
+    # pipelines must build and cache as separate entries.
     from helpers import get_org_id, open_test_db
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.db_session import get_db as real_get_db
-    from ui.backend.main import _get_workflow
+    from ui.backend.main import _get_pipeline
 
     with open_test_db() as db:
         get_or_create_org(db, "other")
 
-    def workflow_config(reply):
+    def pipeline_config(reply):
         return {
             "agents": [{"name": "a", "role": "r", "goal": "g", "model": f"fake:{reply}"}],
             "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-            "workflow": {"steps": ["team"]},
+            "pipeline": {"steps": ["team"]},
         }
 
-    assert client.put("/api/config/workflows/wf?org=default", json=workflow_config("AAA")).status_code == 200
-    assert client.put("/api/config/workflows/wf?org=other", json=workflow_config("BBB")).status_code == 200
+    assert client.put("/api/config/pipelines/wf?org=default", json=pipeline_config("AAA")).status_code == 200
+    assert client.put("/api/config/pipelines/wf?org=other", json=pipeline_config("BBB")).status_code == 200
 
     db_gen = backend_main.app.dependency_overrides[real_get_db]()
     db = next(db_gen)
     try:
-        wf_default = _get_workflow("wf", db, get_org_id("default"))
-        wf_other = _get_workflow("wf", db, get_org_id("other"))
+        wf_default = _get_pipeline("wf", db, get_org_id("default"))
+        wf_other = _get_pipeline("wf", db, get_org_id("other"))
     finally:
         db_gen.close()
 
@@ -1809,50 +1809,50 @@ def test_same_named_workflow_in_two_orgs_resolves_independently(client):
     assert wf_other.steps[0].agents[0].model == "fake:BBB"
 
 
-def test_broken_standalone_kb_only_breaks_workflows_that_reference_it(client):
+def test_broken_standalone_kb_only_breaks_pipelines_that_reference_it(client):
     client.put("/api/config/knowledge_bases/broken_kb?org=default", json={"path": "/no/such/path", "type": "local_folder"})
 
-    broken_workflow = {
+    broken_pipeline = {
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["broken_kb"]}],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    resp = client.put("/api/config/workflows/broken_wf?org=default", json=broken_workflow)
+    resp = client.put("/api/config/pipelines/broken_wf?org=default", json=broken_pipeline)
     assert resp.status_code == 400
     assert "broken_kb" in resp.json()["detail"]
 
-    unrelated_workflow = {
+    unrelated_pipeline = {
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}],
         "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
-    resp2 = client.put("/api/config/workflows/unrelated_wf?org=default", json=unrelated_workflow)
+    resp2 = client.put("/api/config/pipelines/unrelated_wf?org=default", json=unrelated_pipeline)
     assert resp2.status_code == 200
 
 
-def test_workflow_put_rejects_kb_named_after_builtin(client):
+def test_pipeline_put_rejects_kb_named_after_builtin(client):
     # An inline KB named after a built-in tool would silently shadow it.
-    bad = {**_VALID_WORKFLOW_CONFIG,
+    bad = {**_VALID_PIPELINE_CONFIG,
            "knowledge_bases": [{"name": "calculator", "path": "docs"}],
-           "agents": [{**_VALID_WORKFLOW_CONFIG["agents"][0], "tools": ["calculator"]}]}
-    resp = client.put("/api/config/workflows/collide_wf?org=default", json=bad)
+           "agents": [{**_VALID_PIPELINE_CONFIG["agents"][0], "tools": ["calculator"]}]}
+    resp = client.put("/api/config/pipelines/collide_wf?org=default", json=bad)
     assert resp.status_code == 400
     assert "calculator" in resp.json()["detail"]
     assert "built-in tool name" in resp.json()["detail"]
     assert "collide_wf" not in client.get(
-        "/api/workflows", headers=_org_user_headers(client)
-    ).json()["workflows"]
+        "/api/pipelines", headers=_org_user_headers(client)
+    ).json()["pipelines"]
 
 
 def _deployed_wf(config_agents):
     return {
         "agents": config_agents,
         "teams": [{"name": "team", "agents": [a["name"] for a in config_agents], "mode": "sequential"}],
-        "workflow": {"steps": ["team"]},
+        "pipeline": {"steps": ["team"]},
     }
 
 
-def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
+def test_delete_skill_referenced_by_deployed_pipeline_is_409(client):
     with open_test_db() as db:
         org_id = get_org_id("default")
         db.add(SkillRecord(name="greeting", org_id=org_id,
@@ -1860,9 +1860,9 @@ def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
         db.commit()
     # The typed-row guard only sees dependencies recorded at deploy time
     # (record_version_dependencies), so deploy for real via PUT rather than
-    # inserting the WorkflowRecord directly.
+    # inserting the PipelineRecord directly.
     deploy = client.put(
-        "/api/config/workflows/greeter_team?org=default",
+        "/api/config/pipelines/greeter_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:hi", "skills": ["greeting"]}]),
     )
@@ -1873,7 +1873,7 @@ def test_delete_skill_referenced_by_deployed_workflow_is_409(client):
     assert client.get("/api/config/skills/greeting?org=default").status_code == 200  # not deleted
 
 
-def test_delete_kb_referenced_by_deployed_workflow_is_409(client, tmp_path):
+def test_delete_kb_referenced_by_deployed_pipeline_is_409(client, tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "a.txt").write_text("hello", encoding="utf-8")
@@ -1883,9 +1883,9 @@ def test_delete_kb_referenced_by_deployed_workflow_is_409(client, tmp_path):
     ).status_code == 200
     # The typed-row guard only sees dependencies recorded at deploy time
     # (record_version_dependencies), so deploy for real via PUT rather than
-    # inserting the WorkflowRecord directly.
+    # inserting the PipelineRecord directly.
     deploy = client.put(
-        "/api/config/workflows/kb_team?org=default",
+        "/api/config/pipelines/kb_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:hi", "tools": ["mykb"]}]),
     )
@@ -1924,22 +1924,22 @@ def test_kb_upload_rejects_builtin_name(client):
     assert "built-in tool name" in resp.json()["detail"]
 
 
-def test_delete_scan_tolerates_malformed_deployed_workflow(client):
-    # F6: a malformed deployed workflow must not 500 an unrelated skill/KB delete.
+def test_delete_scan_tolerates_malformed_deployed_pipeline(client):
+    # F6: a malformed deployed pipeline must not 500 an unrelated skill/KB delete.
     with open_test_db() as db:
         org_id = get_org_id("default")
         db.add(SkillRecord(name="unused_sk", org_id=org_id,
                            config={"name": "unused_sk", "instructions": "x", "tools": []}))
-        db.add(WorkflowRecord(name="broken", org_id=org_id, status="deployed",
-                              config={"agents": 5, "teams": [], "workflow": {"steps": []}}))
+        db.add(PipelineRecord(name="broken", org_id=org_id, status="deployed",
+                              config={"agents": 5, "teams": [], "pipeline": {"steps": []}}))
         db.commit()
     resp = client.delete("/api/config/skills/unused_sk?org=default")
-    assert resp.status_code == 204  # not 500 despite the malformed workflow
+    assert resp.status_code == 204  # not 500 despite the malformed pipeline
 
 
 def test_delete_builtin_platform_skill_is_refused(client):
     # F4: a seeded platform built-in skill can't be deleted (would orphan bundled
-    # YAML workflows that depend on it).
+    # YAML pipelines that depend on it).
     from ui.backend.skills import seed_default_skills
     with open_test_db() as db:
         seed_default_skills(db)
@@ -1951,9 +1951,9 @@ def test_delete_builtin_platform_skill_is_refused(client):
 # --- Typed dependency records (P1-04): cross-org matching, current-config
 # semantics, and head-delete cascade ---
 
-def test_delete_platform_builtin_skill_referenced_by_org_workflow_is_409(client):
+def test_delete_platform_builtin_skill_referenced_by_org_pipeline_is_409(client):
     # A platform built-in skill (org omitted at creation -> org_id NULL) is
-    # referenced by an org's deployed workflow; deleting it platform-wide (no
+    # referenced by an org's deployed pipeline; deleting it platform-wide (no
     # ?org=) must still 409, proving the guard matches by resource_id across
     # orgs rather than needing an all-orgs name scan.
     assert client.put(
@@ -1961,7 +1961,7 @@ def test_delete_platform_builtin_skill_referenced_by_org_workflow_is_409(client)
         json={"instructions": "hi", "tools": []},
     ).status_code == 200
     assert client.put(
-        "/api/config/workflows/org_team?org=default",
+        "/api/config/pipelines/org_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:hi", "skills": ["greeting"]}]),
     ).status_code == 200
@@ -1971,7 +1971,7 @@ def test_delete_platform_builtin_skill_referenced_by_org_workflow_is_409(client)
 
 
 def test_skill_dropped_from_current_version_becomes_deletable(client):
-    # Deploy a workflow referencing skill 's', then redeploy the same workflow
+    # Deploy a pipeline referencing skill 's', then redeploy the same pipeline
     # name with an agent config that no longer references 's'. The superseded
     # version still has a dep row, but the guard only reads the current
     # version, so 's' must become deletable.
@@ -1981,17 +1981,17 @@ def test_skill_dropped_from_current_version_becomes_deletable(client):
                            config={"name": "s", "instructions": "hi", "tools": []}))
         db.commit()
     assert client.put(
-        "/api/config/workflows/redeploy_team?org=default",
+        "/api/config/pipelines/redeploy_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:v1", "skills": ["s"]}]),
     ).status_code == 200
     assert client.put(
-        "/api/config/workflows/redeploy_team?org=default",
+        "/api/config/pipelines/redeploy_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g", "model": "fake:v2"}]),
     ).status_code == 200
-    from ui.backend.db.models import SkillVersion, WorkflowDependency
+    from ui.backend.db.models import SkillVersion, PipelineDependency
     with open_test_db() as db:
-        pinned_version_id = db.query(WorkflowDependency.resource_version_id).filter_by(
+        pinned_version_id = db.query(PipelineDependency.resource_version_id).filter_by(
             resource_kind="skill", resource_name="s"
         ).scalar()
     assert client.delete("/api/config/skills/s?org=default").status_code == 204
@@ -2010,7 +2010,7 @@ def test_org_skill_created_after_deploy_does_not_retarget_team(client):
         json={"instructions": "hi", "tools": []},
     ).status_code == 200
     assert client.put(
-        "/api/config/workflows/helper_team?org=default",
+        "/api/config/pipelines/helper_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:hi", "skills": ["helper"]}]),
     ).status_code == 200
@@ -2028,8 +2028,8 @@ def test_org_skill_created_after_deploy_does_not_retarget_team(client):
 
 
 def test_inline_kb_shadowing_standalone_leaves_standalone_deletable(client, tmp_path):
-    # A standalone KB "faq" and a workflow that defines an inline KB also named
-    # "faq". The inline KB shadows the standalone at runtime, so the workflow
+    # A standalone KB "faq" and a pipeline that defines an inline KB also named
+    # "faq". The inline KB shadows the standalone at runtime, so the pipeline
     # does not depend on the standalone -- deleting the standalone must 204, not
     # 409 (the inline KB has no standalone row to protect).
     docs_dir = tmp_path / "docs"
@@ -2040,21 +2040,21 @@ def test_inline_kb_shadowing_standalone_leaves_standalone_deletable(client, tmp_
         json={"path": str(docs_dir), "type": "local_folder"},
     ).status_code == 200
     assert client.put(
-        "/api/config/workflows/inline_team?org=default",
+        "/api/config/pipelines/inline_team?org=default",
         json={"knowledge_bases": [{"name": "faq", "path": str(docs_dir), "type": "local_folder"}],
               "agents": [{"name": "a", "role": "r", "goal": "g",
                           "model": "fake:hi", "tools": ["faq"]}],
               "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-              "workflow": {"steps": ["team"]}},
+              "pipeline": {"steps": ["team"]}},
     ).status_code == 200
     assert client.delete("/api/config/knowledge_bases/faq?org=default").status_code == 204
 
 
-def test_delete_workflow_head_removes_dependency_rows(client):
-    # Deploy a never-run workflow referencing a skill, then hard-delete the
-    # head. FK enforcement is off, so no DB cascade removes WorkflowDependency
-    # rows -- delete_workflow_config must clean them up itself.
-    from ui.backend.db.models import WorkflowDependency, WorkflowVersion
+def test_delete_pipeline_head_removes_dependency_rows(client):
+    # Deploy a never-run pipeline referencing a skill, then hard-delete the
+    # head. FK enforcement is off, so no DB cascade removes PipelineDependency
+    # rows -- delete_pipeline_config must clean them up itself.
+    from ui.backend.db.models import PipelineDependency, PipelineVersion
 
     with open_test_db() as db:
         org_id = get_org_id("default")
@@ -2062,25 +2062,25 @@ def test_delete_workflow_head_removes_dependency_rows(client):
                            config={"name": "cascade_skill", "instructions": "hi", "tools": []}))
         db.commit()
     assert client.put(
-        "/api/config/workflows/cascade_team?org=default",
+        "/api/config/pipelines/cascade_team?org=default",
         json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
                             "model": "fake:hi", "skills": ["cascade_skill"]}]),
     ).status_code == 200
 
     with open_test_db() as db:
-        workflow_id = db.query(WorkflowRecord).filter_by(name="cascade_team", org_id=org_id).one().id
-        version_ids = [v for (v,) in db.query(WorkflowVersion.id).filter_by(workflow_id=workflow_id)]
+        pipeline_id = db.query(PipelineRecord).filter_by(name="cascade_team", org_id=org_id).one().id
+        version_ids = [v for (v,) in db.query(PipelineVersion.id).filter_by(pipeline_id=pipeline_id)]
         assert version_ids  # sanity: a version was published
-        dep_count_before = db.query(WorkflowDependency).filter(
-            WorkflowDependency.workflow_version_id.in_(version_ids)
+        dep_count_before = db.query(PipelineDependency).filter(
+            PipelineDependency.pipeline_version_id.in_(version_ids)
         ).count()
         assert dep_count_before > 0  # sanity: a dep row was recorded
 
-    assert client.delete("/api/config/workflows/cascade_team?org=default").status_code == 204
+    assert client.delete("/api/config/pipelines/cascade_team?org=default").status_code == 204
 
     with open_test_db() as db:
-        remaining = db.query(WorkflowDependency).filter(
-            WorkflowDependency.workflow_version_id.in_(version_ids)
+        remaining = db.query(PipelineDependency).filter(
+            PipelineDependency.pipeline_version_id.in_(version_ids)
         ).count()
         assert remaining == 0
 
@@ -2090,7 +2090,7 @@ def test_delete_workflow_head_removes_dependency_rows(client):
 def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client, tmp_path):
     # F2: the loader honors a dict-shaped `tools` ({"mykb": true} -> ["mykb"]), so
     # record_version_dependencies (which the delete guard now reads) must too, else
-    # the reference is missed (bypass). The workflow PUT body is un-validated raw
+    # the reference is missed (bypass). The pipeline PUT body is un-validated raw
     # JSON (no Specification pydantic model), so this shape reaches deploy for real.
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
@@ -2100,11 +2100,11 @@ def test_delete_kb_referenced_via_dict_shaped_tools_is_409(client, tmp_path):
         json={"path": str(docs_dir), "type": "local_folder"},
     ).status_code == 200
     deploy = client.put(
-        "/api/config/workflows/dict_team?org=default",
+        "/api/config/pipelines/dict_team?org=default",
         json={"agents": [{"name": "a", "role": "r", "goal": "g",
                           "model": "fake:hi", "tools": {"mykb": True}}],
               "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-              "workflow": {"steps": ["team"]}},
+              "pipeline": {"steps": ["team"]}},
     )
     assert deploy.status_code == 200
     resp = client.delete("/api/config/knowledge_bases/mykb?org=default")
@@ -2119,13 +2119,13 @@ def test_run_fails_closed_on_legacy_kb_shadowing_builtin(client):
         org_id = get_org_id("default")
         db.add(KnowledgeBaseRecord(name="calculator", org_id=org_id,
                                    config={"name": "calculator", "path": "docs"}))
-        db.add(WorkflowRecord(name="legacy_wf", org_id=org_id, status="deployed",
+        db.add(PipelineRecord(name="legacy_wf", org_id=org_id, status="deployed",
                               config={"agents": [{"name": "a", "role": "r", "goal": "g",
                                                   "model": "fake:hi", "tools": ["calculator"]}],
                                       "teams": [{"name": "t", "agents": ["a"], "mode": "sequential"}],
-                                      "workflow": {"steps": ["t"]}}))
+                                      "pipeline": {"steps": ["t"]}}))
         db.commit()
-    resp = client.post("/api/runs", json={"workflow": "legacy_wf", "input": "hi"},
+    resp = client.post("/api/runs", json={"pipeline": "legacy_wf", "input": "hi"},
                        headers=_org_user_headers(client))
     assert resp.status_code == 400
     assert "built-in" in resp.json()["detail"]
@@ -2136,7 +2136,7 @@ def test_run_fails_closed_on_legacy_kb_shadowing_builtin(client):
 def test_delete_kb_referenced_via_string_shaped_tools_is_409(client, tmp_path):
     # F2: the loader does list(tools), so a string "x" resolves to ["x"] and runs;
     # record_version_dependencies (which the delete guard now reads) must use the
-    # same normalization or it misses the reference. The workflow PUT body is
+    # same normalization or it misses the reference. The pipeline PUT body is
     # un-validated raw JSON (no Specification pydantic model), so this shape
     # reaches deploy for real.
     docs_dir = tmp_path / "docs"
@@ -2147,11 +2147,11 @@ def test_delete_kb_referenced_via_string_shaped_tools_is_409(client, tmp_path):
         json={"path": str(docs_dir), "type": "local_folder"},
     ).status_code == 200
     deploy = client.put(
-        "/api/config/workflows/str_team?org=default",
+        "/api/config/pipelines/str_team?org=default",
         json={"agents": [{"name": "a", "role": "r", "goal": "g",
                           "model": "fake:hi", "tools": "x"}],
               "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-              "workflow": {"steps": ["team"]}},
+              "pipeline": {"steps": ["team"]}},
     )
     assert deploy.status_code == 200
     resp = client.delete("/api/config/knowledge_bases/x?org=default")
@@ -2164,22 +2164,22 @@ def test_run_fails_closed_on_legacy_inline_kb_shadowing_builtin(client):
     # after a built-in must also fail closed at load, not silently shadow it.
     with open_test_db() as db:
         org_id = get_org_id("default")
-        db.add(WorkflowRecord(name="inline_wf", org_id=org_id, status="deployed",
+        db.add(PipelineRecord(name="inline_wf", org_id=org_id, status="deployed",
                               config={"knowledge_bases": [{"name": "calculator", "path": "docs"}],
                                       "agents": [{"name": "a", "role": "r", "goal": "g",
                                                   "model": "fake:hi", "tools": ["calculator"]}],
                                       "teams": [{"name": "t", "agents": ["a"], "mode": "sequential"}],
-                                      "workflow": {"steps": ["t"]}}))
+                                      "pipeline": {"steps": ["t"]}}))
         db.commit()
-    resp = client.post("/api/runs", json={"workflow": "inline_wf", "input": "hi"},
+    resp = client.post("/api/runs", json={"pipeline": "inline_wf", "input": "hi"},
                        headers=_org_user_headers(client))
     assert resp.status_code == 400
     assert "built-in" in resp.json()["detail"]
 
 
-def test_delete_workflow_blocked_by_active_share_link(client):
+def test_delete_pipeline_blocked_by_active_share_link(client):
     from helpers import get_org_id, open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
     from ui.backend.db.share_links import create_share_link
     from ui.backend.db.users import get_user_by_username
 
@@ -2188,24 +2188,24 @@ def test_delete_workflow_blocked_by_active_share_link(client):
         "name": "shared_team",
         "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
         "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["tm"]},
+        "pipeline": {"steps": ["tm"]},
     }
     with open_test_db() as db:
-        record = WorkflowRecord(name="shared_team", org_id=org_id, config=config, status="deployed")
+        record = PipelineRecord(name="shared_team", org_id=org_id, config=config, status="deployed")
         db.add(record)
         db.commit()
         db.refresh(record)
         user = get_user_by_username(db, "test")
-        create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        create_share_link(db, pipeline_id=record.id, org_id=org_id, created_by=user.id)
 
-    resp = client.delete("/api/config/workflows/shared_team?org=default")
+    resp = client.delete("/api/config/pipelines/shared_team?org=default")
     assert resp.status_code == 409
     assert "share" in resp.json()["detail"].lower()
 
 
-def test_delete_workflow_allowed_with_only_revoked_share_link(client):
+def test_delete_pipeline_allowed_with_only_revoked_share_link(client):
     from helpers import get_org_id, open_test_db
-    from ui.backend.db.models import WorkflowRecord
+    from ui.backend.db.models import PipelineRecord
     from ui.backend.db.share_links import create_share_link, patch_share_link
     from ui.backend.db.users import get_user_by_username
 
@@ -2214,29 +2214,29 @@ def test_delete_workflow_allowed_with_only_revoked_share_link(client):
         "name": "revoked_share_team",
         "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
         "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["tm"]},
+        "pipeline": {"steps": ["tm"]},
     }
     with open_test_db() as db:
-        record = WorkflowRecord(name="revoked_share_team", org_id=org_id, config=config, status="deployed")
+        record = PipelineRecord(name="revoked_share_team", org_id=org_id, config=config, status="deployed")
         db.add(record)
         db.commit()
         db.refresh(record)
         user = get_user_by_username(db, "test")
-        link = create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        link = create_share_link(db, pipeline_id=record.id, org_id=org_id, created_by=user.id)
         patch_share_link(db, link, active=False)
 
-    resp = client.delete("/api/config/workflows/revoked_share_team?org=default")
+    resp = client.delete("/api/config/pipelines/revoked_share_team?org=default")
     assert resp.status_code == 204
 
 
-def test_deleting_workflow_removes_revoked_share_links_sessions_and_messages(client):
+def test_deleting_pipeline_removes_revoked_share_links_sessions_and_messages(client):
     """A revoked share_links row (and its sessions/messages) must not become
     a permanent orphan when its team is deleted -- FK enforcement is off, so
     nothing else does this, and SQLite's non-AUTOINCREMENT integer primary
-    key means a later workflow could otherwise silently inherit another
+    key means a later pipeline could otherwise silently inherit another
     team's old share links and visitor transcripts (Codex review finding)."""
     from helpers import get_org_id, open_test_db
-    from ui.backend.db.models import ShareLink, ShareMessage, ShareSession, WorkflowRecord
+    from ui.backend.db.models import ShareLink, ShareMessage, ShareSession, PipelineRecord
     from ui.backend.db.share_links import create_share_link, patch_share_link
     from ui.backend.db.share_messages import append_message
     from ui.backend.db.share_sessions import create_share_session
@@ -2247,21 +2247,21 @@ def test_deleting_workflow_removes_revoked_share_links_sessions_and_messages(cli
         "name": "orphan_check_team",
         "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
         "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-        "workflow": {"steps": ["tm"]},
+        "pipeline": {"steps": ["tm"]},
     }
     with open_test_db() as db:
-        record = WorkflowRecord(name="orphan_check_team", org_id=org_id, config=config, status="deployed")
+        record = PipelineRecord(name="orphan_check_team", org_id=org_id, config=config, status="deployed")
         db.add(record)
         db.commit()
         db.refresh(record)
         user = get_user_by_username(db, "test")
-        link = create_share_link(db, workflow_id=record.id, org_id=org_id, created_by=user.id)
+        link = create_share_link(db, pipeline_id=record.id, org_id=org_id, created_by=user.id)
         session = create_share_session(db, link.id)
         append_message(db, session.id, turn_number=1, role="user", content="hi")
         link_id, session_id = link.id, session.id
         patch_share_link(db, link, active=False)
 
-    resp = client.delete("/api/config/workflows/orphan_check_team?org=default")
+    resp = client.delete("/api/config/pipelines/orphan_check_team?org=default")
     assert resp.status_code == 204
 
     with open_test_db() as db:
@@ -2270,11 +2270,11 @@ def test_deleting_workflow_removes_revoked_share_links_sessions_and_messages(cli
         assert db.query(ShareMessage).filter_by(share_session_id=session_id).count() == 0
 
 
-def test_list_workflows_includes_workflow_ids(client):
+def test_list_pipelines_includes_pipeline_ids(client):
     with open_test_db() as db:
-        record = WorkflowRecord(
+        record = PipelineRecord(
             name="idtest", org_id=get_org_id(),
-            config={"name": "idtest", "agents": [], "teams": [], "workflow": {"steps": []}},
+            config={"name": "idtest", "agents": [], "teams": [], "pipeline": {"steps": []}},
             status="deployed",
         )
         db.add(record)
@@ -2283,11 +2283,11 @@ def test_list_workflows_includes_workflow_ids(client):
         expected_id = record.id
 
     headers = _org_user_headers(client)
-    resp = client.get("/api/workflows", headers=headers)
+    resp = client.get("/api/pipelines", headers=headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert "idtest" in body["workflows"]
-    assert body["workflow_ids"]["idtest"] == expected_id
+    assert "idtest" in body["pipelines"]
+    assert body["pipeline_ids"]["idtest"] == expected_id
 
 
 # ---------------------------------------------------------------------------
@@ -2295,27 +2295,27 @@ def test_list_workflows_includes_workflow_ids(client):
 # ---------------------------------------------------------------------------
 
 
-def test_workflow_put_rejects_email_combined_with_an_egress_tool(client):
+def test_pipeline_put_rejects_email_combined_with_an_egress_tool(client):
     # An injected email could otherwise direct the same agent to put mailbox
     # content into a URL it fetches -- exfiltration without ever sending mail,
     # which is what the draft-only design is supposed to make impossible.
     bad = {
-        **_VALID_WORKFLOW_CONFIG,
+        **_VALID_PIPELINE_CONFIG,
         "agents": [{
-            **_VALID_WORKFLOW_CONFIG["agents"][0],
+            **_VALID_PIPELINE_CONFIG["agents"][0],
             "tools": ["email_read", "http_get"],
         }],
     }
-    resp = client.put("/api/config/workflows/leaky_wf?org=default", json=bad)
+    resp = client.put("/api/config/pipelines/leaky_wf?org=default", json=bad)
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert "http_get" in detail and "support_agent" in detail
     assert "leaky_wf" not in client.get(
-        "/api/workflows", headers=_org_user_headers(client)
-    ).json()["workflows"]
+        "/api/pipelines", headers=_org_user_headers(client)
+    ).json()["pipelines"]
 
 
-def test_workflow_put_rejects_email_and_egress_on_separate_agents(client):
+def test_pipeline_put_rejects_email_and_egress_on_separate_agents(client):
     # Splitting the capabilities across agents used to be the recommended
     # remedy. It does not contain anything: a sequential team feeds the mail
     # agent's output into the next agent's context, so the injected text
@@ -2329,22 +2329,22 @@ def test_workflow_put_rejects_email_and_egress_on_separate_agents(client):
              "model": "fake:hello", "tools": ["http_get"]},
         ],
         "teams": [{"name": "t", "agents": ["mailer", "researcher"], "mode": "sequential"}],
-        "workflow": {"steps": ["t"]},
+        "pipeline": {"steps": ["t"]},
     }
-    resp = client.put("/api/config/workflows/split_wf?org=default", json=split)
+    resp = client.put("/api/config/pipelines/split_wf?org=default", json=split)
     assert resp.status_code == 400, resp.text
     assert "mailer" in resp.text and "researcher" in resp.text
 
 
-def test_workflow_put_still_allows_email_only_agents(client):
+def test_pipeline_put_still_allows_email_only_agents(client):
     ok = {
-        **_VALID_WORKFLOW_CONFIG,
+        **_VALID_PIPELINE_CONFIG,
         "agents": [{
-            **_VALID_WORKFLOW_CONFIG["agents"][0],
+            **_VALID_PIPELINE_CONFIG["agents"][0],
             "tools": ["email_read", "email_draft_reply"],
         }],
     }
-    resp = client.put("/api/config/workflows/mail_only_wf?org=default", json=ok)
+    resp = client.put("/api/config/pipelines/mail_only_wf?org=default", json=ok)
     assert resp.status_code in (200, 201), resp.text
 
 

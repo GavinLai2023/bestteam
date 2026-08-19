@@ -476,7 +476,7 @@ def test_make_knowledge_base_tool_name_and_delegation(docs_kb):
 # ---------------------------------------------------------------------------
 
 def test_loader_resolves_knowledge_base_tool(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
 
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
@@ -500,13 +500,13 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
-    p = tmp_path / "workflow.yaml"
+    p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
-    wf = load_workflow(str(p))
+    wf = load_pipeline(str(p))
     agent = wf.steps[0].agents[0]
 
     assert len(agent.tools) == 1
@@ -516,7 +516,7 @@ workflow:
 
 
 def test_loader_raises_for_missing_knowledge_base_path(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
 
     yaml_text = """
 name: kb_missing_path
@@ -533,14 +533,14 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
-    p = tmp_path / "workflow.yaml"
+    p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match="does not exist or is not a directory"):
-        load_workflow(str(p))
+        load_pipeline(str(p))
 
 
 # ---------------------------------------------------------------------------

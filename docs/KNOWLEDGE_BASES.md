@@ -235,7 +235,7 @@ matching a chunk that only says "refund").
 - `cache_path` (optional): a JSON file persisting per-chunk embedding
   vectors across runs, keyed by `sha256(embedding_model_spec + chunk_text)`.
   This avoids re-embedding unchanged chunks (and re-paying a real provider)
-  on every workflow load. Caching only works when `embedding_model` is a
+  on every pipeline load. Caching only works when `embedding_model` is a
   string spec — passing a live `Embeddings` instance directly skips the
   cache with a warning, since there's no stable spec string to key on. The
   cache is invalidated automatically if the model spec changes.
@@ -267,7 +267,7 @@ will be searched by keyword or by meaning.
 - Also supports opt-in query expansion and opt-in reranking — see those
   sections below.
 
-See `ui/backend/workflows/hybrid_knowledge_base_demo.yaml` for a $0 dry-run
+See `ui/backend/pipelines/hybrid_knowledge_base_demo.yaml` for a $0 dry-run
 example using `"fake:"` specs for both the chat model and the embeddings.
 
 ## Query expansion (opt-in, all three types)
@@ -367,7 +367,7 @@ Requires `pip install 'bestteam[tools-rerank]'`.
 
 ## Configuring a knowledge base in YAML
 
-Knowledge bases are declared under a workflow's `knowledge_bases:` key, then
+Knowledge bases are declared under a pipeline's `knowledge_bases:` key, then
 referenced by name in an agent's `tools:` list — `core/loader.py` builds
 each one and registers it in the same tool lookup table used for built-in
 tools.
@@ -376,7 +376,7 @@ tools.
 ```yaml
 knowledge_bases:
   - name: product_docs
-    path: ./docs/product   # resolved relative to the workflow YAML's directory
+    path: ./docs/product   # resolved relative to the pipeline YAML's directory
     description: Refund, delivery and warranty policies   # optional, max 500 chars
     # optional: chunk_size (default 1000), chunk_overlap (default 100), top_k (default 5)
 
@@ -411,7 +411,7 @@ knowledge_bases:
     cache_path: ./.bestteam_cache/product_docs.json    # optional
 ```
 
-Runnable examples in `ui/backend/workflows/`:
+Runnable examples in `ui/backend/pipelines/`:
 - `knowledge_base_demo.yaml` — `local_folder`, no setup needed.
 - `vector_knowledge_base_demo.yaml` — `vector` with `"fake:"` embeddings, $0.
 - `vector_knowledge_base_demo_live.yaml` — `vector` with real OpenAI
@@ -421,7 +421,7 @@ Runnable examples in `ui/backend/workflows/`:
 
 ## How agents use a knowledge base
 
-`core/loader.py::_build_workflow` builds every entry under
+`core/loader.py::_build_pipeline` builds every entry under
 `knowledge_bases:`, wraps it with `make_knowledge_base_tool(kb)`
 (`core/knowledge_base.py`) — which just gives the KB's `query` method a
 `__name__` matching the KB's `name` plus an auto-generated docstring — and
@@ -542,11 +542,11 @@ pre-Specification catalogue (`builder.py::_all_knowledge_base_tools`) skips an
 unresolvable knowledge base with a logged warning instead of raising -- it
 builds *every* one of the org's knowledge bases, so one customer's unparseable
 upload used to fail spec generation for the whole org -- and the architect is
-only told about the ones that actually built. The workflow-build path
+only told about the ones that actually built. The pipeline-build path
 (`load_knowledge_base_tools`) still fails closed: there a broken knowledge base
 is one an agent actually references.
 
-**Wiring into a workflow**: a workflow's `_build_workflow()` validation only
+**Wiring into a pipeline**: a pipeline's `_build_pipeline()` validation only
 builds the standalone knowledge bases its agents actually reference by name
 (`ui/backend/knowledge_bases.py::load_knowledge_base_tools`) — not every
 knowledge base in the database — since building one means re-reading and
@@ -694,7 +694,7 @@ including any retained older version subdirectory, rather than one version
 directory. `ui/backend/knowledge_bases.py::resolve_knowledge_base()` is the
 one place this choice is made, shared by both `load_knowledge_base_tools`
 (above) and `builder.py::_all_knowledge_base_tools` (the wizard's
-pre-Specification "every standalone KB" catalog), so a workflow build and
+pre-Specification "every standalone KB" catalog), so a pipeline build and
 the wizard's KB catalog always agree on which content is live.
 
 The KB's *shape* — which subclass to build, and which embedding model embeds
@@ -936,7 +936,7 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
 | Shared upload/index/version logic + "only build what's referenced" loading | `ui/backend/knowledge_bases.py` |
 | Async ingestion jobs (parse/chunk/embed on a background thread) | `ui/backend/ingestion.py` |
 | Org self-service upload + "smart search" toggle | `ui/backend/org_knowledge_bases.py` |
-| Example: `local_folder` | `ui/backend/workflows/knowledge_base_demo.yaml` |
-| Example: `vector`, $0 fake embeddings | `ui/backend/workflows/vector_knowledge_base_demo.yaml` |
-| Example: `vector`, real OpenAI embeddings | `ui/backend/workflows/vector_knowledge_base_demo_live.yaml` |
-| Example: `hybrid`, $0 fake embeddings | `ui/backend/workflows/hybrid_knowledge_base_demo.yaml` |
+| Example: `local_folder` | `ui/backend/pipelines/knowledge_base_demo.yaml` |
+| Example: `vector`, $0 fake embeddings | `ui/backend/pipelines/vector_knowledge_base_demo.yaml` |
+| Example: `vector`, real OpenAI embeddings | `ui/backend/pipelines/vector_knowledge_base_demo_live.yaml` |
+| Example: `hybrid`, $0 fake embeddings | `ui/backend/pipelines/hybrid_knowledge_base_demo.yaml` |

@@ -48,7 +48,7 @@ from bestteam.core.tool_context import tool_call_context
 
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
-from .db.dependencies import workflows_referencing
+from .db.dependencies import pipelines_referencing
 from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User, iso_utc
 from .db.usage import record_usage
 from .db_session import get_db
@@ -173,7 +173,7 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
         # `iso_utc`, not the bare column: SQLite hands it back tz-naive, and
         # the panel's `Date` would then read a UTC timestamp as local time.
         "updated_at": iso_utc(record.updated_at),
-        "used_by": workflows_referencing(db, kind="knowledge_base", resource_id=record.id),
+        "used_by": pipelines_referencing(db, kind="knowledge_base", resource_id=record.id),
         "servable": live is not None or latest is None,
         "latest_job": latest_job,
     }
@@ -439,7 +439,7 @@ def search_own_knowledge_base(
     """
     record = _own_kb_or_404(db, org.id, item_name)
     try:
-        # No `source`: this route has no workflow to resolve relative paths
+        # No `source`: this route has no pipeline to resolve relative paths
         # against, and a legacy file-backed collection is refused rather than
         # rebuilt from disk on every click (see `resolve_knowledge_base`).
         kb = resolve_knowledge_base(db, record)

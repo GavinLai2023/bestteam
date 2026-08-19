@@ -12,7 +12,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import inspect
 
-from ui.backend.db import SkillRecord, WorkflowRecord, init_db, make_engine, session_factory
+from ui.backend.db import SkillRecord, PipelineRecord, init_db, make_engine, session_factory
 from ui.backend.db.builder_sessions import (
     STATUSES,
     append_feedback,
@@ -45,9 +45,9 @@ def test_init_db_creates_all_tables():
         "knowledge_chunks",
         "skills",
         "skill_versions",
-        "workflows",
-        "workflow_versions",
-        "workflow_dependencies",
+        "pipelines",
+        "pipeline_versions",
+        "pipeline_dependencies",
         "builder_sessions",
         "email_triggers",
         "inbox_events",
@@ -68,15 +68,15 @@ def test_init_db_creates_all_tables():
     }
 
 
-def test_workflow_record_round_trips_json_config(db_session):
-    workflow = WorkflowRecord(name="support_workflow", config={"agents": [], "teams": [], "workflow": {"steps": []}})
-    db_session.add(workflow)
+def test_pipeline_record_round_trips_json_config(db_session):
+    pipeline = PipelineRecord(name="support_pipeline", config={"agents": [], "teams": [], "pipeline": {"steps": []}})
+    db_session.add(pipeline)
     db_session.commit()
 
-    fetched_workflow = db_session.query(WorkflowRecord).filter_by(name="support_workflow").one()
+    fetched_pipeline = db_session.query(PipelineRecord).filter_by(name="support_pipeline").one()
 
-    assert fetched_workflow.status == "draft"
-    assert fetched_workflow.config["workflow"] == {"steps": []}
+    assert fetched_pipeline.status == "draft"
+    assert fetched_pipeline.config["pipeline"] == {"steps": []}
 
 
 def test_same_name_allowed_in_two_orgs_but_not_within_one(db_session):

@@ -8,7 +8,7 @@ vi.mock('../lib/api', () => ({
   API_BASE: 'http://127.0.0.1:8000',
   WS_BASE: 'ws://127.0.0.1:8000',
   api: {
-    listWorkflows: vi.fn(),
+    listPipelines: vi.fn(),
     createRun: vi.fn(),
     createWsTicket: vi.fn(),
     cancelRun: vi.fn(),
@@ -49,7 +49,7 @@ class FakeWebSocket {
 }
 
 async function startARun() {
-  mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
+  mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'] })
   mockedApi.createRun.mockResolvedValue({ run_id: 'run-1' })
   mockedApi.createWsTicket.mockResolvedValue({ ticket: 't' })
 
@@ -74,7 +74,7 @@ describe('MonitorPage backend error handling', () => {
   it('shows the server error detail, not "unreachable", when the backend returns an HTTP error', async () => {
     const err = new Error('Platform operators do not belong to an organization') as Error & { status?: number }
     err.status = 403
-    mockedApi.listWorkflows.mockRejectedValue(err)
+    mockedApi.listPipelines.mockRejectedValue(err)
 
     renderPage()
 
@@ -85,7 +85,7 @@ describe('MonitorPage backend error handling', () => {
   })
 
   it('shows "Can\'t reach the backend" on a genuine network failure (no HTTP status)', async () => {
-    mockedApi.listWorkflows.mockRejectedValue(new TypeError('Failed to fetch'))
+    mockedApi.listPipelines.mockRejectedValue(new TypeError('Failed to fetch'))
 
     renderPage()
 
@@ -124,12 +124,12 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
 
     await act(async () => {
-      ws!.emit({ type: 'run_started', workflow: 'wf', agent: null, data: null, usage: [] })
+      ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
     })
     expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
 
     await act(async () => {
-      ws!.emit({ type: 'agent_started', workflow: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
+      ws!.emit({ type: 'agent_started', pipeline: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
     })
     expect(screen.queryByText('Waiting for the agent/model…')).not.toBeInTheDocument()
   })
@@ -152,7 +152,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'run_cancelled', workflow: 'wf', agent: null, data: 'Run was cancelled.', usage: [] })
+      ws!.emit({ type: 'run_cancelled', pipeline: 'wf', agent: null, data: 'Run was cancelled.', usage: [] })
     })
 
     expect(screen.getByText('Run cancelled')).toBeInTheDocument()
@@ -160,7 +160,7 @@ describe('MonitorPage run waiting UX', () => {
   })
 
   it('does not show Stop until the new run id exists (avoids a stale-target race)', async () => {
-    mockedApi.listWorkflows.mockResolvedValue({ workflows: ['wf'] })
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'] })
     let resolveCreateRun: (value: { run_id: string }) => void
     mockedApi.createRun.mockReturnValue(
       new Promise((resolve) => {
@@ -191,10 +191,10 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'agent_completed', workflow: 'wf', agent: 'a', data: 'agent step output', usage: [] })
+      ws!.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'a', data: 'agent step output', usage: [] })
     })
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
 
     expect(await screen.findByText('the final answer')).toBeInTheDocument()
@@ -215,7 +215,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
 
     fireEvent.click(await screen.findByText('Copy'))
@@ -230,7 +230,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
 
     await act(async () => {
@@ -248,7 +248,7 @@ describe('MonitorPage run waiting UX', () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
 
     fireEvent.click(screen.getByText('Copy'))
@@ -260,7 +260,7 @@ describe('MonitorPage run waiting UX', () => {
   it('lets you run the same team and input again from the result', async () => {
     const ws = await startARun()
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'the final answer', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
     mockedApi.createRun.mockClear()
 
@@ -277,7 +277,7 @@ describe('MonitorPage run waiting UX', () => {
     await act(async () => {
       ws!.emit({
         type: 'tool_completed',
-        workflow: 'wf',
+        pipeline: 'wf',
         agent: 'a',
         data: { tool: 'echo_tool', success: true, duration_ms: 12, summary: 'echoed: hi' },
         usage: [],

@@ -15,7 +15,7 @@ describe('request() error handling', () => {
       json: async () => ({ detail: 'Platform operators do not belong to an organization' }),
     })
 
-    await expect(api.listWorkflows()).rejects.toMatchObject({
+    await expect(api.listPipelines()).rejects.toMatchObject({
       status: 403,
       message: 'Platform operators do not belong to an organization',
     })
@@ -24,7 +24,7 @@ describe('request() error handling', () => {
   it('propagates a network failure as an error with no status', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
 
-    const err = (await api.listWorkflows().catch((e) => e)) as { status?: number; message: string }
+    const err = (await api.listPipelines().catch((e) => e)) as { status?: number; message: string }
     expect(err).toBeInstanceOf(Error)
     expect(err.status).toBeUndefined()
   })
@@ -47,7 +47,7 @@ describe('request() error handling', () => {
       }),
     })
 
-    await expect(api.listWorkflows()).rejects.toMatchObject({
+    await expect(api.listPipelines()).rejects.toMatchObject({
       status: 422,
       message: "name: identifier may contain only letters, digits, '.', '_' and '-'",
     })
@@ -80,13 +80,13 @@ describe('share links (org self-service)', () => {
     vi.restoreAllMocks()
   })
 
-  it('createShareLink posts to the workflow share-links endpoint', async () => {
+  it('createShareLink posts to the pipeline share-links endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 201,
       json: async () => ({
         id: 1,
-        workflow_id: 5,
+        pipeline_id: 5,
         token: 'tok',
         active: true,
         daily_cap: 30,
@@ -99,19 +99,19 @@ describe('share links (org self-service)', () => {
     const result = await api.createShareLink(5, { daily_cap: 30 })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining('/api/workflows/5/share-links'),
+      expect.stringContaining('/api/pipelines/5/share-links'),
       expect.objectContaining({ method: 'POST', body: JSON.stringify({ daily_cap: 30 }) }),
     )
     expect(result.token).toBe('tok')
   })
 
-  it('listShareLinks gets the workflow share-links endpoint', async () => {
+  it('listShareLinks gets the pipeline share-links endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] })
     globalThis.fetch = fetchMock
 
     await api.listShareLinks(5)
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/workflows/5/share-links'), expect.anything())
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/pipelines/5/share-links'), expect.anything())
   })
 
   it('patchShareLink sends a PATCH to the share-link endpoint', async () => {
@@ -120,7 +120,7 @@ describe('share links (org self-service)', () => {
       status: 200,
       json: async () => ({
         id: 1,
-        workflow_id: 5,
+        pipeline_id: 5,
         token: 'tok',
         active: false,
         daily_cap: 30,

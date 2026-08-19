@@ -105,11 +105,11 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
             ok(name, value)
 
     # --- must be off on a customer deployment -----------------------------
-    if _get(env, "BESTTEAM_DEMO_WORKFLOWS").lower() in _TRUTHY:
-        fail("BESTTEAM_DEMO_WORKFLOWS", "on; every org user would see and run the shipped demo teams "
+    if _get(env, "BESTTEAM_DEMO_PIPELINES").lower() in _TRUTHY:
+        fail("BESTTEAM_DEMO_PIPELINES", "on; every org user would see and run the shipped demo teams "
              "(one of which reads the process-wide mailbox). Unset it on a customer deployment")
     else:
-        ok("BESTTEAM_DEMO_WORKFLOWS", "off")
+        ok("BESTTEAM_DEMO_PIPELINES", "off")
 
     email_env = sorted(k for k in env if k.startswith("BESTTEAM_EMAIL_") and (env.get(k) or "").strip())
     if email_env:

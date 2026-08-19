@@ -21,8 +21,8 @@ from ui.backend.db_session import get_db
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -49,7 +49,7 @@ def _seed_run(db, org_id, *, run_id, status="completed", age_days=0):
     """One run with all three kinds of content a purge clears."""
     created = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=age_days)
     db.add(Run(
-        id=run_id, workflow="support", input="From alice@example.com: my boiler leaks",
+        id=run_id, pipeline="support", input="From alice@example.com: my boiler leaks",
         output="Drafted a reply to alice@example.com", status=status,
         org_id=org_id, created_at=created,
     ))

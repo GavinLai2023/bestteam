@@ -14,7 +14,7 @@ from ..core.agent import Agent
 from ..core.team import CollaborationMode, Team
 from ..core.tool_context import tool_call_context
 from ..core.trace import TraceEvent
-from ..core.workflow import Workflow, WorkflowResult
+from ..core.pipeline import Pipeline, PipelineResult
 from ..exceptions import BestTeamError, ConfigurationError, EngineError
 from .base import EngineAdapter
 
@@ -67,7 +67,7 @@ class _TeamState(TypedDict):
 
 
 def _fake_architect_specification() -> "Specification":
-    from ..core.specification import AgentSpec, Specification, TeamSpec, WorkflowSpec
+    from ..core.specification import AgentSpec, PipelineSpec, Specification, TeamSpec
 
     return Specification(
         name="e2e_support_team",
@@ -82,7 +82,7 @@ def _fake_architect_specification() -> "Specification":
             ),
         ],
         teams=[TeamSpec(name="support_team", mode="sequential", agents=["support_agent"])],
-        workflow=WorkflowSpec(steps=["support_team"]),
+        pipeline=PipelineSpec(steps=["support_team"]),
     )
 
 
@@ -390,7 +390,7 @@ def _run_agent(
 
     def _emit(event_type: str, data: Any = None) -> None:
         if on_event is not None:
-            on_event(TraceEvent(type=event_type, workflow="", agent=agent.name, data=data))
+            on_event(TraceEvent(type=event_type, pipeline="", agent=agent.name, data=data))
 
     model = _resolve_model(agent.model)
     all_tools = [*agent.tools, *extra_tools]
@@ -522,7 +522,7 @@ def _make_delegate_tool(
             on_event(
                 TraceEvent(
                     type="delegation_started",
-                    workflow="",
+                    pipeline="",
                     agent=manager_name,
                     data={"to": agent.name, "task_summary": _summarize(task)},
                 )
@@ -530,7 +530,7 @@ def _make_delegate_tool(
             on_event(
                 TraceEvent(
                     type="subagent_started",
-                    workflow="",
+                    pipeline="",
                     agent=agent.name,
                     data={"task_summary": _summarize(task)},
                 )
@@ -547,7 +547,7 @@ def _make_delegate_tool(
             on_event(
                 TraceEvent(
                     type="subagent_completed",
-                    workflow="",
+                    pipeline="",
                     agent=agent.name,
                     data={"success": True, "summary": _summarize(result)},
                 )
@@ -555,7 +555,7 @@ def _make_delegate_tool(
             on_event(
                 TraceEvent(
                     type="delegation_completed",
-                    workflow="",
+                    pipeline="",
                     agent=manager_name,
                     data={"to": agent.name, "summary": _summarize(result)},
                 )
@@ -730,11 +730,11 @@ class LangGraphAdapter(EngineAdapter):
     message rather than silently behaving like SEQUENTIAL.
     """
 
-    def compile(self, workflow: Workflow) -> Any:
+    def compile(self, pipeline: Pipeline) -> Any:
         graph = StateGraph(_TeamState)
         previous_exit = START
 
-        for team in workflow.steps:
+        for team in pipeline.steps:
             entry, exit_ = self._wire_team(graph, team)
             graph.add_edge(previous_exit, entry)
             previous_exit = exit_
@@ -792,7 +792,7 @@ class LangGraphAdapter(EngineAdapter):
         graph.add_node(node_name, _hierarchical_node(team))
         return node_name, node_name
 
-    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> WorkflowResult:
+    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> PipelineResult:
         try:
             final_state = compiled.invoke(_initial_state(input, memory_preamble))
         except BestTeamError:
@@ -801,13 +801,13 @@ class LangGraphAdapter(EngineAdapter):
             # masking it behind a generic "engine execution failed".
             raise
         except Exception as exc:
-            raise EngineError(f"Workflow execution failed: {exc}") from exc
+            raise EngineError(f"Pipeline execution failed: {exc}") from exc
 
         steps = [
             {"agent": name, "output": text}
             for name, text in final_state.get("contributions", {}).items()
         ]
-        return WorkflowResult(
+        return PipelineResult(
             output=final_state.get("output", ""),
             steps=steps,
             raw=final_state,
@@ -834,7 +834,7 @@ class LangGraphAdapter(EngineAdapter):
                         yield from events_by_agent.get(agent_name, [])
                         yield TraceEvent(
                             type="agent_completed",
-                            workflow="",
+                            pipeline="",
                             agent=agent_name,
                             data=text,
                             usage=usage_by_agent.get(agent_name, []),
@@ -842,4 +842,4 @@ class LangGraphAdapter(EngineAdapter):
         except BestTeamError:
             raise
         except Exception as exc:
-            raise EngineError(f"Workflow execution failed: {exc}") from exc
+            raise EngineError(f"Pipeline execution failed: {exc}") from exc

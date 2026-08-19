@@ -58,7 +58,7 @@ describe('RunDetail', () => {
 
     const ws = FakeWebSocket.instances.at(-1)
     await act(async () => {
-      ws!.emit({ type: 'run_started', workflow: 'wf', agent: null, data: null, usage: [] })
+      ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
     })
 
     expect(screen.getByText('▶ started')).toBeInTheDocument()
@@ -79,7 +79,7 @@ describe('RunDetail', () => {
 
     const ws = FakeWebSocket.instances.at(-1)
     await act(async () => {
-      ws!.emit({ type: 'run_completed', workflow: 'wf', agent: null, data: 'done', usage: [] })
+      ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'done', usage: [] })
     })
 
     // normalize_run_result only runs server-side after the terminal event, so
@@ -202,7 +202,7 @@ describe('RunDetail', () => {
 
     const ws = FakeWebSocket.instances.at(-1)
     await act(async () => {
-      ws!.emit({ type: 'run_failed', workflow: 'wf', agent: null, data: 'boom', usage: [] })
+      ws!.emit({ type: 'run_failed', pipeline: 'wf', agent: null, data: 'boom', usage: [] })
     })
 
     expect(await screen.findByText('Retry')).toBeInTheDocument()

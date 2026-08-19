@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 @dataclass
 class Run:
-    """Tracks one workflow execution: its inputs, replayable event log, and status.
+    """Tracks one pipeline execution: its inputs, replayable event log, and status.
 
     `org_id` is the owning organization -- run reads (GET + the WebSocket
     stream) are refused across orgs. `username` records who started it
@@ -18,7 +18,7 @@ class Run:
     """
 
     id: str
-    workflow: str
+    pipeline: str
     input: str
     org_id: Optional[int] = None
     username: Optional[str] = None
@@ -41,7 +41,7 @@ class RunRegistry:
         self._runs: Dict[str, Run] = {}
         self._subscribers: Dict[str, List[Tuple[asyncio.AbstractEventLoop, "asyncio.Queue[dict]"]]] = {}
         # Cooperative-cancellation flags, one per run -- the worker thread
-        # can't be force-killed mid-`workflow.stream()`, so this is checked
+        # can't be force-killed mid-`pipeline.stream()`, so this is checked
         # between yielded events instead (see runtime.py::run_in_background).
         self._cancel_flags: Dict[str, threading.Event] = {}
         # One lock serialises the event append, the replay snapshot, and
@@ -53,13 +53,13 @@ class RunRegistry:
 
     def create(
         self,
-        workflow: str,
+        pipeline: str,
         input: str,
         *,
         org_id: Optional[int] = None,
         username: Optional[str] = None,
     ) -> Run:
-        run = Run(id=uuid.uuid4().hex, workflow=workflow, input=input, org_id=org_id, username=username)
+        run = Run(id=uuid.uuid4().hex, pipeline=pipeline, input=input, org_id=org_id, username=username)
         with self._lock:
             self._runs[run.id] = run
             self._subscribers[run.id] = []
@@ -144,7 +144,7 @@ class RunRegistry:
         return flag.is_set() if flag else False
 
     def publish(self, run_id: str, event: dict) -> None:
-        """Called from the worker thread running the workflow. Each
+        """Called from the worker thread running the pipeline. Each
         subscriber's queue is woken up on the event loop captured when it
         subscribed (not the loop of the request that started the run, which
         may already be gone by the time this fires)."""

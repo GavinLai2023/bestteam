@@ -29,13 +29,13 @@ _EMAIL_SPEC = {
     "agents": [{"name": "t", "role": "Triager", "goal": "triage",
                 "model": "fake:done", "skills": ["email_triage_reply"]}],
     "teams": [{"name": "tm", "agents": ["t"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 _PLAIN_SPEC = {
     "name": "plain_team",
     "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
     "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 
 
@@ -67,8 +67,8 @@ class _FakeBackend:
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     _FakeBackend.ok = True
     _FakeBackend.drafts_ok = True
     # PUT /api/org/email validates the mailbox before storing it, so the
@@ -428,7 +428,7 @@ from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 def _enable_trigger(org_name="default"):
     with open_test_db() as db:
         org = get_or_create_org(db, org_name)
-        upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+        upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True,
                              last_uid=10, uidvalidity=1)
         return org.id
 
@@ -466,7 +466,7 @@ def test_deploy_rejects_kb_named_after_builtin(client):
         "knowledge_bases": [{"name": "web_search", "path": "docs"}],
         "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi",
                     "tools": ["web_search"]}],
-        "teams": [], "workflow": {"steps": []},
+        "teams": [], "pipeline": {"steps": []},
     }
     sid = _make_session(bad_spec)
     resp = client.post(f"/api/builder/sessions/{sid}/deploy")

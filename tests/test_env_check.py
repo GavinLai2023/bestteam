@@ -68,11 +68,11 @@ def test_frontend_urls_are_required_and_should_be_tls():
     assert _by_name(check_environment(dict(_GOOD, VITE_API_BASE="https://api.example.com/")))["VITE_API_BASE"].level == "FAIL"
 
 
-def test_demo_workflows_and_process_wide_mailbox_are_flagged():
-    by = _by_name(check_environment(dict(_GOOD, BESTTEAM_DEMO_WORKFLOWS="1", BESTTEAM_EMAIL_HOST="imap.x")))
-    assert by["BESTTEAM_DEMO_WORKFLOWS"].level == "FAIL"
+def test_demo_pipelines_and_process_wide_mailbox_are_flagged():
+    by = _by_name(check_environment(dict(_GOOD, BESTTEAM_DEMO_PIPELINES="1", BESTTEAM_EMAIL_HOST="imap.x")))
+    assert by["BESTTEAM_DEMO_PIPELINES"].level == "FAIL"
     assert by["BESTTEAM_EMAIL_*"].level == "WARN" and "BESTTEAM_EMAIL_HOST" in by["BESTTEAM_EMAIL_*"].message
-    assert _by_name(check_environment(dict(_GOOD, BESTTEAM_DEMO_WORKFLOWS="0")))["BESTTEAM_DEMO_WORKFLOWS"].level == "OK"
+    assert _by_name(check_environment(dict(_GOOD, BESTTEAM_DEMO_PIPELINES="0")))["BESTTEAM_DEMO_PIPELINES"].level == "OK"
 
 
 def test_beta_defaults_warn_when_left_at_dev_values():
@@ -106,7 +106,7 @@ def test_the_cli_prints_the_checklist_and_exits_1_on_a_failure(monkeypatch, caps
     pytest.importorskip("sqlalchemy")
     from ui.backend import admin
 
-    for name in list(_GOOD) + ["BESTTEAM_DEMO_WORKFLOWS"]:
+    for name in list(_GOOD) + ["BESTTEAM_DEMO_PIPELINES"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in _GOOD.items():
         monkeypatch.setenv(name, value)
@@ -115,10 +115,10 @@ def test_the_cli_prints_the_checklist_and_exits_1_on_a_failure(monkeypatch, caps
     assert "[OK]   BESTTEAM_CORS_ORIGINS" in out
     assert "no failures" in out
 
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "yes")
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "yes")
     assert admin.main(["check-env"]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] BESTTEAM_DEMO_WORKFLOWS" in out
+    assert "[FAIL] BESTTEAM_DEMO_PIPELINES" in out
 
 
 def test_check_env_does_not_create_the_database(tmp_path):

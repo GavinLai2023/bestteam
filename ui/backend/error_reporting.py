@@ -3,7 +3,7 @@
 `BESTTEAM_SENTRY_DSN` set => `sentry_sdk` is initialised and exactly two
 kinds of thing are reported: an unhandled exception in a request
 (`main.unhandled_exception_handler`) and a failed run (`runtime.py`, both the
-workflow's own `run_failed` and the worker-thread catch-all). Nothing else --
+pipeline's own `run_failed` and the worker-thread catch-all). Nothing else --
 no ERROR-log capture, no request bodies, no local variables, no performance
 tracing -- because a report has to be safe to send off-box: the process
 handles customers' email and documents, and a stack frame's locals or a

@@ -188,19 +188,19 @@ def lookup_order(order_id: str) -> str:
     return f"Order {row.id}: {row.item}, ${row.price}, received {row.received_date}"
 ```
 
-Register it exactly like any other tool: pass it via `load_workflow(path,
+Register it exactly like any other tool: pass it via `load_pipeline(path,
 toolkits=[...])` (see `core/loader.py`), or directly as `extra_tools={"lookup_order":
 lookup_order}` to `validate_specification()`/`generate_specification()`, then
 reference `lookup_order` by name in an agent's `tools:` list.
 
-**Wiring it into a UI-backend-deployed workflow needs one small addition.**
-The pattern above is the whole story for the CLI/SDK (`load_workflow()`) path.
+**Wiring it into a UI-backend-deployed pipeline needs one small addition.**
+The pattern above is the whole story for the CLI/SDK (`load_pipeline()`) path.
 `ui/backend/` only special-cases one kind of standalone, by-name-referenced
 tool today: knowledge bases, via `ui/backend/knowledge_bases.py::load_knowledge_base_tools()`,
-called from `main.py::_get_workflow()`, `builder.py`, and `crud.py` to build
-the `extra_tools` dict passed into `_build_workflow()`. There's no generic
+called from `main.py::_get_pipeline()`, `builder.py`, and `crud.py` to build
+the `extra_tools` dict passed into `_build_pipeline()`. There's no generic
 "custom tool" registry in the UI layer yet — to make `lookup_order` resolvable
-in a workflow deployed through the UI, add a parallel loader (same shape as
+in a pipeline deployed through the UI, add a parallel loader (same shape as
 `load_knowledge_base_tools`) and merge its output into `extra_tools` at those
 same three call sites. This is a small, well-understood extension, not a
 platform redesign — but it is a real code change, not just configuration.
@@ -372,10 +372,10 @@ A new email tool is not one addition but six, and five of the six fail
 
 | Site | What breaks if missed |
 |---|---|
-| `ui/backend/deploy_validation.py::EMAIL_TOOL_NAMES` | **The containment boundary.** `find_email_egress_conflicts` intersects each agent's tools against it, so a missing name lets a workflow pair the tool with `http_get` — an injected attachment directing mailbox content into a fetched URL, exfiltration with no send verb involved. |
+| `ui/backend/deploy_validation.py::EMAIL_TOOL_NAMES` | **The containment boundary.** `find_email_egress_conflicts` intersects each agent's tools against it, so a missing name lets a pipeline pair the tool with `http_get` — an injected attachment directing mailbox content into a fetched URL, exfiltration with no send verb involved. |
 | `ui/backend/email_tools.py::EMAIL_TOOL_NAMES` + `_fixed_message_tools` | **A cross-tenant read.** `spec_uses_email` gates on the set, so an attachment-only team resolved as "does not use email", no per-org tools were built, and on a deployment that also sets `BESTTEAM_EMAIL_BACKEND` the run fell through to the process-env mailbox. The placeholder set has the same shape of miss: an org with no mailbox, or an undecryptable key, got no override for that one name, so it fell through to the env tool. (The two frozensets are duplicated by necessity — `src/bestteam/` must not import from `ui/backend/`.) |
 | `adapters/langgraph_adapter.py::_EMAIL_TOOLS_NEEDING_REDACTION` | The generic 200-character `_summarize(result)` — i.e. extracted attachment text — lands in `trace_events`, `runs.output` and the live WebSocket broadcast. |
-| `tools/__init__.py` — `REGISTRY` and `__all__` | The only one that fails *loudly*: the name cannot be resolved from a workflow YAML at all. |
+| `tools/__init__.py` — `REGISTRY` and `__all__` | The only one that fails *loudly*: the name cannot be resolved from a pipeline YAML at all. |
 | `bestteam/__init__.py` — re-export and `__all__` | `from bestteam import email_read_attachment` fails. |
 | `make_email_tools`' returned dict | The per-org scoped path silently lacks the tool while the env path has it. |
 

@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..exceptions import ConfigurationError
 from ._structured_output import invoke_structured
-from .loader import _build_workflow
-from .workflow import Workflow
+from .loader import _build_pipeline
+from .pipeline import Pipeline
 
 _VALID_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -43,7 +43,7 @@ those requirements.
 For each agent, give it a clear name, role, goal, and (optionally) a \
 backstory, plus a friendly display_name and a one-sentence \
 friendly_description that a non-technical person would understand. Choose \
-tools from the ones available to the workflow, and pick a model spec string \
+tools from the ones available to the pipeline, and pick a model spec string \
 appropriate to the task.
 
 If skills are listed in the input, assign them to agents via each agent's \
@@ -68,7 +68,7 @@ see is "hiring a team with a manager". Give each team a friendly \
 display_name and friendly_description describing how the team works \
 together in plain language.
 
-Finally, list the teams in the order they should run as the workflow's steps.
+Finally, list the teams in the order they should run as the pipeline's steps.
 
 If you receive feedback that a previous design was invalid, fix exactly the \
 issue described and resubmit a complete, corrected Specification."""
@@ -78,7 +78,7 @@ class AgentSpec(BaseModel):
     """Mirrors an `agents:` entry in the loader's raw dict (see `core/loader.py`).
 
     `display_name`/`friendly_description` are wizard-only presentation fields
-    -- `to_raw()` strips them before handing the spec to `_build_workflow`.
+    -- `to_raw()` strips them before handing the spec to `_build_pipeline`.
     """
 
     name: str
@@ -106,7 +106,7 @@ class SkillSpec(BaseModel):
     """A reusable instruction document plus the tools it depends on.
 
     Referenced by name from `AgentSpec.skills` and resolved against
-    `extra_skills` in `core/loader.py::_build_workflow` -- the skill's
+    `extra_skills` in `core/loader.py::_build_pipeline` -- the skill's
     `instructions` are appended to the referencing agent's `backstory` and
     its `tools` are merged into the agent's `tools`.
     """
@@ -204,8 +204,8 @@ class KnowledgeBaseSpec(BaseModel):
         return raw
 
 
-class WorkflowSpec(BaseModel):
-    """Mirrors the `workflow:` entry in the loader's raw dict (see `core/loader.py`)."""
+class PipelineSpec(BaseModel):
+    """Mirrors the `pipeline:` entry in the loader's raw dict (see `core/loader.py`)."""
 
     steps: List[str] = Field(default_factory=list)
 
@@ -215,14 +215,14 @@ class Specification(BaseModel):
 
     This is the structured-output schema the Solution Architect agent fills
     in (`generate_specification`), and what `validate_specification` checks
-    against `_build_workflow` before it's shown to (or accepted by) a customer.
+    against `_build_pipeline` before it's shown to (or accepted by) a customer.
     """
 
     name: str
     knowledge_bases: List[KnowledgeBaseSpec] = Field(default_factory=list)
     agents: List[AgentSpec] = Field(default_factory=list)
     teams: List[TeamSpec] = Field(default_factory=list)
-    workflow: WorkflowSpec = Field(default_factory=WorkflowSpec)
+    pipeline: PipelineSpec = Field(default_factory=PipelineSpec)
 
     def to_raw(self) -> Dict[str, Any]:
         """Strip wizard-only fields and produce the loader's raw dict shape."""
@@ -231,7 +231,7 @@ class Specification(BaseModel):
             "knowledge_bases": [kb.to_raw() for kb in self.knowledge_bases],
             "agents": [agent.to_raw() for agent in self.agents],
             "teams": [team.to_raw() for team in self.teams],
-            "workflow": {"steps": list(self.workflow.steps)},
+            "pipeline": {"steps": list(self.pipeline.steps)},
         }
 
 
@@ -241,16 +241,16 @@ def validate_specification(
     source: Path,
     extra_tools: Optional[Dict[str, Any]] = None,
     extra_skills: Optional[Dict[str, Any]] = None,
-) -> Workflow:
-    """Compile a Specification through the same pipeline as a YAML workflow file.
+) -> Pipeline:
+    """Compile a Specification through the same code path as a YAML pipeline file.
 
-    Returns the resulting `Workflow` if the spec is valid. Raises
+    Returns the resulting `Pipeline` if the spec is valid. Raises
     `ConfigurationError` with a message suitable for showing to a customer or
     feeding back to the Solution Architect agent for self-correction.
     """
     raw = spec.to_raw()
     try:
-        return _build_workflow(raw, source=source, extra_tools=extra_tools or {}, extra_skills=extra_skills or {})
+        return _build_pipeline(raw, source=source, extra_tools=extra_tools or {}, extra_skills=extra_skills or {})
     except (KeyError, TypeError) as exc:
         raise ConfigurationError(f"Specification is malformed: missing or invalid field {exc}") from exc
 

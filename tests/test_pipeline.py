@@ -5,7 +5,7 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Pipeline, Team
 from bestteam.adapters.langgraph_adapter import _MAX_TOOL_ITERATIONS, _tool_loop_exhausted_notice
 from bestteam.exceptions import ConfigurationError
 
@@ -29,15 +29,15 @@ class _FakeToolCallingChatModel(FakeMessagesListChatModel):
         return self
 
 
-def test_sequential_workflow_chains_agent_outputs():
+def test_sequential_pipeline_chains_agent_outputs():
     a = _agent("a", "output from a")
     b = _agent("b", "output from b")
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a, b], mode=CollaborationMode.SEQUENTIAL)],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert result.output == "output from b"
     assert [step["agent"] for step in result.steps] == ["a", "b"]
@@ -45,15 +45,15 @@ def test_sequential_workflow_chains_agent_outputs():
     assert result.steps[1]["output"] == "output from b"
 
 
-def test_parallel_workflow_aggregates_contributions():
+def test_parallel_pipeline_aggregates_contributions():
     a = _agent("a", "alpha")
     b = _agent("b", "beta")
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a, b], mode=CollaborationMode.PARALLEL)],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert {step["agent"] for step in result.steps} == {"a", "b"}
     assert "alpha" in result.output
@@ -68,14 +68,14 @@ def test_parallel_team_output_is_not_contaminated_by_prior_team():
     beta = _agent("beta", "beta-text")
     gamma = _agent("gamma", "gamma-text")
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[
             Team(name="team1", agents=[first], mode=CollaborationMode.SEQUENTIAL),
             Team(name="team2", agents=[beta, gamma], mode=CollaborationMode.PARALLEL),
         ],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert "beta-text" in result.output
     assert "gamma-text" in result.output
@@ -94,12 +94,12 @@ def test_memory_recording_failure_keeps_run_completed():
             raise RuntimeError("memory backend down")
 
     a = _agent("a", "done")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("hi", user_id="u", memory=_FailingMemory()))
+    events = list(pipeline.stream("hi", user_id="u", memory=_FailingMemory()))
 
     types = [e.type for e in events]
     # Recording runs after run_completed; a failure surfaces as memory_failed
@@ -110,7 +110,7 @@ def test_memory_recording_failure_keeps_run_completed():
 
 
 def test_run_memory_recording_failure_keeps_run_completed():
-    # CR-019: run() records memory after the workflow completes; a recording
+    # CR-019: run() records memory after the pipeline completes; a recording
     # failure must not raise (which would make a completed, side-effecting run
     # look failed to the caller), mirroring stream()'s best-effort behavior.
     class _FailingMemory:
@@ -121,41 +121,41 @@ def test_run_memory_recording_failure_keeps_run_completed():
             raise RuntimeError("memory backend down")
 
     a = _agent("a", "done")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    result = workflow.run("hi", user_id="u", memory=_FailingMemory())
+    result = pipeline.run("hi", user_id="u", memory=_FailingMemory())
 
     assert result.output == "done"
 
 
 def test_unimplemented_collaboration_mode_raises_clear_error():
     a = _agent("a", "x")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a], mode=CollaborationMode.DEBATE)],
     )
 
     with pytest.raises(NotImplementedError, match="DEBATE"):
-        workflow.run("do the thing")
+        pipeline.run("do the thing")
 
 
-def test_workflow_requires_at_least_one_step():
+def test_pipeline_requires_at_least_one_step():
     with pytest.raises(ConfigurationError):
-        Workflow(name="wf", steps=[])
+        Pipeline(name="wf", steps=[])
 
 
 def test_stream_yields_run_bookends_and_agent_events_in_order():
     a = _agent("a", "output from a")
     b = _agent("b", "output from b")
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[a, b], mode=CollaborationMode.SEQUENTIAL)],
     )
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
 
     assert [e.type for e in events] == [
         "run_started",
@@ -165,7 +165,7 @@ def test_stream_yields_run_bookends_and_agent_events_in_order():
         "agent_completed",
         "run_completed",
     ]
-    assert all(e.workflow == "wf" for e in events)
+    assert all(e.pipeline == "wf" for e in events)
     assert [e.agent for e in events if e.type == "agent_completed"] == ["a", "b"]
     completed_events = [e for e in events if e.type == "agent_completed"]
     assert completed_events[0].data == "output from a"
@@ -191,11 +191,11 @@ def test_agent_executes_tool_calls_before_producing_final_output():
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[echo_tool])
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert calls == ["hi"]
     assert result.output == "The tool said: echoed: hi"
@@ -213,11 +213,11 @@ def test_agent_recovers_from_unknown_tool_call():
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[])
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert result.output == "final answer"
 
@@ -242,11 +242,11 @@ def test_agent_tool_loop_is_bounded():
     )
     agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[echo_tool])
 
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
     )
-    result = workflow.run("do the thing")
+    result = pipeline.run("do the thing")
 
     assert len(calls) == _MAX_TOOL_ITERATIONS
     # Exhausting the loop without a final answer must not look like a silent
@@ -256,12 +256,12 @@ def test_agent_tool_loop_is_bounded():
 
 def test_stream_yields_run_failed_event_on_configuration_error():
     broken = Agent(name="broken", role="r", goal="g", model="not-a-real-model-spec")
-    workflow = Workflow(
+    pipeline = Pipeline(
         name="wf",
         steps=[Team(name="team", agents=[broken], mode=CollaborationMode.SEQUENTIAL)],
     )
 
-    events = list(workflow.stream("do the thing"))
+    events = list(pipeline.stream("do the thing"))
 
     assert events[0].type == "run_started"
     assert events[-1].type == "run_failed"

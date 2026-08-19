@@ -43,8 +43,8 @@ def _safe_recall(
 
 
 @dataclass
-class WorkflowResult:
-    """Normalized output of a workflow run, independent of the underlying engine.
+class PipelineResult:
+    """Normalized output of a pipeline run, independent of the underlying engine.
 
     Whatever engine produced it (LangGraph today, possibly CrewAI tomorrow),
     customer code only ever sees this shape.
@@ -62,7 +62,7 @@ class WorkflowResult:
     recall: "Optional[RecallResult]" = None
 
 
-class Workflow:
+class Pipeline:
     """Top-level entry point: chains teams into a runnable business pipeline."""
 
     def __init__(
@@ -72,9 +72,9 @@ class Workflow:
         adapter: Optional["EngineAdapter"] = None,
     ) -> None:
         if not name:
-            raise ConfigurationError("Workflow.name is required")
+            raise ConfigurationError("Pipeline.name is required")
         if not steps:
-            raise ConfigurationError(f"Workflow '{name}' needs at least one step")
+            raise ConfigurationError(f"Pipeline '{name}' needs at least one step")
 
         self.name = name
         self.steps: List[Team] = list(steps)
@@ -93,8 +93,8 @@ class Workflow:
         *,
         user_id: Optional[str] = None,
         memory: Optional["MemoryManager"] = None,
-    ) -> WorkflowResult:
-        """Execute the workflow end-to-end and return a normalized result.
+    ) -> PipelineResult:
+        """Execute the pipeline end-to-end and return a normalized result.
 
         When both `user_id` and `memory` are given, per-user memory is recalled
         into every agent's system prompt before the run and the run is recorded
@@ -125,12 +125,12 @@ class Workflow:
         user_id: Optional[str] = None,
         memory: Optional["MemoryManager"] = None,
     ) -> Iterator[TraceEvent]:
-        """Run the workflow while yielding live TraceEvents — what the
+        """Run the pipeline while yielding live TraceEvents — what the
         monitoring UI subscribes to.
 
         Wraps the adapter's raw event stream with run-level bookends
         (`run_started`/`run_completed`/`run_failed`) and stamps every event
-        with this workflow's name. A failure surfaces as a terminal
+        with this pipeline's name. A failure surfaces as a terminal
         `run_failed` event rather than an exception breaking the generator
         mid-iteration — simpler for consumers like a WebSocket handler to relay.
 
@@ -146,7 +146,7 @@ class Workflow:
 
         recall_result = _safe_recall(memory, user_id, input)
 
-        yield TraceEvent(type="run_started", workflow=self.name, data=input)
+        yield TraceEvent(type="run_started", pipeline=self.name, data=input)
 
         # Observability (M-05): for an active-memory run, always surface the recall
         # attempt — a count (0 when nothing matched, distinguishing it from memory
@@ -160,13 +160,13 @@ class Workflow:
             if recall_result.ok:
                 yield TraceEvent(
                     type="memory_recalled",
-                    workflow=self.name,
+                    pipeline=self.name,
                     data=recall_result.count,
                     usage=expansion_usage,
                 )
             else:
                 yield TraceEvent(
-                    type="memory_failed", workflow=self.name, data="recall", usage=expansion_usage
+                    type="memory_failed", pipeline=self.name, data="recall", usage=expansion_usage
                 )
 
         last_output = ""
@@ -174,12 +174,12 @@ class Workflow:
             for event in self._adapter.stream(
                 self._compiled, input, memory_preamble=recall_result.preamble
             ):
-                event = dataclasses.replace(event, workflow=self.name)
+                event = dataclasses.replace(event, pipeline=self.name)
                 if event.type == "agent_completed":
                     last_output = event.data
                 yield event
         except BestTeamError as exc:
-            yield TraceEvent(type="run_failed", workflow=self.name, data=str(exc))
+            yield TraceEvent(type="run_failed", pipeline=self.name, data=str(exc))
             return
 
         # The business run is complete: emit the terminal event NOW, before the
@@ -191,7 +191,7 @@ class Workflow:
         # WebSocket that stops on `run_completed` won't display them, but no
         # durable billing/provenance data depends on that. Recording stays
         # best-effort: a failure is a sanitized `memory_failed`, never `run_failed`.
-        yield TraceEvent(type="run_completed", workflow=self.name, data=last_output)
+        yield TraceEvent(type="run_completed", pipeline=self.name, data=last_output)
 
         if memory:
             from .memory import MemoryOutcome
@@ -200,7 +200,7 @@ class Workflow:
                 outcome = memory.record_run(user_id, input, last_output)
             except Exception:  # noqa: BLE001 -- memory must never break a run
                 _logger.exception("Memory recording failed; run already completed")
-                yield TraceEvent(type="memory_failed", workflow=self.name, data="record")
+                yield TraceEvent(type="memory_failed", pipeline=self.name, data="record")
             else:
                 # A legacy manager may return None (recorded successfully, no
                 # structured outcome) -- that is NOT a failure (review r5 #3).
@@ -214,7 +214,7 @@ class Workflow:
                         # written and carry the extraction usage for the backend.
                         yield TraceEvent(
                             type="memory_recorded",
-                            workflow=self.name,
+                            pipeline=self.name,
                             data=", ".join(outcome.recorded),
                             usage=usage,
                         )
@@ -223,7 +223,7 @@ class Workflow:
                         # A partial/total write failure is observable; when no
                         # write succeeded it carries the (still-billable) usage.
                         yield TraceEvent(
-                            type="memory_failed", workflow=self.name, data="record", usage=usage
+                            type="memory_failed", pipeline=self.name, data="record", usage=usage
                         )
 
     def visualize(self) -> str:

@@ -16,8 +16,8 @@ from ui.backend.db_session import get_db
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -44,9 +44,9 @@ def test_unhandled_exception_returns_sanitized_500(client, monkeypatch):
     def _boom(name, db=None):
         raise RuntimeError("boom: should never reach the client")
 
-    monkeypatch.setattr(backend_main, "_get_workflow", _boom)
+    monkeypatch.setattr(backend_main, "_get_pipeline", _boom)
 
-    resp = client.get("/api/workflows/anything/graph")
+    resp = client.get("/api/pipelines/anything/graph")
 
     assert resp.status_code == 500
     assert resp.json() == {"detail": "Internal server error"}
@@ -54,8 +54,8 @@ def test_unhandled_exception_returns_sanitized_500(client, monkeypatch):
     assert "RuntimeError" not in resp.text
 
 
-def test_known_workflow_404_still_returns_friendly_detail(client):
-    resp = client.get("/api/workflows/does-not-exist/graph")
+def test_known_pipeline_404_still_returns_friendly_detail(client):
+    resp = client.get("/api/pipelines/does-not-exist/graph")
 
     assert resp.status_code == 404
-    assert "Unknown workflow" in resp.json()["detail"]
+    assert "Unknown pipeline" in resp.json()["detail"]

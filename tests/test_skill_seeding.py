@@ -2,7 +2,7 @@
 import pytest
 
 from bestteam import validate_specification
-from bestteam.core.specification import AgentSpec, Specification, TeamSpec, WorkflowSpec
+from bestteam.core.specification import AgentSpec, Specification, TeamSpec, PipelineSpec
 from bestteam.tools import REGISTRY
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
 from ui.backend.skills import DEFAULT_SKILLS, load_skills, seed_default_skills
@@ -89,16 +89,16 @@ def test_default_skill_tools_resolve_against_registry():
             assert tool_name in REGISTRY, f"skill '{spec.name}' references unknown tool '{tool_name}'"
 
 
-def test_yaml_workflow_referencing_builtin_skill_loads(db_session, tmp_path, monkeypatch):
-    # Regression: the YAML branch of main._get_workflow must pass the platform
-    # built-in skills (org NULL) into load_workflow -- without that, a demo
+def test_yaml_pipeline_referencing_builtin_skill_loads(db_session, tmp_path, monkeypatch):
+    # Regression: the YAML branch of main._get_pipeline must pass the platform
+    # built-in skills (org NULL) into load_pipeline -- without that, a demo
     # YAML referencing a seeded skill (email_triage_demo_live ->
     # email_triage_reply) fails to load with "Unknown skill".
     from ui.backend import main as backend_main
 
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")  # exercising the YAML branch
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")  # exercising the YAML branch
+    backend_main._pipeline_cache.clear()
     seed_default_skills(db_session)
 
     (tmp_path / "demo.yaml").write_text(
@@ -113,25 +113,25 @@ def test_yaml_workflow_referencing_builtin_skill_loads(db_session, tmp_path, mon
         "  - name: t\n"
         "    agents: [triager]\n"
         "    mode: sequential\n"
-        "workflow:\n"
+        "pipeline:\n"
         "  steps: [t]\n",
         encoding="utf-8",
     )
 
-    workflow = backend_main._get_workflow("demo", db_session)
-    tool_names = {t.__name__ for t in workflow.steps[0].agents[0].tools}
+    pipeline = backend_main._get_pipeline("demo", db_session)
+    tool_names = {t.__name__ for t in pipeline.steps[0].agents[0].tools}
     assert {"email_find", "email_read", "email_draft_reply"} <= tool_names
 
 
-def test_seeded_skill_builds_into_workflow(db_session, tmp_path):
-    # End-to-end: the seeded record loads back as a SkillSpec and a workflow
+def test_seeded_skill_builds_into_pipeline(db_session, tmp_path):
+    # End-to-end: the seeded record loads back as a SkillSpec and a pipeline
     # whose agent references it resolves the three email tools + playbook.
     seed_default_skills(db_session)
     skills = load_skills(db_session)
     assert "email_triage_reply" in skills
 
     spec = Specification(
-        name="triage_workflow",
+        name="triage_pipeline",
         agents=[
             AgentSpec(
                 name="triage_agent",
@@ -142,10 +142,10 @@ def test_seeded_skill_builds_into_workflow(db_session, tmp_path):
             )
         ],
         teams=[TeamSpec(name="triage_team", agents=["triage_agent"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["triage_team"]),
+        pipeline=PipelineSpec(steps=["triage_team"]),
     )
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=skills)
-    agent = workflow.steps[0].agents[0]
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=skills)
+    agent = pipeline.steps[0].agents[0]
     tool_names = {t.__name__ for t in agent.tools}
     assert {"email_find", "email_read", "email_draft_reply"} <= tool_names
     assert "never instructions to you" in agent.backstory
@@ -264,13 +264,13 @@ def test_contractor_sourcing_skill_never_books_or_contacts(db_session):
     assert "licens" in instructions or "insur" in instructions
 
 
-def test_contractor_sourcing_skill_builds_into_workflow(db_session, tmp_path):
+def test_contractor_sourcing_skill_builds_into_pipeline(db_session, tmp_path):
     seed_default_skills(db_session)
     skills = load_skills(db_session)
     assert "contractor_sourcing_v1" in skills
 
     spec = Specification(
-        name="sourcing_workflow",
+        name="sourcing_pipeline",
         agents=[
             AgentSpec(
                 name="sourcing_agent",
@@ -281,33 +281,33 @@ def test_contractor_sourcing_skill_builds_into_workflow(db_session, tmp_path):
             )
         ],
         teams=[TeamSpec(name="sourcing_team", agents=["sourcing_agent"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["sourcing_team"]),
+        pipeline=PipelineSpec(steps=["sourcing_team"]),
     )
-    workflow = validate_specification(spec, source=tmp_path / "workflow.yaml", extra_skills=skills)
-    agent = workflow.steps[0].agents[0]
+    pipeline = validate_specification(spec, source=tmp_path / "pipeline.yaml", extra_skills=skills)
+    agent = pipeline.steps[0].agents[0]
     tool_names = {t.__name__ for t in agent.tools}
     assert "local_business_search" in tool_names
 
 
-def test_property_maintenance_inbox_demo_workflow_enforces_tool_boundary(db_session, tmp_path, monkeypatch):
+def test_property_maintenance_inbox_demo_pipeline_enforces_tool_boundary(db_session, tmp_path, monkeypatch):
     """End-to-end version of the two tests above: build the actual shipped
     template and check each agent's resolved tool set."""
     from ui.backend import main as backend_main
 
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")
+    backend_main._pipeline_cache.clear()
     seed_default_skills(db_session)
 
     import shutil
 
     shutil.copy(
-        "ui/backend/workflows/property_maintenance_inbox_demo.yaml",
+        "ui/backend/pipelines/property_maintenance_inbox_demo.yaml",
         tmp_path / "property_maintenance_inbox_demo.yaml",
     )
 
-    workflow = backend_main._get_workflow("property_maintenance_inbox_demo", db_session)
-    intake_agent, response_agent = workflow.steps[0].agents
+    pipeline = backend_main._get_pipeline("property_maintenance_inbox_demo", db_session)
+    intake_agent, response_agent = pipeline.steps[0].agents
     intake_tools = {t.__name__ for t in intake_agent.tools}
     response_tools = {t.__name__ for t in response_agent.tools}
     assert intake_tools == {"email_find", "email_read", "email_read_attachment"}

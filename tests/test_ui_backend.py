@@ -1,4 +1,4 @@
-"""Tests for ui/backend/main.py's workflow loading/caching."""
+"""Tests for ui/backend/main.py's pipeline loading/caching."""
 import os
 
 import pytest
@@ -13,15 +13,15 @@ from ui.backend import main as backend_main
 
 
 @pytest.fixture
-def workflows_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+def pipelines_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     # This module tests the YAML-file branch itself, which is opt-in.
-    monkeypatch.setenv("BESTTEAM_DEMO_WORKFLOWS", "1")
-    backend_main._workflow_cache.clear()
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")
+    backend_main._pipeline_cache.clear()
     return tmp_path
 
 
-def _write_workflow(path, name, response):
+def _write_pipeline(path, name, response):
     path.write_text(
         f"""
 name: {name}
@@ -34,32 +34,32 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """,
         encoding="utf-8",
     )
 
 
-def test_get_workflow_caches_until_file_changes(workflows_dir):
-    p = workflows_dir / "demo.yaml"
-    _write_workflow(p, "demo_v1", "first")
+def test_get_pipeline_caches_until_file_changes(pipelines_dir):
+    p = pipelines_dir / "demo.yaml"
+    _write_pipeline(p, "demo_v1", "first")
 
-    wf1 = backend_main._get_workflow("demo")
-    wf2 = backend_main._get_workflow("demo")
+    wf1 = backend_main._get_pipeline("demo")
+    wf2 = backend_main._get_pipeline("demo")
     assert wf1 is wf2
     assert wf1.name == "demo_v1"
 
-    _write_workflow(p, "demo_v2", "second")
+    _write_pipeline(p, "demo_v2", "second")
     new_mtime = p.stat().st_mtime + 1
     os.utime(p, (new_mtime, new_mtime))
 
-    wf3 = backend_main._get_workflow("demo")
+    wf3 = backend_main._get_pipeline("demo")
     assert wf3 is not wf1
     assert wf3.name == "demo_v2"
 
 
-def test_get_workflow_raises_404_for_missing_file(workflows_dir):
+def test_get_pipeline_raises_404_for_missing_file(pipelines_dir):
     with pytest.raises(HTTPException) as exc_info:
-        backend_main._get_workflow("does-not-exist")
+        backend_main._get_pipeline("does-not-exist")
     assert exc_info.value.status_code == 404

@@ -22,8 +22,8 @@ from ui.backend.interview import InterviewExtraction
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     engine = make_engine(":memory:")

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .auth_api import get_current_org, get_current_user
-from .db.models import Organization, ShareLink, ShareSession, User, WorkflowRecord, iso_utc
+from .db.models import Organization, ShareLink, ShareSession, User, PipelineRecord, iso_utc
 from .db.share_links import create_share_link, get_share_link, list_share_links, patch_share_link
 from .db.share_messages import list_messages
 from .db.share_sessions import list_share_sessions
@@ -62,7 +62,7 @@ class ShareLinkPatch(BaseModel):
 def _share_link_dict(link: ShareLink) -> dict:
     return {
         "id": link.id,
-        "workflow_id": link.workflow_id,
+        "pipeline_id": link.pipeline_id,
         "token": link.token,
         "active": link.active,
         "daily_cap": link.daily_cap,
@@ -85,29 +85,29 @@ def _share_session_dict(session: ShareSession) -> dict:
     }
 
 
-def _get_deployed_workflow_or_404(db: Session, workflow_id: int, org_id: int) -> WorkflowRecord:
+def _get_deployed_pipeline_or_404(db: Session, pipeline_id: int, org_id: int) -> PipelineRecord:
     record = (
-        db.query(WorkflowRecord)
-        .filter_by(id=workflow_id, org_id=org_id, status="deployed")
+        db.query(PipelineRecord)
+        .filter_by(id=pipeline_id, org_id=org_id, status="deployed")
         .one_or_none()
     )
     if record is None:
-        raise HTTPException(status_code=404, detail=f"Unknown deployed team '{workflow_id}'")
+        raise HTTPException(status_code=404, detail=f"Unknown deployed team '{pipeline_id}'")
     return record
 
 
-@router.post("/workflows/{workflow_id}/share-links", status_code=201)
+@router.post("/pipelines/{pipeline_id}/share-links", status_code=201)
 def create_share_link_endpoint(
-    workflow_id: int,
+    pipeline_id: int,
     body: ShareLinkCreate,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ) -> dict:
-    _get_deployed_workflow_or_404(db, workflow_id, org.id)
+    _get_deployed_pipeline_or_404(db, pipeline_id, org.id)
     link = create_share_link(
         db,
-        workflow_id=workflow_id,
+        pipeline_id=pipeline_id,
         org_id=org.id,
         created_by=user.id,
         daily_cap=body.daily_cap,
@@ -116,14 +116,14 @@ def create_share_link_endpoint(
     return _share_link_dict(link)
 
 
-@router.get("/workflows/{workflow_id}/share-links")
+@router.get("/pipelines/{pipeline_id}/share-links")
 def list_share_links_endpoint(
-    workflow_id: int,
+    pipeline_id: int,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> List[dict]:
-    _get_deployed_workflow_or_404(db, workflow_id, org.id)
-    return [_share_link_dict(link) for link in list_share_links(db, workflow_id, org.id)]
+    _get_deployed_pipeline_or_404(db, pipeline_id, org.id)
+    return [_share_link_dict(link) for link in list_share_links(db, pipeline_id, org.id)]
 
 
 @router.patch("/share-links/{link_id}")

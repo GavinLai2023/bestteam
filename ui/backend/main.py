@@ -1,7 +1,7 @@
 """FastAPI backend for the bestteam runtime monitoring dashboard.
 
 Pure wrapper: every endpoint is a thin shim over the bestteam SDK
-(`load_workflow`, `Workflow.run/.stream/.visualize`). The only thing this
+(`load_pipeline`, `Pipeline.run/.stream/.visualize`). The only thing this
 layer adds is turning a blocking, synchronous SDK into something a browser
 can subscribe to live — an in-memory run registry plus a thread-pool bridge
 from LangGraph's blocking `.stream()` generator into asyncio.
@@ -29,8 +29,8 @@ from sqlalchemy import func, or_, text as sa_text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from bestteam import Workflow, load_workflow
-from bestteam.core.loader import _build_workflow
+from bestteam import Pipeline, load_pipeline
+from bestteam.core.loader import _build_pipeline
 from bestteam.exceptions import BestTeamError
 
 from . import auth
@@ -59,13 +59,13 @@ from .db.models import (
     KnowledgeBaseRecord,
     OrgEmailCredential,
     Organization,
+    PipelineRecord,
+    PipelineVersion,
     Run,
     SkillRecord,
     TraceEventRecord,
     UsageRecord,
     User,
-    WorkflowRecord,
-    WorkflowVersion,
     iso_utc,
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
@@ -73,19 +73,19 @@ from .db.users import get_user_by_username, orgs_with_multiple_members
 from .db_session import SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
-    contain_workflow_config_for_load,
-    ensure_workflow_cache_paths_for_source,
+    contain_pipeline_config_for_load,
+    ensure_pipeline_cache_paths_for_source,
     load_knowledge_base_tools,
 )
 from .runtime import _executor, registry, run_in_background
 from .skills import load_skills
 from .ws_tickets import consume_ticket, issue_ticket
 
-WORKFLOWS_DIR = Path(__file__).parent / "workflows"
+PIPELINES_DIR = Path(__file__).parent / "pipelines"
 
 
-def demo_workflows_enabled() -> bool:
-    """Whether the shipped YAML workflows in `WORKFLOWS_DIR` are exposed.
+def demo_pipelines_enabled() -> bool:
+    """Whether the shipped YAML pipelines in `PIPELINES_DIR` are exposed.
 
     Off by default. Those files are *our* demo fixtures, not any customer's
     teams: most run `fake:` models that emit a hardcoded, plausible-looking
@@ -95,14 +95,14 @@ def demo_workflows_enabled() -> bool:
     mailbox on a single-org deployment. They are global (no `org_id`), so while
     this is on, every org user on the deployment sees and can run all of them.
 
-    Turn it on (`BESTTEAM_DEMO_WORKFLOWS=1`) only on a dev box or a sales-demo
+    Turn it on (`BESTTEAM_DEMO_PIPELINES=1`) only on a dev box or a sales-demo
     instance. This gates the UI backend only -- the SDK/CLI YAML path
-    (`load_workflow(path)`) is unaffected and always works.
+    (`load_pipeline(path)`) is unaffected and always works.
 
     Read per-call rather than at import so a deployment (or a test) can flip it
     without re-importing the module.
     """
-    return os.environ.get("BESTTEAM_DEMO_WORKFLOWS", "").strip().lower() in (
+    return os.environ.get("BESTTEAM_DEMO_PIPELINES", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -179,7 +179,7 @@ async def _lifespan(_app):
             pass  # pre-migration schema (no users table yet); nothing to enforce
     stop_polling = asyncio.Event()
     poller = asyncio.create_task(
-        email_trigger.poll_forever(stop_polling, email_trigger.build_trigger_workflow)
+        email_trigger.poll_forever(stop_polling, email_trigger.build_trigger_pipeline)
     )
     try:
         yield
@@ -356,36 +356,36 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-# Keyed by (org_id, workflow name): two orgs' same-named workflows are
+# Keyed by (org_id, pipeline name): two orgs' same-named pipelines are
 # different entries, so one org's cached build can never serve another org.
-# YAML demo workflows are global and cache under (None, name).
-_workflow_cache: Dict[Tuple[Optional[int], str], Tuple[Workflow, Any]] = {}
-# Guards the cache dict and a monotonic generation counter. `_get_workflow`
+# YAML demo pipelines are global and cache under (None, name).
+_pipeline_cache: Dict[Tuple[Optional[int], str], Tuple[Pipeline, Any]] = {}
+# Guards the cache dict and a monotonic generation counter. `_get_pipeline`
 # snapshots the generation before it builds and only stores the result if the
 # generation hasn't advanced -- so a concurrent KB/skill invalidation (which
-# bumps the generation, see crud._invalidate_workflow_cache) can't be undone by
+# bumps the generation, see crud._invalidate_pipeline_cache) can't be undone by
 # a load that started before it and finished after (CR-005).
-_workflow_cache_lock = threading.Lock()
-_workflow_cache_generation = 0
+_pipeline_cache_lock = threading.Lock()
+_pipeline_cache_generation = 0
 
 
-def _store_workflow_in_cache(
-    key: Tuple[Optional[int], str], workflow: Workflow, cache_key: Any, generation: int
+def _store_pipeline_in_cache(
+    key: Tuple[Optional[int], str], pipeline: Pipeline, cache_key: Any, generation: int
 ) -> None:
-    with _workflow_cache_lock:
-        if generation == _workflow_cache_generation:
-            _workflow_cache[key] = (workflow, cache_key)
+    with _pipeline_cache_lock:
+        if generation == _pipeline_cache_generation:
+            _pipeline_cache[key] = (pipeline, cache_key)
 
 
 class RunRequest(BaseModel):
-    workflow: str
+    pipeline: str
     input: str
 
 
 def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     """Fingerprint of all SkillRecords and KnowledgeBaseRecords, folded into a
-    cached Workflow's cache key so any change to either invalidates a cached
-    workflow that might depend on them.
+    cached Pipeline's cache key so any change to either invalidates a cached
+    pipeline that might depend on them.
 
     Includes the row COUNT as well as max(updated_at): a *deletion* doesn't
     change the maximum, so a max-only fingerprint would keep serving a deleted
@@ -396,7 +396,7 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     (CR-005). (Adds/updates already bump `updated_at` to now, moving the max.)
 
     Deliberately global rather than scoped to only the names a given
-    workflow references -- see
+    pipeline references -- see
     docs/superpowers/specs/2026-06-22-code-review-fixes-design.md, "Design
     > A" for why."""
     skills_count, skills_max = db.query(
@@ -405,80 +405,80 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     kb_count, kb_max = db.query(
         func.count(KnowledgeBaseRecord.id), func.max(KnowledgeBaseRecord.updated_at)
     ).one()
-    # Per-org email tools are baked into the compiled workflow, so connecting /
-    # rotating / clearing a mailbox must invalidate that org's cached workflows.
+    # Per-org email tools are baked into the compiled pipeline, so connecting /
+    # rotating / clearing a mailbox must invalidate that org's cached pipelines.
     email_count, email_max = db.query(
         func.count(OrgEmailCredential.id), func.max(OrgEmailCredential.updated_at)
     ).one()
     return (skills_count, skills_max, kb_count, kb_max, email_count, email_max)
 
 
-def _resolve_workflow_and_version(
+def _resolve_pipeline_and_version(
     name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
-) -> tuple[Workflow, Optional[int], Optional[int]]:
-    """Load a workflow by name for one org and return it together with the
+) -> tuple[Pipeline, Optional[int], Optional[int]]:
+    """Load a pipeline by name for one org and return it together with the
     `current_version_id` of the record it was built from (None for a YAML demo
-    or an absent record) AND the record's own stable `workflow_id`
-    (`WorkflowRecord.id`, None in the same two cases) -- the cross-workflow
+    or an absent record) AND the record's own stable `pipeline_id`
+    (`PipelineRecord.id`, None in the same two cases) -- the cross-pipeline
     memory-scoping key, distinct from `current_version_id` (a redeploy changes
-    the version but keeps the same `workflow_id`, so accumulated task memory
+    the version but keeps the same `pipeline_id`, so accumulated task memory
     survives a redeploy). Returning both from the SAME record read that
     produces the config makes a run's stamped version match the config it
     executed even if a redeploy commits concurrently -- a separate
     `current_version_id` re-query could observe a newer version than the one
     built (pysqlite does not lock on SELECT).
 
-    Load and cache a workflow by name for one org (Workflow already
-    memoizes its own compiled graph, so repeat runs of the same workflow
+    Load and cache a pipeline by name for one org (Pipeline already
+    memoizes its own compiled graph, so repeat runs of the same pipeline
     stay cheap).
 
-    A `WorkflowRecord` in the database (e.g. one deployed via the Team
+    A `PipelineRecord` in the database (e.g. one deployed via the Team
     Builder Wizard, or edited through the `/api/config` CRUD API) is looked
-    up within `org_id` -- another org's same-named workflow is invisible --
+    up within `org_id` -- another org's same-named pipeline is invisible --
     and is cached on its `updated_at` under the `(org_id, name)` cache key.
-    Otherwise falls back to `WORKFLOWS_DIR/<name>.yaml` (global demo
-    workflows, shared across orgs under `(None, name)`), cached by the
-    file's mtime, so editing a workflow file on disk is picked up on the
+    Otherwise falls back to `PIPELINES_DIR/<name>.yaml` (global demo
+    pipelines, shared across orgs under `(None, name)`), cached by the
+    file's mtime, so editing a pipeline file on disk is picked up on the
     next request.
 
-    If `owner_principal_id` is provided, only workflows created by that
+    If `owner_principal_id` is provided, only pipelines created by that
     principal OR admin-shared (created_by = NULL) are returned; other users'
-    personal workflows are rejected with a 404. Must be the caller's
-    principal_id, never their username (see WorkflowRecord.created_by).
+    personal pipelines are rejected with a 404. Must be the caller's
+    principal_id, never their username (see PipelineRecord.created_by).
 
     `db` is the request's `get_db`-provided session, if available, so this
     sees the same data as the `/api/builder` and `/api/config` routers
     (including in tests, which override `get_db`); if omitted, a one-off
     session against the module-level engine is used."""
-    source = WORKFLOWS_DIR / f"{name}.yaml"
+    source = PIPELINES_DIR / f"{name}.yaml"
     # Snapshot the invalidation generation before we read dependencies / build,
     # so a KB/skill delete that races this load makes us skip caching a stale
     # result rather than repopulating the cache after the invalidation (CR-005).
-    generation = _workflow_cache_generation
+    generation = _pipeline_cache_generation
     if db is not None:
-        query = db.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
+        query = db.query(PipelineRecord).filter_by(name=name, org_id=org_id, status="deployed")
         if owner_principal_id is not None:
-            query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
+            query = query.filter(or_(PipelineRecord.created_by == owner_principal_id, PipelineRecord.created_by.is_(None)))
         record = query.one_or_none()
         dependency_freshness = _dependency_freshness(db) if record is not None else None
     else:
         with SessionLocal() as session:
-            query = session.query(WorkflowRecord).filter_by(name=name, org_id=org_id, status="deployed")
+            query = session.query(PipelineRecord).filter_by(name=name, org_id=org_id, status="deployed")
             if owner_principal_id is not None:
-                query = query.filter(or_(WorkflowRecord.created_by == owner_principal_id, WorkflowRecord.created_by.is_(None)))
+                query = query.filter(or_(PipelineRecord.created_by == owner_principal_id, PipelineRecord.created_by.is_(None)))
             record = query.one_or_none()
             dependency_freshness = _dependency_freshness(session) if record is not None else None
 
     if record is not None:
         cache_key: Any = ("db", record.updated_at, *dependency_freshness)
-        cached = _workflow_cache.get((org_id, name))
+        cached = _pipeline_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
             return cached[0], record.current_version_id, record.id
         # Only load skills and build standalone KB tools (which may re-chunk
         # files and, for type: vector, call a paid embedding model) on a cache
         # miss -- not on every request. Dependencies resolve within the
-        # workflow record's own org (+ platform built-in skills), so one org's
-        # workflow can never pull in another org's KB or skill by name.
+        # pipeline record's own org (+ platform built-in skills), so one org's
+        # pipeline can never pull in another org's KB or skill by name.
         try:
             # Tool loading is inside the try so a BestTeamError from resolving a
             # standalone KB (e.g. a legacy KB shadowing a built-in, F4) becomes a
@@ -487,7 +487,7 @@ def _resolve_workflow_and_version(
                 skill_lookup = load_skills(
                     db,
                     record.org_id,
-                    workflow_version_id=record.current_version_id,
+                    pipeline_version_id=record.current_version_id,
                 )
                 kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=record.org_id)
                 email_tools = load_email_tools(db, record.org_id)
@@ -496,15 +496,15 @@ def _resolve_workflow_and_version(
                     skill_lookup = load_skills(
                         session,
                         record.org_id,
-                        workflow_version_id=record.current_version_id,
+                        pipeline_version_id=record.current_version_id,
                     )
                     kb_tools = load_knowledge_base_tools(
                         session, record.config, source, org_id=record.org_id
                     )
                     email_tools = load_email_tools(session, record.org_id)
-            config = contain_workflow_config_for_load(record.config)
-            ensure_workflow_cache_paths_for_source(config, source)
-            workflow = _build_workflow(
+            config = contain_pipeline_config_for_load(record.config)
+            ensure_pipeline_cache_paths_for_source(config, source)
+            pipeline = _build_pipeline(
                 config,
                 source=source,
                 # Per-org email tools override the env-based ones in REGISTRY by
@@ -514,16 +514,16 @@ def _resolve_workflow_and_version(
             )
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-        return workflow, record.current_version_id, record.id
+        _store_pipeline_in_cache((org_id, name), pipeline, cache_key, generation)
+        return pipeline, record.current_version_id, record.id
 
     # Same 404 whether the demos are disabled or the file is absent -- hiding
     # them from the list alone would still leave them runnable by name via
     # POST /api/runs, which for email_triage_demo_live means a customer's agent
     # reaching the configured mailbox.
-    path = WORKFLOWS_DIR / f"{name}.yaml"
-    if not demo_workflows_enabled() or not path.is_file():
-        raise HTTPException(status_code=404, detail=f"Unknown workflow '{name}'")
+    path = PIPELINES_DIR / f"{name}.yaml"
+    if not demo_pipelines_enabled() or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Unknown pipeline '{name}'")
 
     # A global YAML demo can reference the built-in email_triage_reply skill,
     # whose email_* tools otherwise resolve to the env-based REGISTRY. Inject the
@@ -542,12 +542,12 @@ def _resolve_workflow_and_version(
         else:
             cache_key = ("file", mtime)
             email_tools = {}
-        cached = _workflow_cache.get((org_id, name))
+        cached = _pipeline_cache.get((org_id, name))
         if cached is not None and cached[1] == cache_key:
             return cached[0], None, None
         builtin_skills = load_skills(session, None)
         try:
-            workflow = load_workflow(
+            pipeline = load_pipeline(
                 path,
                 toolkits=[email_tools] if email_tools else None,
                 skills=list(builtin_skills.values()),
@@ -557,17 +557,17 @@ def _resolve_workflow_and_version(
     finally:
         if own_session:
             session.close()
-    _store_workflow_in_cache((org_id, name), workflow, cache_key, generation)
-    return workflow, None, None
+    _store_pipeline_in_cache((org_id, name), pipeline, cache_key, generation)
+    return pipeline, None, None
 
 
-def _get_workflow(
+def _get_pipeline(
     name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
-) -> Workflow:
-    """Back-compat wrapper: the built workflow only (see
-    `_resolve_workflow_and_version` for the version-aware form used by run
+) -> Pipeline:
+    """Back-compat wrapper: the built pipeline only (see
+    `_resolve_pipeline_and_version` for the version-aware form used by run
     creation)."""
-    return _resolve_workflow_and_version(name, db, org_id, owner_principal_id)[0]
+    return _resolve_pipeline_and_version(name, db, org_id, owner_principal_id)[0]
 
 
 @app.get("/api/health")
@@ -591,44 +591,44 @@ def health():
     return {"status": "ok", "database": "ok"}
 
 
-@app.get("/api/workflows")
-def list_workflows(
+@app.get("/api/pipelines")
+def list_pipelines(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ):
-    # The user's own deployed workflows (created_by = current user's
-    # principal_id, never username -- see WorkflowRecord.created_by) PLUS
-    # admin-deployed shared workflows (created_by = NULL, deployed by operators).
+    # The user's own deployed pipelines (created_by = current user's
+    # principal_id, never username -- see PipelineRecord.created_by) PLUS
+    # admin-deployed shared pipelines (created_by = NULL, deployed by operators).
     # This supports two models:
     # - Personal teams: user-created via builder, visible only to creator
     # - Shared templates: admin-created via /api/config, visible to all org members
     # Plus the global YAML demos only where they're deliberately enabled.
     id_by_name = {
         row.name: row.id
-        for row in db.query(WorkflowRecord.name, WorkflowRecord.id).filter(
-            WorkflowRecord.org_id == org.id,
-            WorkflowRecord.status == "deployed",
-            or_(WorkflowRecord.created_by == user.principal_id, WorkflowRecord.created_by.is_(None)),
+        for row in db.query(PipelineRecord.name, PipelineRecord.id).filter(
+            PipelineRecord.org_id == org.id,
+            PipelineRecord.status == "deployed",
+            or_(PipelineRecord.created_by == user.principal_id, PipelineRecord.created_by.is_(None)),
         )
     }
     db_names = set(id_by_name)
     yaml_names = (
-        {p.stem for p in WORKFLOWS_DIR.glob("*.yaml")} if demo_workflows_enabled() else set()
+        {p.stem for p in PIPELINES_DIR.glob("*.yaml")} if demo_pipelines_enabled() else set()
     )
-    return {"workflows": sorted(db_names | yaml_names), "workflow_ids": id_by_name}
+    return {"pipelines": sorted(db_names | yaml_names), "pipeline_ids": id_by_name}
 
 
-@app.get("/api/workflows/{name}/graph")
-def workflow_graph(
+@app.get("/api/pipelines/{name}/graph")
+def pipeline_graph(
     name: str,
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ):
-    workflow = _get_workflow(name, db, org.id, user.principal_id)
+    pipeline = _get_pipeline(name, db, org.id, user.principal_id)
     try:
-        return {"mermaid": workflow.visualize()}
+        return {"mermaid": pipeline.visualize()}
     except BestTeamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -640,25 +640,25 @@ async def create_run(
     user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
-    # Resolve the workflow and the version it was built from together, so the
+    # Resolve the pipeline and the version it was built from together, so the
     # run is stamped with exactly the version whose config it executes.
-    # Only allow running workflows created by this user (by principal_id) or
+    # Only allow running pipelines created by this user (by principal_id) or
     # admin-shared (created_by = NULL).
-    workflow, version_id, workflow_id = _resolve_workflow_and_version(req.workflow, db, org.id, user.principal_id)
-    run = registry.create(req.workflow, req.input, org_id=org.id, username=user.username)
+    pipeline, version_id, pipeline_id = _resolve_pipeline_and_version(req.pipeline, db, org.id, user.principal_id)
+    run = registry.create(req.pipeline, req.input, org_id=org.id, username=user.username)
 
     _executor.submit(
         run_in_background,
         run.id,
-        workflow,
+        pipeline,
         req.input,
         engine=db.get_bind(),
         user_id=user.username,
         org_id=org.id,
         principal_id=user.principal_id,
         username=user.username,
-        workflow_version_id=version_id,
-        workflow_id=workflow_id,
+        pipeline_version_id=version_id,
+        pipeline_id=pipeline_id,
     )
 
     return {"run_id": run.id}
@@ -751,7 +751,7 @@ def retry_run(
     exact original UID batch (spec section 11.2) -- always a NEW run, never an
     overwrite of history. Only eligible for a run this org owns that carries a
     recorded `trigger_context`; see `email_trigger.retry_triggered_run` for the
-    full eligibility checks (UIDVALIDITY match, mailbox reachable, workflow
+    full eligibility checks (UIDVALIDITY match, mailbox reachable, pipeline
     still buildable, daily cap)."""
     run_row = db.get(Run, run_id)
     if run_row is None or run_row.org_id != org.id:
@@ -789,7 +789,7 @@ def purge_run_content(
 @app.get("/api/runs")
 def list_runs(
     run_id: Optional[str] = None,
-    workflow: Optional[str] = None,
+    pipeline: Optional[str] = None,
     status: Optional[str] = None,
     manual: Optional[bool] = None,
     since: Optional[datetime] = None,
@@ -835,8 +835,8 @@ def list_runs(
         query = query.filter(Run.org_id == scope.org_id)
     if run_id:
         query = query.filter(Run.id == run_id)
-    if workflow:
-        query = query.filter(Run.workflow == workflow)
+    if pipeline:
+        query = query.filter(Run.pipeline == pipeline)
     if status:
         query = query.filter(Run.status == status)
     if manual is not None:
@@ -856,17 +856,17 @@ def list_runs(
 
     # The customer-facing team name (My Teams shows the same thing) -- batched
     # rather than one lookup per row. Sourced from each run's own pinned
-    # version, not the workflow's current config, so a run's card always
+    # version, not the pipeline's current config, so a run's card always
     # reflects the team as it was when that run actually happened.
-    version_ids = {row.workflow_version_id for row in rows if row.workflow_version_id is not None}
+    version_ids = {row.pipeline_version_id for row in rows if row.pipeline_version_id is not None}
     version_configs = (
-        {v.id: v.config for v in db.query(WorkflowVersion).filter(WorkflowVersion.id.in_(version_ids))}
+        {v.id: v.config for v in db.query(PipelineVersion).filter(PipelineVersion.id.in_(version_ids))}
         if version_ids
         else {}
     )
 
     def _team_display_name(row: Run) -> Optional[str]:
-        config = version_configs.get(row.workflow_version_id)
+        config = version_configs.get(row.pipeline_version_id)
         if not config:
             return None
         teams = config.get("teams") or []
@@ -884,7 +884,7 @@ def list_runs(
         "runs": [
             {
                 "id": row.id,
-                "workflow": row.workflow,
+                "pipeline": row.pipeline,
                 "team_display_name": _team_display_name(row),
                 "status": row.status,
                 "started_at": iso_utc(row.created_at),

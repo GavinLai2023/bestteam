@@ -20,8 +20,8 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
     """client + a platform-admin bearer header ('op')."""
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -69,12 +69,12 @@ def test_existing_token_403s_on_org_surface_when_deactivated(rig):
     client, _ = rig
     token = _make_org_member(client).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    assert client.get("/api/workflows", headers=headers).status_code == 200
+    assert client.get("/api/pipelines", headers=headers).status_code == 200
 
     with open_test_db() as db:
         set_org_active(db, "acme", False)
 
-    assert client.get("/api/workflows", headers=headers).status_code == 403
+    assert client.get("/api/pipelines", headers=headers).status_code == 403
 
 
 def test_admin_still_reads_deactivated_org_config(rig):
@@ -84,7 +84,7 @@ def test_admin_still_reads_deactivated_org_config(rig):
         set_org_active(db, "acme", False)
 
     # Admin cross-org surfaces are NOT blocked by deactivation.
-    resp = client.get("/api/config/workflows?org=acme", headers=admin)
+    resp = client.get("/api/config/pipelines?org=acme", headers=admin)
     assert resp.status_code == 200
 
 

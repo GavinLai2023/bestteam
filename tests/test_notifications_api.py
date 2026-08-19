@@ -23,8 +23,8 @@ from ui.backend.db_session import get_db
 @pytest.fixture
 def ctx(monkeypatch, tmp_path):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
     # The settings route resolves DNS for real; these tests are about the API.
     monkeypatch.setattr(notifications_module, "check_host_allowed", lambda h: "1.2.3.4")
 
@@ -50,7 +50,7 @@ def ctx(monkeypatch, tmp_path):
         engine.dispose()
 
 
-def _seed(SessionLocal, org_name="default", *, fingerprint="workflow", count=1):
+def _seed(SessionLocal, org_name="default", *, fingerprint="pipeline", count=1):
     with SessionLocal() as db:
         org_id = get_or_create_org(db, org_name).id
         ids = []

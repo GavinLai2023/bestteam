@@ -1,19 +1,19 @@
-"""CRUD API for `knowledge_bases`/`skills`/`workflows` + the model catalog.
+"""CRUD API for `knowledge_bases`/`skills`/`pipelines` + the model catalog.
 
 The "advanced view" referenced by docs/team_builder_methodology.md's Phase 2:
 an operator-facing fine-tuning surface for already-deployed configs, reusing
-the same `*Spec.to_raw()` / `_build_workflow()` validation as the wizard.
+the same `*Spec.to_raw()` / `_build_pipeline()` validation as the wizard.
 
-A `workflows` entry is a complete, self-contained `Specification.to_raw()`
+A `pipelines` entry is a complete, self-contained `Specification.to_raw()`
 dict -- it carries its own `agents:` and `teams:` inline -- and is validated
-as a whole via `_build_workflow`, exactly like the wizard's Specification
+as a whole via `_build_pipeline`, exactly like the wizard's Specification
 stage. `knowledge_bases` and `skills` are the only standalone records a
-workflow resolves by name (via `knowledge_bases.py::load_knowledge_base_tools`
+pipeline resolves by name (via `knowledge_bases.py::load_knowledge_base_tools`
 and `skills.py::load_skills`).
 
 Standalone `agents`/`teams` CRUD used to live here too, but nothing ever
-consumed those records: `_build_workflow` takes only `extra_tools`/
-`extra_skills`, so they could never reach a running workflow. Both tables
+consumed those records: `_build_pipeline` takes only `extra_tools`/
+`extra_skills`, so they could never reach a running pipeline. Both tables
 were empty in every deployment, so the routes were removed; the models
 remain in `db/models.py`.
 """
@@ -29,7 +29,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from bestteam import KnowledgeBaseSpec, SkillSpec
-from bestteam.core.loader import _build_workflow
+from bestteam.core.loader import _build_pipeline
 from bestteam.exceptions import BestTeamError
 from bestteam.tools import REGISTRY
 
@@ -41,6 +41,9 @@ from .db.models import (
     IngestionJob,
     KnowledgeBaseRecord,
     Organization,
+    PipelineDependency,
+    PipelineRecord,
+    PipelineVersion,
     Run,
     ShareLink,
     ShareMessage,
@@ -48,21 +51,18 @@ from .db.models import (
     SkillRecord,
     SkillVersion,
     User,
-    WorkflowDependency,
-    WorkflowRecord,
-    WorkflowVersion,
     iso_utc,
 )
-from .db.dependencies import workflows_referencing
+from .db.dependencies import pipelines_referencing
 from .db.share_links import count_active_share_links
 from .db.skills import publish_skill_version
 from .db.orgs import get_org_by_name, list_orgs
-from .db.workflows import publish_workflow_version
+from .db.pipelines import publish_pipeline_version
 from .email_tools import load_email_tools, resolve_agent_tool_sets
 from .db_session import get_db
 from .ingestion import job_status_payload
 from .knowledge_bases import (
-    _invalidate_workflow_cache,
+    _invalidate_pipeline_cache,
     _reject_builtin_kb_name,
     check_path_traversal,
     checked_contained_cache_path,
@@ -74,13 +74,13 @@ from .knowledge_bases import (
 from .component_lock import component_mutation_lock
 from .skills import DEFAULT_SKILLS, load_skills
 
-# Seeded platform built-in skills can't be deleted -- bundled YAML workflows may
+# Seeded platform built-in skills can't be deleted -- bundled YAML pipelines may
 # depend on them (F4). Names only; the check applies to the platform tier.
 _BUILTIN_SKILL_NAMES = frozenset(s.name for s in DEFAULT_SKILLS)
 
-# Used as `_build_workflow`'s `source` for relative knowledge-base paths and
-# the default workflow name -- same directory as the YAML demo workflows.
-_WORKFLOWS_DIR = Path(__file__).parent / "workflows"
+# Used as `_build_pipeline`'s `source` for relative knowledge-base paths and
+# the default pipeline name -- same directory as the YAML demo pipelines.
+_PIPELINES_DIR = Path(__file__).parent / "pipelines"
 
 router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(get_current_admin)])
 
@@ -122,7 +122,7 @@ def _validate_kb_paths(kb_config: Dict[str, Any]) -> None:
     Reject `..`/absolute with a clear 400, then rewrite `cache_path` in place to
     an app-owned `_kb_cache/<filename>` -- so even a clean relative or Windows
     rooted-relative value can only ever write inside that subdir, never over a
-    workflow YAML or outside the app roots. Absolute `local_folder` `path`s stay
+    pipeline YAML or outside the app roots. Absolute `local_folder` `path`s stay
     allowed (the documented "point at a folder you manage yourself" feature).
     """
     path = kb_config.get("path")
@@ -226,7 +226,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         raw = spec.to_raw()
-        # Skill saves append immutable versions and are serialized with workflow
+        # Skill saves append immutable versions and are serialized with pipeline
         # deploy so the deploy pins either the old or new version atomically.
         # Creating an org override deliberately does not rewrite existing team
         # dependencies: only a future redeploy opts that team into the override.
@@ -249,7 +249,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                     item.config = raw
             db.commit()
         if name in ("knowledge_bases", "skills"):
-            _invalidate_workflow_cache()
+            _invalidate_pipeline_cache()
         return {
             "name": item_name,
             "org": org,
@@ -276,14 +276,14 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             if item is None:
                 raise HTTPException(status_code=404, detail=f"Unknown {name[:-1]} '{item_name}'")
             # A seeded platform built-in skill can't be deleted -- bundled YAML
-            # workflows may depend on it (F4). Platform tier only (org_id None).
+            # pipelines may depend on it (F4). Platform tier only (org_id None).
             if name == "skills" and org_id is None and item_name in _BUILTIN_SKILL_NAMES:
                 raise HTTPException(
                     status_code=409,
                     detail=f"'{item_name}' is a built-in skill and can't be deleted.",
                 )
             if name == "skills":
-                used_by = workflows_referencing(db, kind="skill", resource_id=item.id)
+                used_by = pipelines_referencing(db, kind="skill", resource_id=item.id)
                 if used_by:
                     raise HTTPException(
                         status_code=409,
@@ -293,7 +293,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                             + ". Update or remove those teams first."
                         ),
                     )
-                # Retain immutable version snapshots for superseded workflow
+                # Retain immutable version snapshots for superseded pipeline
                 # provenance while detaching them from the deleted library head.
                 db.query(SkillVersion).filter_by(skill_id=item.id).update(
                     {SkillVersion.skill_id: None}, synchronize_session=False
@@ -303,7 +303,7 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
             db.delete(item)
             db.commit()
         if name == "skills":
-            _invalidate_workflow_cache()
+            _invalidate_pipeline_cache()
         return Response(status_code=204)
 
     if name == "skills":
@@ -382,17 +382,17 @@ def get_ingestion_job_status(
     return job_status_payload(db, job)
 
 
-_workflows = APIRouter(prefix="/workflows")
+_pipelines = APIRouter(prefix="/pipelines")
 
 
-@_workflows.get("")
-def list_workflow_configs(
+@_pipelines.get("")
+def list_pipeline_configs(
     org: Optional[str] = Query(None), db: Session = Depends(get_db)
 ) -> list[Dict[str, Any]]:
-    query = db.query(WorkflowRecord)
+    query = db.query(PipelineRecord)
     if org is not None:
-        query = query.filter(WorkflowRecord.org_id == _resolve_org_id(db, org, allow_platform=False))
-    items = query.order_by(WorkflowRecord.name).all()
+        query = query.filter(PipelineRecord.org_id == _resolve_org_id(db, org, allow_platform=False))
+    items = query.order_by(PipelineRecord.name).all()
     org_names = _org_name_map(db)
     return [
         {"name": item.name, "org": org_names.get(item.org_id), "status": item.status, "config": item.config}
@@ -400,19 +400,19 @@ def list_workflow_configs(
     ]
 
 
-@_workflows.get("/{item_name}")
-def get_workflow_config(
+@_pipelines.get("/{item_name}")
+def get_pipeline_config(
     item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     org_id = _resolve_org_id(db, org, allow_platform=False)
-    item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    item = db.query(PipelineRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if item is None:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
+        raise HTTPException(status_code=404, detail=f"Unknown pipeline '{item_name}'")
     return {"name": item.name, "org": org, "status": item.status, "config": item.config}
 
 
-@_workflows.put("/{item_name}")
-def upsert_workflow_config(
+@_pipelines.put("/{item_name}")
+def upsert_pipeline_config(
     item_name: str,
     config: Dict[str, Any] = Body(...),
     org: Optional[str] = Query(None),
@@ -421,7 +421,7 @@ def upsert_workflow_config(
     org_id = _resolve_org_id(db, org, allow_platform=False)
     raw = {**config, "name": item_name}
     # Serialize dependency resolution + the deployed write against a concurrent
-    # component delete (F3): either the delete's scan sees this workflow, or this
+    # component delete (F3): either the delete's scan sees this pipeline, or this
     # deploy's resolution fails because the resource was already removed.
     with component_mutation_lock:
         try:
@@ -438,13 +438,13 @@ def upsert_workflow_config(
             for kb_config in raw.get("knowledge_bases", []) or []:
                 if isinstance(kb_config, dict):
                     _validate_kb_paths(kb_config)
-            source = _WORKFLOWS_DIR / f"{item_name}.yaml"
-            # Dependencies resolve within the workflow's own org (+ built-in skills).
+            source = _PIPELINES_DIR / f"{item_name}.yaml"
+            # Dependencies resolve within the pipeline's own org (+ built-in skills).
             extra_tools = {
                 **load_knowledge_base_tools(db, raw, source, org_id=org_id),
                 **(load_email_tools(db, org_id) if org_id is not None else {}),
             }
-            _build_workflow(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
+            _build_pipeline(raw, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org_id))
         except (KeyError, TypeError, BestTeamError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -469,7 +469,7 @@ def upsert_workflow_config(
                     detail=(
                         "This team can't be deployed: "
                         + "; ".join(egress_problems)
-                        + ". Remove the web-access tool, or move that work to a workflow with no mailbox access."
+                        + ". Remove the web-access tool, or move that work to a pipeline with no mailbox access."
                     ),
                 )
 
@@ -477,9 +477,9 @@ def upsert_workflow_config(
         # guarantees at most one) so it shows up on that member's My Teams
         # page instead of being permanently invisible there. Ownership binds
         # to the member's immutable principal_id, never their username (see
-        # WorkflowRecord.created_by).
+        # PipelineRecord.created_by).
         member = db.query(User).filter_by(org_id=org_id).one_or_none()
-        item, _version = publish_workflow_version(
+        item, _version = publish_pipeline_version(
             db, org_id=org_id, name=item_name, config=raw,
             created_by=member.username if member else None,
             owner_principal_id=member.principal_id if member else None,
@@ -489,27 +489,27 @@ def upsert_workflow_config(
     return {"name": item_name, "org": org, "status": status, "config": raw}
 
 
-@_workflows.delete("/{item_name}", status_code=204)
-def delete_workflow_config(
+@_pipelines.delete("/{item_name}", status_code=204)
+def delete_pipeline_config(
     item_name: str, org: Optional[str] = Query(None), db: Session = Depends(get_db)
 ) -> Response:
     org_id = _resolve_org_id(db, org, allow_platform=False)
     # Serialize with publish (which appends versions + moves the pointer under the
     # same lock) so a delete can't interleave with a concurrent version publish.
     with component_mutation_lock:
-        item = db.query(WorkflowRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+        item = db.query(PipelineRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
         if item is None:
-            raise HTTPException(status_code=404, detail=f"Unknown workflow '{item_name}'")
+            raise HTTPException(status_code=404, detail=f"Unknown pipeline '{item_name}'")
         # Preserve run provenance: refuse to delete while any Run references one
         # of this head's versions, since deletion removes the version history
         # (FK enforcement is off -> no DB cascade) and would leave those runs
-        # pointing at rows that no longer exist. A never-run workflow deletes
+        # pointing at rows that no longer exist. A never-run pipeline deletes
         # cleanly, taking its (unreferenced) version history with it so no
-        # orphaned workflow_versions rows survive the deleted head.
+        # orphaned pipeline_versions rows survive the deleted head.
         run_refs = (
             db.query(Run)
-            .filter(Run.workflow_version_id.in_(
-                db.query(WorkflowVersion.id).filter_by(workflow_id=item.id)
+            .filter(Run.pipeline_version_id.in_(
+                db.query(PipelineVersion.id).filter_by(pipeline_id=item.id)
             ))
             .count()
         )
@@ -530,16 +530,16 @@ def delete_workflow_config(
                     "link(s) point at it. Revoke them first."
                 ),
             )
-        # Every share_links row still pointing at this workflow is revoked
+        # Every share_links row still pointing at this pipeline is revoked
         # (the guard above already refused if any are active) -- delete them
         # and their dependent sessions/messages too, or they become
         # permanent orphans (FK enforcement is off, so nothing does this for
         # us). SQLite's INTEGER PRIMARY KEY is not AUTOINCREMENT here, so a
-        # later workflow reusing this same id could otherwise silently
+        # later pipeline reusing this same id could otherwise silently
         # inherit another team's old share links and visitor transcripts
         # (Codex review finding).
         revoked_link_ids = [
-            link_id for (link_id,) in db.query(ShareLink.id).filter_by(workflow_id=item.id)
+            link_id for (link_id,) in db.query(ShareLink.id).filter_by(pipeline_id=item.id)
         ]
         if revoked_link_ids:
             session_ids = [
@@ -559,26 +559,26 @@ def delete_workflow_config(
                 ShareLink.id.in_(revoked_link_ids)
             ).delete(synchronize_session=False)
         # Detach any builder sessions that deployed this head so none is left
-        # pointing at a deleted workflow. A nulled workflow_id self-heals: the
+        # pointing at a deleted pipeline. A nulled pipeline_id self-heals: the
         # session's next deploy resolve-or-creates a fresh head by (org_id, name)
-        # (publish_workflow_version treats a stale/absent workflow_id as a miss).
-        db.query(BuilderSession).filter_by(workflow_id=item.id).update(
-            {BuilderSession.workflow_id: None}
+        # (publish_pipeline_version treats a stale/absent pipeline_id as a miss).
+        db.query(BuilderSession).filter_by(pipeline_id=item.id).update(
+            {BuilderSession.pipeline_id: None}
         )
         version_ids = [
-            v for (v,) in db.query(WorkflowVersion.id).filter_by(workflow_id=item.id)
+            v for (v,) in db.query(PipelineVersion.id).filter_by(pipeline_id=item.id)
         ]
         if version_ids:
-            db.query(WorkflowDependency).filter(
-                WorkflowDependency.workflow_version_id.in_(version_ids)
+            db.query(PipelineDependency).filter(
+                PipelineDependency.pipeline_version_id.in_(version_ids)
             ).delete(synchronize_session=False)
-        db.query(WorkflowVersion).filter_by(workflow_id=item.id).delete()
+        db.query(PipelineVersion).filter_by(pipeline_id=item.id).delete()
         db.delete(item)
         db.commit()
     return Response(status_code=204)
 
 
-router.include_router(_workflows)
+router.include_router(_pipelines)
 
 
 class ModelCatalogEntrySpec(BaseModel):

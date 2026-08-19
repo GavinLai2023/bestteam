@@ -19,7 +19,7 @@ from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.email_triggers import get_email_trigger
 from ui.backend.db.inbox_events import mailbox_identity, record_events
-from ui.backend.db.models import InboxEvent, Run, WorkflowRecord
+from ui.backend.db.models import InboxEvent, Run, PipelineRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 from ui.backend.skills import seed_default_skills
@@ -29,13 +29,13 @@ _EMAIL_TEAM_CONFIG = {
     "agents": [{"name": "t", "role": "Triager", "goal": "triage",
                 "model": "fake:done", "skills": ["email_triage_reply"]}],
     "teams": [{"name": "tm", "agents": ["t"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 _PLAIN_TEAM_CONFIG = {
     "name": "plain",
     "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
     "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 
 
@@ -43,7 +43,7 @@ _PLAIN_TEAM_CONFIG = {
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("BESTTEAM_TRIGGERS_DISABLED", raising=False)
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -70,7 +70,7 @@ def _seed_team(config, status="deployed", org_name="default"):
     with open_test_db() as db:
         seed_default_skills(db)
         org = get_or_create_org(db, org_name)
-        db.add(WorkflowRecord(name=config["name"], org_id=org.id,
+        db.add(PipelineRecord(name=config["name"], org_id=org.id,
                               config=config, status=status))
         db.commit()
         return org.id
@@ -99,7 +99,7 @@ def test_enable_happy_path_sets_baseline(client, monkeypatch):
     _connect_mailbox(org_id)
     _stub_mailbox(monkeypatch, uidvalidity=7, max_uid=99)
     body = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": True}).json()
+                      json={"pipeline_name": "triage", "enabled": True}).json()
     assert body["enabled"] is True and body["status"] == "active"
     with open_test_db() as db:
         t = get_email_trigger(db, org_id)
@@ -111,7 +111,7 @@ def test_enable_rejects_undeployed_team(client, monkeypatch):
     _connect_mailbox(org_id)
     _stub_mailbox(monkeypatch)
     resp = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": True})
+                      json={"pipeline_name": "triage", "enabled": True})
     assert resp.status_code == 400
     assert "launch" in resp.json()["detail"].lower()
 
@@ -121,7 +121,7 @@ def test_enable_rejects_non_email_team(client, monkeypatch):
     _connect_mailbox(org_id)
     _stub_mailbox(monkeypatch)
     resp = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "plain", "enabled": True})
+                      json={"pipeline_name": "plain", "enabled": True})
     assert resp.status_code == 400
     assert "email" in resp.json()["detail"].lower()
 
@@ -130,7 +130,7 @@ def test_enable_rejects_when_no_mailbox(client, monkeypatch):
     _seed_team(_EMAIL_TEAM_CONFIG)
     _stub_mailbox(monkeypatch)
     resp = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": True})
+                      json={"pipeline_name": "triage", "enabled": True})
     assert resp.status_code == 400
     assert "mailbox" in resp.json()["detail"].lower()
 
@@ -144,7 +144,7 @@ def test_enable_unreachable_mailbox_is_friendly_400(client, monkeypatch):
 
     monkeypatch.setattr(email_trigger_api, "mailbox_state", _fail)
     resp = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": True})
+                      json={"pipeline_name": "triage", "enabled": True})
     assert resp.status_code == 400
     assert "WinError" not in resp.json()["detail"]
 
@@ -153,9 +153,9 @@ def test_disable_turns_off(client, monkeypatch):
     org_id = _seed_team(_EMAIL_TEAM_CONFIG)
     _connect_mailbox(org_id)
     _stub_mailbox(monkeypatch)
-    client.put("/api/org/email-trigger", json={"workflow_name": "triage", "enabled": True})
+    client.put("/api/org/email-trigger", json={"pipeline_name": "triage", "enabled": True})
     body = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": False}).json()
+                      json={"pipeline_name": "triage", "enabled": False}).json()
     assert body["enabled"] is False and body["status"] == "off"
 
 
@@ -166,13 +166,13 @@ def test_enable_clears_stale_error(client, monkeypatch):
     org_id = _seed_team(_EMAIL_TEAM_CONFIG)
     _connect_mailbox(org_id)
     _stub_mailbox(monkeypatch)
-    client.put("/api/org/email-trigger", json={"workflow_name": "triage", "enabled": True})
+    client.put("/api/org/email-trigger", json={"pipeline_name": "triage", "enabled": True})
     with open_test_db() as db:
         t = get_email_trigger(db, org_id)
         t.last_error = "Couldn't check the mailbox. We'll keep retrying automatically."
         db.commit()
     body = client.put("/api/org/email-trigger",
-                      json={"workflow_name": "triage", "enabled": True}).json()
+                      json={"pipeline_name": "triage", "enabled": True}).json()
     assert body["status"] == "active"
     assert body["last_error"] is None
     with open_test_db() as db:
@@ -193,7 +193,7 @@ def test_cross_org_cannot_enable_other_orgs_team(client, monkeypatch):
     other = create_user_and_login(client, username="bob", org="org_b")
     resp = client.put("/api/org/email-trigger",
                       headers={"Authorization": f"Bearer {other}"},
-                      json={"workflow_name": "triage", "enabled": True})
+                      json={"pipeline_name": "triage", "enabled": True})
     assert resp.status_code == 400  # 'triage' is invisible from org_b
 
 
@@ -202,7 +202,7 @@ def test_cross_org_cannot_enable_other_orgs_team(client, monkeypatch):
 
 def _add_run(org_id, run_id, username, minutes_ago, status="completed"):
     with open_test_db() as db:
-        db.add(Run(id=run_id, workflow="triage", input="x", status=status,
+        db.add(Run(id=run_id, pipeline="triage", input="x", status=status,
                    org_id=org_id, username=username,
                    created_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)))
         db.commit()
@@ -229,11 +229,11 @@ def test_activity_filters_autonomous_server_side(client):
     # 60 manual runs (newer) then 1 autonomous (older) -- the autonomous one must
     # still appear (server-side filter), not be pushed out of a 50-row window.
     with open_test_db() as db:
-        db.add(Run(id="auto", workflow="w", input="x", status="completed", org_id=org_id,
+        db.add(Run(id="auto", pipeline="w", input="x", status="completed", org_id=org_id,
                    username="email-trigger",
                    created_at=datetime.now(timezone.utc) - timedelta(hours=1)))
         for i in range(60):
-            db.add(Run(id=f"m{i}", workflow="w", input="x", status="completed", org_id=org_id,
+            db.add(Run(id=f"m{i}", pipeline="w", input="x", status="completed", org_id=org_id,
                        username="alice",
                        created_at=datetime.now(timezone.utc) - timedelta(minutes=i)))
         db.commit()

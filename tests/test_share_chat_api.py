@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import Organization, WorkflowRecord
+from ui.backend.db.models import Organization, PipelineRecord
 from ui.backend.db.share_links import create_share_link, patch_share_link
 from ui.backend.db.users import create_user
 from ui.backend.db_session import get_db
@@ -21,14 +21,14 @@ _TEAM_CONFIG = {
     "name": "greeter",
     "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hello!"}],
     "teams": [{"name": "tm", "agents": ["a"], "mode": "sequential"}],
-    "workflow": {"steps": ["tm"]},
+    "pipeline": {"steps": ["tm"]},
 }
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     # A file database, not `:memory:`: every accepted send here dispatches a
     # real run onto `runtime.py`'s executor, and `run_in_background` opens its
@@ -67,11 +67,11 @@ def _make_link(**overrides):
     with open_test_db() as db:
         org_id = get_org_id()
         user = create_user(db, "owner", "pw", org_id=org_id)
-        team = WorkflowRecord(name=_TEAM_CONFIG["name"], org_id=org_id, config=_TEAM_CONFIG, status="deployed")
+        team = PipelineRecord(name=_TEAM_CONFIG["name"], org_id=org_id, config=_TEAM_CONFIG, status="deployed")
         db.add(team)
         db.commit()
         db.refresh(team)
-        link = create_share_link(db, workflow_id=team.id, org_id=org_id, created_by=user.id, **overrides)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=user.id, **overrides)
         return link.token, link.id
 
 
@@ -256,7 +256,7 @@ def test_turn_collision_refunds_the_daily_cap_turn(client, monkeypatch):
 
 
 def test_undeployed_team_404_matches_revoked_link_404(client):
-    """A workflow-not-deployed 404 must be indistinguishable from every other
+    """A pipeline-not-deployed 404 must be indistinguishable from every other
     "can't use this link" 404 (Task 8 review finding 2) -- a differing detail
     string would let a prober tell "real, active link whose team just isn't
     deployed" apart from "fake/revoked/expired/org-deactivated".
@@ -266,7 +266,7 @@ def test_undeployed_team_404_matches_revoked_link_404(client):
     undeployed_token, _ = _make_link()
     with open_test_db() as db:
         link = get_share_link_by_token(db, undeployed_token)
-        team = db.query(WorkflowRecord).filter_by(id=link.workflow_id).one()
+        team = db.query(PipelineRecord).filter_by(id=link.pipeline_id).one()
         team.status = "draft"
         db.commit()
 
@@ -279,7 +279,7 @@ def test_undeployed_team_404_matches_revoked_link_404(client):
     with open_test_db() as db:
         link = get_share_link_by_token(db, undeployed_token)
         revoked_link = create_share_link(
-            db, workflow_id=link.workflow_id, org_id=link.org_id, created_by=link.created_by
+            db, pipeline_id=link.pipeline_id, org_id=link.org_id, created_by=link.created_by
         )
         revoked_token = revoked_link.token
         patch_share_link(db, revoked_link, active=False)
@@ -345,7 +345,7 @@ def test_undeployed_team_link_never_creates_a_share_session_row(client):
     token, _ = _make_link()
     with open_test_db() as db:
         link = get_share_link_by_token(db, token)
-        team = db.query(WorkflowRecord).filter_by(id=link.workflow_id).one()
+        team = db.query(PipelineRecord).filter_by(id=link.pipeline_id).one()
         team.status = "draft"
         db.commit()
 
@@ -403,7 +403,7 @@ class _RecordingExecutor:
 
 
 def _dispatched_transcript(executor) -> str:
-    # run_in_background(run_id, workflow, input, ...) -- the transcript is the
+    # run_in_background(run_id, pipeline, input, ...) -- the transcript is the
     # third positional argument, and the same text lands in Run.input.
     return executor.calls[-1][0][2]
 
@@ -420,7 +420,7 @@ def _session_id_for(client, token) -> int:
 def test_second_turn_replays_the_first_turns_exchange(client, monkeypatch):
     """The one assertion that proves this feature's central architectural bet:
     multi-turn works by replaying the whole transcript as one input string to
-    the existing single-shot `Workflow.run()` (spec "Approach"), rather than
+    the existing single-shot `Pipeline.run()` (spec "Approach"), rather than
     LangGraph checkpointing. Turn 2's dispatched input must contain both turn
     1's question and turn 1's answer (final whole-branch review I10).
     """
@@ -569,7 +569,7 @@ def test_concurrent_sends_for_the_same_session_are_serialized(client, monkeypatc
     assert result.get("status") == 202
 
 
-def test_workflow_build_failure_does_not_create_a_session_or_burn_a_cap_turn(client, monkeypatch):
+def test_pipeline_build_failure_does_not_create_a_session_or_burn_a_cap_turn(client, monkeypatch):
     """A malformed team config must fail before any session/cap side effect
     -- otherwise every retry burns another link-wide daily-cap turn until
     the link goes dark for the whole day despite never dispatching a run
@@ -584,7 +584,7 @@ def test_workflow_build_failure_does_not_create_a_session_or_burn_a_cap_turn(cli
     def boom(name, db, org_id):
         raise HTTPException(status_code=400, detail="broken team config")
 
-    monkeypatch.setattr(backend_main, "_resolve_workflow_and_version", boom)
+    monkeypatch.setattr(backend_main, "_resolve_pipeline_and_version", boom)
 
     resp = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
     assert resp.status_code == 400

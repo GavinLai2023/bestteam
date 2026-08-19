@@ -25,7 +25,7 @@ from .models import (
     KnowledgeBaseRecord,
     OrgEmailBudgetSetting,
     UsageRecord,
-    WorkflowRecord,
+    PipelineRecord,
 )
 
 # The operator-wide default a self-service "smart search" knowledge base is
@@ -171,7 +171,7 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     that from a silent inaccuracy into something an admin can act on -- by
     pricing the model, or by knowing the cap does not cover it.
 
-    Resolved from **every** `status="deployed"` `WorkflowRecord` in the org --
+    Resolved from **every** `status="deployed"` `PipelineRecord` in the org --
     not only the one an email trigger happens to point at. The cap it advises
     is an org-level `SUM` over the whole ledger (`spent_this_month`), so a team
     deployed without a trigger, run from the wizard or a share link, is exactly
@@ -202,7 +202,7 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     """
     try:
         records = (
-            db.query(WorkflowRecord)
+            db.query(PipelineRecord)
             .filter_by(org_id=org_id, status="deployed")
             .all()
         )

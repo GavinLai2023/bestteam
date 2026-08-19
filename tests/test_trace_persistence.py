@@ -13,11 +13,11 @@ fastapi = pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
-from bestteam import AgentSpec, Specification, TeamSpec, WorkflowSpec, validate_specification
+from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, WorkflowRecord, WorkflowVersion
+from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, PipelineRecord, PipelineVersion
 from ui.backend.db_session import get_db
 from ui.backend.runtime import registry, run_in_background
 
@@ -28,12 +28,12 @@ def _engine(tmp_path):
     return e
 
 
-def _workflow(tmp_path, response="done"):
+def _pipeline(tmp_path, response="done"):
     spec = Specification(
         name="w",
         agents=[AgentSpec(name="a", role="R", goal="g", model=f"fake:{response}")],
         teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
-        workflow=WorkflowSpec(steps=["t"]),
+        pipeline=PipelineSpec(steps=["t"]),
     )
     return validate_specification(spec, source=tmp_path / "w.yaml")
 
@@ -44,7 +44,7 @@ def test_run_in_background_publishes_run_queued_to_the_live_registry_log(tmp_pat
     # must carry the same event, or a live view starts at run_started while
     # the historical view starts at run_queued.
     engine = _engine(tmp_path)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run = registry.create("w", "in")
 
     run_in_background(run.id, wf, "in", engine=engine)
@@ -56,7 +56,7 @@ def test_run_in_background_publishes_run_queued_to_the_live_registry_log(tmp_pat
 def test_run_in_background_persists_trace_events_in_seq_order(tmp_path):
     engine = _engine(tmp_path)
     Session = session_factory(engine)
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run = registry.create("w", "in")
 
     run_in_background(run.id, wf, "in", engine=engine)
@@ -83,8 +83,8 @@ def test_run_in_background_persists_trace_events_in_seq_order(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
-    backend_main._workflow_cache.clear()
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
+    backend_main._pipeline_cache.clear()
 
     # File-backed, not `:memory:` -- this fixture drives run_in_background,
     # which opens its own Session on a worker thread (see
@@ -116,9 +116,9 @@ def test_get_run_trace_returns_persisted_events_in_seq_order(client, tmp_path):
         engine = db.get_bind()
     run = registry.create("w", "in", org_id=org_id, username="test")
     with open_test_db() as db:
-        db.add(Run(id=run.id, workflow="w", input="in", status="running", org_id=org_id, username="test"))
+        db.add(Run(id=run.id, pipeline="w", input="in", status="running", org_id=org_id, username="test"))
         db.commit()
-    wf = _workflow(tmp_path)
+    wf = _pipeline(tmp_path)
     run_in_background(run.id, wf, "in", engine=engine, org_id=org_id, username="test")
 
     resp = client.get(f"/api/runs/{run.id}/trace")
@@ -142,7 +142,7 @@ def test_get_run_trace_includes_per_agent_usage(client):
     # RunDetail.tsx only reads `events` and ignores this.
     org_id = get_org_id()
     with open_test_db() as db:
-        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(Run(id="r-1", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"))
         db.add(
             UsageRecord(
                 run_id="r-1", agent="agent-a", model="fake:x", input_tokens=10, output_tokens=5,
@@ -162,7 +162,7 @@ def test_get_run_trace_includes_per_agent_usage(client):
 
 def test_get_run_trace_cross_org_is_404(client):
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", workflow="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
         db.commit()
 
     resp = client.get("/api/runs/other-org-run/trace")
@@ -183,7 +183,7 @@ def test_list_runs_by_run_id_cross_org_is_404(client):
     review finding: that would let a caller distinguish "not yours" from
     "doesn't exist" by diffing it against a real 404 elsewhere)."""
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", workflow="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
         db.commit()
 
     resp = client.get("/api/runs", params={"run_id": "other-org-run"})
@@ -200,8 +200,8 @@ def test_list_runs_by_run_id_unknown_is_404(client):
 def test_list_runs_by_run_id_returns_that_run_for_its_own_org(client):
     org_id = get_org_id()
     with open_test_db() as db:
-        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
-        db.add(Run(id="r-2", workflow="wf-b", input="in", status="failed", org_id=org_id, username="test"))
+        db.add(Run(id="r-1", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(Run(id="r-2", pipeline="wf-b", input="in", status="failed", org_id=org_id, username="test"))
         db.commit()
 
     resp = client.get("/api/runs", params={"run_id": "r-1"})
@@ -215,7 +215,7 @@ def test_list_runs_by_run_id_returns_that_run_for_its_own_org(client):
 def test_list_runs_started_at_is_utc_qualified(client):
     org_id = get_org_id()
     with open_test_db() as db:
-        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(Run(id="r-1", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"))
         db.commit()
 
     resp = client.get("/api/runs")
@@ -229,15 +229,15 @@ def test_list_runs_started_at_is_utc_qualified(client):
 
 def test_list_runs_includes_the_team_display_name_from_the_pinned_version(client):
     # customer_support_team is the internal technical name (used for the
-    # `workflow` filter/API identity); the Activity page's run cards should
+    # `pipeline` filter/API identity); the Activity page's run cards should
     # show the customer-facing team name instead, same as My Teams.
     org_id = get_org_id()
     with open_test_db() as db:
-        record = WorkflowRecord(name="customer_support_team", org_id=org_id, config={}, status="deployed")
+        record = PipelineRecord(name="customer_support_team", org_id=org_id, config={}, status="deployed")
         db.add(record)
         db.flush()
-        version = WorkflowVersion(
-            workflow_id=record.id,
+        version = PipelineVersion(
+            pipeline_id=record.id,
             version_number=1,
             config={"name": "customer_support_team", "teams": [{"name": "t", "display_name": "Customer Support Team"}]},
         )
@@ -246,12 +246,12 @@ def test_list_runs_includes_the_team_display_name_from_the_pinned_version(client
         db.add(
             Run(
                 id="r-1",
-                workflow="customer_support_team",
+                pipeline="customer_support_team",
                 input="in",
                 status="completed",
                 org_id=org_id,
                 username="test",
-                workflow_version_id=version.id,
+                pipeline_version_id=version.id,
             )
         )
         db.commit()
@@ -263,11 +263,11 @@ def test_list_runs_includes_the_team_display_name_from_the_pinned_version(client
 
 
 def test_list_runs_team_display_name_is_null_without_a_pinned_version(client):
-    # A sandbox test-run (or a pre-migration row) has no workflow_version_id --
-    # the frontend falls back to the raw workflow name in that case.
+    # A sandbox test-run (or a pre-migration row) has no pipeline_version_id --
+    # the frontend falls back to the raw pipeline name in that case.
     org_id = get_org_id()
     with open_test_db() as db:
-        db.add(Run(id="r-1", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"))
+        db.add(Run(id="r-1", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"))
         db.commit()
 
     resp = client.get("/api/runs")
@@ -282,7 +282,7 @@ def test_list_runs_manual_filter_includes_null_username_rows(client):
     # `username != 'email-trigger'` is UNKNOWN (excluded) for a NULL username.
     org_id = get_org_id()
     with open_test_db() as db:
-        db.add(Run(id="r-null-username", workflow="wf-a", input="in", status="completed", org_id=org_id, username=None))
+        db.add(Run(id="r-null-username", pipeline="wf-a", input="in", status="completed", org_id=org_id, username=None))
         db.commit()
 
     resp = client.get("/api/runs")
@@ -301,7 +301,7 @@ def test_list_runs_is_paginated(client):
     with open_test_db() as db:
         db.add_all(
             [
-                Run(id=f"r-{i}", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test")
+                Run(id=f"r-{i}", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test")
                 for i in range(3)
             ]
         )
@@ -326,15 +326,15 @@ def test_list_runs_defaults_to_a_bounded_page(client):
     assert resp.json()["limit"] == 50
 
 
-def test_list_runs_filters_by_manual_workflow_and_status(client):
+def test_list_runs_filters_by_manual_pipeline_and_status(client):
     org_id = get_org_id()
     with open_test_db() as db:
         db.add_all(
             [
-                Run(id="r-manual", workflow="wf-a", input="in", status="completed", org_id=org_id, username="test"),
-                Run(id="r-auto", workflow="wf-a", input="in", status="completed", org_id=org_id, username="email-trigger"),
-                Run(id="r-other-wf", workflow="wf-b", input="in", status="failed", org_id=org_id, username="test"),
-                Run(id="r-other-org", workflow="wf-a", input="in", status="completed", org_id=org_id + 1000, username="test"),
+                Run(id="r-manual", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"),
+                Run(id="r-auto", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="email-trigger"),
+                Run(id="r-other-wf", pipeline="wf-b", input="in", status="failed", org_id=org_id, username="test"),
+                Run(id="r-other-org", pipeline="wf-a", input="in", status="completed", org_id=org_id + 1000, username="test"),
             ]
         )
         db.commit()
@@ -342,7 +342,7 @@ def test_list_runs_filters_by_manual_workflow_and_status(client):
     resp = client.get("/api/runs", params={"manual": "true"})
     assert {r["id"] for r in resp.json()["runs"]} == {"r-manual", "r-other-wf"}
 
-    resp = client.get("/api/runs", params={"workflow": "wf-a"})
+    resp = client.get("/api/runs", params={"pipeline": "wf-a"})
     assert {r["id"] for r in resp.json()["runs"]} == {"r-manual", "r-auto"}
 
     resp = client.get("/api/runs", params={"status": "failed"})

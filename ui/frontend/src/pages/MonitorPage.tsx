@@ -13,7 +13,7 @@ type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected'
 
 function MonitorPage() {
   const [searchParams] = useSearchParams()
-  const [workflows, setWorkflows] = useState<string[]>([])
+  const [pipelines, setPipelines] = useState<string[]>([])
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -32,14 +32,14 @@ function MonitorPage() {
   const lastEventAtRef = useRef<number | null>(null)
 
   useEffect(() => {
-    api.listWorkflows()
+    api.listPipelines()
       .then((data) => {
-        setWorkflows(data.workflows)
-        const preferred = searchParams.get('workflow')
-        if (preferred && data.workflows.includes(preferred)) {
+        setPipelines(data.pipelines)
+        const preferred = searchParams.get('pipeline')
+        if (preferred && data.pipelines.includes(preferred)) {
           setSelected(preferred)
-        } else if (data.workflows.length) {
-          setSelected(data.workflows[0])
+        } else if (data.pipelines.length) {
+          setSelected(data.pipelines[0])
         }
       })
       .catch((err: { status?: number; message: string }) => {
@@ -164,7 +164,7 @@ function MonitorPage() {
         <label>
           Team
           <select value={selected} onChange={(e) => setSelected(e.target.value)}>
-            {workflows.map((name) => (
+            {pipelines.map((name) => (
               <option key={name} value={name}>
                 {name}
               </option>

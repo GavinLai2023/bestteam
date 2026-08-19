@@ -39,7 +39,7 @@ export interface Specification {
   name: string
   agents: AgentSpec[]
   teams: TeamSpec[]
-  workflow?: { steps: string[] }
+  pipeline?: { steps: string[] }
 }
 
 export interface Requirements {
@@ -65,7 +65,7 @@ export interface BuilderSession {
   specification_json?: Specification | null
   feedback_history?: FeedbackHistoryEntry[]
   uses_email?: boolean
-  workflow_id?: number | null
+  pipeline_id?: number | null
   updated_at: string
 }
 
@@ -87,7 +87,7 @@ export interface TraceEvent {
 
 export interface RunListItem {
   id: string
-  workflow: string
+  pipeline: string
   team_display_name?: string | null
   status: string
   autonomous: boolean
@@ -106,10 +106,10 @@ export interface UsageRecord {
   cost_estimate: number | null
 }
 
-export interface WorkflowAnalyticsSummary {
+export interface PipelineAnalyticsSummary {
   org_id: number | null
   org: string | null
-  workflow: string
+  pipeline: string
   total_runs: number
   completed: number
   failed: number
@@ -146,9 +146,9 @@ export interface FailurePoint {
   pct_of_failures: number
 }
 
-export interface WorkflowAnalyticsDetail {
+export interface PipelineAnalyticsDetail {
   org_id: number | null
-  workflow: string
+  pipeline: string
   per_agent: AgentAnalytics[]
   per_model: ModelAnalytics[]
   common_failure_points: FailurePoint[]
@@ -184,7 +184,7 @@ export interface AutomationResult {
 
 export interface EmailTrigger {
   enabled: boolean
-  workflow_name: string | null
+  pipeline_name: string | null
   status: 'active' | 'off' | 'disabled' | 'paused_cap' | 'error'
   daily_cap: number
   last_error?: string | null
@@ -308,7 +308,7 @@ export interface KnowledgeBaseSearchResponse {
 
 export interface ShareLink {
   id: number
-  workflow_id: number
+  pipeline_id: number
   token: string
   active: boolean
   daily_cap: number

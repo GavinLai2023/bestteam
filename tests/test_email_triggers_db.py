@@ -32,20 +32,20 @@ def test_get_returns_none_when_absent(db):
 
 def test_upsert_creates_then_updates_in_place(db):
     org = get_or_create_org(db, "acme")
-    t = upsert_email_trigger(db, org.id, workflow_name="triage", enabled=True,
+    t = upsert_email_trigger(db, org.id, pipeline_name="triage", enabled=True,
                              last_uid=41, uidvalidity=7)
-    assert (t.workflow_name, t.enabled, t.last_uid, t.uidvalidity) == ("triage", True, 41, 7)
+    assert (t.pipeline_name, t.enabled, t.last_uid, t.uidvalidity) == ("triage", True, 41, 7)
     assert t.runs_today == 0 and t.runs_date is None and t.last_run_id is None
-    t2 = upsert_email_trigger(db, org.id, workflow_name="other", enabled=False,
+    t2 = upsert_email_trigger(db, org.id, pipeline_name="other", enabled=False,
                               last_uid=99, uidvalidity=8)
     assert t2.id == t.id  # one row per org, updated in place
-    assert (t2.workflow_name, t2.enabled, t2.last_uid) == ("other", False, 99)
+    assert (t2.pipeline_name, t2.enabled, t2.last_uid) == ("other", False, 99)
 
 
 def test_list_enabled_returns_only_enabled(db):
     a = get_or_create_org(db, "a")
     b = get_or_create_org(db, "b")
-    upsert_email_trigger(db, a.id, workflow_name="wa", enabled=True, last_uid=0, uidvalidity=None)
-    upsert_email_trigger(db, b.id, workflow_name="wb", enabled=False, last_uid=0, uidvalidity=None)
+    upsert_email_trigger(db, a.id, pipeline_name="wa", enabled=True, last_uid=0, uidvalidity=None)
+    upsert_email_trigger(db, b.id, pipeline_name="wb", enabled=False, last_uid=0, uidvalidity=None)
     enabled = list_enabled_triggers(db)
     assert [t.org_id for t in enabled] == [a.id]

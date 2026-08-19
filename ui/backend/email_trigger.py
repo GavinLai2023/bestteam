@@ -30,7 +30,7 @@ from cryptography.fernet import InvalidToken
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from bestteam.core.loader import _build_workflow
+from bestteam.core.loader import _build_pipeline
 from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import _ImapBackend, make_email_tools
@@ -57,12 +57,12 @@ from .db.models import (
     OrgEmailCredential,
     Run,
     SkillRecord,
-    WorkflowRecord,
+    PipelineRecord,
 )
 from .email_tools import spec_uses_email
 from .knowledge_bases import (
-    contain_workflow_config_for_load,
-    ensure_workflow_cache_paths_for_source,
+    contain_pipeline_config_for_load,
+    ensure_pipeline_cache_paths_for_source,
     load_knowledge_base_tools,
 )
 from .notifications import dispatch_pending
@@ -72,12 +72,16 @@ from .skills import load_skills
 
 _logger = logging.getLogger(__name__)
 
-_WORKFLOWS_DIR = Path(__file__).resolve().parent / "workflows"
+_PIPELINES_DIR = Path(__file__).resolve().parent / "pipelines"
 
 TRIGGER_USERNAME = "email-trigger"
 
 _ERROR_KIND_MAILBOX = "mailbox"
-_ERROR_KIND_WORKFLOW = "workflow"
+# Identifier renamed Workflow -> Pipeline; the stored VALUE stays "workflow"
+# on purpose -- it's compared against EmailTrigger.last_error_kind rows an
+# older app version may have written, and changing it would need a backfill
+# purely for cosmetic consistency. See db/models.py's matching note.
+_ERROR_KIND_PIPELINE = "workflow"
 
 # Shown when a detected message has exhausted its automatic retries. Without
 # it a dead-lettered message would be invisible: it is no longer pending, so
@@ -93,7 +97,7 @@ _UIDNEXT_RE = re.compile(rb"UIDNEXT (\d+)")
 # Per-org dispatch lock: serializes the overlap-guard-check-through-dispatch
 # critical section of poll_org and retry_triggered_run against each other.
 # Both read `trigger.last_run_id`/the in-process registry, do real work (IMAP
-# round-trip, workflow build), and only then write last_run_id -- without a
+# round-trip, pipeline build), and only then write last_run_id -- without a
 # lock spanning that whole section, two dispatches racing for the same org
 # (an automatic poll cycle and a manual retry, or two near-simultaneous
 # manual retries) could both observe "no active run" and both fire against
@@ -134,7 +138,7 @@ def _at_daily_cap(db: Session, trigger: EmailTrigger, today) -> bool:
     """Fresh (uncached) re-check of the daily cap, taken right before dispatch
     while holding `_dispatch_lock` -- same staleness rationale as
     `_current_last_run_id`. The cap check further up (before the lock, before
-    the mailbox check/workflow build) is only a fast-path optimization to
+    the mailbox check/pipeline build) is only a fast-path optimization to
     skip unnecessary IMAP calls when obviously already at cap; without this
     second check immediately before the atomic runs_today advance, two
     dispatches that both read "under cap" before either committed its
@@ -222,7 +226,7 @@ def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
     released, so the overlap guard should stop honouring it.
 
     A run cannot be forcibly killed -- a node already executing inside
-    `workflow.stream()` can't be safely interrupted, which is why
+    `pipeline.stream()` can't be safely interrupted, which is why
     `registry.request_cancel` is cooperative (see registry.py). So this makes a
     timed-out run non-blocking rather than trying to stop it: request
     cancellation, mark the durable row failed, and record the fault on the
@@ -255,7 +259,7 @@ def _release_stale_run(db: Session, trigger: EmailTrigger, run_id: str) -> bool:
         run_row.status = "failed"
         run_row.output = message
     trigger.last_error = message
-    trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+    trigger.last_error_kind = _ERROR_KIND_PIPELINE
     _apply_health(db, trigger, trigger_health.OUTCOME_TIMEOUT)
     # Infrastructure-class: the run hung, the messages are innocent. Hand them
     # back so they are reprocessed rather than consumed by a wedged run. This
@@ -440,19 +444,19 @@ def disable_trigger_on_identity_change(
         disable_trigger(db, org_id)
 
 
-def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, backend):
-    """An UNCACHED workflow for (org_id, name) whose email tools are confined to
-    `allowed_uids`. Mirrors main._get_workflow's DB-record build but substitutes
+def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, backend):
+    """An UNCACHED pipeline for (org_id, name) whose email tools are confined to
+    `allowed_uids`. Mirrors main._get_pipeline's DB-record build but substitutes
     scoped email tools; not cached because the UID set is per-run. `backend` is
     the IMAP backend the caller already resolved for this poll cycle -- reused
     rather than re-fetched, so a mailbox swap mid-cycle can't produce a run
     that detects mail on one mailbox and reads/drafts on another. Raises on a
     missing/invalid team."""
-    # Deployed-only gate (same as main._get_workflow): a workflow that isn't
+    # Deployed-only gate (same as main._get_pipeline): a pipeline that isn't
     # deployed must not run, including via the autonomous poller. A non-deployed
     # (or absent) record is treated identically -- no run is built.
     record = (
-        db.query(WorkflowRecord)
+        db.query(PipelineRecord)
         .filter_by(name=name, org_id=org_id, status="deployed")
         .one_or_none()
     )
@@ -466,7 +470,7 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     # team does (no build, no state advanced upstream).
     if not spec_uses_email(db, record.config, org_id):
         raise ValueError(f"Deployed team '{name}' for org {org_id} no longer uses email")
-    source = _WORKFLOWS_DIR / f"{name}.yaml"
+    source = _PIPELINES_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)
     # Stamp every draft this run creates with a deterministic source key, so a
     # later retry can reconcile against the mailbox itself and recognise a
@@ -482,11 +486,11 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
         backend, allowed_uids=allowed_uids, draft_marker_prefix=marker_prefix
     )
     skills = load_skills(
-        db, org_id, workflow_version_id=record.current_version_id
+        db, org_id, pipeline_version_id=record.current_version_id
     )
-    config = contain_workflow_config_for_load(record.config)
-    ensure_workflow_cache_paths_for_source(config, source)
-    workflow = _build_workflow(
+    config = contain_pipeline_config_for_load(record.config)
+    ensure_pipeline_cache_paths_for_source(config, source)
+    pipeline = _build_pipeline(
         config,
         source=source,
         extra_tools={**kb_tools, **email_tools},
@@ -496,30 +500,30 @@ def build_trigger_workflow(name: str, db: Session, org_id: int, allowed_uids, ba
     # the triggered run records exactly the version it executes even if a
     # redeploy commits concurrently (a separate current_version_id re-query could
     # observe a newer version than the one built).
-    return workflow, record.current_version_id
+    return pipeline, record.current_version_id
 
 
-# The platform skill whose system prompt commits a workflow's Response agent to
+# The platform skill whose system prompt commits a pipeline's Response agent to
 # emitting automation_results.RESULT_TYPE_BATCH_MARKER's JSON envelope (see
-# skills.py / ui/backend/workflows/property_maintenance_inbox_demo.yaml). Used
+# skills.py / ui/backend/pipelines/property_maintenance_inbox_demo.yaml). Used
 # only to stamp `trigger_context["result_contract"]` below -- advisory metadata,
-# never anything build_trigger_workflow's actual run depends on.
+# never anything build_trigger_pipeline's actual run depends on.
 _PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response_v1"
 
 
-def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_name: str) -> bool:
-    """Best-effort: does this deployed workflow's config give any agent the
+def _declares_property_maintenance_contract(db: Session, org_id: int, pipeline_name: str) -> bool:
+    """Best-effort: does this deployed pipeline's config give any agent the
     ACTUAL platform `property_maintenance_response_v1` skill?
 
     A run's own trace/output can't tell us this after the fact for a run that
     crashed before producing any JSON (`_normalize` can then only see a plain
     failure string, indistinguishable from any other org's unrelated
-    email-trigger workflow output) -- so this is captured up front, from the
-    workflow config itself, and stamped into `trigger_context` at dispatch
+    email-trigger pipeline output) -- so this is captured up front, from the
+    pipeline config itself, and stamped into `trigger_context` at dispatch
     time (below). That lets `automation_results._normalize` still synthesize
     the spec-required per-UID error rows for an envelope-less *maintenance-
     inbox* run, without also doing so for a crashed *unrelated* org's
-    email-trigger workflow that never declared this skill (Codex review
+    email-trigger pipeline that never declared this skill (Codex review
     finding). A read failure here must never block dispatch -- this is
     advisory only.
 
@@ -534,8 +538,8 @@ def _declares_property_maintenance_contract(db: Session, org_id: int, workflow_n
     """
     try:
         record = (
-            db.query(WorkflowRecord)
-            .filter_by(name=workflow_name, org_id=org_id, status="deployed")
+            db.query(PipelineRecord)
+            .filter_by(name=pipeline_name, org_id=org_id, status="deployed")
             .one_or_none()
         )
         if record is None:
@@ -631,12 +635,12 @@ def _filter_decisions(backend, settings, uids) -> Dict[str, str]:
     return decisions
 
 
-def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None:
+def poll_org(db: Session, trigger: EmailTrigger, get_pipeline: Callable) -> None:
     """One org's poll cycle. Never raises; all state changes committed here.
 
-    `get_workflow` is `build_trigger_workflow` injected by the loop (avoids a
+    `get_pipeline` is `build_trigger_pipeline` injected by the loop (avoids a
     circular import and lets tests pass a stub):
-    `(name, db, org_id, allowed_uids, backend) -> Workflow`.
+    `(name, db, org_id, allowed_uids, backend) -> Pipeline`.
     """
     # Daily cap: reset on date rollover, and skip the mailbox entirely at cap.
     today = _today()
@@ -709,9 +713,9 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
 
         trigger.last_checked_at = _utcnow()
         # A successful mailbox check is direct proof connectivity/credentials are
-        # fine, so a *mailbox*-kind error can auto-clear here. A *workflow*-kind
+        # fine, so a *mailbox*-kind error can auto-clear here. A *pipeline*-kind
         # error (or a legacy/unknown-kind row) must persist across empty polls
-        # (F5) -- an empty poll never rebuilds the workflow, so it proves nothing
+        # (F5) -- an empty poll never rebuilds the pipeline, so it proves nothing
         # about whether the team still builds. Cleared only on a successful
         # dispatch (below) or on (re-)enable (the API).
         if trigger.last_error_kind == _ERROR_KIND_MAILBOX:
@@ -731,7 +735,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             # THE durability point. Recording the work and advancing the cursor
             # in ONE commit is what stops a process kill from consuming mail
             # that nothing ran: before this, `_start_triggered_run` advanced
-            # `last_uid` and only then handed the workflow to a thread pool, and
+            # `last_uid` and only then handed the pipeline to a thread pool, and
             # a kill in between lost the batch for good.
             detected = sorted(new_uids)[: batch_size() * _DETECT_MULTIPLIER]
             # The pre-LLM filter chooses each row's STATUS, never whether the row
@@ -772,7 +776,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_workflow: Callable) -> None
             db.commit()  # persist last_checked_at / error-clearing above; no dispatch
             return
 
-        _start_triggered_run(db, trigger, get_workflow, backend, cred)
+        _start_triggered_run(db, trigger, get_pipeline, backend, cred)
 
 
 def _trigger_input(uids) -> str:
@@ -784,19 +788,19 @@ def _trigger_input(uids) -> str:
 
 
 def _start_triggered_run(
-    db: Session, trigger: EmailTrigger, get_workflow, backend, cred
+    db: Session, trigger: EmailTrigger, get_pipeline, backend, cred
 ) -> None:
     """Start ONE run over a bounded batch of this org's pending inbox events.
 
     The batch is whatever this run CLAIMS from the durable ledger, not whatever
     the poller happened to detect this cycle -- batching is a claim policy now,
-    not a coupling. The claim is committed before any workflow build is
+    not a coupling. The claim is committed before any pipeline build is
     attempted, so a build failure releases the messages (penalty-free: a broken
     team config is not the message's fault) rather than consuming them.
 
     Then persist a durable run row and advance state in one commit, then
-    dispatch. `get_workflow` is `build_trigger_workflow(name, db, org_id,
-    allowed_uids, backend) -> (Workflow, Optional[int] version_id)`; the version
+    dispatch. `get_pipeline` is `build_trigger_pipeline(name, db, org_id,
+    allowed_uids, backend) -> (Pipeline, Optional[int] version_id)`; the version
     is captured from the same record read that built the config so the run
     records exactly the version it executes.
 
@@ -816,7 +820,7 @@ def _start_triggered_run(
     # (the same create-then-discard shape the disabled-mid-build branch below
     # already used).
     run = registry.create(
-        trigger.workflow_name, "", org_id=trigger.org_id, username=TRIGGER_USERNAME,
+        trigger.pipeline_name, "", org_id=trigger.org_id, username=TRIGGER_USERNAME,
     )
     # The customer's two budgets (the operator's `daily_cap()` runs-per-day rail
     # is separate and unchanged, checked by the caller). Both are read here,
@@ -863,7 +867,7 @@ def _start_triggered_run(
         registry.discard(run.id)
         db.commit()
         return
-    db.commit()  # the claim is durable before any workflow build is attempted
+    db.commit()  # the claim is durable before any pipeline build is attempted
     batch = [int(e.external_id) for e in claimed]
     input_text = _trigger_input(batch)
     run.input = input_text
@@ -877,19 +881,19 @@ def _start_triggered_run(
         "folder": "INBOX",
         "triggered_at": _utcnow().isoformat(),
     }
-    if _declares_property_maintenance_contract(db, trigger.org_id, trigger.workflow_name):
+    if _declares_property_maintenance_contract(db, trigger.org_id, trigger.pipeline_name):
         trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
     try:
-        workflow, version_id = get_workflow(trigger.workflow_name, db, trigger.org_id, set(batch), backend)
+        pipeline, version_id = get_pipeline(trigger.pipeline_name, db, trigger.org_id, set(batch), backend)
     except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since enabling
-        _logger.warning("email trigger: cannot build workflow %r for org %s: %s",
-                        trigger.workflow_name, trigger.org_id, exc)
+        _logger.warning("email trigger: cannot build pipeline %r for org %s: %s",
+                        trigger.pipeline_name, trigger.org_id, exc)
         trigger.last_error = (
-            f"Couldn't start the team '{trigger.workflow_name}' -- it may have "
+            f"Couldn't start the team '{trigger.pipeline_name}' -- it may have "
             "been changed or removed. Re-enable automatic runs from its page."
         )
-        trigger.last_error_kind = _ERROR_KIND_WORKFLOW
-        # Penalty-free release: the workflow is broken, not the messages. No
+        trigger.last_error_kind = _ERROR_KIND_PIPELINE
+        # Penalty-free release: the pipeline is broken, not the messages. No
         # attempt was charged (that happens at dispatch), so these retry until
         # the customer fixes the team -- which is today's behaviour, and the
         # reason attempts are not charged at claim time.
@@ -900,16 +904,16 @@ def _start_triggered_run(
     # Durable activity record before dispatch (worker updates its terminal
     # status; run_in_background reuses this row rather than re-inserting).
     run_row = Run(
-        id=run.id, workflow=trigger.workflow_name, input=input_text,
+        id=run.id, pipeline=trigger.pipeline_name, input=input_text,
         status="running", org_id=trigger.org_id, username=TRIGGER_USERNAME,
-        workflow_version_id=version_id, trigger_context=trigger_context,
+        pipeline_version_id=version_id, trigger_context=trigger_context,
     )
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
     # their own commit when the customer/operator disconnects or replaces the
     # mailbox (a replacement disables via disable_trigger_on_identity_change),
     # separate from the credential write that may have landed while this
-    # workflow was being built. Guarding the advance and the enabled-check in
+    # pipeline was being built. Guarding the advance and the enabled-check in
     # ONE statement closes the read-then-commit window a separate refresh would
     # leave open: if a disable landed in it, the UPDATE matches no row and we
     # never dispatch against a mailbox they just disconnected/replaced.
@@ -970,7 +974,7 @@ def _start_triggered_run(
     db.refresh(trigger)  # resync the ORM object with the values the CAS wrote
     try:
         _executor.submit(
-            run_in_background, run.id, workflow, input_text,
+            run_in_background, run.id, pipeline, input_text,
             engine=db.get_bind(), org_id=trigger.org_id, username=TRIGGER_USERNAME,
         )
     except Exception:  # noqa: BLE001 -- submission itself must never wedge the trigger
@@ -986,7 +990,7 @@ def _start_triggered_run(
         run_row.status = "failed"
         run_row.output = message
         trigger.last_error = message
-        trigger.last_error_kind = _ERROR_KIND_WORKFLOW
+        trigger.last_error_kind = _ERROR_KIND_PIPELINE
         # Infrastructure-class: nothing reached the model, so the messages go
         # back for reprocessing. An attempt WAS charged above, so a mailbox that
         # can never be dispatched dead-letters rather than looping forever --
@@ -1005,7 +1009,7 @@ def _start_triggered_run(
         # review finding).
         normalize_run_result(db, run_row)
         registry.publish(run.id, dataclasses.asdict(
-            TraceEvent(type="run_failed", workflow=trigger.workflow_name, data=message)
+            TraceEvent(type="run_failed", pipeline=trigger.pipeline_name, data=message)
         ))
 
 
@@ -1025,7 +1029,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
     mailbox must still be the same one (host/username, not just its
     UIDVALIDITY -- a replaced mailbox that coincidentally shares a UIDVALIDITY
     value would otherwise pass), the mailbox credential must still work, the
-    workflow must still build, and the org's daily automatic-run cap must not
+    pipeline must still build, and the org's daily automatic-run cap must not
     already be hit. Raises `RetryError` with a customer-facing message for any
     ineligibility; returns the new run id on successful dispatch.
     """
@@ -1040,7 +1044,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         # risks duplicate drafts. Only a failed run is safe to redo.
         raise RetryError("Only a failed run can be retried.")
     # Fast-path only, both checks below: skip the mailbox connectivity check
-    # and workflow rebuild entirely for the common case of an obviously
+    # and pipeline rebuild entirely for the common case of an obviously
     # ineligible retry. Neither is the authoritative gate -- both are
     # re-checked fresh, while holding the per-org dispatch lock, immediately
     # before the actual dispatch further down (Codex review finding: a
@@ -1128,7 +1132,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
                     )
 
         if _at_daily_cap(db, trigger, today):
-            # The check further up is only a fast-path (skip mailbox/workflow
+            # The check further up is only a fast-path (skip mailbox/pipeline
             # work when obviously already at cap); this fresh re-check, taken
             # while holding the lock right before dispatch, is what actually
             # closes the race -- two dispatches for this org that both read
@@ -1169,34 +1173,34 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         input_text = _trigger_input(retry_uids)
 
         try:
-            workflow, version_id = build_trigger_workflow(run_row.workflow, db, org_id, set(retry_uids), backend)
+            pipeline, version_id = build_trigger_pipeline(run_row.pipeline, db, org_id, set(retry_uids), backend)
         except Exception as exc:  # noqa: BLE001 -- team deleted/invalid since the original run
             raise RetryError(
-                f"Couldn't rebuild the team '{run_row.workflow}' -- it may have been changed or removed."
+                f"Couldn't rebuild the team '{run_row.pipeline}' -- it may have been changed or removed."
             ) from exc
 
-        new_run = registry.create(run_row.workflow, input_text, org_id=org_id, username=TRIGGER_USERNAME)
+        new_run = registry.create(run_row.pipeline, input_text, org_id=org_id, username=TRIGGER_USERNAME)
         # Narrowed to retry_uids (not the original full batch): a UID already
         # confirmed drafted is excluded from what this new run is even allowed to
-        # touch (build_trigger_workflow's allowed_uids above), and its
+        # touch (build_trigger_pipeline's allowed_uids above), and its
         # trigger_context must agree, or normalize_run_result would treat that
         # already-handled UID as "missing" from this run's envelope and wrongly
         # synthesize a needs_attention error row for it under the new run id.
         new_trigger_context = {**trigger_context, "uids": retry_uids, "triggered_at": _utcnow().isoformat()}
         # Recompute, don't just carry over: the original run's result_contract
-        # can be stale by the time it's retried if the deployed workflow (or a
+        # can be stale by the time it's retried if the deployed pipeline (or a
         # same-named skill) changed in between -- carrying it over verbatim
-        # would either leave a now-maintenance workflow's output unredacted or
-        # wrongly redact/normalize a workflow that no longer declares the
+        # would either leave a now-maintenance pipeline's output unredacted or
+        # wrongly redact/normalize a pipeline that no longer declares the
         # contract (Codex review finding).
-        if _declares_property_maintenance_contract(db, org_id, run_row.workflow):
+        if _declares_property_maintenance_contract(db, org_id, run_row.pipeline):
             new_trigger_context["result_contract"] = RESULT_TYPE_BATCH_MARKER
         else:
             new_trigger_context.pop("result_contract", None)
         new_row = Run(
-            id=new_run.id, workflow=run_row.workflow, input=input_text,
+            id=new_run.id, pipeline=run_row.pipeline, input=input_text,
             status="running", org_id=org_id, username=TRIGGER_USERNAME,
-            workflow_version_id=version_id, trigger_context=new_trigger_context,
+            pipeline_version_id=version_id, trigger_context=new_trigger_context,
             retry_of_run_id=run_row.id,
         )
         db.add(new_row)
@@ -1240,7 +1244,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
                 last_run_id=new_run.id,
                 # A run is going out: clear any prior fault, same as
                 # _start_triggered_run's atomic advance -- otherwise a sticky
-                # workflow-kind error from a past failure keeps reporting a
+                # pipeline-kind error from a past failure keeps reporting a
                 # failure indefinitely despite this successful dispatch
                 # (Codex review finding).
                 last_error=None,
@@ -1257,7 +1261,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         db.commit()
         try:
             _executor.submit(
-                run_in_background, new_run.id, workflow, input_text,
+                run_in_background, new_run.id, pipeline, input_text,
                 engine=db.get_bind(), org_id=org_id, username=TRIGGER_USERNAME,
             )
         except Exception:  # noqa: BLE001 -- submission itself must never raise out of this call
@@ -1273,7 +1277,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
             # review finding).
             normalize_run_result(db, new_row)
             registry.publish(new_run.id, dataclasses.asdict(
-                TraceEvent(type="run_failed", workflow=run_row.workflow, data=message)
+                TraceEvent(type="run_failed", pipeline=run_row.pipeline, data=message)
             ))
         return new_run.id
 
@@ -1418,7 +1422,7 @@ def maintenance_once(session_factory=None) -> None:
         run_maintenance(db)
 
 
-def poll_once(get_workflow: Callable, session_factory=None) -> None:
+def poll_once(get_pipeline: Callable, session_factory=None) -> None:
     """One pass over every enabled org. Runs on a worker thread (imaplib and
     SQLAlchemy here are synchronous); a failure in one org never stops the rest."""
     from .db_session import SessionLocal  # late import: keep module import-light
@@ -1429,7 +1433,7 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
     with factory() as db:
         for trigger in list_enabled_triggers(db):
             try:
-                poll_org(db, trigger, get_workflow)
+                poll_org(db, trigger, get_pipeline)
             except Exception:  # noqa: BLE001 -- the loop must outlive any org's failure
                 # Roll back BEFORE touching `trigger` again: a failed flush leaves
                 # the session's objects expired, so logging trigger.org_id first
@@ -1446,7 +1450,7 @@ def poll_once(get_workflow: Callable, session_factory=None) -> None:
         run_maintenance(db)
 
 
-async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> None:
+async def poll_forever(stop_event: "asyncio.Event", get_pipeline: Callable) -> None:
     """The poller task: sleep FIRST, then poll, forever until `stop_event`.
 
     Sleeping first means app startup (and short-lived TestClient lifespans)
@@ -1467,6 +1471,6 @@ async def poll_forever(stop_event: "asyncio.Event", get_workflow: Callable) -> N
                 _logger.exception("email trigger: maintenance cycle failed")
             continue
         try:
-            await asyncio.to_thread(poll_once, get_workflow)
+            await asyncio.to_thread(poll_once, get_pipeline)
         except Exception:  # noqa: BLE001 -- never let the task die
             _logger.exception("email trigger: poll cycle failed")

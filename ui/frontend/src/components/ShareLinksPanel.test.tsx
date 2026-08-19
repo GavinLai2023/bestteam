@@ -21,18 +21,18 @@ describe('ShareLinksPanel', () => {
 
   it('lists existing links and shows their status', async () => {
     mockedApi.listShareLinks.mockResolvedValue([
-      { id: 1, workflow_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
     ])
-    render(<ShareLinksPanel workflowId={5} />)
+    render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     await waitFor(() => expect(screen.getByText(/active/i)).toBeInTheDocument())
   })
 
   it('creates a new link on click', async () => {
     mockedApi.createShareLink.mockResolvedValue({
-      id: 2, workflow_id: 5, token: 'newtoken', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
+      id: 2, pipeline_id: 5, token: 'newtoken', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
-    render(<ShareLinksPanel workflowId={5} />)
+    render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
     await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
@@ -40,12 +40,12 @@ describe('ShareLinksPanel', () => {
 
   it('revokes a link on click', async () => {
     mockedApi.listShareLinks.mockResolvedValue([
-      { id: 1, workflow_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
     ])
     mockedApi.patchShareLink.mockResolvedValue({
-      id: 1, workflow_id: 5, token: 'abc123token', active: false, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
+      id: 1, pipeline_id: 5, token: 'abc123token', active: false, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
-    render(<ShareLinksPanel workflowId={5} />)
+    render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
     await waitFor(() => expect(mockedApi.patchShareLink).toHaveBeenCalledWith(1, { active: false }))
@@ -56,14 +56,14 @@ describe('ShareLinksPanel', () => {
     // real host), which used to surface as an unhandled rejection and no
     // feedback at all.
     mockedApi.listShareLinks.mockResolvedValue([
-      { id: 1, workflow_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
     ])
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockRejectedValue(new Error('not allowed')) },
     })
 
-    render(<ShareLinksPanel workflowId={5} />)
+    render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /copy link/i }))
 

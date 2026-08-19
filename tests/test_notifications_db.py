@@ -39,7 +39,7 @@ def _org(db, name="acme"):
     return get_or_create_org(db, name).id
 
 
-def _notify(db, org_id, *, fingerprint="workflow", severity="error"):
+def _notify(db, org_id, *, fingerprint="pipeline", severity="error"):
     return create_notification(
         db, org_id=org_id, kind="trigger_health", severity=severity,
         title="Automatic email replies are failing", body="b",

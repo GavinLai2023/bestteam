@@ -13,7 +13,7 @@ which alerts are outstanding; a condition already alerted for stays quiet
 until it clears.
 
 *Which alerts*, plural: two domains can be broken at once. A single remembered
-fingerprint meant a mailbox fault overwrote an outstanding workflow one, and
+fingerprint meant a mailbox fault overwrote an outstanding pipeline one, and
 the next successful mailbox check then cleared it and announced a recovery
 that had not happened (Codex review finding). The outstanding set is stored in
 the one `alerted_fingerprint` column as a sorted comma-separated string --
@@ -26,19 +26,24 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-OUTCOME_WORKFLOW = "workflow_fault"
+# Identifiers renamed Workflow -> Pipeline; the stored VALUES stay unchanged
+# ("workflow_fault"/"workflow_ok"/"workflow") on purpose -- they're compared
+# against EmailTrigger.alerted_fingerprint/Notification.fingerprint rows an
+# older app version may have written, and changing them would need a backfill
+# purely for cosmetic consistency. See db/models.py's matching note.
+OUTCOME_PIPELINE = "workflow_fault"
 OUTCOME_MAILBOX = "mailbox_fault"
 OUTCOME_TIMEOUT = "run_timeout"
 # Recovery is domain-specific on purpose. A successful mailbox check is direct
 # proof that connectivity and credentials are fine; it says nothing about
-# whether the team still builds and runs, so it must not clear a workflow
+# whether the team still builds and runs, so it must not clear a pipeline
 # fault. That asymmetry is the existing `last_error_kind` convention (F5) and
 # flattening it here would silently re-introduce the "healthy trigger, every
 # run failing" state Phase 0 fixed.
 OUTCOME_MAILBOX_OK = "mailbox_ok"
-OUTCOME_WORKFLOW_OK = "workflow_ok"
+OUTCOME_PIPELINE_OK = "workflow_ok"
 
-FINGERPRINT_WORKFLOW = "workflow"
+FINGERPRINT_PIPELINE = "workflow"
 FINGERPRINT_MAILBOX = "mailbox"
 FINGERPRINT_TIMEOUT = "run_timeout"
 
@@ -52,7 +57,7 @@ _DEFAULT_THRESHOLD = 3
 _THRESHOLD_ENV = "BESTTEAM_TRIGGER_ALERT_THRESHOLD"
 
 _FAULT_FINGERPRINTS = {
-    OUTCOME_WORKFLOW: FINGERPRINT_WORKFLOW,
+    OUTCOME_PIPELINE: FINGERPRINT_PIPELINE,
     OUTCOME_MAILBOX: FINGERPRINT_MAILBOX,
     OUTCOME_TIMEOUT: FINGERPRINT_TIMEOUT,
 }
@@ -61,12 +66,12 @@ _FAULT_FINGERPRINTS = {
 # clears a timeout alert: the wedge it reported is demonstrably gone.
 _OK_CLEARS = {
     OUTCOME_MAILBOX_OK: frozenset({FINGERPRINT_MAILBOX}),
-    OUTCOME_WORKFLOW_OK: frozenset({FINGERPRINT_WORKFLOW, FINGERPRINT_TIMEOUT}),
+    OUTCOME_PIPELINE_OK: frozenset({FINGERPRINT_PIPELINE, FINGERPRINT_TIMEOUT}),
 }
 
 _RECOVERY_TITLES = {
     OUTCOME_MAILBOX_OK: "Your mailbox is reachable again",
-    OUTCOME_WORKFLOW_OK: "Automatic email replies are working again",
+    OUTCOME_PIPELINE_OK: "Automatic email replies are working again",
 }
 
 
@@ -107,7 +112,7 @@ def _encode(outstanding: set) -> Optional[str]:
 
 
 def alert_threshold() -> int:
-    """Consecutive faults before a workflow/mailbox alert fires.
+    """Consecutive faults before a pipeline/mailbox alert fires.
 
     Clamped to at least 1: a threshold of 0 would alert before anything had
     gone wrong, and a negative one would alert forever.
@@ -158,7 +163,7 @@ def _draft(outcome: str, faults: int) -> NotificationDraft:
             "being drafted. Open the run history to see what each run "
             "reported."
         ),
-        fingerprint=FINGERPRINT_WORKFLOW,
+        fingerprint=FINGERPRINT_PIPELINE,
     )
 
 

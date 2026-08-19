@@ -979,7 +979,7 @@ def _lock_for_source_key(key: str) -> threading.Lock:
 
     The duplicate-draft race this closes is intra-process. The stale-run
     watchdog releases a timed-out run's overlap guard without being able to
-    stop the worker -- a node executing inside `workflow.stream()` can't be
+    stop the worker -- a node executing inside `pipeline.stream()` can't be
     interrupted -- so the wedged worker and the retry it enabled are both
     threads of the SAME uvicorn process. Serialising check-then-APPEND here
     therefore closes the window rather than merely narrowing it.

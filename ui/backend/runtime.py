@@ -18,7 +18,7 @@ from typing import Any, Optional
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from bestteam import MemoryManager, SqliteBM25Memory, Workflow
+from bestteam import MemoryManager, Pipeline, SqliteBM25Memory
 from bestteam.core.trace import TraceEvent
 
 from . import error_reporting
@@ -99,7 +99,7 @@ def fail_interrupted_runs(engine: Engine, *, max_event_attempts: int) -> int:
 # just never the trace/output columns.
 _PM_TRACE_REDACTED = "[redacted -- Property Maintenance Inbox response; see automation results for this run]"
 
-# If a declared maintenance workflow uses HIERARCHICAL mode, the manager's
+# If a declared maintenance pipeline uses HIERARCHICAL mode, the manager's
 # delegate/subordinate exchange carries the same customer-email-derived text
 # as agent_completed/run_completed (delegation_started/subagent_started's
 # `task_summary` is the manager's own free-text hand-off, and
@@ -189,9 +189,9 @@ def _apply_trigger_health(db: Session, trigger, run_status: str) -> None:
     from .db.notifications import create_notification
 
     outcome = (
-        trigger_health.OUTCOME_WORKFLOW_OK
+        trigger_health.OUTCOME_PIPELINE_OK
         if run_status == "completed"
-        else trigger_health.OUTCOME_WORKFLOW
+        else trigger_health.OUTCOME_PIPELINE
     )
     decision = trigger_health.evaluate(
         outcome=outcome,
@@ -418,12 +418,12 @@ def _make_memory(
     *,
     principal_id: Optional[str] = None,
     run_id: Optional[str] = None,
-    workflow_version_id: Optional[int] = None,
-    workflow_id: Optional[int] = None,
+    pipeline_version_id: Optional[int] = None,
+    pipeline_id: Optional[int] = None,
 ) -> Optional[MemoryManager]:
     """Build a per-user `MemoryManager` from env, or None when memory is disabled.
 
-    Called on the worker thread that runs the workflow so the underlying
+    Called on the worker thread that runs the pipeline so the underlying
     SQLite connection stays thread-local (`SqliteBM25Memory` opens its
     connection in `__init__`).
 
@@ -462,9 +462,9 @@ def _make_memory(
       `docs/superpowers/specs/2026-08-12-pluggable-rerank-design.md`.
 
     `org_id` scopes every recall/record to the run's organization (SP-2), so a
-    run only ever sees and writes its own org's memory. `workflow_id` (the
-    deployed team's stable `WorkflowRecord.id`) additionally scopes
-    episodic/procedural recall/writes to the current workflow -- semantic facts
+    run only ever sees and writes its own org's memory. `pipeline_id` (the
+    deployed team's stable `PipelineRecord.id`) additionally scopes
+    episodic/procedural recall/writes to the current pipeline -- semantic facts
     stay org-wide regardless (see `core/memory.py::MemoryManager.recall`).
     """
     db_path = os.environ.get("BESTTEAM_MEMORY_DB", "").strip()
@@ -490,9 +490,9 @@ def _make_memory(
         extraction_model=extraction_model,
         org_id=org_id,
         principal_id=principal_id,
-        workflow_id=workflow_id,
+        pipeline_id=pipeline_id,
         run_id=run_id,
-        workflow_version_id=workflow_version_id,
+        pipeline_version_id=pipeline_version_id,
         # SP-4: production recall is bounded by default (M-09); episodic retention
         # is opt-in (M-07, destructive so default unbounded).
         recall_max_candidates=_env_int("BESTTEAM_MEMORY_RECALL_MAX_CANDIDATES", 1000),
@@ -509,17 +509,17 @@ def _make_memory(
 
 def run_in_background(
     run_id: str,
-    workflow: Workflow,
+    pipeline: Pipeline,
     input: str,
     engine: Optional[Engine] = None,
     user_id: Optional[str] = None,
     org_id: Optional[int] = None,
     principal_id: Optional[str] = None,
     username: Optional[str] = None,
-    workflow_version_id: Optional[int] = None,
-    workflow_id: Optional[int] = None,
+    pipeline_version_id: Optional[int] = None,
+    pipeline_id: Optional[int] = None,
 ) -> None:
-    """Drain `Workflow.stream()` on a worker thread and publish each event to
+    """Drain `Pipeline.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
 
     If `engine` is given, each `agent_completed` event's per-model-call
@@ -547,8 +547,8 @@ def run_in_background(
             org_id,
             principal_id=principal_id,
             run_id=run_id,
-            workflow_version_id=workflow_version_id,
-            workflow_id=workflow_id,
+            pipeline_version_id=pipeline_version_id,
+            pipeline_id=pipeline_id,
         )
         if user_id
         else None
@@ -614,17 +614,17 @@ def run_in_background(
             if run_row is None:
                 run_row = Run(
                     id=run_id,
-                    workflow=getattr(workflow, "name", ""),
+                    pipeline=getattr(pipeline, "name", ""),
                     input=input,
                     org_id=org_id,
                     username=username,
-                    workflow_version_id=workflow_version_id,
+                    pipeline_version_id=pipeline_version_id,
                 )
                 db.add(run_row)
             else:
                 # A caller (the autonomous trigger) already persisted this row
                 # before dispatch as a durable activity record; keep it.
-                run_row.workflow = getattr(workflow, "name", "") or run_row.workflow
+                run_row.pipeline = getattr(pipeline, "name", "") or run_row.pipeline
             db.commit()
         is_pm_contract_run = bool(
             run_row is not None
@@ -637,19 +637,19 @@ def run_in_background(
         # subscriber's replay log agrees with the persisted trace_events
         # history below (review finding P3: this used to be persisted only,
         # leaving the live log starting at run_started).
-        run_queued_event = TraceEvent(type="run_queued", workflow=getattr(workflow, "name", ""), data=None)
+        run_queued_event = TraceEvent(type="run_queued", pipeline=getattr(pipeline, "name", ""), data=None)
         registry.publish(run_id, dataclasses.asdict(run_queued_event))
         if db is not None:
             _safe_record_trace_event(db, run_id=run_id, seq=seq, event=run_queued_event)
             seq += 1
         def _mark_cancelled() -> None:
             # Cooperative cancellation only, never a forceful thread kill (not
-            # safely possible mid-`workflow.stream()`) -- this only runs
+            # safely possible mid-`pipeline.stream()`) -- this only runs
             # between yielded events, so it can't cut off a node already in
             # flight (see registry.py::request_cancel).
             nonlocal seq, terminal_seen
             cancelled = TraceEvent(
-                type="run_cancelled", workflow=getattr(workflow, "name", ""), data="Run was cancelled."
+                type="run_cancelled", pipeline=getattr(pipeline, "name", ""), data="Run was cancelled."
             )
             # Commit + normalize BEFORE publish/trace-record (not after, as
             # this used to do) -- same ordering rationale as the streaming
@@ -674,14 +674,14 @@ def run_in_background(
             # behind other runs on the thread pool) -- skip streaming entirely.
             _mark_cancelled()
         else:
-            stream_iter = workflow.stream(input, user_id=user_id, memory=memory)
+            stream_iter = pipeline.stream(input, user_id=user_id, memory=memory)
             for event in stream_iter:
                 raw_run_completed_output: Optional[str] = None
                 if is_pm_contract_run and (
                     event.type in _PM_REDACTED_EVENT_TYPES or _is_delegate_tool_completed(event)
                 ):
                     # `run_completed.data` is the same raw agent text as
-                    # `agent_completed.data` (core/workflow.py's `last_output`)
+                    # `agent_completed.data` (core/pipeline.py's `last_output`)
                     # -- normalize_run_result still needs the real JSON, so
                     # it's captured here before the event itself is redacted
                     # for everyone else (live subscribers, trace_events,
@@ -732,16 +732,16 @@ def run_in_background(
                         failed_tool_message_ids.add(message_id)
                 if event.type in ("run_completed", "run_failed"):
                     if event.type == "run_failed":
-                        # The workflow failed without raising (a provider or
+                        # The pipeline failed without raising (a provider or
                         # BestTeamError the SDK already turned into an event):
                         # still worth an operator's attention. Ids only -- the
                         # reason (`event.data`, an exception's text) can quote
                         # a prompt or a model's output, and is in the run's
                         # persisted trace on-box; see error_reporting.py.
                         error_reporting.report_message(
-                            f"Run failed: {getattr(workflow, 'name', '')}",
+                            f"Run failed: {getattr(pipeline, 'name', '')}",
                             run_id=run_id,
-                            workflow=getattr(workflow, "name", ""),
+                            pipeline=getattr(pipeline, "name", ""),
                         )
                     if run_row is not None:
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
@@ -837,7 +837,7 @@ def run_in_background(
                     _mark_cancelled()
                     break
     except Exception as exc:  # noqa: BLE001 -- any worker failure must still yield a terminal event
-        # Workflow.stream() compiles before its own BestTeamError handler, so a
+        # Pipeline.stream() compiles before its own BestTeamError handler, so a
         # compile failure (e.g. an unsupported collaboration mode) escapes as an
         # exception rather than a run_failed event. Without this catch-all the
         # run would stay "running" forever and subscribers would never see a
@@ -846,10 +846,10 @@ def run_in_background(
         # event was already published, so a post-completion failure (e.g. usage
         # recording) can't flip a completed run to failed.
         _logger.exception("Run %s failed on the worker thread", run_id)
-        error_reporting.report_exception(exc, run_id=run_id, workflow=getattr(workflow, "name", ""))
+        error_reporting.report_exception(exc, run_id=run_id, pipeline=getattr(pipeline, "name", ""))
         if not terminal_seen:
             message = "The run failed due to an internal error."
-            failed_event = TraceEvent(type="run_failed", workflow=getattr(workflow, "name", ""), data=message)
+            failed_event = TraceEvent(type="run_failed", pipeline=getattr(pipeline, "name", ""), data=message)
             # Persist status + normalize BEFORE publish/trace-record (not
             # after, as this used to do) -- same ordering rationale as the
             # streaming loop's terminal branch and _mark_cancelled: a live
@@ -865,7 +865,7 @@ def run_in_background(
                     run_row.output = message
                     db.add(run_row)
                     db.commit()
-                    # A triggered run that fails before workflow.stream() ever
+                    # A triggered run that fails before pipeline.stream() ever
                     # yields an event (e.g. a compile failure) previously
                     # skipped normalization entirely, so its UID batch just
                     # disappeared from Needs-attention instead of getting the

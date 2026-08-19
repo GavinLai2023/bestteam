@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import type { ShareLink } from '../lib/types'
 
 interface ShareLinksPanelProps {
-  workflowId: number
+  pipelineId: number
 }
 
 function shareUrlFor(token: string): string {
@@ -17,7 +17,7 @@ function shareUrlFor(token: string): string {
 // default -- SessionsPage can list many teams, and this keeps the page from
 // firing a share-links fetch per card on every load; the list only loads
 // once the user opts in by clicking "Share".
-export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
+export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
   const [links, setLinks] = useState<ShareLink[]>([])
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -25,7 +25,7 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
 
   const refresh = () => {
     api
-      .listShareLinks(workflowId)
+      .listShareLinks(pipelineId)
       .then(setLinks)
       .catch((e: Error) => setError(e.message))
   }
@@ -37,7 +37,7 @@ export default function ShareLinksPanel({ workflowId }: ShareLinksPanelProps) {
 
   const handleCreate = async () => {
     try {
-      await api.createShareLink(workflowId, {})
+      await api.createShareLink(pipelineId, {})
       refresh()
     } catch (e) {
       setError((e as Error).message)

@@ -7,7 +7,7 @@ to run the same pipeline against a real provider — nothing else changes.
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from bestteam import Agent, CollaborationMode, Team, Workflow
+from bestteam import Agent, CollaborationMode, Pipeline, Team
 
 researcher = Agent(
     name="researcher",
@@ -29,10 +29,10 @@ content_team = Team(
     mode=CollaborationMode.SEQUENTIAL,
 )
 
-workflow = Workflow(name="article_pipeline", steps=[content_team])
+pipeline = Pipeline(name="article_pipeline", steps=[content_team])
 
 if __name__ == "__main__":
-    result = workflow.run("Write a short article about multi-agent AI systems.")
+    result = pipeline.run("Write a short article about multi-agent AI systems.")
 
     print("=== Final output ===")
     print(result.output)
@@ -42,4 +42,4 @@ if __name__ == "__main__":
         print(f"- {step['agent']}: {step['output']}")
 
     print("\n=== Graph (Mermaid) ===")
-    print(workflow.visualize())
+    print(pipeline.visualize())

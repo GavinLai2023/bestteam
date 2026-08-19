@@ -58,9 +58,9 @@ def _wait_for_job_status(job_id, deadline_seconds=10):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend_main, "WORKFLOWS_DIR", tmp_path)
+    monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     monkeypatch.setattr(backend_knowledge_bases, "_KB_UPLOADS_DIR", tmp_path / "knowledge_base_uploads")
-    backend_main._workflow_cache.clear()
+    backend_main._pipeline_cache.clear()
 
     # A file database, not `:memory:`: every upload here dispatches an
     # ingestion job onto `ingestion.py`'s executor, and that worker thread
@@ -671,15 +671,15 @@ def test_delete_own_kb_409_when_used_by_deployed_team(client):
     assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     # The delete guard reads typed dependency rows, which only exist once a
-    # workflow is deployed for real -- so deploy through the admin CRUD route
-    # rather than inserting a WorkflowRecord directly.
+    # pipeline is deployed for real -- so deploy through the admin CRUD route
+    # rather than inserting a PipelineRecord directly.
     admin = create_user_and_login(client, username="op", org=None, admin=True)
     deploy = client.put(
-        "/api/config/workflows/kb_team?org=default",
+        "/api/config/pipelines/kb_team?org=default",
         json={
             "agents": [{"name": "a", "role": "r", "goal": "g", "model": "fake:hi", "tools": ["policies"]}],
             "teams": [{"name": "team", "agents": ["a"], "mode": "sequential"}],
-            "workflow": {"steps": ["team"]},
+            "pipeline": {"steps": ["team"]},
         },
         headers={"Authorization": f"Bearer {admin}"},
     )

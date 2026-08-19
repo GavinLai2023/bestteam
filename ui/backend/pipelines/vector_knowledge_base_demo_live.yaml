@@ -1,6 +1,6 @@
 # Same as vector_knowledge_base_demo.yaml, but wired to real OpenAI models
 # instead of "fake:" specs - mirrors the examples/code_review_demo_live.py
-# convention (same workflow, real provider).
+# convention (same pipeline, real provider).
 #
 # "support_agent" calls the "company_docs" tool (cosine-similarity search
 # over OpenAI embeddings of kb_docs/) to ground its answers in the company's
@@ -33,5 +33,5 @@ teams:
     agents: [support_agent]
     mode: sequential
 
-workflow:
+pipeline:
   steps: [support_team]

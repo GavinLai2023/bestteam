@@ -1,7 +1,7 @@
-"""Deploy primitive: publish a WorkflowRecord's config as an immutable version.
+"""Deploy primitive: publish a PipelineRecord's config as an immutable version.
 
-`WorkflowRecord` is the stable team head (unique `(org_id, name)`);
-`workflow_versions` is its append-only history. Deploy appends a version, moves
+`PipelineRecord` is the stable team head (unique `(org_id, name)`);
+`pipeline_versions` is its append-only history. Deploy appends a version, moves
 `current_version_id`, and keeps `config` as a mirror of the current version.
 Skill dependencies are content-version-pinned during the same transaction. Callers hold
 `component_mutation_lock` and own the commit."""
@@ -14,42 +14,42 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .dependencies import record_version_dependencies
-from .models import WorkflowRecord, WorkflowVersion
+from .models import PipelineRecord, PipelineVersion
 
 
-def publish_workflow_version(
+def publish_pipeline_version(
     db: Session,
     *,
     org_id: Optional[int],
     name: str,
     config: dict[str, Any],
-    workflow_id: Optional[int] = None,
+    pipeline_id: Optional[int] = None,
     created_by: Optional[str] = None,
     owner_principal_id: Optional[str] = None,
-) -> tuple[WorkflowRecord, WorkflowVersion]:
+) -> tuple[PipelineRecord, PipelineVersion]:
     """Publish `config` as the next immutable version of a team head, moving its
     current-version pointer. Returns `(record, version)`; does NOT commit.
 
-    `workflow_id` given and found *within `org_id`* -> that existing head
+    `pipeline_id` given and found *within `org_id`* -> that existing head
     (rename-safe: `record.name = name`). Otherwise resolve-or-create the head by
     `(org_id, name)` -- so a stale session pointer (deleted team), or one that
-    names another org's workflow, recreates cleanly in the caller's own org, and
+    names another org's pipeline, recreates cleanly in the caller's own org, and
     two sessions deploying the same name converge on one head. The lookup is
     org-scoped so this primitive can never rename/redeploy another org's record.
 
     `created_by` (a username) is purely an informational audit label on the
-    immutable `WorkflowVersion` snapshot -- same role as `SkillVersion.created_by`.
+    immutable `PipelineVersion` snapshot -- same role as `SkillVersion.created_by`.
     `owner_principal_id` is the *authorization* value written to
-    `WorkflowRecord.created_by` (My Teams / run-ownership filtering): it must be
+    `PipelineRecord.created_by` (My Teams / run-ownership filtering): it must be
     the creator's immutable `User.principal_id`, never their username, since
     usernames are reusable after account deletion and a username-keyed
     comparison would let a newly created same-named account see/run the
-    deleted account's personal workflows."""
-    record: Optional[WorkflowRecord] = None
-    if workflow_id is not None:
+    deleted account's personal pipelines."""
+    record: Optional[PipelineRecord] = None
+    if pipeline_id is not None:
         record = (
-            db.query(WorkflowRecord)
-            .filter_by(id=workflow_id, org_id=org_id)
+            db.query(PipelineRecord)
+            .filter_by(id=pipeline_id, org_id=org_id)
             .one_or_none()
         )
     if record is not None:
@@ -60,10 +60,10 @@ def publish_workflow_version(
             record.created_by = owner_principal_id
     else:
         record = (
-            db.query(WorkflowRecord).filter_by(name=name, org_id=org_id).one_or_none()
+            db.query(PipelineRecord).filter_by(name=name, org_id=org_id).one_or_none()
         )
         if record is None:
-            record = WorkflowRecord(
+            record = PipelineRecord(
                 name=name, config=config, status="deployed", org_id=org_id, created_by=owner_principal_id
             )
             db.add(record)
@@ -79,13 +79,13 @@ def publish_workflow_version(
     # not mutate record.config / version.config in place, or you corrupt history.
     db.flush()  # need record.id
     next_number = (
-        db.query(func.max(WorkflowVersion.version_number))
-        .filter_by(workflow_id=record.id)
+        db.query(func.max(PipelineVersion.version_number))
+        .filter_by(pipeline_id=record.id)
         .scalar()
         or 0
     ) + 1
-    version = WorkflowVersion(
-        workflow_id=record.id,
+    version = PipelineVersion(
+        pipeline_id=record.id,
         version_number=next_number,
         config=config,
         created_by=created_by,
@@ -100,7 +100,7 @@ def publish_workflow_version(
 def current_version_id(db: Session, org_id: Optional[int], name: str) -> Optional[int]:
     """The `current_version_id` of a deployed team by `(org_id, name)`, else None."""
     record = (
-        db.query(WorkflowRecord)
+        db.query(PipelineRecord)
         .filter_by(org_id=org_id, name=name, status="deployed")
         .one_or_none()
     )

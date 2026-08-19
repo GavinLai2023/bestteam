@@ -8,13 +8,13 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .. import __version__
-from ..core.loader import load_workflow
+from ..core.loader import load_pipeline
 from ..exceptions import BestTeamError
 from . import scaffold
 
 app = typer.Typer(
     name="bestteam",
-    help="Build and run multi-agent workflows without touching the underlying engine.",
+    help="Build and run multi-agent pipelines without touching the underlying engine.",
     add_completion=False,
 )
 console = Console()
@@ -37,7 +37,7 @@ def main(
         help="Show the bestteam version and exit.",
     )
 ) -> None:
-    """bestteam — business-friendly multi-agent workflows, powered by LangGraph under the hood."""
+    """bestteam — business-friendly multi-agent pipelines, powered by LangGraph under the hood."""
 
 
 @app.command()
@@ -45,7 +45,7 @@ def init(
     project: str = typer.Argument(..., help="Name of the project directory to create"),
     directory: Path = typer.Option(Path("."), "--dir", help="Parent directory for the new project"),
 ) -> None:
-    """Scaffold a new bestteam project with a sample reviewer/fixer workflow."""
+    """Scaffold a new bestteam project with a sample reviewer/fixer pipeline."""
     target = directory / project
     try:
         created = scaffold.create_project(target)
@@ -61,21 +61,21 @@ def init(
     console.print(f"  cd {target}")
     console.print("  pip install langchain langchain-openai   # or your preferred provider")
     console.print('  $env:OPENAI_API_KEY = "sk-..."')
-    console.print('  bestteam run workflow.yaml "Review this Python function for bugs: ..."')
+    console.print('  bestteam run pipeline.yaml "Review this Python function for bugs: ..."')
 
 
 @app.command()
 def run(
-    workflow_file: Path = typer.Argument(..., help="Path to a workflow YAML file"),
-    input: str = typer.Argument(..., help="Input text to feed the workflow"),
+    pipeline_file: Path = typer.Argument(..., help="Path to a pipeline YAML file"),
+    input: str = typer.Argument(..., help="Input text to feed the pipeline"),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print each agent's intermediate output"
     ),
 ) -> None:
-    """Load a workflow from YAML and run it against the given input."""
+    """Load a pipeline from YAML and run it against the given input."""
     try:
-        workflow = load_workflow(workflow_file)
-        result = workflow.run(input)
+        pipeline = load_pipeline(pipeline_file)
+        result = pipeline.run(input)
     except BestTeamError as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -89,12 +89,12 @@ def run(
 
 @app.command()
 def graph(
-    workflow_file: Path = typer.Argument(..., help="Path to a workflow YAML file"),
+    pipeline_file: Path = typer.Argument(..., help="Path to a pipeline YAML file"),
 ) -> None:
-    """Print the compiled workflow graph as Mermaid markup (paste into a Mermaid viewer)."""
+    """Print the compiled pipeline graph as Mermaid markup (paste into a Mermaid viewer)."""
     try:
-        workflow = load_workflow(workflow_file)
-        diagram = workflow.visualize()
+        pipeline = load_pipeline(pipeline_file)
+        diagram = pipeline.visualize()
     except BestTeamError as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)

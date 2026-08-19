@@ -10,8 +10,8 @@ from ui.backend.trigger_health import (
     OUTCOME_MAILBOX_OK,
     OUTCOME_MAILBOX,
     OUTCOME_TIMEOUT,
-    OUTCOME_WORKFLOW,
-    OUTCOME_WORKFLOW_OK,
+    OUTCOME_PIPELINE,
+    OUTCOME_PIPELINE_OK,
     alert_threshold,
     evaluate,
 )
@@ -37,30 +37,30 @@ def _fold(outcomes, threshold=3):
 
 
 def test_faults_below_the_threshold_stay_quiet():
-    assert _fold([OUTCOME_WORKFLOW, OUTCOME_WORKFLOW]) == []
+    assert _fold([OUTCOME_PIPELINE, OUTCOME_PIPELINE]) == []
 
 
 def test_reaching_the_threshold_alerts_once_and_then_stays_quiet():
-    emitted = _fold([OUTCOME_WORKFLOW] * 6)
+    emitted = _fold([OUTCOME_PIPELINE] * 6)
     assert len(emitted) == 1
     assert emitted[0].fingerprint == "workflow"
     assert emitted[0].severity == "error"
 
 
 def test_a_recovery_is_announced_and_resets_the_streak():
-    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_WORKFLOW_OK])
+    emitted = _fold([OUTCOME_PIPELINE] * 3 + [OUTCOME_PIPELINE_OK])
     assert [n.fingerprint for n in emitted] == ["workflow", "recovered"]
     assert emitted[1].severity == "info"
 
 
 def test_success_without_a_prior_alert_says_nothing():
-    assert _fold([OUTCOME_WORKFLOW_OK, OUTCOME_WORKFLOW_OK]) == []
+    assert _fold([OUTCOME_PIPELINE_OK, OUTCOME_PIPELINE_OK]) == []
 
 
 def test_a_brief_wobble_below_the_threshold_never_alerts():
     # Two failures then a success: the streak resets, nobody is told.
-    assert _fold([OUTCOME_WORKFLOW, OUTCOME_WORKFLOW, OUTCOME_WORKFLOW_OK,
-                  OUTCOME_WORKFLOW, OUTCOME_WORKFLOW]) == []
+    assert _fold([OUTCOME_PIPELINE, OUTCOME_PIPELINE, OUTCOME_PIPELINE_OK,
+                  OUTCOME_PIPELINE, OUTCOME_PIPELINE]) == []
 
 
 def test_a_timeout_alerts_immediately_regardless_of_the_threshold():
@@ -74,9 +74,9 @@ def test_repeated_timeouts_alert_once():
 
 
 def test_a_changed_fault_kind_alerts_again():
-    # Mailbox trouble after workflow trouble is a different problem with a
+    # Mailbox trouble after pipeline trouble is a different problem with a
     # different fix, so suppressing it would hide the thing that matters.
-    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX] * 3)
+    emitted = _fold([OUTCOME_PIPELINE] * 3 + [OUTCOME_MAILBOX] * 3)
     assert [n.fingerprint for n in emitted] == ["workflow", "mailbox"]
 
 
@@ -87,7 +87,7 @@ def test_the_mailbox_alert_points_at_the_connection_settings():
 
 
 def test_a_threshold_of_one_alerts_on_the_first_fault():
-    assert len(_fold([OUTCOME_WORKFLOW], threshold=1)) == 1
+    assert len(_fold([OUTCOME_PIPELINE], threshold=1)) == 1
 
 
 def test_an_unmodelled_outcome_changes_nothing():
@@ -102,7 +102,7 @@ def test_an_unmodelled_outcome_changes_nothing():
 
 def test_a_negative_stored_count_is_treated_as_zero():
     decision = evaluate(
-        outcome=OUTCOME_WORKFLOW, consecutive_faults=-5,
+        outcome=OUTCOME_PIPELINE, consecutive_faults=-5,
         alerted_fingerprint=None, threshold=3,
     )
     assert decision.consecutive_faults == 1
@@ -121,11 +121,11 @@ def test_the_threshold_defaults_to_three_when_unset(monkeypatch):
     assert alert_threshold() == 3
 
 
-def test_a_successful_mailbox_check_does_not_clear_a_workflow_alert():
+def test_a_successful_mailbox_check_does_not_clear_a_pipeline_alert():
     # The existing `last_error_kind` asymmetry (F5): connectivity being fine
     # says nothing about whether the team still builds and runs. Flattening
     # this would re-create the "healthy trigger, every run failing" state.
-    emitted = _fold([OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX_OK] * 2)
+    emitted = _fold([OUTCOME_PIPELINE] * 3 + [OUTCOME_MAILBOX_OK] * 2)
     assert [n.fingerprint for n in emitted] == ["workflow"]
 
 
@@ -137,37 +137,37 @@ def test_a_successful_mailbox_check_clears_a_mailbox_alert():
 
 def test_a_completed_run_clears_a_timeout_alert():
     # The wedge the watchdog reported is demonstrably gone.
-    emitted = _fold([OUTCOME_TIMEOUT, OUTCOME_WORKFLOW_OK])
+    emitted = _fold([OUTCOME_TIMEOUT, OUTCOME_PIPELINE_OK])
     assert [n.fingerprint for n in emitted] == ["run_timeout", "recovered"]
 
 
-def test_a_mailbox_recovery_does_not_announce_an_unfixed_workflow_fault():
+def test_a_mailbox_recovery_does_not_announce_an_unfixed_pipeline_fault():
     # Both domains can be broken at once. A single remembered fingerprint let
-    # the mailbox fault overwrite the workflow one, so this mailbox recovery
+    # the mailbox fault overwrite the pipeline one, so this mailbox recovery
     # cleared it and announced a recovery that had not happened.
     emitted = _fold(
-        [OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
+        [OUTCOME_PIPELINE] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
     )
     assert [n.fingerprint for n in emitted] == ["workflow", "mailbox", "recovered"]
     assert emitted[2].title == "Your mailbox is reachable again"
 
 
-def test_the_workflow_alert_survives_a_mailbox_alert_and_its_recovery():
+def test_the_pipeline_alert_survives_a_mailbox_alert_and_its_recovery():
     decision = evaluate(
         outcome=OUTCOME_MAILBOX_OK, consecutive_faults=6,
         alerted_fingerprint="mailbox,workflow", threshold=3,
     )
-    # Only the mailbox alert clears; the workflow fault is still outstanding,
+    # Only the mailbox alert clears; the pipeline fault is still outstanding,
     # so it is neither re-announced later nor forgotten now.
     assert decision.alerted_fingerprint == "workflow"
 
 
-def test_an_outstanding_workflow_alert_is_not_re_announced_after_that():
-    # Following on from the case above: the workflow fault was already
+def test_an_outstanding_pipeline_alert_is_not_re_announced_after_that():
+    # Following on from the case above: the pipeline fault was already
     # reported and nothing about it changed, so it stays quiet.
     emitted = _fold(
-        [OUTCOME_WORKFLOW] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
-        + [OUTCOME_WORKFLOW] * 3
+        [OUTCOME_PIPELINE] * 3 + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
+        + [OUTCOME_PIPELINE] * 3
     )
     assert [n.fingerprint for n in emitted] == ["workflow", "mailbox", "recovered"]
 
@@ -176,7 +176,7 @@ def test_a_timeout_alert_survives_a_mailbox_fault_and_recovery():
     # The reachable version of the same bug: a timeout is outstanding when the
     # mailbox breaks and then comes back.
     emitted = _fold([OUTCOME_TIMEOUT] + [OUTCOME_MAILBOX] * 3 + [OUTCOME_MAILBOX_OK]
-                    + [OUTCOME_WORKFLOW_OK])
+                    + [OUTCOME_PIPELINE_OK])
     # The last outcome is what genuinely clears the timeout.
     assert [n.fingerprint for n in emitted] == [
         "run_timeout", "mailbox", "recovered", "recovered",
@@ -193,7 +193,7 @@ def test_a_single_stored_fingerprint_still_parses():
     assert decision.notification is not None
 
 
-def test_a_mailbox_success_does_not_reset_an_outstanding_workflow_streak():
+def test_a_mailbox_success_does_not_reset_an_outstanding_pipeline_streak():
     decision = evaluate(
         outcome=OUTCOME_MAILBOX_OK, consecutive_faults=4,
         alerted_fingerprint="workflow", threshold=3,

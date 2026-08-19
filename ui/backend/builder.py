@@ -28,14 +28,14 @@ from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_chat_entries, to_prompt_text
 from .deploy_validation import find_email_egress_conflicts, validate_agent_models
-from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, User, WorkflowRecord, iso_utc
-from .db.workflows import publish_workflow_version
+from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, PipelineRecord, User, iso_utc
+from .db.pipelines import publish_pipeline_version
 from .db_session import get_db
 from .component_lock import component_mutation_lock
 from .knowledge_bases import (
     check_path_traversal,
     checked_contained_cache_path,
-    ensure_workflow_cache_paths_for_source,
+    ensure_pipeline_cache_paths_for_source,
     kb_name_collisions,
     load_knowledge_base_tools,
     resolve_knowledge_base,
@@ -79,24 +79,24 @@ def _session_to_dict(
     uses_email = False
     if db is not None and org_id is not None and session.specification_json:
         spec_raw = session.specification_json
-        workflow_version_id = None
+        pipeline_version_id = None
         # Once deployed, capability metadata must describe the exact live team,
         # including its pinned skills. The session spec can be stale after an
         # Advanced-page redeploy, and current skill heads can move independently.
-        if session.status == "deployed" and session.workflow_id is not None:
+        if session.status == "deployed" and session.pipeline_id is not None:
             record = (
-                db.query(WorkflowRecord)
-                .filter_by(id=session.workflow_id, org_id=org_id, status="deployed")
+                db.query(PipelineRecord)
+                .filter_by(id=session.pipeline_id, org_id=org_id, status="deployed")
                 .one_or_none()
             )
             if record is not None:
                 spec_raw = record.config
-                workflow_version_id = record.current_version_id
+                pipeline_version_id = record.current_version_id
         uses_email = spec_uses_email(
             db,
             spec_raw,
             org_id,
-            workflow_version_id=workflow_version_id,
+            pipeline_version_id=pipeline_version_id,
         )
     return {
         "id": session.id,
@@ -105,7 +105,7 @@ def _session_to_dict(
         "requirements_json": session.requirements_json,
         "specification_json": session.specification_json,
         "status": session.status,
-        "workflow_id": session.workflow_id,
+        "pipeline_id": session.pipeline_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
         "created_at": iso_utc(session.created_at),
@@ -125,11 +125,11 @@ def _get_session_or_404(db: Session, session_id: str, org_id: Optional[int] = No
 
 
 def _source_for(session_id: str) -> Path:
-    """A per-session workspace directory, used as `_build_workflow`'s `source`
-    (relative knowledge-base paths, default workflow name)."""
+    """A per-session workspace directory, used as `_build_pipeline`'s `source`
+    (relative knowledge-base paths, default pipeline name)."""
     workspace = _SESSIONS_DIR / session_id
     workspace.mkdir(parents=True, exist_ok=True)
-    return workspace / "workflow.yaml"
+    return workspace / "pipeline.yaml"
 
 
 def _requirements_text(session: BuilderSession) -> str:
@@ -213,7 +213,7 @@ def _all_knowledge_base_tools(db: Session, source: Path, org_id: Optional[int] =
     completed yet) is skipped rather than raised: this runs for every one of
     the org's knowledge bases at generation time, so one customer's
     unparseable upload used to 4xx spec generation for the whole org. The
-    workflow-build path (`load_knowledge_base_tools`) still fails closed --
+    pipeline-build path (`load_knowledge_base_tools`) still fails closed --
     there a broken KB is one an agent actually references.
     """
     records = db.query(KnowledgeBaseRecord).filter(KnowledgeBaseRecord.org_id == org_id).all()
@@ -232,7 +232,7 @@ def _reject_unsafe_kb_paths(spec: Specification) -> None:
     """Constrain a spec's KB paths in place before it is built or stored (CR-001).
 
     Building a vector KB calls `_save_embedding_cache` at construction time, so
-    this must run before `validate_specification`/`_build_workflow`. Rejects
+    this must run before `validate_specification`/`_build_pipeline`. Rejects
     absolute/`..` paths and rewrites each `cache_path` to an app-owned
     `_kb_cache/<filename>`, mutating the spec's KnowledgeBaseSpec objects so the
     contained value is what gets built, stored, and later deployed. Shared by
@@ -250,7 +250,7 @@ def _prepare_generated_specification(spec: Specification, source: Path) -> None:
     """Contain an untrusted model candidate before SDK validation builds it."""
     try:
         _reject_unsafe_kb_paths(spec)
-        ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
+        ensure_pipeline_cache_paths_for_source(spec.to_raw(), source)
     except HTTPException as exc:
         # ``generate_specification`` treats ConfigurationError as feedback for
         # the architect and, after retries, `_call_model` returns it as a 400.
@@ -268,7 +268,7 @@ def _validate_spec_payload(
     try:
         spec = Specification.model_validate(payload)
         _reject_unsafe_kb_paths(spec)
-        ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
+        ensure_pipeline_cache_paths_for_source(spec.to_raw(), source)
         extra_tools = {
             **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org_id),
             **(load_email_tools(db, org_id) if org_id is not None else {}),
@@ -319,10 +319,10 @@ def create_builder_session(
     return _session_to_dict(session, db, org.id)
 
 
-def _synthetic_session_for_workflow(
-    record: WorkflowRecord, db: Session, org_id: int
+def _synthetic_session_for_pipeline(
+    record: PipelineRecord, db: Session, org_id: int
 ) -> Dict[str, Any]:
-    """A My-teams card for a workflow deployed without ever going through the
+    """A My-teams card for a pipeline deployed without ever going through the
     wizard (e.g. via the admin Advanced/CRUD page) -- so every deployed team
     is visible there, not just wizard-built ones. `id` stays `None`: there is
     no `BuilderSession` to resume into, so the frontend routes a click
@@ -334,13 +334,13 @@ def _synthetic_session_for_workflow(
         "requirements_json": None,
         "specification_json": record.config,
         "status": "deployed",
-        "workflow_id": record.id,
+        "pipeline_id": record.id,
         "feedback_history": [],
         "uses_email": spec_uses_email(
             db,
             record.config,
             org_id,
-            workflow_version_id=record.current_version_id,
+            pipeline_version_id=record.current_version_id,
         ),
         "created_at": iso_utc(record.created_at),
         "updated_at": iso_utc(record.updated_at),
@@ -355,27 +355,27 @@ def list_builder_sessions(
 ) -> Dict[str, Any]:
     """List the current user's own builder sessions (most recent first), for
     an "AI teams I've built" list page. A session with status 'deployed' has
-    a live WorkflowRecord matching specification_json['name']. A deployed
-    workflow with no backing session at all (deployed straight through the
+    a live PipelineRecord matching specification_json['name']. A deployed
+    pipeline with no backing session at all (deployed straight through the
     admin Advanced/CRUD page) gets a synthetic entry too -- but only when its
     `created_by` matches this user's immutable principal_id (never username --
-    see WorkflowRecord.created_by), so My Teams shows exactly the teams this
-    person built, not every workflow anyone in the org can run (that broader
-    "org can run" list is /api/workflows, which treats an unowned workflow as
+    see PipelineRecord.created_by), so My Teams shows exactly the teams this
+    person built, not every pipeline anyone in the org can run (that broader
+    "org can run" list is /api/pipelines, which treats an unowned pipeline as
     an admin-shared template)."""
     sessions = list_sessions(db, org_id=org.id)
     session_dicts = [_session_to_dict(s, db, org.id) for s in sessions]
 
-    session_workflow_ids = {s.workflow_id for s in sessions if s.workflow_id is not None}
-    orphan_workflows = (
-        db.query(WorkflowRecord)
-        .filter(WorkflowRecord.org_id == org.id, WorkflowRecord.status == "deployed")
-        .filter(WorkflowRecord.id.notin_(session_workflow_ids))
-        .filter(WorkflowRecord.created_by == user.principal_id)
+    session_pipeline_ids = {s.pipeline_id for s in sessions if s.pipeline_id is not None}
+    orphan_pipelines = (
+        db.query(PipelineRecord)
+        .filter(PipelineRecord.org_id == org.id, PipelineRecord.status == "deployed")
+        .filter(PipelineRecord.id.notin_(session_pipeline_ids))
+        .filter(PipelineRecord.created_by == user.principal_id)
         .all()
     )
     session_dicts.extend(
-        _synthetic_session_for_workflow(r, db, org.id) for r in orphan_workflows
+        _synthetic_session_for_pipeline(r, db, org.id) for r in orphan_pipelines
     )
     # Both source queries have different ordering semantics; enforce the API's
     # most-recent-first contract after combining them, with stable tie-breakers.
@@ -383,7 +383,7 @@ def list_builder_sessions(
         key=lambda item: (
             item["updated_at"],
             item["id"] or "",
-            item["workflow_id"] or 0,
+            item["pipeline_id"] or 0,
         ),
         reverse=True,
     )
@@ -405,13 +405,13 @@ def delete_builder_session(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> None:
-    """Delete a session that was never deployed (`workflow_id IS NULL`) --
+    """Delete a session that was never deployed (`pipeline_id IS NULL`) --
     the "abandoned draft" case. A session that has ever gone live has no
     delete path here (see docs/superpowers/specs/2026-07-31-draft-session-deletion-design.md);
-    the frontend never offers this for a `workflow_id`-linked session, but
+    the frontend never offers this for a `pipeline_id`-linked session, but
     this guard holds even if the route is called directly."""
     session = _get_session_or_404(db, session_id, org.id)
-    if session.workflow_id is not None:
+    if session.pipeline_id is not None:
         raise HTTPException(
             status_code=409,
             detail="This team is live -- it can't be deleted from here yet.",
@@ -466,7 +466,7 @@ def submit_specification(
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
     """Stage 3 (Specification): generate (via `model`) or accept (via `specification`)
-    a team design, validated through `_build_workflow` before it's stored."""
+    a team design, validated through `_build_pipeline` before it's stored."""
     session = _get_session_or_404(db, session_id, org.id)
     source = _source_for(session_id)
 
@@ -589,7 +589,7 @@ async def create_test_run(
     user: User = Depends(get_current_user),
 ) -> Dict[str, str]:
     """Stage 5 (Testing): run the validated Specification in the sandbox via
-    the same `Workflow.stream()`/`RunRegistry` machinery as `/api/runs`."""
+    the same `Pipeline.stream()`/`RunRegistry` machinery as `/api/runs`."""
     session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
         raise HTTPException(status_code=400, detail="Generate a specification before testing")
@@ -597,13 +597,13 @@ async def create_test_run(
     spec = Specification.model_validate(session.specification_json)
     _reject_unsafe_kb_paths(spec)  # CR-001: guard the stored spec before it is built
     source = _source_for(session_id)
-    ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
+    ensure_pipeline_cache_paths_for_source(spec.to_raw(), source)
     extra_tools = {
         **load_knowledge_base_tools(db, spec.to_raw(), source, org_id=org.id),
         **load_email_tools(db, org.id),
     }
     try:
-        workflow = validate_specification(
+        pipeline = validate_specification(
             spec, source=source, extra_tools=extra_tools, extra_skills=load_skills(db, org.id)
         )
     except ConfigurationError as exc:
@@ -618,7 +618,7 @@ async def create_test_run(
     _executor.submit(
         run_in_background,
         run.id,
-        workflow,
+        pipeline,
         req.input,
         engine=db.get_bind(),
         org_id=org.id,
@@ -635,9 +635,9 @@ def deploy_session(
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Stage 6 (Deployment): publish the validated Specification as a new
-    immutable version of a `WorkflowRecord` team head (`status=deployed`) so
-    `_get_workflow()` picks it up, and link the session to that head
-    (`session.workflow_id`) so a redeploy versions the same team (P1-02).
+    immutable version of a `PipelineRecord` team head (`status=deployed`) so
+    `_get_pipeline()` picks it up, and link the session to that head
+    (`session.pipeline_id`) so a redeploy versions the same team (P1-02).
     The version publish and the session update share a single commit (P1-14)."""
     session = _get_session_or_404(db, session_id, org.id)
     if session.specification_json is None:
@@ -656,9 +656,9 @@ def deploy_session(
             ),
         )
     source = _source_for(session_id)
-    ensure_workflow_cache_paths_for_source(spec.to_raw(), source)
+    ensure_pipeline_cache_paths_for_source(spec.to_raw(), source)
     # Serialize dependency resolution + the deployed write against a concurrent
-    # component delete (F3): either the delete's scan sees this workflow, or this
+    # component delete (F3): either the delete's scan sees this pipeline, or this
     # deploy's resolution fails because the resource was already removed.
     with component_mutation_lock:
         # Resolve capability and publish dependencies from one skill-head
@@ -700,7 +700,7 @@ def deploy_session(
                 detail=(
                     "This team can't be deployed: "
                     + "; ".join(egress_problems)
-                    + ". Remove the web-access tool, or move that work to a workflow with no mailbox access."
+                    + ". Remove the web-access tool, or move that work to a pipeline with no mailbox access."
                 ),
             )
         # spec.to_raw() deliberately omits display_name/friendly_description
@@ -716,16 +716,16 @@ def deploy_session(
             if team_spec.friendly_description:
                 team_raw["friendly_description"] = team_spec.friendly_description
 
-        record, _version = publish_workflow_version(
+        record, _version = publish_pipeline_version(
             db,
             org_id=org.id,
             name=spec.name,
             config=raw,
-            workflow_id=session.workflow_id,
+            pipeline_id=session.pipeline_id,
             created_by=user.username,
             owner_principal_id=user.principal_id,
         )
         session = update_session(
-            db, session_id, status="deployed", workflow_id=record.id
+            db, session_id, status="deployed", pipeline_id=record.id
         )
     return _session_to_dict(session, db, org.id)

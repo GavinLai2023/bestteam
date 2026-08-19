@@ -31,7 +31,7 @@ def test_registry_contains_all_tools():
 
 
 def test_registry_exposes_attachment_reading():
-    # Named in a workflow YAML only if the loader can resolve it here.
+    # Named in a pipeline YAML only if the loader can resolve it here.
     assert "email_read_attachment" in REGISTRY
 
 
@@ -564,7 +564,7 @@ def test_parse_file_reads_docx_tables(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_loader_resolves_calculator_tool(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
     yaml_text = """
@@ -579,19 +579,19 @@ teams:
   - name: math_team
     agents: [cruncher]
     mode: sequential
-workflow:
+pipeline:
   steps: [math_team]
 """
     p = tmp_path / "tool_test.yaml"
     p.write_text(yaml_text, encoding="utf-8")
-    wf = load_workflow(str(p))
+    wf = load_pipeline(str(p))
     agent = wf.steps[0].agents[0]
     assert len(agent.tools) == 1
     assert agent.tools[0] is calculator
 
 
 def test_loader_raises_for_unknown_tool(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
     from bestteam.exceptions import ConfigurationError
 
     yaml_text = """
@@ -606,13 +606,13 @@ teams:
   - name: t1
     agents: [agent1]
     mode: sequential
-workflow:
+pipeline:
   steps: [t1]
 """
     p = tmp_path / "bad_tool.yaml"
     p.write_text(yaml_text, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="Unknown tool 'nonexistent_tool'"):
-        load_workflow(str(p))
+        load_pipeline(str(p))
 
 
 # ---------------------------------------------------------------------------
@@ -631,13 +631,13 @@ teams:
   - name: team1
     agents: [helper]
     mode: sequential
-workflow:
+pipeline:
   steps: [team1]
 """
 
 
 def test_loader_resolves_custom_toolkit_tool(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
     from bestteam.core.tools import ToolKit
 
     my_tools = ToolKit("company")
@@ -648,14 +648,14 @@ def test_loader_resolves_custom_toolkit_tool(tmp_path):
 
     p = tmp_path / "custom.yaml"
     p.write_text(_TOOLKIT_YAML, encoding="utf-8")
-    wf = load_workflow(str(p), toolkits=[my_tools])
+    wf = load_pipeline(str(p), toolkits=[my_tools])
     agent = wf.steps[0].agents[0]
     assert len(agent.tools) == 1
     assert agent.tools[0] is send_slack
 
 
 def test_loader_resolves_skill_via_skills_param(tmp_path):
-    from bestteam import SkillSpec, load_workflow
+    from bestteam import SkillSpec, load_pipeline
 
     yaml_text = """
 name: skill_test
@@ -669,7 +669,7 @@ teams:
   - name: math_team
     agents: [cruncher]
     mode: sequential
-workflow:
+pipeline:
   steps: [math_team]
 """
     p = tmp_path / "skill_test.yaml"
@@ -679,14 +679,14 @@ workflow:
         instructions="Use the calculator for any math.",
         tools=["calculator"],
     )
-    wf = load_workflow(str(p), skills=[research_skill])
+    wf = load_pipeline(str(p), skills=[research_skill])
     agent = wf.steps[0].agents[0]
     assert agent.tools[0] is calculator
     assert "Use the calculator for any math." in agent.backstory
 
 
 def test_loader_custom_tool_appears_in_error_message(tmp_path):
-    from bestteam import load_workflow
+    from bestteam import load_pipeline
     from bestteam.core.tools import ToolKit
     from bestteam.exceptions import ConfigurationError
 
@@ -708,13 +708,13 @@ teams:
   - name: t
     agents: [a]
     mode: sequential
-workflow:
+pipeline:
   steps: [t]
 """
     p = tmp_path / "err.yaml"
     p.write_text(yaml_text, encoding="utf-8")
     with pytest.raises(ConfigurationError) as exc_info:
-        load_workflow(str(p), toolkits=[my_tools])
+        load_pipeline(str(p), toolkits=[my_tools])
     assert "send_slack" in str(exc_info.value)
 
 

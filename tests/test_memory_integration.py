@@ -1,4 +1,4 @@
-"""Integration tests: per-user memory flowing through `Workflow.stream`.
+"""Integration tests: per-user memory flowing through `Pipeline.stream`.
 
 Asserts that a recalled memory reaches an agent's SystemMessage (the
 `memory_preamble` path) and that a run writes a new episodic record, across
@@ -12,7 +12,7 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage, SystemMessage
 
-from bestteam import Agent, CollaborationMode, MemoryManager, SqliteBM25Memory, Team, Workflow
+from bestteam import Agent, CollaborationMode, MemoryManager, SqliteBM25Memory, Team, Pipeline
 from bestteam.core.memory import EPISODIC, SEMANTIC
 
 pytestmark = pytest.mark.unit
@@ -48,9 +48,9 @@ def test_sequential_agent_receives_preamble_and_run_is_recorded():
     store, manager = _seeded_manager()
     model = _RecordingChatModel(responses=[AIMessage(content="Refunds take 30 days")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    events = list(pipeline.stream("what is the refund policy", user_id="u", memory=manager))
 
     assert "refund policy" in (model.captured_system or "")
     assert any(e.type == "run_completed" for e in events)
@@ -65,9 +65,9 @@ def test_parallel_agents_receive_preamble():
     m2 = _RecordingChatModel(responses=[AIMessage(content="answer two")])
     a1 = Agent(name="a1", role="r1", goal="g1", model=m1)
     a2 = Agent(name="a2", role="r2", goal="g2", model=m2)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[a1, a2], mode=CollaborationMode.PARALLEL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[a1, a2], mode=CollaborationMode.PARALLEL)])
 
-    list(workflow.stream("explain the refund policy", user_id="u", memory=manager))
+    list(pipeline.stream("explain the refund policy", user_id="u", memory=manager))
 
     assert "refund policy" in (m1.captured_system or "")
     assert "refund policy" in (m2.captured_system or "")
@@ -92,9 +92,9 @@ def test_hierarchical_manager_receives_preamble():
     )
     boss = Agent(name="boss", role="Manager", goal="coordinate", model=manager_model)
     team = Team(name="t", agents=[subordinate], manager=boss, mode=CollaborationMode.HIERARCHICAL)
-    workflow = Workflow(name="wf", steps=[team])
+    pipeline = Pipeline(name="wf", steps=[team])
 
-    list(workflow.stream("handle the refund policy question", user_id="u", memory=manager))
+    list(pipeline.stream("handle the refund policy question", user_id="u", memory=manager))
 
     # Manager's system prompt carries both the recalled memory and delegation guidance.
     assert "refund policy" in (manager_model.captured_system or "")
@@ -119,9 +119,9 @@ def test_hierarchical_subordinate_receives_preamble():
     )
     boss = Agent(name="boss", role="Manager", goal="coordinate", model=manager_model)
     team = Team(name="t", agents=[subordinate], manager=boss, mode=CollaborationMode.HIERARCHICAL)
-    workflow = Workflow(name="wf", steps=[team])
+    pipeline = Pipeline(name="wf", steps=[team])
 
-    list(workflow.stream("handle the refund policy question", user_id="u", memory=manager))
+    list(pipeline.stream("handle the refund policy question", user_id="u", memory=manager))
 
     assert "refund policy" in (sub_model.captured_system or "")
 
@@ -140,9 +140,9 @@ def test_recall_failure_degrades_gracefully_and_run_still_records():
     manager = MemoryManager(store)
     model = _RecordingChatModel(responses=[AIMessage(content="ok answer")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("a question", user_id="u", memory=manager))
+    events = list(pipeline.stream("a question", user_id="u", memory=manager))
 
     assert any(e.type == "run_completed" for e in events)
     assert not any(e.type == "run_failed" for e in events)
@@ -152,15 +152,15 @@ def test_recall_failure_degrades_gracefully_and_run_still_records():
     assert len([r for r in store.all("u") if r.type == EPISODIC]) == 1
 
 
-def test_recall_failure_does_not_break_workflow_run():
-    # Same guarantee on the non-streaming Workflow.run path.
+def test_recall_failure_does_not_break_pipeline_run():
+    # Same guarantee on the non-streaming Pipeline.run path.
     store = _FailingSearchMemory(":memory:")
     manager = MemoryManager(store)
     model = _RecordingChatModel(responses=[AIMessage(content="the answer")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    result = workflow.run("a question", user_id="u", memory=manager)
+    result = pipeline.run("a question", user_id="u", memory=manager)
 
     assert "the answer" in result.output
     assert len([r for r in store.all("u") if r.type == EPISODIC]) == 1
@@ -176,9 +176,9 @@ def test_recall_is_isolated_by_org_for_same_username():
 
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    list(pipeline.stream("what is the refund policy", user_id="u", memory=manager))
 
     system = model.captured_system or ""
     assert "org five" in system
@@ -197,9 +197,9 @@ def test_recall_is_isolated_by_principal_for_reused_username():
 
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    list(pipeline.stream("what is the refund policy", user_id="u", memory=manager))
 
     # The recreated account's agent never saw the deleted account's note.
     assert "old account" not in (model.captured_system or "")
@@ -219,9 +219,9 @@ def test_in_flight_write_after_retire_is_dropped():
 
     model = _RecordingChatModel(responses=[AIMessage(content="answer")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("a question", user_id="u", memory=manager))
+    events = list(pipeline.stream("a question", user_id="u", memory=manager))
 
     assert any(e.type == "run_completed" for e in events)
     assert store.all("u", org_id=5, principal_id=None) == []  # nothing persisted
@@ -232,9 +232,9 @@ def test_stream_emits_memory_recalled_and_recorded_events():
     store, manager = _seeded_manager()  # one seeded episodic record for "u"
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("what is the refund policy", user_id="u", memory=manager))
+    events = list(pipeline.stream("what is the refund policy", user_id="u", memory=manager))
     types = [e.type for e in events]
 
     assert "memory_recalled" in types and "memory_recorded" in types
@@ -254,9 +254,9 @@ def test_run_surfaces_memory_outcome():
     store, manager = _seeded_manager()
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+    result = pipeline.run("what is the refund policy", user_id="u", memory=manager)
 
     assert result.memory is not None
     assert "episodic" in result.memory.recorded
@@ -276,9 +276,9 @@ def test_custom_recall_preamble_is_honored():
 
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("hi", user_id="u", memory=_CustomManager()))
+    list(pipeline.stream("hi", user_id="u", memory=_CustomManager()))
     assert "CUSTOM PREAMBLE" in (model.captured_system or "")
 
 
@@ -288,9 +288,9 @@ def test_stream_emits_memory_recalled_zero_when_no_matches():
     manager = MemoryManager(SqliteBM25Memory(":memory:"))  # empty store
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("nothing here", user_id="u", memory=manager))
+    events = list(pipeline.stream("nothing here", user_id="u", memory=manager))
     recalled = [e for e in events if e.type == "memory_recalled"]
     assert len(recalled) == 1 and recalled[0].data == 0
 
@@ -301,9 +301,9 @@ def test_stream_emits_memory_failed_on_recall_failure():
     manager = MemoryManager(_FailingSearchMemory(":memory:"))
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("q", user_id="u", memory=manager))
+    events = list(pipeline.stream("q", user_id="u", memory=manager))
     types = [e.type for e in events]
     assert any(e.type == "memory_failed" and e.data == "recall" for e in events)
     # Recall failure surfaces before the agents; the run still completes.
@@ -320,9 +320,9 @@ def test_stream_emits_memory_failed_on_record_failure():
     manager = MemoryManager(_FailAddStore(":memory:"))
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("q", user_id="u", memory=manager))
+    events = list(pipeline.stream("q", user_id="u", memory=manager))
     types = [e.type for e in events]
     assert any(e.type == "memory_failed" and e.data == "record" for e in events)
     # Recording (and its failure) happens AFTER the terminal event now.
@@ -341,9 +341,9 @@ def test_stream_tolerates_legacy_record_run_returning_none():
 
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("hi", user_id="u", memory=_LegacyManager()))
+    events = list(pipeline.stream("hi", user_id="u", memory=_LegacyManager()))
     types = [e.type for e in events]
 
     assert "memory_failed" not in types
@@ -360,12 +360,12 @@ def test_run_surfaces_recording_failure_distinct_from_disabled():
     manager = MemoryManager(_FailAddStore(":memory:"))
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    result = workflow.run("q", user_id="u", memory=manager)
+    result = pipeline.run("q", user_id="u", memory=manager)
     assert result.memory is not None and result.memory.ok is False  # failed, not disabled
 
-    result_no_mem = workflow.run("q")
+    result_no_mem = pipeline.run("q")
     assert result_no_mem.memory is None  # disabled
 
 
@@ -375,22 +375,22 @@ def test_run_surfaces_recall_outcome():
     store, manager = _seeded_manager()  # one seeded record for "u"
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    result = workflow.run("what is the refund policy", user_id="u", memory=manager)
+    result = pipeline.run("what is the refund policy", user_id="u", memory=manager)
     assert result.recall is not None
     assert result.recall.count == 1 and result.recall.ok is True
 
-    assert workflow.run("x").recall is None  # disabled -> None
+    assert pipeline.run("x").recall is None  # disabled -> None
 
 
 def test_run_recall_failure_is_distinguishable():
     manager = MemoryManager(_FailingSearchMemory(":memory:"))
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    result = workflow.run("q", user_id="u", memory=manager)
+    result = pipeline.run("q", user_id="u", memory=manager)
     assert result.recall is not None and result.recall.ok is False  # failure, not disabled
 
 
@@ -406,7 +406,7 @@ def test_extraction_update_reconciles_across_sequential_runs():
 
     first_agent_model = FakeMessagesListChatModel(responses=[AIMessage(content="noted, concise it is")])
     first_agent = Agent(name="a", role="r", goal="g", model=first_agent_model)
-    first_workflow = Workflow(
+    first_pipeline = Pipeline(
         name="wf", steps=[Team(name="t", agents=[first_agent], mode=CollaborationMode.SEQUENTIAL)]
     )
     first_extraction = FakeMessagesListChatModel(
@@ -416,7 +416,7 @@ def test_extraction_update_reconciles_across_sequential_runs():
             )
         ]
     )
-    first_workflow.run(
+    first_pipeline.run(
         "how should answers be formatted?",
         user_id="u",
         memory=MemoryManager(store, extraction_model=first_extraction),
@@ -426,7 +426,7 @@ def test_extraction_update_reconciles_across_sequential_runs():
 
     second_agent_model = FakeMessagesListChatModel(responses=[AIMessage(content="noted, will be detailed")])
     second_agent = Agent(name="a", role="r", goal="g", model=second_agent_model)
-    second_workflow = Workflow(
+    second_pipeline = Pipeline(
         name="wf", steps=[Team(name="t", agents=[second_agent], mode=CollaborationMode.SEQUENTIAL)]
     )
     second_extraction = FakeMessagesListChatModel(
@@ -441,7 +441,7 @@ def test_extraction_update_reconciles_across_sequential_runs():
     )
     # Shares vocabulary with the stored fact ("concise answers") so the BM25
     # candidate search actually surfaces it for the model to reconcile against.
-    second_workflow.run(
+    second_pipeline.run(
         "actually I don't want concise answers anymore, give more detail",
         user_id="u",
         memory=MemoryManager(store, extraction_model=second_extraction),
@@ -454,9 +454,9 @@ def test_extraction_update_reconciles_across_sequential_runs():
 def test_stream_without_memory_emits_no_memory_events():
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("no memory here"))
+    events = list(pipeline.stream("no memory here"))
     types = [e.type for e in events]
 
     assert "memory_recalled" not in types and "memory_recorded" not in types
@@ -466,9 +466,9 @@ def test_no_memory_writes_nothing_and_no_preamble():
     store = SqliteBM25Memory(":memory:")
     model = _RecordingChatModel(responses=[AIMessage(content="hi")])
     agent = Agent(name="a", role="r", goal="g", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("no memory here"))
+    events = list(pipeline.stream("no memory here"))
 
     assert any(e.type == "run_completed" for e in events)
     assert store.all("u") == []
@@ -476,7 +476,7 @@ def test_no_memory_writes_nothing_and_no_preamble():
     assert "previous sessions" not in (model.captured_system or "")
 
 
-# --- Hybrid (BM25 + vector) recall, end-to-end through Workflow.stream ------
+# --- Hybrid (BM25 + vector) recall, end-to-end through Pipeline.stream ------
 
 
 class _TopicEmbedding(Embeddings):
@@ -501,9 +501,9 @@ def test_recall_uses_hybrid_when_embedding_model_configured():
     manager = MemoryManager(store)
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+    list(pipeline.stream("cycling hobby", user_id="u", memory=manager))
 
     # Zero keyword overlap between "cycling hobby" and "bicycle every weekend"
     # -- only findable via the vector leg.
@@ -516,9 +516,9 @@ def test_recall_unaffected_when_embedding_model_unset():
     manager = MemoryManager(store)
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+    list(pipeline.stream("cycling hobby", user_id="u", memory=manager))
 
     assert "bicycle" not in (model.captured_system or "")
 
@@ -554,9 +554,9 @@ def test_recall_uses_query_expansion_when_configured():
     )
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+    list(pipeline.stream("cycling hobby", user_id="u", memory=manager))
 
     # Zero keyword overlap between "cycling hobby" and "bicycle every weekend"
     # -- only findable once the query is expanded into a phrasing that shares
@@ -570,9 +570,9 @@ def test_recall_unaffected_when_query_expansion_unset():
     manager = MemoryManager(store)
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+    list(pipeline.stream("cycling hobby", user_id="u", memory=manager))
 
     assert "bicycle" not in (model.captured_system or "")
 
@@ -605,9 +605,9 @@ def test_memory_recalled_trace_event_carries_expansion_usage():
     manager = MemoryManager(store, query_expansion_model=expansion)
     model = _RecordingChatModel(responses=[AIMessage(content="ok")])
     agent = Agent(name="a", role="Support", goal="help", model=model)
-    workflow = Workflow(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+    pipeline = Pipeline(name="wf", steps=[Team(name="t", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
 
-    events = list(workflow.stream("cycling hobby", user_id="u", memory=manager))
+    events = list(pipeline.stream("cycling hobby", user_id="u", memory=manager))
 
     recalled = next(e for e in events if e.type == "memory_recalled")
     assert recalled.usage == [{"model": None, "input_tokens": 6, "output_tokens": 2}]
