@@ -246,9 +246,12 @@ def upload_knowledge_base(
         contents[filename] = data
 
     # Read-only, and deliberately outside the per-KB lock below: it only
-    # supplies defaults for what this call left unsaid, and the lock's own
-    # re-query is what the record is actually written from. Runs before the
-    # type validation, so an inherited type is validated like any other.
+    # supplies defaults for what this call left unsaid. Note what the lock
+    # does NOT buy here -- its own re-query decides insert-vs-update, but the
+    # inherited shape is the copy read on these lines, so a wizard upgrade
+    # committing between here and the lock is overwritten by this call's
+    # stale reading of it. Accepted: the losing side re-uploads. Runs before
+    # the type validation, so an inherited type is validated like any other.
     existing_config: Dict[str, Any] = {}
     existing_record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if existing_record is not None:

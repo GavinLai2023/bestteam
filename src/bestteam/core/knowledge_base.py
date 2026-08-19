@@ -516,7 +516,10 @@ def _chunk_document(
     `p.N` is precise. The cost is that a paragraph running across a page
     boundary loses the overlap it would otherwise borrow -- accepted, because
     a citation an operator can check beats an extra hundred characters of
-    context. Every other format is chunked exactly as before; `.md` chunks
+    context. A `.xlsx`/`.xlsm`/`.docx` goes to `_chunk_tabular_document`,
+    which splits on the parser's own `[Sheet: …]`/`[Table N]` markers and
+    repeats the marker and header row in every chunk of an over-long block.
+    Every other format is chunked exactly as before; `.md` chunks
     additionally carry the section heading they open under.
     """
     if suffix == ".pdf":

@@ -409,17 +409,22 @@ def search_own_knowledge_base(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
-    """Run one query against the org's own collection and return the passages
-    an agent would have retrieved, each with the citation the agent sees.
+    """Run one query against the org's own collection and return up to
+    `top_k` of the passages an agent would rank first, each with the citation
+    the agent sees. Not the agent's own result set: the panel sends `top_k=5`
+    whatever the collection's configured `top_k` is, and an agent's tool call
+    also runs whatever reranking and expansion the collection is configured
+    for.
 
-    Deliberately **uncached and unthrottled**. Every call rebuilds the
-    knowledge base from its Document/Chunk rows (a `hybrid` one also
-    `json.loads`es every stored vector), which is sub-second to a few seconds
-    at the tens-to-hundreds-of-documents this beta is sized for, and the
-    caller is a person clicking a button rather than an agent loop. A cache
-    would need invalidating on every re-upload to buy correctness this does
-    not yet need; a rate limit would bound a cost the `top_k` cap and the
-    metering below already bound.
+    Deliberately **uncached and unthrottled**. The money at stake is
+    negligible -- one short query embedding, and metering *records* that, it
+    does not bound it. The real cost is CPU: every call rebuilds the knowledge
+    base from its Document/Chunk rows (a `hybrid` one also `json.loads`es
+    every stored vector) on the sync threadpool, which is sub-second to a few
+    seconds at the tens-to-hundreds-of-documents this beta is sized for, with
+    a person clicking a button rather than an agent loop on the other end. A
+    cache would need invalidating on every re-upload to buy correctness this
+    does not yet need. Revisit both if the button is ever abused.
     """
     record = _own_kb_or_404(db, org.id, item_name)
     try:

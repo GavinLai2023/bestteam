@@ -251,9 +251,9 @@ owns:
   one way this codebase embeds a *list* of documents (both `_embed_chunks`
   copies and `ui/backend/ingestion.py`; `memory.py`'s single-record write and
   every `embed_query` are untouched). It sends `_EMBED_BATCH_SIZE` = 100 texts
-  per provider call and retries a failed batch up to `_EMBED_ATTEMPTS` = 3
-  times, backing off 1s then 2s, re-raising the original exception if the third
-  attempt still fails. **Only the failing batch is retried**, so a hiccup
+  per provider call and gives a failed batch up to `_EMBED_ATTEMPTS` = 3
+  attempts -- i.e. two retries -- backing off 1s then 2s, re-raising the
+  original exception if the third attempt still fails. **Only the failing batch is retried**, so a hiccup
   partway through a large corpus no longer discards the chunks already embedded
   and paid for. Any exception retries -- classifying provider exceptions would
   mean tracking every provider's taxonomy, so an auth failure waits 3s before
@@ -403,7 +403,11 @@ Han, kana or Hangul characters into overlapping bigrams (a lone character
 becomes its own token). Stemming means only inflections of one word conflate
 ("refund"/"refunds"/"refunded"), never synonyms — that headroom is still the
 `vector`/`hybrid` types' job. `_STOPWORDS` is stemmed with the same stemmer so
-a stemmed query token still matches its stopword entry. Kana and Hangul sit in
+a stemmed query token still matches its stopword entry -- which also means a
+word that stems *into* a stopword ("willing" -> "will", "doing" -> "do") is
+dropped from `significant_terms`, and so stops counting towards the overlap
+gate. That is standard IR behaviour rather than a defect, and BM25 scoring is
+unaffected either way. Kana and Hangul sit in
 the *same* character class as Han, so a kanji+kana Japanese word is one run
 rather than two fragments cut at the script boundary. `snowballstemmer` is a
 **soft import** (in the `tools-rag` and `tools` extras): without it `_stem` is

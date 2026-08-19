@@ -89,7 +89,10 @@ implemented** — don't assume they exist:
   `agent_completed.usage` into `usage_records`, and a `vector`/`hybrid`
   ingestion job with a billable embedding spec (a non-`fake:` string) and a
   non-zero token estimate writes one `agent="kb:ingest"` row with a NULL
-  `run_id` — a path-constructed KB embeds at load time and is not metered. Embedding token counts are
+  `run_id` — a path-constructed KB embeds at load time and is not metered.
+  An ad-hoc "Try a search" from the "My documents" panel is the third source:
+  one `agent="kb:search"` row with **both** foreign keys NULL, written on the
+  failure path too. Embedding token counts are
   *estimated* (±30%) — no provider reports them — and a local reranker is $0,
   so it is not recorded.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +

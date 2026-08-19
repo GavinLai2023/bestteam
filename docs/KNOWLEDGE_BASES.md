@@ -103,7 +103,12 @@ from (see "Citations", below):
   A `.docx`'s body paragraphs, before its first table, chunk the ordinary way
   and carry no heading. A block with no rows under its marker — an empty
   sheet, such as a workbook's untouched trailing `Sheet2` — yields no chunk
-  at all, so it can't become the content-free chunk described above.
+  at all, so it can't become the content-free chunk described above. Two
+  knock-on effects: a workbook of many small sheets now yields at least one
+  chunk per sheet where the sheets used to be packed together, so a
+  `vector`/`hybrid` collection embeds (and pays for) more chunks than before,
+  and repeating the header row in every chunk of a long sheet makes the column
+  names common across the corpus, slightly diluting their BM25 IDF.
 
 Every other format supplies neither, and such a chunk cites its filename
 alone.
@@ -147,7 +152,11 @@ embeddings or external services involved.
 
 Querying:
 1. Tokenize the query into lowercase alphanumeric words, dropping common
-   English stopwords ("the", "and", "is", …).
+   English stopwords ("the", "and", "is", …). Latin/digit words are **stemmed**
+   ("refunds" → "refund"), and each run of Han, kana or Hangul characters is
+   split into overlapping bigrams — the same `core/text_tokenize.py` that
+   indexed the chunks, so the index and the query always agree (see
+   "Evaluating retrieval" below for what that does and doesn't conflate).
 2. Score every chunk with BM25.
 3. Rank candidates by *(number of shared significant terms, BM25 score)* —
    chunks that share zero significant terms with the query are excluded
@@ -272,11 +281,12 @@ honest, not enough to reconcile against a bill. Query-expansion tokens are
 used directly.
 
 **A retried batch is not billed twice.** Document embedding goes out 100
-chunks at a time, and a batch that fails is retried up to three times (1s then
-2s apart) on its own — only the failing batch, so a provider hiccup partway
+chunks at a time, and a batch that fails gets up to three attempts — two
+retries, 1s then 2s apart — on its own — only the failing batch, so a provider hiccup partway
 through a large upload no longer throws away the chunks already embedded and
 paid for. The ingestion row's token estimate is computed once from the chunk
-texts, before any provider call, so a retry adds nothing to it. That cuts the
+texts (in `ui/backend/ingestion.py`, after the embedding call returns), so a
+retry adds nothing to it. That cuts the
 other way too: the estimate counts each chunk once even though a retried batch
 was genuinely charged more than once by the provider — one more reason it is an
 estimate, not a bill.
@@ -506,8 +516,10 @@ re-chunking files (and, for `vector`, calling an embedding model).
 
 `POST /api/org/knowledge-bases/{name}/search`
 (`ui/backend/org_knowledge_bases.py`) runs one query against the org's own
-collection and returns the passages an agent would have retrieved — the
-"Try a search" panel behind each row of the "My documents" list. Body:
+collection and returns up to `top_k` of the passages an agent would rank
+first — the "Try a search" panel behind each row of the "My documents" list.
+Not quite the agent's own result set: the panel always sends `top_k=5`,
+whatever the collection's configured `top_k` is. Body:
 `{"query": "...", "top_k": 5}`, with `query` between 1 and 500 characters and
 `top_k` between 1 and 10; anything else is a `422`. Response:
 
@@ -555,13 +567,16 @@ spend is recorded on the failure path too, because a query expansion is paid
 for before the embedding call that raised. Recording is best-effort: a
 metering failure is logged and never turns a successful search into an error.
 
-There is deliberately **no cache and no rate limit**. Every call rebuilds the
-knowledge base from its `KnowledgeChunk` rows (a `hybrid` one also
-`json.loads`es every stored vector), which is sub-second to a few seconds at
-the tens-to-hundreds-of-documents scale this beta is sized for, and the
-caller is a person clicking a button rather than an agent loop. A cache would
-have to be invalidated by every re-upload to buy correctness this does not
-need; the `top_k` cap and the metering above already bound the cost.
+There is deliberately **no cache and no rate limit**. The money at stake is
+negligible — one short query embedding — and the metering above *records*
+that spend, it does not bound it. The real cost is CPU: every call rebuilds
+the knowledge base from its `KnowledgeChunk` rows (a `hybrid` one also
+`json.loads`es every stored vector) on the backend's sync threadpool, which
+is sub-second to a few seconds at the tens-to-hundreds-of-documents scale
+this beta is sized for, with a person clicking a button rather than an agent
+loop on the other end. A cache would have to be invalidated by every
+re-upload to buy correctness this does not need. Both are worth revisiting if
+the button is ever abused.
 
 This answers one query at a time. For judging a collection as a whole — and
 for telling whether a change to it helped — see "Evaluating retrieval" below.
@@ -658,8 +673,14 @@ shape group (`type`, `embedding_model`, `rerank_model`,
 `description` if this upload didn't give one, so replacing an Enhanced
 collection's documents never silently rebuilds it as a Standard one. A name
 that doesn't exist yet has nothing to inherit and gets `local_folder`, the
-historical default. `chunk_size`/`chunk_overlap`/`top_k` are never inherited
-— every route always sends them. A caller that *does* send `kb_type` (the
+historical default. Only the shape group and the description are inherited:
+`chunk_size`/`chunk_overlap`/`top_k` come from the caller's own arguments on
+every upload, and `candidate_k`/`query_expansion_count`/`score_threshold`
+aren't upload parameters at all — so **every upload resets all six to their
+defaults**, discarding whatever a YAML or admin-API config had set for them.
+The description inherits in one direction only: an empty one is read as
+"didn't say", so an upload can replace a description but cannot clear it (do
+that through the config path). A caller that *does* send `kb_type` (the
 org self-service route always does, from the wizard's Standard/Enhanced
 toggle) names the whole group itself, and switching it re-embeds every
 document from scratch: the new generation is a full re-index, and the

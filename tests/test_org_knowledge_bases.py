@@ -584,9 +584,9 @@ def test_kb_with_no_ingestion_job_falls_back_to_legacy_file_path(client, tmp_pat
     zero IngestionJob rows."""
     legacy_dir = tmp_path / "legacy_kb"
     legacy_dir.mkdir()
-    # BM25 keyword search requires literal term overlap with the query
-    # ("refund policy") -- no stemming, so this must share those exact words,
-    # not just paraphrase them ("Refunds" alone wouldn't match "refund").
+    # BM25 keyword search requires term overlap with the query
+    # ("refund policy"), so this shares those words rather than paraphrasing
+    # them.
     (legacy_dir / "doc.txt").write_text("Refund policy: returns accepted within 14 days.", encoding="utf-8")
 
     with open_test_db() as db:
@@ -1128,6 +1128,46 @@ def test_search_records_kb_search_usage_for_a_hybrid_kb(client, monkeypatch):
         ingest = db.query(UsageRecord).filter_by(agent="kb:ingest").all()
         assert len(ingest) == 1
         assert ingest[0].ingestion_job_id == result["job_id"]
+
+
+def test_search_502s_and_still_meters_what_the_failed_search_spent(client, monkeypatch):
+    """A query expansion is paid for *before* the embedding call that raises,
+    so the money is gone whether or not the search returns anything. The 502
+    tells the customer what to do about it; the ledger row still says what it
+    cost."""
+    from bestteam.core.tool_context import add_usage
+    from ui.backend.db.models import UsageRecord
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    class _SpendsThenFails:
+        def search(self, query, top_k):
+            add_usage({
+                "model": "openai:gpt-4o-mini",
+                "input_tokens": 12,
+                "output_tokens": 30,
+            })
+            raise RuntimeError("the provider hung up mid-search")
+
+    monkeypatch.setattr(
+        backend_org_kb, "resolve_knowledge_base", lambda *a, **k: _SpendsThenFails()
+    )
+
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund"})
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail.startswith("The search could not be run:")
+    # The provider's own words never reach the customer.
+    assert "hung up" not in detail
+
+    with open_test_db() as db:
+        rows = db.query(UsageRecord).filter_by(agent="kb:search").all()
+        assert len(rows) == 1
+        assert rows[0].model == "openai:gpt-4o-mini"
+        assert rows[0].input_tokens == 12
+        assert rows[0].run_id is None
+        assert rows[0].ingestion_job_id is None
 
 
 def test_search_rejects_empty_query_and_top_k_out_of_range(client):

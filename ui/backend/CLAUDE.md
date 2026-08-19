@@ -1284,7 +1284,8 @@ document/chunk objects are discarded before anything is written (a
 vector/hybrid KB with no embeddings can't serve queries, so a total
 embedding failure must leave no partial rows behind). That embedding call is
 `bestteam.core.embeddings.embed_documents_in_batches` (P1-2): 100 chunks per
-provider call, each batch retried up to three times with a 1s then 2s backoff,
+provider call, each batch given up to three attempts (two retries, a 1s then
+2s backoff),
 and **only the failing batch is retried** — a provider hiccup partway through a
 large upload now costs one batch rather than every chunk embedded before it.
 Only an exception that survives all three attempts, or a batch that comes back

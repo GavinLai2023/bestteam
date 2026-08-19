@@ -938,6 +938,11 @@ def test_estimate_embedding_tokens_counts_cjk_per_char_and_latin_per_4():
     # CJK: one token per character, because there are no word boundaries to
     # merge across.
     assert estimate_embedding_tokens("退货政策") == 4
+    # Kana and Hangul are inside `_CJK_RUN_RE`'s ranges too (P1-1), so they are
+    # counted per character rather than per four -- which is roughly where
+    # Japanese and Korean land.
+    assert estimate_embedding_tokens("ひらがな") == 4
+    assert estimate_embedding_tokens("한글") == 2
     # Mixed: 4 CJK characters + " refunds" (8 characters -> 2).
     assert estimate_embedding_tokens("退货政策 refunds") == 6
 
