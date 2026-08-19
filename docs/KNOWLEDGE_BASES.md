@@ -129,12 +129,19 @@ from (see "Citations", below):
   as an orphan. The nearest ancestor becomes the chunk's `heading` — the
   `tag attr="…"` part of its line, capped at 80 characters — so the chunk
   cites `refund_flow.xml § decision id="3" question="Is the item unopened?"`.
-  Three caveats. XML chunks carry **no character overlap**: the repeated path
-  is the cross-chunk context, every split lands on a whole line, and a raw
-  slice of the previous chunk would put a cut-open tag ahead of the path.
-  A single leaf too large for its path, or a path that would leave no room at
-  all, falls back to the ordinary paragraph/sentence/word split under whatever
-  path did fit. And the tree that is repeated is the *nesting*: a diagram
+  The repeated path is capped at half of `chunk_size` — outermost ancestors
+  dropped first, so content always keeps at least half the chunk — and an
+  ancestor that every descendant chunk had to drop is emitted once as content
+  at its own level, since its opening line is the only copy of its attributes
+  and inline text. A parent's own mixed-content text (`<root><label>…</label>
+  root description</root>`) stays with the parent, never packed or cited under
+  the child it happens to follow. Three caveats. XML chunks carry **no
+  character overlap**: the repeated path is the cross-chunk context, every
+  split lands on a whole line, and a raw slice of the previous chunk would put
+  a cut-open tag ahead of the path. A single leaf too large for its path, or
+  an element whose opening line is too long to head a path at all, falls back
+  to the ordinary paragraph/sentence/word split under whatever path did fit.
+  And the tree that is repeated is the *nesting*: a diagram
   tool that exports nodes and edges as a flat list (draw.io's `<mxCell
   source="3" target="7">`) has its branches in id references, which nothing
   here reconstructs — export such diagrams as nested XML, or as a text

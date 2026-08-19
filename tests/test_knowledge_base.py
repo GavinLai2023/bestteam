@@ -979,6 +979,44 @@ def test_xml_deep_path_is_capped_so_content_keeps_at_least_half_the_chunk():
     )
 
 
+def test_xml_ancestor_dropped_from_the_path_is_still_indexed_as_content():
+    # A narrow, deep tree: the root's own text is on its opening line and
+    # nowhere else. Its descendants' path is too long to keep the root, so
+    # the root must be emitted as content in its own right, or a search for
+    # "IMPORTANT ROOT TEXT" finds nothing (Codex review, P1).
+    root = "<root> IMPORTANT ROOT TEXT about widgets"
+    leaves = "".join(f'        <leaf id="{i}"> Leaf number {i} has a label\n' for i in range(12))
+    text = "[XML: deep.xml]\n" + root + "\n  <a>\n    <b>\n      <c>\n" + leaves.rstrip("\n")
+    chunks = _chunk_document("deep.xml", text, chunk_size=120, chunk_overlap=0, suffix=".xml")
+
+    assert all(len(chunk.text) <= 120 for chunk in chunks)
+    assert any(root in chunk.text.split("\n") for chunk in chunks)
+    # And the cap still holds: no leaf chunk carries the root.
+    leaf_chunks = [chunk for chunk in chunks if "Leaf number" in chunk.text]
+    assert leaf_chunks and all(root not in chunk.text for chunk in leaf_chunks)
+
+
+def test_xml_parent_tail_text_stays_with_the_parent_not_the_preceding_child():
+    # Mixed content: `<root><label>…</label>root description<note/></root>`.
+    # The renderer puts the tail at the child's depth as a text line; it is
+    # the root's text, and must not be packed, prefixed or cited under
+    # `<label>` just because it follows it (Codex review, P2).
+    items = "".join(f'    <item id="{i}"> Item number {i} with some words\n' for i in range(10))
+    text = (
+        "[XML: mixed.xml]\n"
+        "<root>\n"
+        "  <label>\n"
+        + items
+        + "  root description after the label\n"
+        "  <note> trailing note"
+    )
+    chunks = _chunk_document("mixed.xml", text, chunk_size=200, chunk_overlap=0, suffix=".xml")
+
+    tail_chunk = next(chunk for chunk in chunks if "root description after the label" in chunk.text)
+    assert tail_chunk.heading == "root"
+    assert "  <label>" not in tail_chunk.text.split("\n")
+
+
 def test_xml_ancestor_path_longer_than_chunk_size_degrades_to_plain_split():
     long_attr = "x" * 150
     text = (

@@ -341,15 +341,22 @@ it exists for is a flowchart or decision tree exported as nested XML: a
 meaningless, so the chunk carries the decision and every branch and decision
 above it, and cites the nearest one as `heading`
 (`[source: flow.xml § decision id="3" question="Is the item unopened?"]`,
-the `tag attr="…"` part of the line, same 80-char cap). Three consequences
-worth knowing: XML chunks get **no character overlap** (the path is the
-cross-chunk context, every split lands on a whole line, and a raw slice of
-the previous chunk would put a cut-open tag ahead of the path); a leaf too
-large for its path, or a path that would leave no room at all, falls back to
-the generic separators under whatever path did fit; and the `[XML: name]`
-header rides on the first chunk only when there is room, since the citation
-already names the file. A document that fits one chunk is byte-for-byte what
-it was. Edge-based diagram exports (draw.io's `<mxCell source= target=>`)
+the `tag attr="…"` part of the line, same 80-char cap). The repeated path is
+**capped at half of `chunk_size`**, outermost ancestors dropped first, so
+content always keeps at least half the chunk (uncapped, a six-level path in
+a small chunk shredded every leaf); an ancestor capped out of *every*
+descendant chunk is emitted once as content at its own level instead, since
+its opening line is the only copy of its attributes and inline text (Codex
+review, P1). A parent's mixed-content tail -- rendered as a text line at the
+children's depth -- is its own section, never packed, prefixed or cited under
+the child it happens to follow (P2). Three more consequences worth knowing:
+XML chunks get **no character overlap** (the path is the cross-chunk context,
+every split lands on a whole line, and a raw slice of the previous chunk
+would put a cut-open tag ahead of the path); a leaf too large for its path,
+or an opener too long to head a path at all, falls back to the generic
+separators under whatever path did fit; and the `[XML: name]` header rides
+on the first chunk only when there is room, since the citation already names
+the file. A document that fits one chunk is byte-for-byte what it was. Edge-based diagram exports (draw.io's `<mxCell source= target=>`)
 get no special treatment: their branches are id references, not nesting,
 and nothing here reconstructs them.
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`

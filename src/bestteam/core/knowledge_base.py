@@ -541,17 +541,20 @@ def _xml_heading(element_line: str) -> str:
 
 
 def _xml_sections(lines: List[str]) -> List[List[str]]:
-    """Group sibling subtrees: each section opens at an element line at the
-    shallowest depth present (the children of whatever these lines hang
-    under) and runs to the next one. Lines before the first such element --
-    leading text, if any -- form a section of their own."""
+    """Group the items directly under one parent: each section opens at a
+    line at the shallowest depth present -- a child element, which runs to
+    the next item and owns everything deeper, or a line of the parent's own
+    mixed-content text, which the renderer emits at the children's depth.
+    The text line is its own section, not the tail of the child before it:
+    it belongs to the parent, and must not be packed, prefixed or cited
+    under that child's subtree."""
     level = min((_xml_indent(l) for l in lines if _xml_is_element(l)), default=None)
     if level is None:
         return [lines]
     sections: List[List[str]] = []
     current: List[str] = []
     for line in lines:
-        if current and _xml_is_element(line) and _xml_indent(line) == level:
+        if current and _xml_indent(line) == level:
             sections.append(current)
             current = []
         current.append(line)
@@ -610,7 +613,14 @@ def _xml_pieces(lines: List[str], chunk_size: int, ancestors: List[str]) -> List
         # same cap `_xml_path_prefix` applies -- so a subtree is never split
         # into chunks that no longer say which element they belong to.
         if len(section) > 1 and _xml_is_element(opener) and len(opener) + 1 <= chunk_size // 2:
-            pieces.extend(_xml_pieces(section[1:], chunk_size, ancestors + [opener]))
+            below = _xml_pieces(section[1:], chunk_size, ancestors + [opener])
+            pieces.extend(below)
+            # The opener's attributes and inline text exist on that one line.
+            # Deeper paths may have been capped past it in every descendant
+            # chunk; if so it would be indexed nowhere, so it becomes content
+            # at its own level, packed with the siblings that follow.
+            if not any(opener in text.split("\n") for text, _ in below):
+                current = opener
         else:
             pieces.extend(
                 (prefix + piece, heading)

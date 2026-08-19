@@ -1440,7 +1440,12 @@
   depth 1, so a single-root tree fell straight through to line splitting), and
   repeats the element lines on the path from the root at the top of every chunk
   -- the XML counterpart of the repeated sheet marker and header row -- with
-  `heading` set to the nearest ancestor's `tag attr="…"`. XML chunks carry no
+  `heading` set to the nearest ancestor's `tag attr="…"`. The path is capped at
+  half the chunk (outermost dropped first); an ancestor capped out of every
+  descendant chunk is emitted once as content at its own level so its
+  attributes and inline text stay searchable, and a parent's mixed-content
+  tail is its own item rather than the tail of the child before it (both
+  Codex review findings). XML chunks carry no
   character overlap (the path is the context, and the raw slice used to cut
   tags in half). Edge-list exports (draw.io's `<mxCell source= target=>`) are
   not reconstructed -- their branches are id references, not nesting. The
