@@ -274,6 +274,9 @@ export interface IngestionJobStatus {
 export interface OrgKnowledgeBase {
   name: string
   description: string | null
+  // The *serving* generation: the type of the latest completed ingestion job,
+  // falling back to the requested config when none has completed yet -- not
+  // the pending config.
   type: string
   updated_at: string
   used_by: string[]

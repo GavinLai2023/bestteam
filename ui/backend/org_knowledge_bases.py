@@ -40,7 +40,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from bestteam.core.knowledge_base import _citation
@@ -358,6 +358,16 @@ class KnowledgeBaseSearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=500)
     top_k: int = Field(5, ge=1, le=10)
+
+    @field_validator("query")
+    @classmethod
+    def _reject_blank_query(cls, v: str) -> str:
+        # `min_length` counts characters, so `"   "` clears it. Retrieval has
+        # nothing to match on -- but a `vector`/`hybrid` collection would still
+        # pay for the query embedding first.
+        if not v.strip():
+            raise ValueError("query must not be blank")
+        return v
 
 
 def _safe_record_search_usage(

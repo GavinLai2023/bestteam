@@ -1176,6 +1176,9 @@ def test_search_rejects_empty_query_and_top_k_out_of_range(client):
 
     for body in (
         {"query": ""},
+        # Whitespace-only clears `min_length` but retrieves nothing, and on a
+        # `vector`/`hybrid` collection it would still cost a query embedding.
+        {"query": "   "},
         {"query": "x" * 501},
         {"query": "refund", "top_k": 0},
         {"query": "refund", "top_k": 11},
