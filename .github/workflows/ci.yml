@@ -60,8 +60,10 @@ jobs:
               - 'examples/**'
               - 'scripts/**'
               - 'Dockerfile'
+              - 'docker-entrypoint.sh'
               - 'docker-compose.yml'
               - '.dockerignore'
+              - '.gitattributes'
               - '.env.example'
               - '.github/workflows/**'
             backend:

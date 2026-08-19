@@ -80,7 +80,8 @@ checklist against the *actual* environment the backend will see:
 docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 ```
 
-It prints one line per variable and exits 1 on any `[FAIL]`. What it holds you
+It prints one line per variable and exits 1 on any `[FAIL]`. It only reads:
+run on a box with no database yet, it leaves it that way. What it holds you
 to, and why:
 
 | Item | Level | Why it is on the list |
@@ -93,6 +94,7 @@ to, and why:
 | `BESTTEAM_EMAIL_*` unset | WARN | Configures one process-wide mailbox; use per-org `admin set-email` instead. |
 | `BESTTEAM_RUN_RETENTION_DAYS` set (e.g. `90`) **before** creating the org | WARN | Otherwise the org keeps run history forever, and existing orgs are never retro-fitted. |
 | `BESTTEAM_SENTRY_DSN` set | WARN | Without it the container log is the only record of a failure. |
+| `BESTTEAM_SENTRY_DSN` a valid DSN | FAIL | A malformed one makes `sentry_sdk.init` raise at import -- a restart loop. |
 | `FORWARDED_ALLOW_IPS` set to your proxy | WARN | Otherwise the per-address login budget is shared by everyone behind the proxy. |
 
 Then, once the org exists: connect its mailbox with `--test`
@@ -491,11 +493,15 @@ is enough for a beta; any Sentry-protocol collector such as GlitchTip works)
 and the backend reports exactly two kinds of event -- an *unhandled* request
 exception (the 500 the customer saw) and a *failed run* (the workflow's own
 failure or a crash on the worker thread) -- tagged with the run id, workflow
-name, method and path, and for a failed run the first 300 characters of the
-reason. Nothing else is captured: no ERROR-log mirroring, no request bodies,
-no stack-frame locals, no performance tracing, no user data (`send_default_pii`
-is off). This is deliberate -- the process handles customers' email and
-documents, and a report has to be safe to leave the box. `BESTTEAM_ENVIRONMENT`
+name, method and path. The exception's type and stack go; its *message* does
+not (a parser error quotes the model's output, an HTTP error the URL a tool
+fetched), and neither does a failed run's reason -- both are in the run's
+trace on the box, keyed by the run id in the report. Nothing else is
+captured: no ERROR-log mirroring, no request bodies, no stack-frame locals,
+no performance tracing, no user data (`send_default_pii` is off). This is
+deliberate -- the process handles customers' email and documents, and a
+report has to be safe to leave the box. A malformed DSN stops the backend at
+start-up (`check-env` flags it first). `BESTTEAM_ENVIRONMENT`
 (default `production`) and `BESTTEAM_RELEASE` label the events; unset the DSN
 to turn reporting off. `sentry-sdk` ships in the image; on a bare
 `pip install`, it is part of the `ui` extra.
@@ -548,6 +554,12 @@ To restore from a backup:
 2. Copy the backup file into the container, overwriting the live database:
    ```bash
    docker compose cp /path/to/backups/bestteam-2026-06-17.db backend:/app/ui/backend/data/bestteam.db
+   ```
+   `docker cp` writes the file as **root**, and the backend runs as uid 1000
+   -- it could read the restored database but not write to it (or migrate
+   it), so hand it back before starting:
+   ```bash
+   docker compose run --rm --no-deps --user root backend chown 1000:1000 /app/ui/backend/data/bestteam.db
    ```
 3. Restart the backend:
    ```bash

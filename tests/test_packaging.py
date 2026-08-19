@@ -178,6 +178,11 @@ def test_entrypoint_migrates_only_when_starting_the_server():
     assert 'exec "$@"' in script
     attrs = (_ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "*.sh text eol=lf" in attrs
+    # Both files are checked by this test, so a change to either has to run
+    # it: the CI path filter is an allowlist.
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "- 'docker-entrypoint.sh'" in ci
+    assert "- '.gitattributes'" in ci
 
 
 def test_compose_restarts_and_bounds_the_services():

@@ -1417,8 +1417,13 @@ that KB permanently undeletable.
   username (lower-cased) and 20 per client address in 15 minutes; a
   throttled attempt gets 429 + `Retry-After` **before** PBKDF2 runs (the CPU
   half of the defence -- 0.76 s per hash), with the same message whether the
-  username exists or not; a success clears the username's failures, not the
-  address's. Behind a reverse proxy the address is the proxy's unless uvicorn
+  username exists or not. The check *reserves*: `reserve()` counts the
+  attempt as a failure in the same locked step that admits it (a
+  check-then-record pair would let a concurrent burst -- the route runs in
+  the thread pool -- hash once per thread), and only `record_success()`
+  takes it back: it clears the username's failures and releases the one
+  slot the attempt took from the address, not the address's other failures.
+  Behind a reverse proxy the address is the proxy's unless uvicorn
   is told to trust it (`docs/deployment.md`), which is why the username key
   exists. `tests/conftest.py` swaps in a fresh limiter per test.
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
@@ -1697,13 +1702,19 @@ logger already has handlers, so pytest's capture and an operator's own
 `include_local_variables=False`, no tracing, so the SDK adds **no** capture
 points of its own. Exactly two call sites: `main.unhandled_exception_handler`
 (`report_exception`, tags method/path) and `runtime.py` -- the streaming
-loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, extras
-`reason` capped at 300 chars) and the worker-thread catch-all
-(`report_exception`, tags run_id/workflow). Both helpers are no-ops without a
-DSN or without the SDK and never raise. Adding a third call site is a
-deliberate decision, not a convenience: the rule is ids and names, never
-content. `sentry-sdk` is in the `ui` extra. Tests: `tests/test_error_reporting.py`
-(a fake `sentry_sdk` module in `sys.modules`).
+loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, tags
+only; the reason is an exception's text and stays in the run's persisted
+trace) and the worker-thread catch-all (`report_exception`, tags
+run_id/workflow). A `before_send` hook (`_scrub_event`) drops every exception
+*message* from an event -- an output parser echoes the model's text, an HTTP
+error carries the URL a tool fetched -- keeping type, stack (no locals) and
+tags. Both helpers are no-ops without a DSN or without the SDK and never
+raise. Adding a third call site is a deliberate decision, not a convenience:
+the rule is ids and names, never content. `sentry-sdk` is in the `ui` extra;
+a malformed DSN makes `sentry_sdk.init` raise at import (the backend refuses
+to start), which `admin check-env` catches beforehand. `BESTTEAM_LOG_LEVEL`
+blank (as `.env.example` ships it) means INFO. Tests:
+`tests/test_error_reporting.py` (a fake `sentry_sdk` module in `sys.modules`).
 
 ## Known limitation: general-purpose cache
 
