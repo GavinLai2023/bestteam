@@ -87,6 +87,35 @@ _MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 _MAX_SELF_SERVICE_KBS_PER_ORG = 20
 
 
+def _latest_completed_job(db: Session, record: KnowledgeBaseRecord) -> Optional[IngestionJob]:
+    """The ingestion job a search against this knowledge base is served from.
+
+    Same "highest `id` wins" ordering as `resolve_knowledge_base` -- `id` is
+    the only column guaranteed monotonic with submission order.
+    """
+    return (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id, status="completed")
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+
+
+def _live_kb_type(db: Session, record: KnowledgeBaseRecord) -> str:
+    """The knowledge base's *serving* type, which `config` may not be.
+
+    `config` advances to the new spec the moment a re-upload is dispatched,
+    and stays there for good if that job fails -- so it answers "what would
+    the next upload build?", not "what can be searched today?". The serving
+    generation's own `kb_type` answers the latter; a knowledge base with no
+    completed job has nothing else to report, so it falls back to `config`.
+    """
+    live = _latest_completed_job(db, record)
+    if live is not None and live.kb_type:
+        return live.kb_type
+    return (record.config or {}).get("type", "local_folder")
+
+
 def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
     """One knowledge base as the customer's own "My documents" panel sees it.
 
@@ -111,9 +140,7 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
     if latest is not None:
         latest_job = job_status_payload(db, latest)
         latest_job.pop("config", None)
-    has_completed = (
-        db.query(IngestionJob.id).filter_by(kb_id=record.id, status="completed").first() is not None
-    )
+    live = _latest_completed_job(db, record)
     config = record.config or {}
     return {
         "name": record.name,
@@ -121,12 +148,14 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
         # a knowledge base created before the field existed, or by a caller
         # that omitted it.
         "description": config.get("description"),
-        "type": config.get("type", "local_folder"),
+        # The shape that actually answers a search today, not the one the
+        # next upload would build (see `_live_kb_type`).
+        "type": _live_kb_type(db, record),
         # `iso_utc`, not the bare column: SQLite hands it back tz-naive, and
         # the panel's `Date` would then read a UTC timestamp as local time.
         "updated_at": iso_utc(record.updated_at),
         "used_by": workflows_referencing(db, kind="knowledge_base", resource_id=record.id),
-        "servable": has_completed or latest is None,
+        "servable": live is not None or latest is None,
         "latest_job": latest_job,
     }
 
@@ -203,10 +232,17 @@ def upload_own_knowledge_base(
                     ),
                 )
         elif not replace:
+            # Name the shape that is live today: this refusal is the one
+            # moment the wizard can tell the customer what they are about to
+            # replace, and its own confirmation dialog adds what it would
+            # become -- so cancelling and flipping the toggle is an informed
+            # choice rather than a silent up/downgrade plus a full re-index.
+            quality = "Enhanced" if _live_kb_type(db, existing) == "hybrid" else "Standard"
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"'{item_name}' already exists and may be used by another team. "
+                    f"It currently uses {quality} search. "
                     "Choose a different name, or confirm to replace its documents."
                 ),
             )

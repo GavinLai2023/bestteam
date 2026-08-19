@@ -4,6 +4,7 @@ step. Mirrors `test_org_settings.py`'s auth/org-scoping patterns and reuses
 `test_crud_api.py`'s upload-endpoint assertions for the shared
 `knowledge_bases.upload_knowledge_base()` implementation."""
 
+import io
 import time
 from pathlib import Path
 
@@ -797,3 +798,139 @@ def test_upload_description_lands_in_config_and_tool_docstring(client, tmp_path)
     resp = client.get("/api/org/knowledge-bases/policies")
     assert resp.status_code == 200
     assert resp.json()["description"] == "Our refund and shipping policies"
+
+
+# --- P1-3: shape inheritance, and reporting the shape that actually serves ---
+
+def _upload_file(name="doc.txt", content=b"The refund policy allows returns within 30 days."):
+    """One `UploadFile` for calling `upload_knowledge_base()` directly.
+
+    The admin route is the caller that names no shape, and it isn't reachable
+    from this file's org-scoped client -- so the inheritance branch is driven
+    through the shared function itself here, and end to end over the admin
+    route in `test_crud_api.py`.
+    """
+    return fastapi.UploadFile(io.BytesIO(content), filename=name)
+
+
+def test_summary_type_reports_the_live_generation_not_the_pending_config(client, monkeypatch):
+    """`config` advances to the new shape the moment a re-upload is
+    dispatched, and stays there forever if that job fails -- so reading the
+    customer's panel off `config` told them a failed Enhanced upgrade had
+    taken effect while every search still ran against the old Standard
+    generation."""
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    # Upgrade to Enhanced with a document that has no extractable text, so
+    # the new generation never becomes servable.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"replace": "true", "smart_search": "true"},
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one()
+        # The config records the intent -- what the next upload would use.
+        assert record.config["type"] == "hybrid"
+
+    body = client.get("/api/org/knowledge-bases/policies").json()
+    # ...but the panel reports what a search runs against today.
+    assert body["type"] == "local_folder"
+    assert body["servable"] is True
+    assert body["latest_job"]["status"] == "failed"
+
+
+def test_replace_conflict_names_the_current_search_quality(client, monkeypatch):
+    """The 409 is the only moment the wizard can tell a customer what the
+    collection they are about to replace is like today, so it names it."""
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files())
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    resp = client.post(
+        "/api/org/knowledge-bases/handbook/upload",
+        data={"smart_search": "true"},
+        files=_files(),
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_files(name="other.txt"))
+    assert resp.status_code == 409
+    assert "currently uses Standard search" in resp.json()["detail"]
+
+    resp = client.post("/api/org/knowledge-bases/handbook/upload", files=_files(name="other.txt"))
+    assert resp.status_code == 409
+    assert "currently uses Enhanced search" in resp.json()["detail"]
+
+
+def test_upload_without_a_shape_inherits_the_existing_configuration_and_description(client, monkeypatch):
+    """A caller naming no `kb_type` is replacing a collection's documents,
+    not redesigning it: the shape group and the description carry over from
+    what the last upload asked for."""
+    from ui.backend import ingestion as backend_ingestion
+
+    # Nothing here needs the documents indexed -- the assertions are about
+    # the record and the job row the upload writes.
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *args, **kwargs: None)
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(
+            db,
+            org_id,
+            "policies",
+            [_upload_file()],
+            chunk_size=500,
+            kb_type="hybrid",
+            description="Our refund and shipping policies",
+            embedding_model="fake:16",
+            rerank_model="fake:",
+            query_expansion_model="fake:expansion",
+        )
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        result = backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="v2.txt")]
+        )
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "hybrid"
+        assert config["embedding_model"] == "fake:16"
+        assert config["rerank_model"] == "fake:"
+        assert config["query_expansion_model"] == "fake:expansion"
+        assert config["description"] == "Our refund and shipping policies"
+        # Chunking and top_k are per-upload knobs every route always sends,
+        # so they take this call's values rather than the previous upload's.
+        assert config["chunk_size"] == 1000
+        # And the job that will do the indexing agrees with the record.
+        job = db.get(IngestionJob, result["job_id"])
+        assert job.kb_type == "hybrid"
+        assert job.embedding_model == "fake:16"
+
+
+def test_upload_without_a_shape_on_a_new_name_is_a_standard_collection(client, monkeypatch):
+    """There is nothing to inherit from, so the historical default stands."""
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *args, **kwargs: None)
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(db, org_id, "policies", [_upload_file()])
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        config = db.query(KnowledgeBaseRecord).filter_by(name="policies", org_id=org_id).one().config
+        assert config["type"] == "local_folder"
+        assert config.get("description") is None

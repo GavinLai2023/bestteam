@@ -1340,6 +1340,28 @@
   character instead of per four characters — the right direction for Japanese
   and Korean, which run near one token per character.
 
+- **A re-upload keeps the collection's shape, and the panel reports the one
+  that serves** (P1-3): `upload_knowledge_base()`'s `kb_type` is now optional
+  and, when a caller names none, inherits the whole shape group
+  (`type`/`embedding_model`/`rerank_model`/`query_expansion_model`) plus the
+  `description` from the existing record — `local_folder` only for a name that
+  doesn't exist yet. The admin route (`crud.py`) is exactly such a caller: it
+  has no way to send a shape, so replacing an Enhanced (`hybrid`) collection's
+  documents used to silently rebuild it as Standard and blank the customer's
+  description. `chunk_size`/`chunk_overlap`/`top_k` are still per-upload, never
+  inherited. The other half is the config-vs-job divergence this exposed:
+  `KnowledgeBaseRecord.config` advances at dispatch and stays advanced if the
+  job fails, so it says what the *next* upload would build, not what a search
+  runs against. `org_knowledge_bases.py::_live_kb_type(db, record)` (the latest
+  completed job's own `kb_type`, falling back to `config`) now backs both the
+  "My documents" panel's `type` and the replace `409`, which names it in the
+  wizard's own words ("It currently uses Standard search."); the wizard's
+  confirmation adds what it would become ("They will be indexed with Enhanced
+  search."), so one dialog carries both halves and no mount-time probe is
+  needed. `job_status_payload.config` is deliberately unchanged — that one is
+  the configuration intent. See `ui/backend/CLAUDE.md`,
+  `docs/KNOWLEDGE_BASES.md`.
+
 - **An org manages its own knowledge bases** (P0-2): `GET /api/org/knowledge-bases`,
   `GET`/`DELETE /api/org/knowledge-bases/{name}` plus a "My documents" panel on
   My teams — each collection's latest ingestion attempt (a failed upload's error

@@ -586,6 +586,29 @@ job finishes (and forever, if it fails). The retrieval knobs (`top_k`,
 `query_expansion_count`) still come from `config` — they apply uniformly
 whichever generation is live.
 
+**Changing the search quality re-indexes; a re-upload that names no shape
+keeps the existing one.** `upload_knowledge_base()`'s `kb_type` is optional.
+A caller that doesn't send one — the admin route can't — inherits the whole
+shape group (`type`, `embedding_model`, `rerank_model`,
+`query_expansion_model`) from the existing record's `config`, plus its
+`description` if this upload didn't give one, so replacing an Enhanced
+collection's documents never silently rebuilds it as a Standard one. A name
+that doesn't exist yet has nothing to inherit and gets `local_folder`, the
+historical default. `chunk_size`/`chunk_overlap`/`top_k` are never inherited
+— every route always sends them. A caller that *does* send `kb_type` (the
+org self-service route always does, from the wizard's Standard/Enhanced
+toggle) names the whole group itself, and switching it re-embeds every
+document from scratch: the new generation is a full re-index, and the
+previous one keeps serving until it completes.
+
+Because of that, the customer-facing surfaces report the shape that is
+*serving*, not the one `config` holds: `_kb_summary`'s `type` and the
+self-service upload's replace `409` ("It currently uses Enhanced search.")
+both come from `org_knowledge_bases.py::_live_kb_type()` — the latest
+completed job's own `kb_type`, falling back to `config` for a knowledge base
+that has never completed one. `job_status_payload`'s `config` is unchanged;
+that one is the configuration *intent*, i.e. what the next upload builds.
+
 Deleting a knowledge base cascades to delete its `IngestionJob`/
 `KnowledgeDocument`/`KnowledgeChunk` rows (`ingestion.delete_kb_ingestion_data`),
 and is **refused with `409` while that knowledge base has a `queued` or

@@ -1231,6 +1231,36 @@ the agent tool's own docstring, `builder._with_knowledge_base_catalog`'s
 listing (`- name (type: X): description`), and `_kb_summary`'s
 customer-facing payload.
 
+**Changing a KB's shape, and reporting the shape that serves** (P1-3).
+`upload_knowledge_base()`'s `kb_type` is `Optional[str] = None`, meaning
+"whatever this collection already is": before the type validation (and
+outside the per-KB lock -- the in-lock re-query still decides what is
+written), it reads the existing `KnowledgeBaseRecord` and inherits the whole
+shape group `type`/`embedding_model`/`rerank_model`/`query_expansion_model`,
+falling back to `local_folder` for a name that doesn't exist yet;
+`description` is inherited independently on `None`. That is what `crud.py`'s
+admin upload route sends -- it has no way to name a shape -- so before this,
+an operator replacing a `hybrid` collection's documents silently rebuilt it
+as `local_folder` and blanked the customer's description with it. A caller
+that passes `kb_type` names the whole group from that call
+(`org_knowledge_bases.py` always does, derived from the wizard's toggle), and
+`chunk_size`/`chunk_overlap`/`top_k` are never inherited -- both routes
+always send them, so there is no `None` to interpret.
+
+The flip side is reporting: `config` is the *next* upload's shape, so
+`org_knowledge_bases.py::_live_kb_type(db, record)` answers "what can be
+searched today" from the latest **completed** job's own `kb_type`, falling
+back to `config` when there is none. `_kb_summary`'s `type` and `servable`
+both derive from that same completed job, and the self-service upload's
+replace `409` names it in words the wizard's audience can act on ("It
+currently uses Enhanced search.", `hybrid` -> Enhanced). The wizard's own
+confirmation adds what the collection would *become*
+(`DocumentsPage.tsx`), so one dialog carries both halves of the change and
+cancelling to flip the toggle is an informed choice -- there is deliberately
+no mount-time probe of the KB's shape, because the wizard has no name to
+probe with until the customer types a label. `job_status_payload`'s `config`
+is unchanged: that one is the configuration intent, by design.
+
 **Per-document partial-failure model.** One bad file (unsupported file type,
 parse error, no extractable text, or zero chunks produced) doesn't fail the
 whole job — it's recorded as a `failed` `KnowledgeDocument` row with a capped

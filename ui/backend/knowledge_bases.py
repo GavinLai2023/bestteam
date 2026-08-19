@@ -139,7 +139,7 @@ def upload_knowledge_base(
     chunk_size: int = 1000,
     chunk_overlap: int = 100,
     top_k: int = 5,
-    kb_type: str = "local_folder",
+    kb_type: Optional[str] = None,
     description: Optional[str] = None,
     embedding_model: Optional[str] = None,
     rerank_model: Optional[str] = None,
@@ -161,10 +161,25 @@ def upload_knowledge_base(
     `rerank_model`/`query_expansion_model`. `embedding_model` is required
     when `kb_type` is `vector` or `hybrid` and ignored otherwise.
 
+    `kb_type is None` means "whatever shape this collection already has":
+    the shape group (`type`/`embedding_model`/`rerank_model`/
+    `query_expansion_model`) is inherited wholesale from an existing
+    record's config, and defaults to `local_folder` for a name that doesn't
+    exist yet. That is what the admin route sends -- it has no way to name a
+    shape -- so without the inheritance an operator re-uploading documents
+    for a `hybrid` collection would silently rebuild it as `local_folder`.
+    A caller that *does* pass `kb_type` names the whole group itself; the
+    org self-service route always does. `chunk_size`/`chunk_overlap`/`top_k`
+    are per-upload knobs both routes always send, so they are never
+    inherited.
+
     `description` is the customer's one sentence about what the documents
     cover. It is stored on the KB's config and becomes the agent tool's own
     description, so it is what tells a model which of an org's collections
-    answers a question; both routes cap it at 500 characters.
+    answers a question; both routes cap it at 500 characters. It is
+    inherited independently of the shape, since both routes send `None` for
+    "not given" and re-uploading documents shouldn't blank a description the
+    customer can see.
 
     This validates synchronously (name/size limits, `kb_type`, chunk params),
     writes the uploaded files to a fresh version directory, upserts the
@@ -214,6 +229,22 @@ def upload_knowledge_base(
                 detail=f"Total upload size exceeds the {max_total_size_bytes // (1024 * 1024)}MB limit",
             )
         contents[filename] = data
+
+    # Read-only, and deliberately outside the per-KB lock below: it only
+    # supplies defaults for what this call left unsaid, and the lock's own
+    # re-query is what the record is actually written from. Runs before the
+    # type validation, so an inherited type is validated like any other.
+    existing_config: Dict[str, Any] = {}
+    existing_record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if existing_record is not None:
+        existing_config = existing_record.config or {}
+    if kb_type is None:
+        kb_type = existing_config.get("type", "local_folder")
+        embedding_model = existing_config.get("embedding_model")
+        rerank_model = existing_config.get("rerank_model")
+        query_expansion_model = existing_config.get("query_expansion_model")
+    if description is None:
+        description = existing_config.get("description")
 
     if kb_type not in _KNOWLEDGE_BASE_TYPES:
         valid = ", ".join(sorted(_KNOWLEDGE_BASE_TYPES))
