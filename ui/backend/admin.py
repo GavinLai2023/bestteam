@@ -62,8 +62,17 @@ from .db.users import (
     set_admin_status,
     set_user_org,
 )
-from .db_session import SessionLocal
 from .env_check import check_environment, has_failures
+
+
+def _open_session():
+    # Late-bound on purpose: importing `db_session` creates the database
+    # file, its tables and the default rows, and `check-env` is advertised
+    # as running before any of that exists (and must not be the thing that
+    # creates it). Tests replace this name with an in-memory factory.
+    from .db_session import SessionLocal
+
+    return SessionLocal()
 
 
 def _prompt_password(parser: argparse.ArgumentParser, label: str = "Password") -> str:
@@ -165,8 +174,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "check-env":
-        # Deliberately before the database is opened: the checklist must run
-        # on a box whose database does not exist yet.
+        # Deliberately before the database is opened (`_open_session` is what
+        # imports `db_session`): the checklist must run on a box whose
+        # database does not exist yet, and leave it that way.
         findings = check_environment(os.environ)
         for finding in findings:
             print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
@@ -175,7 +185,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"{failures} failure(s), {warnings} warning(s)" if failures else f"no failures, {warnings} warning(s)")
         return 1 if has_failures(findings) else 0
 
-    with SessionLocal() as db:
+    with _open_session() as db:
         if args.command == "list":
             for user in db.query(User).filter_by(is_admin=True).order_by(User.username).all():
                 print(user.username)
