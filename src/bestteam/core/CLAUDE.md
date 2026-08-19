@@ -349,7 +349,12 @@ descendant chunk is emitted once as content at its own level instead, since
 its opening line is the only copy of its attributes and inline text (Codex
 review, P1). A parent's mixed-content tail -- rendered as a text line at the
 children's depth -- is its own section, never packed, prefixed or cited under
-the child it happens to follow (P2). Three more consequences worth knowing:
+the child it happens to follow (P2). The walk keeps its own stack rather than
+recursing, as the renderer does -- a valid document nests deeper than the
+Python call stack, and at a large `chunk_size` every level would otherwise
+cost a frame (round 2) -- and measures indents once, since re-stripping a
+deeply indented line at every level was quadratic. Three more consequences
+worth knowing:
 XML chunks get **no character overlap** (the path is the cross-chunk context,
 every split lands on a whole line, and a raw slice of the previous chunk
 would put a cut-open tag ahead of the path); a leaf too large for its path,

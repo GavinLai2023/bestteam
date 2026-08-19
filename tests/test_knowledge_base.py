@@ -1017,6 +1017,22 @@ def test_xml_parent_tail_text_stays_with_the_parent_not_the_preceding_child():
     assert "  <label>" not in tail_chunk.text.split("\n")
 
 
+def test_xml_chunking_survives_deeply_nested_documents():
+    # `_parse_xml_bytes` renders a 2,000-level document on purpose (an
+    # explicit stack, not recursion). A chunk size large enough for every
+    # opener to head a path must not turn that into a RecursionError here
+    # (Codex review, round 2).
+    from bestteam.tools.file_parser import parse_bytes
+
+    depth = 1500
+    text = parse_bytes(b"<a>" * depth + b"innermost" + b"</a>" * depth, "deep.xml")
+    chunks = _chunk_document("deep.xml", text, chunk_size=10000, chunk_overlap=0, suffix=".xml")
+
+    assert chunks
+    assert all(len(chunk.text) <= 10000 for chunk in chunks)
+    assert any("innermost" in chunk.text for chunk in chunks)
+
+
 def test_xml_ancestor_path_longer_than_chunk_size_degrades_to_plain_split():
     long_attr = "x" * 150
     text = (
