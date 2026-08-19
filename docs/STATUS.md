@@ -1529,6 +1529,76 @@
   hand (none is seeded) — without one the calls are recorded with a NULL
   `cost_estimate`. Reranking is a local cross-encoder, $0, and is deliberately
   not recorded.
+- **Reproducible Python installs** (beta gate G1 of the 2026-08-17
+  architecture review): `requirements.lock` is a `uv pip compile --universal`
+  constraints file over every extra CI and the Dockerfile install
+  (`ui,dev,tools,test,interview,providers-openai`); all five CI installs, the
+  pip cache key and the image build go through `-c requirements.lock`, so a
+  hot-fix rebuild during the beta gets the versions the last build ran on
+  rather than the day's newest. `langgraph`, `langchain-core`, `langchain` and
+  `langchain-openai` gained `<2` upper bounds (1.x is what was already
+  installed and passing). `pyproject.toml` keeps floating ranges on purpose:
+  `bestteam` is also a library. There is no `uv` in CI or the image -- the
+  lock is a plain pip constraints file, `uv` is needed only to regenerate it,
+  and `tests/test_packaging.py` is the drift guard (every declared dependency
+  pinned within its specifier; Dockerfile and CI install under the lock).
+  Not done: hash verification, `pip-audit`/Dependabot (Stage 1 of the same
+  review), and `tools-rerank` is outside the lock because nothing in CI or
+  the image installs it.
+- **Beta gate G2 — login throttling** (`ui/backend/login_rate_limit.py`):
+  a process-wide in-memory sliding window over *failed* logins, 5 per
+  lower-cased username and 20 per client address in 15 minutes; `POST
+  /api/auth/login` answers 429 + `Retry-After` **before** hashing (PBKDF2 is
+  0.76 s of CPU per attempt, so unthrottled guessing was a self-DoS as much as
+  a credential attack), one message whether the username exists or not; the
+  check reserves the attempt atomically (a concurrent burst cannot hash once
+  per pool thread), a success clears the username's failures and releases
+  the address's one slot, not its other failures. Behind a
+  reverse proxy the address is the proxy's unless `FORWARDED_ALLOW_IPS` names
+  it (`.env.example`, `docs/deployment.md`) -- the username key is why there
+  are two. `tests/conftest.py` installs a fresh limiter per test.
+- **Beta gate G3 — container/ops baseline**: the image runs as `app`
+  (uid 1000) with only `ui/backend/data` writable (a volume from the old
+  root image needs a one-off `chown`, documented); a `HEALTHCHECK` on
+  `/api/health`; `docker-entrypoint.sh` runs `alembic upgrade head` before
+  `uvicorn` and only before `uvicorn`, so the operator CLI's recovery commands
+  are never gated on the migration they recover from; compose has
+  `restart: unless-stopped` on both services, a 2 GB backend memory limit and
+  rotated json-file logs; the frontend nginx gained gzip, `nosniff`/`DENY`/
+  referrer headers and immutable caching for hashed assets (upload limits
+  belong on the operator's proxy: the browser talks to :8000 directly);
+  `.gitattributes` keeps `*.sh` LF; a cron line for `scripts/backup-db.sh` is
+  in `docs/deployment.md`. Pinned by `tests/test_packaging.py`.
+- **Beta gate G4 — logs and one error channel**: `main.py` calls
+  `logging.basicConfig` (`BESTTEAM_LOG_LEVEL`, default INFO, timestamped; a
+  no-op when the root already has handlers). `ui/backend/error_reporting.py`
+  wraps `sentry-sdk` (now in the `ui` extra) behind `BESTTEAM_SENTRY_DSN` with
+  `default_integrations=False`, no PII, no request bodies, no stack locals, no
+  tracing; exactly two call sites report -- the unhandled-request handler and
+  runtime's two failed-run paths (the workflow's own `run_failed`; the
+  worker-thread catch-all) -- ids and names only: a `before_send` hook drops
+  exception *messages* (a parser error quotes the model's output) and a
+  failed run's reason stays in its on-box trace. Both helpers no-op without a
+  DSN or the SDK and never raise; a blank `BESTTEAM_LOG_LEVEL` (as
+  `.env.example` ships it) means INFO. `tests/test_error_reporting.py`.
+- **Beta gate G5 — `docs/BETA_NOTES.md`**: the one-page "what to expect" for
+  a beta customer and their operator (one org/member/mailbox/team, drafts
+  never sent, caps and the shared four-run pool, M365 unverified, KB scope,
+  spend as an estimate, retention forever by default, no erasure by address,
+  what is and is not watched).
+- **Beta gate G6 — `admin check-env`** (`ui/backend/env_check.py`): the
+  launch checklist as a pure function over the environment, printed
+  `[FAIL]`/`[WARN]`/`[OK]` per variable, exit 1 on any FAIL, run before the
+  database is opened -- and without creating it: the CLI binds `db_session`
+  late (placeholder/missing signing key, secrets key missing/equal/not
+  Fernet, CORS wildcard/inexact, frontend base URLs, demo workflows on,
+  process-wide mailbox env, retention unset, error channel unset or a
+  malformed DSN, no trusted proxy). Table in `docs/deployment.md`, "Beta
+  launch checklist".
+- **Beta gate G7** is a runbook step, not code: an M365 beta customer needs
+  `docs/email-smoke-test.md` §9 walked against their live tenant before
+  go-live (still never done -- see Known issues). The checklist and
+  `BETA_NOTES.md` both point at it.
 
 ## In Progress
 
@@ -1827,6 +1897,14 @@
 
 ## Next steps / roadmap
 
+- **Beta launch gate** (architecture review 2026-08-17, Stage 0 -- ops and
+  hygiene only, no business-logic change): G1–G6 are done (see Done). G7 is
+  conditional and operator-run: a live Microsoft 365 tenant smoke test
+  (`docs/email-smoke-test.md` §9) before the first M365 customer. Stage 1 of
+  the same review (ruff/mypy, `pip-audit`/Dependabot, `/api/health` DB +
+  alembic-head check, `/metrics`, `_resolve_model` move, `STATUS.md` →
+  `CHANGELOG.md` split, frontend error boundary, unified settings) runs in
+  parallel with the beta.
 - **Deployment model — RESOLVED 2026-07-16:** the shared-hosted-platform
   question (raised 2026-07-15) was decided in favour of **org-scoped
   multi-tenancy, one codebase for both models** — see `DECISIONS.md`

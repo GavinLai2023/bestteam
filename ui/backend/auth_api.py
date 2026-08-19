@@ -14,7 +14,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -24,10 +24,15 @@ from .db.models import Organization, User
 from .db.orgs import get_org_by_name
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
+from .login_rate_limit import LoginRateLimiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# One limiter per process, consulted before any password is hashed. Tests
+# swap it for one with a fake clock (`tests/test_login_rate_limit.py`).
+_LOGIN_LIMITER = LoginRateLimiter()
 
 
 class LoginRequest(BaseModel):
@@ -41,10 +46,23 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    ip = request.client.host if request.client else None
+    retry_after = _LOGIN_LIMITER.reserve(req.username, ip)
+    if retry_after is not None:
+        # Same message whether the username exists or not, and raised before
+        # PBKDF2 runs -- see login_rate_limit.py for both halves of why. The
+        # admitted attempt is already counted as a failure; only success
+        # below takes that back.
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
     user = authenticate_user(db, req.username, req.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    _LOGIN_LIMITER.record_success(req.username, ip)
     # A deactivated org's member can't log in (full-suspend enforcement).
     # Platform operators/admins (org_id NULL) are never affected.
     if user.org_id is not None:

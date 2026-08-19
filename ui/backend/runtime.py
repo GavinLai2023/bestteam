@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session
 from bestteam import MemoryManager, SqliteBM25Memory, Workflow
 from bestteam.core.trace import TraceEvent
 
+from . import error_reporting
+
 from .automation_results import (
     CONFIRMED_DRAFT_OUTCOMES,
     RESULT_TYPE_BATCH_MARKER,
@@ -683,6 +685,18 @@ def run_in_background(
                     if message_id:
                         failed_tool_message_ids.add(message_id)
                 if event.type in ("run_completed", "run_failed"):
+                    if event.type == "run_failed":
+                        # The workflow failed without raising (a provider or
+                        # BestTeamError the SDK already turned into an event):
+                        # still worth an operator's attention. Ids only -- the
+                        # reason (`event.data`, an exception's text) can quote
+                        # a prompt or a model's output, and is in the run's
+                        # persisted trace on-box; see error_reporting.py.
+                        error_reporting.report_message(
+                            f"Run failed: {getattr(workflow, 'name', '')}",
+                            run_id=run_id,
+                            workflow=getattr(workflow, "name", ""),
+                        )
                     if run_row is not None:
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
                         run_row.output = event.data  # already redacted above for a PM-contract run
@@ -776,7 +790,7 @@ def run_in_background(
                     stream_iter.close()
                     _mark_cancelled()
                     break
-    except Exception:  # noqa: BLE001 -- any worker failure must still yield a terminal event
+    except Exception as exc:  # noqa: BLE001 -- any worker failure must still yield a terminal event
         # Workflow.stream() compiles before its own BestTeamError handler, so a
         # compile failure (e.g. an unsupported collaboration mode) escapes as an
         # exception rather than a run_failed event. Without this catch-all the
@@ -786,6 +800,7 @@ def run_in_background(
         # event was already published, so a post-completion failure (e.g. usage
         # recording) can't flip a completed run to failed.
         _logger.exception("Run %s failed on the worker thread", run_id)
+        error_reporting.report_exception(exc, run_id=run_id, workflow=getattr(workflow, "name", ""))
         if not terminal_seen:
             message = "The run failed due to an internal error."
             failed_event = TraceEvent(type="run_failed", workflow=getattr(workflow, "name", ""), data=message)

@@ -67,3 +67,126 @@ def test_python_dash_m_bestteam_entry_point():
     )
     assert result.returncode == 0, result.stderr
     assert "Usage" in result.stdout
+
+
+# --- G1: reproducible installs -------------------------------------------
+#
+# `requirements.lock` is a `uv pip compile --universal` constraints file over
+# every extra CI and the Dockerfile install. These three tests are the drift
+# guard: they run in the deterministic suite with no `uv` on the machine, and
+# fail when someone edits `pyproject.toml` without regenerating the lock, or
+# installs somewhere without it.
+
+_LOCKED_EXTRAS = ("ui", "dev", "tools", "test", "interview", "providers-openai")
+
+
+def _lock_text():
+    return (_ROOT / "requirements.lock").read_text(encoding="utf-8")
+
+
+def _pinned_versions():
+    """`{normalised name: {version, ...}}` -- a name can pin more than one
+    version under different environment markers (`--universal`)."""
+    from packaging.utils import canonicalize_name
+
+    pins = {}
+    for line in _lock_text().splitlines():
+        if not line or line.startswith(("#", " ", "-")):
+            continue
+        name, _, rest = line.partition("==")
+        version = rest.split(";", 1)[0].strip()
+        pins.setdefault(canonicalize_name(name), set()).add(version)
+    return pins
+
+
+def test_lockfile_was_compiled_over_the_extras_ci_and_docker_install():
+    header = _lock_text().splitlines()[1]
+    for extra in _LOCKED_EXTRAS:
+        assert f"--extra {extra}" in header, header
+    assert "--universal" in header, header
+
+
+def test_lockfile_pins_every_declared_dependency_within_its_specifier():
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    from packaging.version import Version
+
+    project = _pyproject()["project"]
+    declared = list(project["dependencies"])
+    for extra in _LOCKED_EXTRAS:
+        declared += project["optional-dependencies"][extra]
+    pins = _pinned_versions()
+    for spec in declared:
+        req = Requirement(spec)
+        versions = pins.get(canonicalize_name(req.name))
+        assert versions, f"{req.name} is declared but not in requirements.lock"
+        for version in versions:
+            assert req.specifier.contains(Version(version), prereleases=True), (
+                f"{req.name}=={version} in requirements.lock does not satisfy {spec}"
+            )
+
+
+def test_langgraph_and_langchain_have_upper_bounds():
+    from packaging.requirements import Requirement
+
+    project = _pyproject()["project"]
+    specs = {
+        Requirement(s).name: Requirement(s)
+        for s in project["dependencies"] + project["optional-dependencies"]["providers-openai"]
+    }
+    for name in ("langgraph", "langchain-core", "langchain", "langchain-openai"):
+        assert any(op.operator in ("<", "<=", "==", "~=") for op in specs[name].specifier), (
+            f"{name} has no upper bound: {specs[name]}"
+        )
+
+
+def test_dockerfile_and_ci_install_under_the_lockfile():
+    dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY pyproject.toml requirements.lock" in dockerfile
+    assert "-c requirements.lock" in dockerfile
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    installs = [line for line in ci.splitlines() if "pip install" in line]
+    assert installs
+    for line in installs:
+        assert "-c requirements.lock" in line, line
+    assert "cache-dependency-path: pyproject.toml" not in ci
+
+
+# --- G3: container / ops baseline ------------------------------------------
+
+
+def test_image_runs_unprivileged_with_a_healthcheck_and_migrating_entrypoint():
+    dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "useradd" in dockerfile
+    assert "\nUSER app\n" in dockerfile
+    # Only the data directory is handed to the unprivileged user: the volume
+    # mount point must exist in the image with that owner, or a fresh named
+    # volume is created root-owned and the first write fails.
+    assert "chown -R app:app ui/backend/data" in dockerfile
+    assert "HEALTHCHECK" in dockerfile and "/api/health" in dockerfile
+    assert 'ENTRYPOINT ["./docker-entrypoint.sh"]' in dockerfile
+    # The default command must stay `uvicorn ...`: that is the literal the
+    # entrypoint keys its migration step on.
+    assert 'CMD ["uvicorn"' in dockerfile
+
+
+def test_entrypoint_migrates_only_when_starting_the_server():
+    script = (_ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    assert "\r" not in script, "CRLF would break the shebang inside the container"
+    assert 'if [ "$1" = "uvicorn" ]' in script
+    assert "alembic upgrade head" in script
+    assert 'exec "$@"' in script
+    attrs = (_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.sh text eol=lf" in attrs
+    # Both files are checked by this test, so a change to either has to run
+    # it: the CI path filter is an allowlist.
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "- 'docker-entrypoint.sh'" in ci
+    assert "- '.gitattributes'" in ci
+
+
+def test_compose_restarts_and_bounds_the_services():
+    compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert compose.count("restart: unless-stopped") == 2
+    assert "memory: 2g" in compose
+    assert compose.count("max-size:") == 2

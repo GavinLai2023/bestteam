@@ -32,6 +32,11 @@ Run everything through the project venv (`./.venv/Scripts/python.exe` on
 Windows).
 
 ```powershell
+# Install / update the environment (the lockfile pins what CI and Docker use)
+.\.venv\Scripts\python.exe -m pip install -c requirements.lock -e ".[ui,dev,tools,test]"
+# After changing a dependency in pyproject.toml, regenerate the lockfile
+uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai -o requirements.lock
+
 # Tests
 .\.venv\Scripts\python.exe -m pytest
 
@@ -39,6 +44,9 @@ Windows).
 .\.venv\Scripts\python.exe -m bestteam init my_project
 .\.venv\Scripts\python.exe -m bestteam run workflow.yaml "some input"
 .\.venv\Scripts\python.exe -m bestteam graph workflow.yaml
+
+# Launch checklist for a deployment's environment (FAIL/WARN/OK per variable)
+.\.venv\Scripts\python.exe -m ui.backend.admin check-env
 
 # Monitoring dashboard — needs BOTH running simultaneously
 $env:BESTTEAM_SECRET_KEY = "dev-only-secret-change-me-for-real-use"

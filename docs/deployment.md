@@ -62,6 +62,46 @@ Edit `.env` and fill in:
 TLS termination (HTTPS/WSS) is assumed to be handled by a reverse proxy or
 the hosting platform's load balancer in front of these containers.
 
+**Login throttling and the client address.** `/api/auth/login` throttles
+failed attempts per username (5 in 15 minutes) and per client address (20 in
+15 minutes) and answers 429 with `Retry-After`. Uvicorn only substitutes the
+address from `X-Forwarded-For` for a proxy it trusts, so behind your reverse
+proxy set `FORWARDED_ALLOW_IPS` in `.env` to the proxy's address (or `*` if
+the backend port is reachable only from the proxy) -- otherwise every login
+appears to come from the proxy and the per-address budget is shared by all
+users. The per-username budget holds either way.
+
+### Beta launch checklist
+
+Before the first `docker compose up -d` for a beta organisation, run the
+checklist against the *actual* environment the backend will see:
+
+```bash
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+```
+
+It prints one line per variable and exits 1 on any `[FAIL]`. It only reads:
+run on a box with no database yet, it leaves it that way. What it holds you
+to, and why:
+
+| Item | Level | Why it is on the list |
+|------|-------|-----------------------|
+| `BESTTEAM_SECRET_KEY` set, not a placeholder | FAIL | The backend refuses to start otherwise; better to learn that here than from a crash loop. |
+| `BESTTEAM_SECRETS_KEY` set, a real Fernet key, **different** from the signing key | WARN if unset, FAIL if equal/invalid | Required the moment a mailbox is connected; reusing the signing key would make one leak two. |
+| `BESTTEAM_CORS_ORIGINS` exact origins, no `*`, no trailing slash | FAIL | A wildcard is refused; a wrong origin means the frontend cannot call the API at all. |
+| `VITE_API_BASE` / `VITE_WS_BASE` set, `https://` / `wss://` | FAIL if unset | Baked into the frontend image at build time — wrong values mean a rebuild. |
+| `BESTTEAM_DEMO_WORKFLOWS` **off** | FAIL | Every org user would otherwise see and run the shipped demo teams. |
+| `BESTTEAM_EMAIL_*` unset | WARN | Configures one process-wide mailbox; use per-org `admin set-email` instead. |
+| `BESTTEAM_RUN_RETENTION_DAYS` set (e.g. `90`) **before** creating the org | WARN | Otherwise the org keeps run history forever, and existing orgs are never retro-fitted. |
+| `BESTTEAM_SENTRY_DSN` set | WARN | Without it the container log is the only record of a failure. |
+| `BESTTEAM_SENTRY_DSN` a valid DSN | FAIL | A malformed one makes `sentry_sdk.init` raise at import -- a restart loop. |
+| `FORWARDED_ALLOW_IPS` set to your proxy | WARN | Otherwise the per-address login budget is shared by everyone behind the proxy. |
+
+Then, once the org exists: connect its mailbox with `--test`
+(§4c), and if it is on Microsoft 365, walk `docs/email-smoke-test.md` §9
+against the live tenant with the customer before go-live. Hand the customer
+`docs/BETA_NOTES.md`.
+
 ## 2. Build and start
 
 ```bash
@@ -69,30 +109,63 @@ docker compose build
 docker compose up -d
 ```
 
+The backend image installs under `requirements.lock`, so a rebuild -- a hot-fix
+during the beta included -- gets exactly the dependency versions the previous
+build ran on, not whatever was newest that day. Newer upstream versions arrive
+only through a deliberate lockfile update (README, "Updating the lockfile").
+
+What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
+
+- **Both services restart on their own** (`restart: unless-stopped`) after a
+  crash or a host reboot, and stay down only after an explicit
+  `docker compose stop`. The backend has a `HEALTHCHECK` on `/api/health`, so
+  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`.
+- **The backend runs as an unprivileged user** (`app`, uid 1000). Only the data
+  directory -- the SQLite database and knowledge-base uploads, the
+  `bestteam_data` volume -- is writable. A volume created by an *earlier*
+  root-running image is root-owned; before the first start on this image, run
+  once: `docker compose run --rm --no-deps --user root backend chown -R 1000:1000 /app/ui/backend/data`.
+- **The backend applies migrations on every start** (`docker-entrypoint.sh`
+  runs `alembic upgrade head` before `uvicorn`, and only before `uvicorn` --
+  `docker compose run backend python -m ui.backend.admin ...` runs as given, so
+  the recovery commands in section 3 are never gated on the migration they
+  recover from).
+- **Container logs are rotated** (json-file, 5 x 20 MB backend, 3 x 10 MB
+  frontend); see "Logs and error reporting" below for where to look and what
+  is reported.
+- The backend is capped at **2 GB of memory**; raise `deploy.resources.limits`
+  before enabling the local reranker.
+- **Upload size limits belong on your reverse proxy**, not the frontend nginx:
+  the browser talks to port 8000 directly, and a knowledge-base workbook or an
+  interview recording (up to 200 MB) has to fit through whatever fronts it.
+
 `docker compose` automatically loads `.env` from the project root to
 substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
 is separate from the backend's `env_file: .env`), so the values you set in
 step 1 are baked into the frontend image at build time.
 
-## 3. Apply database migrations
+## 3. Database migrations
+
+The backend container runs `alembic upgrade head` itself every time it starts
+(see section 2), so on a normal `docker compose up -d` -- first start or after
+pulling an update with a new file under `alembic/versions/` -- there is nothing
+to do. The command is still yours to run by hand when you want to migrate
+without starting the server, or to see a migration's output on its own:
 
 ```bash
-docker compose exec backend alembic upgrade head
+docker compose run --rm --no-deps backend alembic upgrade head
 ```
 
-Run this once after the first `docker compose up -d`, and again after
-pulling any update that includes a new file under `alembic/versions/`. This
-is the canonical way the database schema is created/updated going forward
+Migrations are the canonical way the schema is created/updated
 (replacing a bare `Base.metadata.create_all()`, which still runs
 automatically as a harmless no-op safety net on a brand-new database).
 
-**Run migrations promptly after an upgrade.** `create_all()` never adds a new
-index/constraint to a pre-existing table, so a security invariant introduced by
-a migration (currently: one member per org) isn't in force until
+**Why the entrypoint migrates before serving.** `create_all()` never adds a
+new index/constraint to a pre-existing table, so a security invariant
+introduced by a migration (currently: one member per org) isn't in force until
 `alembic upgrade head` runs. As a backstop the backend **refuses to start**
 (HTTP) while that invariant is violated — see the recovery procedure below —
-so the window can't be served through, but you still complete the upgrade by
-running the migration.
+so the window can't be served through either way.
 
 ### Recovering a legacy multi-member org
 
@@ -402,6 +475,38 @@ not run history) lives in the `bestteam_data` named volume, mounted at
 `/app/ui/backend/data` in the backend container. It survives
 `docker compose restart` / `docker compose down` (without `-v`).
 
+## Logs and error reporting
+
+**Where the logs are.** Both containers log to stdout, which Docker keeps as
+rotated json-file logs (backend 5 x 20 MB, frontend 3 x 10 MB -- about a week
+of an active beta at INFO). Read them with `docker compose logs -f backend`
+(add `--since 1h` / `--tail 500`); they survive a container restart but not
+`docker compose down -v` or a host rebuild, so if you need them longer, ship
+them with the log driver of your choice (`logging:` in `docker-compose.yml`)
+or a host agent that tails `/var/lib/docker/containers/*/*-json.log`. Every
+application record is `timestamp LEVEL logger: message`; `BESTTEAM_LOG_LEVEL`
+lowers or raises the floor (INFO by default). Uvicorn's own access log is
+separate and untouched.
+
+**One error channel, opt-in.** Set `BESTTEAM_SENTRY_DSN` (Sentry's free tier
+is enough for a beta; any Sentry-protocol collector such as GlitchTip works)
+and the backend reports exactly two kinds of event -- an *unhandled* request
+exception (the 500 the customer saw) and a *failed run* (the workflow's own
+failure or a crash on the worker thread) -- tagged with the run id, workflow
+name, method and route template (never a concrete path, whose parameter can
+be a share token). The exception's type and stack go; its *message* does
+not (a parser error quotes the model's output, an HTTP error the URL a tool
+fetched), and neither does a failed run's reason -- both are in the run's
+trace on the box, keyed by the run id in the report. Nothing else is
+captured: no ERROR-log mirroring, no request bodies, no stack-frame locals,
+no performance tracing, no user data (`send_default_pii` is off). This is
+deliberate -- the process handles customers' email and documents, and a
+report has to be safe to leave the box. A malformed DSN stops the backend at
+start-up (`check-env` flags it first). `BESTTEAM_ENVIRONMENT`
+(default `production`) and `BESTTEAM_RELEASE` label the events; unset the DSN
+to turn reporting off. `sentry-sdk` ships in the image; on a bare
+`pip install`, it is part of the `ui` extra.
+
 ## Backup and restore
 
 Back up the live database (safe to run while the backend is running):
@@ -411,6 +516,20 @@ Back up the live database (safe to run while the backend is running):
 # or with an explicit path:
 ./scripts/backup-db.sh /path/to/backups/bestteam-2026-06-17.db
 ```
+
+**Schedule it.** Nothing in the containers backs the database up on its own.
+On the Docker host, a nightly cron entry (adjust the paths; the script must
+run from the checkout so `docker compose` finds the project) is enough for the
+beta:
+
+```cron
+15 3 * * * cd /opt/bestteam && ./scripts/backup-db.sh /var/backups/bestteam/bestteam-$(date +\%F).db >> /var/log/bestteam-backup.log 2>&1
+```
+
+Prune old files with whatever you already use (`find /var/backups/bestteam
+-mtime +30 -delete` in the same crontab is the simplest), and copy the
+directory off the host — a backup on the disk that fails with the database is
+not a backup.
 
 **Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
 or secrets vault — NOT alongside the database dump). Stored mailbox passwords
@@ -436,6 +555,12 @@ To restore from a backup:
 2. Copy the backup file into the container, overwriting the live database:
    ```bash
    docker compose cp /path/to/backups/bestteam-2026-06-17.db backend:/app/ui/backend/data/bestteam.db
+   ```
+   `docker cp` writes the file as **root**, and the backend runs as uid 1000
+   -- it could read the restored database but not write to it (or migrate
+   it), so hand it back before starting:
+   ```bash
+   docker compose run --rm --no-deps --user root backend chown 1000:1000 /app/ui/backend/data/bestteam.db
    ```
 3. Restart the backend:
    ```bash

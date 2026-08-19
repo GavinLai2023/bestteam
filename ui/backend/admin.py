@@ -16,6 +16,7 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin set-email acme --host imap.gmail.com --user support@acme.com --test
     docker compose exec backend python -m ui.backend.admin set-email acme --auth microsoft-oauth --user support@acme.com --tenant <directory-id> --client-id <application-id>
     docker compose exec backend python -m ui.backend.admin clear-email acme
+    docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 `create-user --platform` creates a platform operator (no org); org members
 are created with `--org <name>` (default: the `default` org). Admin rights
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 from typing import Optional, Sequence
 
 from . import email_trigger
@@ -60,7 +62,17 @@ from .db.users import (
     set_admin_status,
     set_user_org,
 )
-from .db_session import SessionLocal
+from .env_check import check_environment, has_failures
+
+
+def _open_session():
+    # Late-bound on purpose: importing `db_session` creates the database
+    # file, its tables and the default rows, and `check-env` is advertised
+    # as running before any of that exists (and must not be the thing that
+    # creates it). Tests replace this name with an in-memory factory.
+    from .db_session import SessionLocal
+
+    return SessionLocal()
 
 
 def _prompt_password(parser: argparse.ArgumentParser, label: str = "Password") -> str:
@@ -153,9 +165,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     clear_email_p = sub.add_parser("clear-email", help="disconnect an org's mailbox")
     clear_email_p.add_argument("org", help="organization name")
 
+    sub.add_parser(
+        "check-env",
+        help="print the launch checklist for this process's environment "
+             "(FAIL/WARN/OK per variable); exit 1 on any FAIL. Reads only.",
+    )
+
     args = parser.parse_args(argv)
 
-    with SessionLocal() as db:
+    if args.command == "check-env":
+        # Deliberately before the database is opened (`_open_session` is what
+        # imports `db_session`): the checklist must run on a box whose
+        # database does not exist yet, and leave it that way.
+        findings = check_environment(os.environ)
+        for finding in findings:
+            print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
+        failures = sum(1 for f in findings if f.level == "FAIL")
+        warnings = sum(1 for f in findings if f.level == "WARN")
+        print(f"{failures} failure(s), {warnings} warning(s)" if failures else f"no failures, {warnings} warning(s)")
+        return 1 if has_failures(findings) else 0
+
+    with _open_session() as db:
         if args.command == "list":
             for user in db.query(User).filter_by(is_admin=True).order_by(User.username).all():
                 print(user.username)

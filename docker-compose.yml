@@ -2,10 +2,26 @@ services:
   backend:
     build: .
     env_file: .env
+    # An unattended poller: come back after a crash or a host reboot, but stay
+    # down after an explicit `docker compose stop`.
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - bestteam_data:/app/ui/backend/data
+    # Compose v2 honours these limits outside Swarm. 2 GB covers the SQLite
+    # backend plus four concurrent runs with in-memory knowledge bases; raise
+    # it before enabling the local reranker (`tools-rerank`), which loads a
+    # cross-encoder into the process.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   frontend:
     build:
@@ -13,10 +29,16 @@ services:
       args:
         VITE_API_BASE: ${VITE_API_BASE}
         VITE_WS_BASE: ${VITE_WS_BASE}
+    restart: unless-stopped
     ports:
       - "80:80"
     depends_on:
       - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   bestteam_data:

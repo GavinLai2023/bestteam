@@ -36,6 +36,7 @@ from bestteam.exceptions import BestTeamError
 from . import auth
 from . import automation_results
 from . import email_trigger
+from . import error_reporting
 from . import ingestion
 from . import interview
 from . import retention
@@ -309,14 +310,36 @@ app.include_router(share_chat_router)
 
 logger = logging.getLogger("bestteam.api")
 
+# Application logging (beta gate G4). uvicorn configures only its own loggers,
+# so without this every `bestteam.*` / `ui.backend.*` record below WARNING
+# was dropped and the rest went to stderr bare. `basicConfig` is a no-op when
+# the root logger already has handlers (pytest's capture, an operator's own
+# dictConfig), so this cannot override anything deliberate.
+logging.basicConfig(
+    # `or`, not a default: `.env.example` ships the variable blank and
+    # compose passes a blank through, and `basicConfig(level="")` raises.
+    level=(os.environ.get("BESTTEAM_LOG_LEVEL") or "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+if error_reporting.init_from_env():
+    logger.info("Error reporting is on (BESTTEAM_SENTRY_DSN set)")
+
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """Catch-all for anything not already turned into an HTTPException by a
     route handler (BestTeamError/ValidationError/KeyError/TypeError are
     handled inline and never reach here). Logs the full traceback
-    server-side and returns a generic, non-leaking 500 to the client."""
+    server-side, reports it (ids only -- see error_reporting.py) and
+    returns a generic, non-leaking 500 to the client."""
     logger.exception("Unhandled exception in %s %s", request.method, request.url.path)
+    # The matched route's *template* ("/api/share/{token}/messages"), never
+    # the concrete path: a path parameter can be a capability token, and the
+    # report leaves the box.
+    route = request.scope.get("route")
+    error_reporting.report_exception(
+        exc, method=request.method, path=getattr(route, "path", None) or "<unrouted>"
+    )
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 

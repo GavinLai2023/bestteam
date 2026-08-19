@@ -18,7 +18,7 @@ def session_local(monkeypatch):
     engine = make_engine(":memory:")
     init_db(engine)
     Session = session_factory(engine)
-    monkeypatch.setattr(admin_cli, "SessionLocal", Session)
+    monkeypatch.setattr(admin_cli, "_open_session", Session)
     return Session
 
 

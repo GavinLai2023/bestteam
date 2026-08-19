@@ -1412,6 +1412,25 @@ that KB permanently undeletable.
   module-level seeding likewise warns-and-skips on a pre-migration schema).
   `/api/health` and `/api/auth/*` stay public; the run stream WebSocket
   authenticates with a single-use `?ticket=` (see the runs section).
+  **`POST /login` is throttled** (`login_rate_limit.py`, beta gate G2): a
+  process-wide in-memory sliding window over *failed* attempts, 5 per
+  username (lower-cased) and 20 per client address in 15 minutes; a
+  throttled attempt gets 429 + `Retry-After` **before** PBKDF2 runs (the CPU
+  half of the defence -- 0.76 s per hash), with the same message whether the
+  username exists or not. The check *reserves*: `reserve()` counts the
+  attempt as a failure in the same locked step that admits it (a
+  check-then-record pair would let a concurrent burst -- the route runs in
+  the thread pool -- hash once per thread), and only `record_success()`
+  takes it back: it clears the username's failures and releases the one
+  slot the attempt took from the address, not the address's other failures.
+  Username keys are a SHA-256 digest (the request puts no bound on the
+  name's length and a key lives a whole window), and the expired-key sweep
+  runs when the dict has doubled since the last one (amortised O(1) per
+  attempt -- an unknown username never reaches PBKDF2, so keys can arrive
+  as fast as the per-address budget allows).
+  Behind a reverse proxy the address is the proxy's unless uvicorn
+  is told to trust it (`docs/deployment.md`), which is why the username key
+  exists. `tests/conftest.py` swaps in a fresh limiter per test.
 - **Model catalog** (`ui/backend/db/model_catalog.py` + `/api/config/model-catalog`
   CRUD in `crud.py`) — `to_prompt_text(entries)` renders the catalog for the
   Solution Architect's prompt. **`tier="embedding"` marks an entry as an
@@ -1676,6 +1695,33 @@ grammar on org/user names (`[A-Za-z0-9._-]`, ≤64, and not the `.`/`..`
 dot-segments proxies collapse), server-side, so a direct API call can't create an
 unmanageable or path-unaddressable record.
 Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
+
+## Logging and error reporting (beta gate G4)
+
+`main.py` calls `logging.basicConfig` at import (level `BESTTEAM_LOG_LEVEL`,
+default INFO, `timestamp LEVEL logger: message`) -- a no-op when the root
+logger already has handlers, so pytest's capture and an operator's own
+`dictConfig` win. `error_reporting.py` is the one off-box channel: opt-in by
+`BESTTEAM_SENTRY_DSN`, initialised with `default_integrations=False`,
+`send_default_pii=False`, `max_request_body_size="never"`,
+`include_local_variables=False`, no tracing, so the SDK adds **no** capture
+points of its own. Exactly two call sites: `main.unhandled_exception_handler`
+(`report_exception`, tags method + the matched route *template* --
+`/api/share/{token}/messages`, never the concrete path, whose parameter can
+be a capability token) and `runtime.py` -- the streaming
+loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, tags
+only; the reason is an exception's text and stays in the run's persisted
+trace) and the worker-thread catch-all (`report_exception`, tags
+run_id/workflow). A `before_send` hook (`_scrub_event`) drops every exception
+*message* from an event -- an output parser echoes the model's text, an HTTP
+error carries the URL a tool fetched -- keeping type, stack (no locals) and
+tags. Both helpers are no-ops without a DSN or without the SDK and never
+raise. Adding a third call site is a deliberate decision, not a convenience:
+the rule is ids and names, never content. `sentry-sdk` is in the `ui` extra;
+a malformed DSN makes `sentry_sdk.init` raise at import (the backend refuses
+to start), which `admin check-env` catches beforehand. `BESTTEAM_LOG_LEVEL`
+blank (as `.env.example` ships it) means INFO. Tests:
+`tests/test_error_reporting.py` (a fake `sentry_sdk` module in `sys.modules`).
 
 ## Known limitation: general-purpose cache
 

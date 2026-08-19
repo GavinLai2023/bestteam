@@ -83,6 +83,7 @@ never accept the password as an argument — so it never lands in shell history.
 | `set-email <org> --host <h> --user <u> [--port 993] [--drafts <folder>] [--test]` | Connect an org's IMAP mailbox for the email tools. Prompts for the password. `--test` verifies with a real login before saving. |
 | `clear-email <org>` | Disconnect an org's mailbox (also disables its autonomous email trigger). |
 | `backfill-memory-principals` | One-off, **opt-in** upgrade step: bind each current user's legacy NULL-principal memory rows to their principal so their existing memory keeps being recalled (§6). |
+| `check-env` | Print the launch checklist for the process's environment (`[FAIL]`/`[WARN]`/`[OK]` per variable) and exit 1 on any FAIL. Reads only; runs before the database is opened. See `docs/deployment.md`, "Beta launch checklist". |
 
 > **Note on visibility:** there is intentionally no "list all users" or "list org
 > members" command. `list` shows admins; `list-orgs` shows orgs. To see a
