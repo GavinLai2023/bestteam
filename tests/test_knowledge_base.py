@@ -6,6 +6,7 @@ import pytest
 
 from bestteam.core.knowledge_base import (
     LocalFolderKnowledgeBase,
+    _chunk_document,
     _chunk_text,
     _has_extractable_text,
     _load_document_chunks,
@@ -105,7 +106,7 @@ def test_chunk_text_overlap_never_exceeds_chunk_size():
     assert all(len(chunk) <= 50 for chunk in chunks)
 
 
-def test_chunk_text_xml_splits_on_top_level_element_boundaries():
+def test_xml_chunks_split_on_element_boundaries():
     text = (
         "[XML: catalog.xml]\n"
         "<catalog>\n"
@@ -113,24 +114,22 @@ def test_chunk_text_xml_splits_on_top_level_element_boundaries():
         '  <book id="bk102"> Gadgets Explained\n'
         '  <book id="bk103"> Gizmos Explained'
     )
-    chunks = _chunk_text(text, chunk_size=60, chunk_overlap=0, suffix=".xml")
+    chunks = _chunk_document("catalog.xml", text, chunk_size=60, chunk_overlap=0, suffix=".xml")
     assert len(chunks) > 1
     for chunk in chunks:
-        for line in chunk.splitlines():
+        assert len(chunk.text) <= 60
+        for line in chunk.text.splitlines():
             if line.strip():
                 assert line.lstrip().startswith("<") or line.startswith("[XML:")
 
 
-def test_chunk_text_xml_oversized_element_falls_back_without_cutting_words():
-    # A single top-level element too large to fit in one chunk on its own --
-    # the top-level-boundary regex can't help here (there's only one
-    # section), so this must fall back to _DEFAULT_SEPARATORS. That fallback
-    # can't preserve a "<tag>" prefix on every resulting line once it's
-    # forced down to word-level splitting (there's nothing left to attach a
-    # tag marker to), so the guarantee this test checks is the honest one:
-    # no word gets cut in half and no chunk exceeds chunk_size -- not "every
-    # line starts with a tag", which only holds when sections individually
-    # fit within chunk_size (see the previous test).
+def test_xml_oversized_leaf_falls_back_without_cutting_words():
+    # A single leaf element too large to fit in one chunk even under its
+    # ancestor path -- there is no deeper structure to split on, so this must
+    # fall back to _DEFAULT_SEPARATORS. That fallback can't preserve a "<tag>"
+    # prefix on every resulting line once it's forced down to word-level
+    # splitting, so the guarantee this test checks is the honest one: no word
+    # gets cut in half and no chunk exceeds chunk_size.
     long_title = " ".join(f"word{i}" for i in range(1, 30))
     text = (
         "[XML: catalog.xml]\n"
@@ -138,11 +137,11 @@ def test_chunk_text_xml_oversized_element_falls_back_without_cutting_words():
         '  <book id="bk101">\n'
         f"    <title> {long_title}"
     )
-    chunks = _chunk_text(text, chunk_size=50, chunk_overlap=0, suffix=".xml")
+    chunks = _chunk_document("catalog.xml", text, chunk_size=50, chunk_overlap=0, suffix=".xml")
     assert len(chunks) > 1
-    assert all(len(chunk) <= 50 for chunk in chunks)
-    reconstructed = " ".join(chunks).split()
-    assert reconstructed == text.split()
+    assert all(len(chunk.text) <= 50 for chunk in chunks)
+    words = set(" ".join(chunk.text for chunk in chunks).split())
+    assert {w for w in words if w.startswith("word")} == {f"word{i}" for i in range(1, 30)}
 
 
 # ---------------------------------------------------------------------------
@@ -849,10 +848,224 @@ def test_markdown_chunks_carry_section_heading():
     headings = [chunk.heading for chunk in chunks]
     assert "Refunds" in headings
     assert "Shipping" in headings
-    # Heading is a Markdown-only approximation -- nothing else claims one.
+    # Heading is an approximation only Markdown and XML claim -- plain text does not.
     assert all(chunk.heading is None for chunk in _chunk_document(
         "notes.txt", "## Refunds\nplain text", chunk_size=1000, chunk_overlap=0, suffix=".txt"
     ))
+
+
+# The parsed form of a small decision tree, exactly as `_parse_xml_bytes`
+# renders it: one element per line, two-space indent per level, an element's
+# own text after its tag.
+_FLOW_XML = (
+    "[XML: refund_flow.xml]\n"
+    '<process name="Refund handling">\n'
+    '  <step id="1"> Customer submits refund request\n'
+    '  <decision id="2" question="Is the order within 30 days?">\n'
+    '    <branch answer="Yes">\n'
+    '      <decision id="3" question="Is the item unopened?">\n'
+    '        <branch answer="Yes">\n'
+    '          <step id="4"> Full refund to original payment method\n'
+    '        <branch answer="No">\n'
+    '          <step id="5"> Offer store credit only (15% restocking fee)\n'
+    '    <branch answer="No">\n'
+    '      <step id="6"> Reject: outside refund window; escalate to supervisor\n'
+    '  <step id="7"> End'
+)
+
+
+def test_xml_document_that_fits_is_one_chunk_unchanged():
+    chunks = _chunk_document("refund_flow.xml", _FLOW_XML, chunk_size=1000, chunk_overlap=100, suffix=".xml")
+
+    assert [chunk.text for chunk in chunks] == [_FLOW_XML]
+    assert chunks[0].heading is None
+
+
+def test_xml_sub_chunks_repeat_their_ancestor_path():
+    chunks = _chunk_document("refund_flow.xml", _FLOW_XML, chunk_size=400, chunk_overlap=0, suffix=".xml")
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 400 for chunk in chunks)
+
+    # The "No" branch of decision 3 was split away from its decision; the
+    # chunk that carries it must still say which question it answers, and
+    # which outer branch it sits under -- the whole path, not just the parent.
+    store_credit = next(chunk for chunk in chunks if "store credit" in chunk.text)
+    lines = store_credit.text.splitlines()
+    assert lines[0] == '<process name="Refund handling">'
+    assert '  <decision id="2" question="Is the order within 30 days?">' in lines
+    assert '    <branch answer="Yes">' in lines
+    assert '      <decision id="3" question="Is the item unopened?">' in lines
+    # Ancestors come before the content they introduce, in document order.
+    assert lines.index('      <decision id="3" question="Is the item unopened?">') < lines.index(
+        '        <branch answer="No">'
+    )
+
+
+def test_xml_sub_chunks_never_cut_an_element_line():
+    chunks = _chunk_document("refund_flow.xml", _FLOW_XML, chunk_size=300, chunk_overlap=100, suffix=".xml")
+    assert len(chunks) > 1
+    original_lines = set(_FLOW_XML.splitlines())
+    for chunk in chunks:
+        for line in chunk.text.splitlines():
+            assert line in original_lines, f"line cut or altered: {line!r}"
+
+
+def test_xml_sub_chunk_heading_is_its_nearest_ancestor_element():
+    chunks = _chunk_document("refund_flow.xml", _FLOW_XML, chunk_size=300, chunk_overlap=0, suffix=".xml")
+
+    store_credit = next(chunk for chunk in chunks if "store credit" in chunk.text)
+    assert store_credit.heading == 'decision id="3" question="Is the item unopened?"'
+    assert all(chunk.heading is not None for chunk in chunks)
+    assert all(len(chunk.heading) <= 80 for chunk in chunks)
+
+
+def test_xml_splits_descend_below_the_top_level():
+    # One root, one depth-1 element, many depth-2 leaves: the only useful
+    # boundaries are two levels down. Every chunk must still be whole lines.
+    leaves = "".join(f'    <item id="{i}"> Leaf number {i} has a label\n' for i in range(40))
+    text = "[XML: deep.xml]\n<root>\n  <group name=\"all\">\n" + leaves.rstrip("\n")
+    chunks = _chunk_document("deep.xml", text, chunk_size=200, chunk_overlap=0, suffix=".xml")
+
+    assert len(chunks) > 3
+    original_lines = set(text.splitlines())
+    for chunk in chunks:
+        assert len(chunk.text) <= 200
+        lines = chunk.text.splitlines()
+        assert all(line in original_lines for line in lines)
+        assert lines[0] == "<root>" or lines[0].startswith("[XML:")
+        assert '  <group name="all">' in lines
+        assert chunk.heading == 'group name="all"'
+
+
+def test_xml_deep_path_is_capped_so_content_keeps_at_least_half_the_chunk():
+    # Six levels deep, the full path alone is ~270 characters: repeated whole,
+    # it would leave a 300-character chunk a few dozen characters of content
+    # and shred every leaf. Outermost ancestors are dropped first, the
+    # nearest ones kept, and no element line is ever cut.
+    text = (
+        "[XML: refund_flow.xml]\n"
+        '<process name="Refund handling">\n'
+        '  <decision id="2" question="Is the order within 30 days?">\n'
+        '    <branch answer="Yes">\n'
+        '      <decision id="3" question="Is the item unopened?">\n'
+        '        <branch answer="Yes">\n'
+        '          <decision id="4" question="Amount greater than $500?">\n'
+        '            <branch answer="Yes">\n'
+        '              <step id="5"> Manager approval required before refund is issued\n'
+        '              <step id="6"> Full refund to original payment method\n'
+        '            <branch answer="No">\n'
+        '              <step id="7"> Full refund to original payment method\n'
+        '        <branch answer="No">\n'
+        '          <step id="8"> Offer store credit only (15% restocking fee)\n'
+        '    <branch answer="No">\n'
+        '      <step id="9"> Reject: outside refund window\n'
+        '  <step id="10"> End'
+    )
+    chunks = _chunk_document("refund_flow.xml", text, chunk_size=300, chunk_overlap=0, suffix=".xml")
+
+    original_lines = set(text.splitlines())
+    for chunk in chunks:
+        assert len(chunk.text) <= 300
+        for line in chunk.text.splitlines():
+            assert line in original_lines, f"line cut or altered: {line!r}"
+    approval = next(chunk for chunk in chunks if "Manager approval" in chunk.text)
+    lines = approval.text.splitlines()
+    # The nearest ancestors survive even though the root had to go.
+    assert '          <decision id="4" question="Amount greater than $500?">' in lines
+    assert '            <branch answer="Yes">' in lines
+    assert approval.heading in (
+        'decision id="4" question="Amount greater than $500?"',
+        'branch answer="Yes"',
+    )
+
+
+def test_xml_ancestor_dropped_from_the_path_is_still_indexed_as_content():
+    # A narrow, deep tree: the root's own text is on its opening line and
+    # nowhere else. Its descendants' path is too long to keep the root, so
+    # the root must be emitted as content in its own right, or a search for
+    # "IMPORTANT ROOT TEXT" finds nothing (Codex review, P1).
+    root = "<root> IMPORTANT ROOT TEXT about widgets"
+    leaves = "".join(f'        <leaf id="{i}"> Leaf number {i} has a label\n' for i in range(12))
+    text = "[XML: deep.xml]\n" + root + "\n  <a>\n    <b>\n      <c>\n" + leaves.rstrip("\n")
+    chunks = _chunk_document("deep.xml", text, chunk_size=120, chunk_overlap=0, suffix=".xml")
+
+    assert all(len(chunk.text) <= 120 for chunk in chunks)
+    assert any(root in chunk.text.split("\n") for chunk in chunks)
+    # And the cap still holds: no leaf chunk carries the root.
+    leaf_chunks = [chunk for chunk in chunks if "Leaf number" in chunk.text]
+    assert leaf_chunks and all(root not in chunk.text for chunk in leaf_chunks)
+
+
+def test_xml_parent_tail_text_stays_with_the_parent_not_the_preceding_child():
+    # Mixed content: `<root><label>…</label>root description<note/></root>`.
+    # The renderer puts the tail at the child's depth as a text line; it is
+    # the root's text, and must not be packed, prefixed or cited under
+    # `<label>` just because it follows it (Codex review, P2).
+    items = "".join(f'    <item id="{i}"> Item number {i} with some words\n' for i in range(10))
+    text = (
+        "[XML: mixed.xml]\n"
+        "<root>\n"
+        "  <label>\n"
+        + items
+        + "  root description after the label\n"
+        "  <note> trailing note"
+    )
+    chunks = _chunk_document("mixed.xml", text, chunk_size=200, chunk_overlap=0, suffix=".xml")
+
+    tail_chunk = next(chunk for chunk in chunks if "root description after the label" in chunk.text)
+    assert tail_chunk.heading == "root"
+    assert "  <label>" not in tail_chunk.text.split("\n")
+
+
+def test_xml_chunking_survives_deeply_nested_documents():
+    # `_parse_xml_bytes` renders a 2,000-level document on purpose (an
+    # explicit stack, not recursion). A chunk size large enough for every
+    # opener to head a path must not turn that into a RecursionError here
+    # (Codex review, round 2).
+    from bestteam.tools.file_parser import parse_bytes
+
+    depth = 1500
+    text = parse_bytes(b"<a>" * depth + b"innermost" + b"</a>" * depth, "deep.xml")
+    chunks = _chunk_document("deep.xml", text, chunk_size=10000, chunk_overlap=0, suffix=".xml")
+
+    assert chunks
+    assert all(len(chunk.text) <= 10000 for chunk in chunks)
+    assert any("innermost" in chunk.text for chunk in chunks)
+
+
+def test_xml_ancestor_path_longer_than_chunk_size_degrades_to_plain_split():
+    long_attr = "x" * 150
+    text = (
+        "[XML: wide.xml]\n"
+        f'<root note="{long_attr}">\n'
+        + "".join(f'  <item id="{i}"> Leaf {i}\n' for i in range(20)).rstrip("\n")
+    )
+    chunks = _chunk_document("wide.xml", text, chunk_size=120, chunk_overlap=0, suffix=".xml")
+
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 120 for chunk in chunks)
+    assert any("Leaf 19" in chunk.text for chunk in chunks)
+
+
+def test_knowledge_base_xml_tree_query_returns_branch_with_its_question(tmp_path):
+    (tmp_path / "refund_flow.xml").write_text(
+        '<process name="Refund handling">'
+        '<decision id="2" question="Is the order within 30 days?">'
+        '<branch answer="Yes">'
+        '<decision id="3" question="Is the item unopened?">'
+        '<branch answer="Yes"><step id="4">Full refund to original payment method</step></branch>'
+        '<branch answer="No"><step id="5">Offer store credit only (15% restocking fee)</step></branch>'
+        "</decision></branch>"
+        '<branch answer="No"><step id="6">Reject: outside refund window; escalate to supervisor</step></branch>'
+        "</decision></process>",
+        encoding="utf-8",
+    )
+    kb = LocalFolderKnowledgeBase("flows", tmp_path, chunk_size=300, chunk_overlap=0, top_k=1)
+
+    result = kb.query("store credit restocking fee")
+    assert "store credit" in result
+    assert "Is the item unopened?" in result
+    assert '[source: refund_flow.xml § decision id="3" question="Is the item unopened?"]' in result
 
 
 def test_format_results_unchanged_without_metadata():

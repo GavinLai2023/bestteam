@@ -4,8 +4,9 @@ import logging
 import re
 import warnings
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, NamedTuple, Optional
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
@@ -277,8 +278,6 @@ _DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
 
 _MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", "。", "！", "？", ". ", " ", ""]
 
-_XML_TOP_LEVEL_BOUNDARY = re.compile(r"(?=\n  <)")
-
 # Separators that mark the START of the content they introduce (a heading
 # line) rather than the END of what precedes them (like sentence-terminating
 # punctuation) -- these get reattached as a prefix on the following piece;
@@ -380,11 +379,7 @@ def _split_pieces(text: str, chunk_size: int, suffix: str = "") -> List[str]:
     text = text.strip()
     if not text:
         return []
-    if suffix == ".xml":
-        sections = _XML_TOP_LEVEL_BOUNDARY.split(text)
-        pieces = _pack_pieces(sections, chunk_size, _DEFAULT_SEPARATORS)
-    else:
-        pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
+    pieces = _recursive_split(text, _separators_for_suffix(suffix), chunk_size)
     return [p for p in pieces if p.strip()]
 
 
@@ -522,6 +517,189 @@ def _chunk_tabular_document(
     return chunks
 
 
+# The XML renderer (`tools/file_parser.py::_render_xml_tree`) emits one line
+# per element -- `<tag attr="v"> text`, indented two spaces per level -- and a
+# child's tail text as a line at the child's own depth. Indentation is
+# therefore the element tree, and that is what the XML chunker reads.
+def _xml_heading(element_line: str) -> str:
+    """`<decision id="3" question="...">` -> `decision id="3" question="..."`.
+
+    Attribute values are `quoteattr`-escaped by the renderer, so the first
+    `>` is the end of the tag and nothing inside an attribute can fake it.
+    """
+    stripped = element_line.strip()
+    end = stripped.find(">")
+    inner = stripped[1:end] if end != -1 else stripped[1:]
+    return inner[:_MAX_HEADING_CHARS]
+
+
+def _xml_sections(
+    indents: List[int], is_element: List[bool], start: int, end: int
+) -> List[Tuple[int, int]]:
+    """Group the items directly under one parent, as `[start, end)` line
+    ranges: each section opens at a line at the shallowest depth present --
+    a child element, which runs to the next item and owns everything deeper,
+    or a line of the parent's own mixed-content text, which the renderer
+    emits at the children's depth. The text line is its own section, not the
+    tail of the child before it: it belongs to the parent, and must not be
+    packed, prefixed or cited under that child's subtree."""
+    level = min((indents[i] for i in range(start, end) if is_element[i]), default=None)
+    if level is None:
+        return [(start, end)]
+    sections: List[Tuple[int, int]] = []
+    section_start = start
+    for i in range(start + 1, end):
+        if indents[i] == level:
+            sections.append((section_start, i))
+            section_start = i
+    sections.append((section_start, end))
+    return sections
+
+
+def _xml_path_prefix(ancestors: List[str], chunk_size: int) -> Tuple[str, int]:
+    """The ancestor lines repeated at the top of a chunk, and how many of
+    them were kept. Nearest first to be kept: the path is capped at half of
+    `chunk_size`, outermost ancestors dropped first, so content always has
+    at least half the chunk. Without the cap a six-level path in a small
+    chunk left a few dozen characters for the leaves and shredded every one
+    of them.
+    """
+    kept: List[str] = []
+    total = 0
+    for line in reversed(ancestors):
+        total += len(line) + 1
+        if total > chunk_size // 2:
+            break
+        kept.append(line)
+    return "".join(line + "\n" for line in reversed(kept)), len(kept)
+
+
+@dataclass
+class _XmlLevel:
+    """One level of the walk in `_xml_pieces`: the items directly under one
+    parent, the path repeated above each chunk cut here, and the packing
+    state. `kept` is how many of the innermost ancestors that path holds."""
+
+    sections: List[Tuple[int, int]]
+    prefix: str
+    kept: int
+    heading: Optional[str]
+    next_index: int = 0
+    current: str = ""
+
+
+def _xml_pieces(lines: List[str], chunk_size: int) -> List[Tuple[str, Optional[str]]]:
+    """Pack a rendered XML body into chunks of at most `chunk_size`,
+    repeating the ancestor path at the top of every chunk.
+
+    Sibling subtrees are packed greedily. A subtree too large to fit under
+    its ancestors is opened up: its own element line joins the ancestor path
+    and its children are packed one level down -- so a branch cut away from
+    its decision still carries the decision, and the decisions above it, at
+    the top of its chunk. A subtree with nothing deeper to split on (one
+    oversized leaf), or whose own opening line is too long to be part of a
+    path, falls back to the generic separators under the current path.
+
+    The walk keeps its own stack rather than recursing, for the same reason
+    the renderer does: a valid document can nest deeper than the Python
+    call stack, and a chunk size large enough for every opener to head a
+    path would otherwise descend one frame per level. Sections are line
+    ranges, indents are measured once, and lengths are summed rather than
+    joined until a body is actually cut -- re-reading the rest of a deep
+    document at every level is quadratic.
+    """
+    indents = [len(line) - len(line.lstrip(" ")) for line in lines]
+    is_element = [line.startswith("<", indent) for line, indent in zip(lines, indents)]
+    pieces: List[Tuple[str, Optional[str]]] = []
+    ancestors: List[str] = []
+    # Per ancestor: has some chunk been cut with it in the repeated path? An
+    # opener's attributes and inline text exist on that one line, and deeper
+    # paths may be capped past it in every descendant chunk; one that was
+    # never repeated is emitted as content at its own level when its subtree
+    # is closed, packed with the siblings that follow.
+    repeated: List[bool] = []
+    half = chunk_size // 2
+
+    def open_level(start: int, end: int) -> _XmlLevel:
+        prefix, kept = _xml_path_prefix(ancestors, chunk_size)
+        heading = _xml_heading(ancestors[-1]) if ancestors else None
+        return _XmlLevel(_xml_sections(indents, is_element, start, end), prefix, kept, heading)
+
+    def cut(level: _XmlLevel, body: str) -> None:
+        pieces.append((level.prefix + body, level.heading))
+        for i in range(len(ancestors) - level.kept, len(ancestors)):
+            repeated[i] = True
+
+    stack = [open_level(0, len(lines))]
+    while stack:
+        level = stack[-1]
+        budget = chunk_size - len(level.prefix)
+        if level.next_index == len(level.sections):
+            if level.current:
+                cut(level, level.current)
+            stack.pop()
+            if ancestors:
+                opener = ancestors.pop()
+                if not repeated.pop():
+                    # The parent's `current` is empty: it was cut before
+                    # this subtree was opened.
+                    stack[-1].current = opener
+            continue
+        start, end = level.sections[level.next_index]
+        level.next_index += 1
+        body_len = sum(len(lines[i]) + 1 for i in range(start, end)) - 1
+        if level.current and len(level.current) + 1 + body_len <= budget:
+            level.current += "\n" + "\n".join(lines[start:end])
+            continue
+        if level.current:
+            cut(level, level.current)
+            level.current = ""
+        if body_len <= budget:
+            level.current = "\n".join(lines[start:end])
+            continue
+        opener = lines[start]
+        # Descend only when the opener can head its children's path -- the
+        # same cap `_xml_path_prefix` applies -- so a subtree is never split
+        # into chunks that no longer say which element they belong to.
+        if end - start > 1 and is_element[start] and len(opener) + 1 <= half:
+            ancestors.append(opener)
+            repeated.append(False)
+            stack.append(open_level(start + 1, end))
+            continue
+        for piece in _recursive_split("\n".join(lines[start:end]), _DEFAULT_SEPARATORS, budget):
+            if piece.strip():
+                cut(level, piece)
+    return pieces
+
+
+def _chunk_xml_document(source: str, text: str, chunk_size: int) -> List[_Chunk]:
+    """Chunk a rendered XML document along its element tree.
+
+    A flowchart or decision tree exported as nested XML is only readable
+    with its ancestry: `<branch answer="No">` means nothing without the
+    question it answers and the branches above that. So every chunk repeats
+    the element lines on the path from the root to its content -- the XML
+    counterpart of the repeated sheet marker and header row in
+    `_chunk_table_block` -- capped at half the chunk with the outermost
+    dropped first, and cites the nearest one as its `heading`.
+
+    There is no character overlap between XML chunks: the repeated path is
+    the cross-chunk context, every split lands on a whole line, and a raw
+    slice of the previous chunk would put a cut-open tag ahead of the path.
+    The `[XML: name]` header line rides on the first chunk when there is
+    room; it carries nothing the citation does not already say.
+    """
+    lines = text.strip().split("\n")
+    header = lines[0] if lines and lines[0].startswith("[XML:") else None
+    body = lines[1:] if header else lines
+    if not any(line.strip() for line in body):
+        return []
+    pieces = _xml_pieces(body, chunk_size)
+    if header and len(header) + 1 + len(pieces[0][0]) <= chunk_size:
+        pieces[0] = (header + "\n" + pieces[0][0], pieces[0][1])
+    return [_Chunk(source=source, text=piece, heading=heading) for piece, heading in pieces]
+
+
 def _chunk_document(
     source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
 ) -> List[_Chunk]:
@@ -535,8 +713,10 @@ def _chunk_document(
     context. A `.xlsx`/`.xlsm`/`.docx` goes to `_chunk_tabular_document`,
     which splits on the parser's own `[Sheet: …]`/`[Table N]` markers and
     repeats the marker and header row in every chunk of an over-long block.
-    Every other format is chunked exactly as before; `.md` chunks
-    additionally carry the section heading they open under.
+    An `.xml` goes to `_chunk_xml_document`, which splits along the element
+    tree and repeats the ancestor path at the top of every chunk. Every
+    other format is chunked exactly as before; `.md` chunks additionally
+    carry the section heading they open under.
     """
     if suffix == ".pdf":
         chunks: List[_Chunk] = []
@@ -549,6 +729,9 @@ def _chunk_document(
 
     if suffix in _TABULAR_SUFFIXES:
         return _chunk_tabular_document(source, text, chunk_size, chunk_overlap, suffix)
+
+    if suffix == ".xml":
+        return _chunk_xml_document(source, text, chunk_size)
 
     pieces = _split_pieces(text, chunk_size, suffix)
     headings = _headings_for(pieces) if suffix == ".md" else [None] * len(pieces)

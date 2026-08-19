@@ -64,10 +64,11 @@ raises a `ConfigurationError` at load time.
 
 Chunking is **format-aware, not a fixed character slice**: `_chunk_text`
 (shared by all three KB types) splits on the document's own structure —
-Markdown heading boundaries, XML element boundaries, and a generic
-paragraph/sentence/word fallback (with CJK sentence terminators `。！？`) —
-before falling back to a raw slice, so related content tends to stay
-together in one chunk instead of being cut mid-paragraph or mid-element.
+Markdown heading boundaries and a generic paragraph/sentence/word fallback
+(with CJK sentence terminators `。！？`) — before falling back to a raw
+slice, so related content tends to stay together in one chunk instead of
+being cut mid-paragraph; XML is chunked along its element tree (see "XML
+`heading`" below).
 `chunk_size` is still enforced as a hard ceiling either way. This is
 still single-level (not "small-to-big" hierarchical/parent-child)
 chunking — see "Known limitations" below.
@@ -114,6 +115,40 @@ from (see "Citations", below):
   `vector`/`hybrid` collection embeds (and pays for) more chunks than before,
   and repeating the header row in every chunk of a long sheet makes the column
   names common across the corpus, slightly diluting their BM25 IDF.
+- **XML `heading`, plus a repeated ancestor path.** An `.xml` is chunked
+  along its element tree, read off the parser's own rendering (one line per
+  element, two spaces of indent per level). Sibling subtrees are packed
+  together while they fit; a subtree too large for one chunk is opened up one
+  level, and **the element lines on the path from the root down to the
+  chunk's content are repeated at the top of every chunk** — the XML
+  counterpart of the repeated sheet marker and header row. This is what makes
+  a flowchart or decision tree exported as nested XML usable: a
+  `<branch answer="No">` cut away from its decision still arrives with
+  `<decision question="Is the item unopened?">`, and with every branch and
+  decision above that, so the agent reads the branch in context rather than
+  as an orphan. The nearest ancestor becomes the chunk's `heading` — the
+  `tag attr="…"` part of its line, capped at 80 characters — so the chunk
+  cites `refund_flow.xml § decision id="3" question="Is the item unopened?"`.
+  The repeated path is capped at half of `chunk_size` — outermost ancestors
+  dropped first, so content always keeps at least half the chunk — and an
+  ancestor that every descendant chunk had to drop is emitted once as content
+  at its own level, since its opening line is the only copy of its attributes
+  and inline text. A parent's own mixed-content text (`<root><label>…</label>
+  root description</root>`) stays with the parent, never packed or cited under
+  the child it happens to follow. Three caveats. XML chunks carry **no
+  character overlap**: the repeated path is the cross-chunk context, every
+  split lands on a whole line, and a raw slice of the previous chunk would put
+  a cut-open tag ahead of the path. A single leaf too large for its path, or
+  an element whose opening line is too long to head a path at all, falls back
+  to the ordinary paragraph/sentence/word split under whatever path did fit.
+  And the tree that is repeated is the *nesting*: a diagram
+  tool that exports nodes and edges as a flat list (draw.io's `<mxCell
+  source="3" target="7">`) has its branches in id references, which nothing
+  here reconstructs — export such diagrams as nested XML, or as a text
+  outline, instead. A document that fits one chunk is byte-for-byte what it
+  was. Practical advice for flowcharts: one flow per file, attribute names
+  that carry meaning (`question=`, `answer=`), and a `chunk_size` large enough
+  that a whole branch usually fits under its path.
 
 Every other format supplies neither, and such a chunk cites its filename
 alone.
@@ -861,10 +896,10 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   enough for a person to find the passage — but there is no chunk id in the
   tag, no click-through to the document, and no "which version of which page"
   audit trail: a re-upload replaces a collection's chunks wholesale, so a
-  citation names a location in *today's* documents. `.xml` and plain text
-  still cite their filename alone, and both the Markdown heading and the
-  spreadsheet/table one are approximations — see "Chunk location metadata"
-  above.
+  citation names a location in *today's* documents. Plain text still cites
+  its filename alone, and the Markdown heading, the spreadsheet/table one and
+  the XML ancestor one are all approximations — see "Chunk location
+  metadata" above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose
   Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,
