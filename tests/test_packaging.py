@@ -190,3 +190,7 @@ def test_compose_restarts_and_bounds_the_services():
     assert compose.count("restart: unless-stopped") == 2
     assert "memory: 2g" in compose
     assert compose.count("max-size:") == 2
+    # The backend image declares a HEALTHCHECK; the frontend should wait on it
+    # rather than on the container merely having started, so an operator who
+    # opens port 80 right after `up -d` finds a backend that answers.
+    assert "condition: service_healthy" in compose
