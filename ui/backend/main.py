@@ -165,8 +165,12 @@ async def _lifespan(_app):
                 )
             # Same reasoning for runs: the run executor is per-process too, so
             # a row still `running` now was orphaned by the last shutdown and
-            # would otherwise show as running forever (beta B1).
-            orphaned = runtime.fail_interrupted_runs(session.get_bind())
+            # would otherwise show as running forever; the inbox events it had
+            # claimed are handed back the way the stale-run watchdog does it
+            # (beta B1).
+            orphaned = runtime.fail_interrupted_runs(
+                session.get_bind(), max_event_attempts=email_trigger.max_event_attempts()
+            )
             if orphaned:
                 logger.warning(
                     "Marked %s interrupted run(s) as failed on startup", orphaned,
@@ -570,11 +574,14 @@ def _get_workflow(
 def health():
     """Liveness + a database ping. The container HEALTHCHECK polls this, so
     a process that cannot reach its database (missing/unmounted volume, a
-    corrupt file) must report 503 rather than a constant "ok" -- otherwise
-    Docker keeps a dead backend alive (beta B2). Deliberately no Alembic
-    head comparison here: a migrating-but-healthy process must not be
-    restarted mid-migration; that check belongs in `admin check-env` or a
-    later `/metrics`."""
+    corrupt file) must report 503 rather than a constant "ok" -- that is what
+    makes `docker compose ps` show `unhealthy` and what the frontend's
+    `depends_on: service_healthy` waits on (beta B2). Note that plain Docker
+    does not restart an unhealthy container (only Swarm or an autoheal
+    sidecar does); the gain is visibility, not self-healing. Deliberately no
+    Alembic head comparison here: a process mid-migration is healthy and
+    must not be marked otherwise for being behind; that check belongs in
+    `admin check-env` or a later `/metrics`."""
     try:
         with SessionLocal() as db:
             db.execute(sa_text("SELECT 1"))

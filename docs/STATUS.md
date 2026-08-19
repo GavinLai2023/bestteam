@@ -1639,12 +1639,21 @@
   blocked by the one writer (`busy_timeout` needed nothing -- pysqlite's
   default is already 5 s). Tests: `tests/test_startup_run_sweep.py`,
   `tests/test_health.py`, `tests/test_database.py`, `ErrorBoundary.test.tsx`,
-  and `tests/test_packaging.py` for the compose/scripts contracts. Not done
-  here and deliberately so: a terminal trace event or inbox-ledger release
-  for swept runs (see Known issues), an Alembic-head check in `/api/health`
-  (a mid-migration process must not be restarted for being behind), and a
-  Docker restore rehearsal (no Docker on the workstation -- an operator step
-  called out in `docs/deployment.md`).
+  and `tests/test_packaging.py` for the compose/scripts contracts. A review
+  pass then made the sweep give a dead run the same treatment
+  `_release_stale_run` gives a hung one -- `release_events` hands its claimed
+  inbox events back (or dead-letters the exhausted ones) and
+  `normalize_run_result` runs, so the next poll reprocesses the batch instead
+  of leaving it `claimed` forever -- fixed `restore.sh` staging the files
+  archive in a container `/tmp` that a `docker compose run` container never
+  sees, made `backup-files.sh` treat GNU tar's exit 1 ("file changed as we
+  read it") as the success it is, and corrected the claim that an unhealthy
+  container is restarted (plain Docker only restarts an exited process; the
+  health status is visibility plus the frontend's `service_healthy` gate).
+  Not done here and deliberately so: a terminal trace event for swept runs,
+  an Alembic-head check in `/api/health` (a mid-migration process is
+  healthy), and a Docker restore rehearsal (no Docker on the workstation --
+  an operator step called out in `docs/deployment.md`).
 
 ## In Progress
 
@@ -1915,11 +1924,13 @@
   from `_lifespan` beside `ingestion.fail_interrupted_jobs`): each becomes
   `failed` with a fixed "interrupted by a server restart" output, so the
   Activity page no longer shows it running forever and a triggered run's
-  Retry path becomes available. What the sweep deliberately does **not** do:
-  write a terminal trace event, release the `inbox_events` the run had
-  claimed, or normalise `automation_item_results` for its batch — those
-  messages stay `claimed` until a human retries the run (the existing
-  reconciliation gap, see the autonomous-trigger residuals below).
+  Retry path becomes available. A triggered run's claimed `inbox_events` are
+  handed back by the same `release_events` the stale-run watchdog uses (or
+  dead-lettered once out of attempts), and `normalize_run_result` runs for a
+  declared maintenance batch — so the next poll reprocesses the messages,
+  with duplicate drafts guarded at APPEND by the per-source-key Drafts check.
+  What the sweep still does **not** do: write a terminal trace event (the
+  run's persisted trace simply ends; `runs.output` carries the reason).
 - **Autonomous trigger residuals:** `asyncio.to_thread` poll cycles aren't
   awaited on shutdown, so a mailbox check/commit/dispatch already in flight
   can keep running briefly after the ASGI shutdown handler returns; a process
@@ -1952,9 +1963,9 @@
   hygiene only, no business-logic change): G1–G6 are done (see Done), as is
   the 2026-08-19 re-review's pre-launch hardening (B1–B5, B8 -- see Done).
   G7 is conditional and operator-run: a live Microsoft 365 tenant smoke test
-  (`docs/email-smoke-test.md` §9) before the first M365 customer. Still
-  open before freeze: decide whether PR #69 (XML tree-aware chunking) ships
-  in the beta build, rehearse `scripts/restore.sh` once against a throwaway
+  (`docs/email-smoke-test.md` §9) before the first M365 customer. XML
+  tree-aware chunking (PR #69) is merged and in the beta build. Still open
+  before freeze: rehearse `scripts/restore.sh` once against a throwaway
   stack, then freeze and name the beta build from a green `main` run of
   `backend-full`/`e2e-full`. Stage 1 of the review (ruff/mypy,
   `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,

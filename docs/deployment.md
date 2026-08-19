@@ -120,10 +120,14 @@ What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
   crash or a host reboot, and stay down only after an explicit
   `docker compose stop`. The backend has a `HEALTHCHECK` on `/api/health`,
   which pings the database (`SELECT 1`) and answers 503 when it cannot -- so
-  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`, and a
-  backend whose data volume is missing or unreadable is restarted rather than
-  kept alive. It does not compare the Alembic revision: a process mid-migration
-  must not be restarted for being behind.
+  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`, and
+  the frontend (`depends_on: condition: service_healthy`) is only offered once
+  the backend can answer. **Plain Docker does not restart an `unhealthy`
+  container** -- `restart: unless-stopped` reacts to the process exiting, not
+  to the health status -- so an unhealthy backend is something to look at, not
+  something that heals itself; add an autoheal sidecar if you want that. The
+  check does not compare the Alembic revision: a process mid-migration is
+  healthy and must not be marked otherwise for being behind.
 - **The backend runs as an unprivileged user** (`app`, uid 1000). Only the data
   directory -- the SQLite database and knowledge-base uploads, the
   `bestteam_data` volume -- is writable. A volume created by an *earlier*

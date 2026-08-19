@@ -19,11 +19,24 @@ mkdir -p "$(dirname "$OUT_PATH")"
 # Stream the archive straight out of the container: no temp file inside it,
 # nothing to clean up. Uploads in flight are staged into their own version
 # directory and only become live when the database says so, so a partial
-# directory in this archive is harmless on restore.
+# directory in this archive is harmless on restore. For the same reason GNU
+# tar's exit status 1 ("file changed/removed as we read it") is not a
+# failure here -- the archive is complete and usable -- only status 2 (a
+# real error) is. Without that distinction a nightly run that overlaps an
+# upload would log a spurious backup failure.
+set +e
 docker compose exec -T backend tar czf - \
   -C /app/ui/backend/data \
+  --warning=no-file-changed \
   --exclude='bestteam.db' \
   --exclude='bestteam.db-*' \
   . > "$OUT_PATH"
+status=$?
+set -e
+if [ "$status" -gt 1 ]; then
+  echo "Backup failed: tar exited with status $status" >&2
+  rm -f "$OUT_PATH"
+  exit "$status"
+fi
 
 echo "Backed up data files to $OUT_PATH"

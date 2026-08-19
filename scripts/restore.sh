@@ -43,9 +43,13 @@ docker compose cp "$DB_BACKUP" "backend:$DATA_DIR/bestteam.db"
 
 if [ -n "$FILES_BACKUP" ]; then
   echo "Restoring data files from $FILES_BACKUP..."
-  docker compose cp "$FILES_BACKUP" "backend:/tmp/bestteam-files-restore.tgz"
+  # Stage the archive INSIDE the data volume: `docker compose cp` writes into
+  # the stopped backend container's own filesystem, and the one-off
+  # `docker compose run` container below shares only the volume with it --
+  # an archive copied to the container's /tmp would not be there.
+  docker compose cp "$FILES_BACKUP" "backend:$DATA_DIR/.restore-files.tgz"
   docker compose run --rm --no-deps --user root backend \
-    sh -c "tar xzf /tmp/bestteam-files-restore.tgz -C $DATA_DIR && rm -f /tmp/bestteam-files-restore.tgz"
+    sh -c "tar xzf $DATA_DIR/.restore-files.tgz -C $DATA_DIR && rm -f $DATA_DIR/.restore-files.tgz"
 fi
 
 echo "Handing the data directory back to uid 1000..."

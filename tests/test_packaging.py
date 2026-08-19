@@ -208,6 +208,11 @@ def test_backup_covers_the_data_volume_not_only_the_database():
     # online-backup script, never to a raw tar of a database in use.
     assert "--exclude='bestteam.db'" in files or "--exclude=bestteam.db" in files
     assert "bestteam.db-*" in files
+    # GNU tar exits 1 ("file changed as we read it") when an upload is staged
+    # while the archive streams; the archive is still complete. Only exit 2
+    # (a real error) may fail the backup, or cron reports a spurious failure.
+    assert "--warning=no-file-changed" in files
+    assert "-gt 1" in files
     doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     assert "backup-files.sh" in doc
 
@@ -225,5 +230,10 @@ def test_restore_script_follows_the_documented_procedure():
         "/api/health",
     ):
         assert step in restore, step
+    # `docker compose cp` lands in the stopped backend container's own
+    # filesystem; a later `docker compose run` is a fresh container that
+    # shares only the data volume -- so the archive must be staged inside the
+    # data directory, never /tmp, or the extraction finds nothing.
+    assert "/tmp/" not in restore
     doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     assert "restore.sh" in doc
