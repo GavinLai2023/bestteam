@@ -19,9 +19,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 #   "1229 tests collected in 5.04s"
 #   "590/1229 tests collected (639 deselected) in 15.28s"
 # Real pytest always appends a trailing "in N.NNs" timing suffix.
+# Past 60 s pytest appends "(H:MM:SS)" to the duration -- "in 62.83s
+# (0:01:02)" -- which a loaded machine under `-n auto` does reach.
 _COLLECTED_RE = re.compile(
     r"^(?:(?P<selected>\d+)/(?P<total>\d+)|(?P<count>\d+)) tests? collected"
-    r"(?: \(\d+ deselected\))? in [\d.]+s?$"
+    r"(?: \(\d+ deselected\))? in [\d.]+s?(?: \(\d+:\d\d:\d\d\))?$"
 )
 
 
