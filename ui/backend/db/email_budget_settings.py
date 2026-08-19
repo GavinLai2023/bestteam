@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 from bestteam.core.embeddings import billable_spec
 
 from ..email_budget import BudgetCaps
-from .email_triggers import get_email_trigger
 from .model_catalog import list_entries
 from .models import (
     KnowledgeBaseRecord,
@@ -165,19 +164,25 @@ def _knowledge_base_specs(db: Session, org_id: int, raw: Dict[str, Any]) -> Set[
 
 
 def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
-    """The models this org's automation runs that have no `model_catalog` row.
+    """The models this org's deployed teams run that have no `model_catalog` row.
 
     Such a model contributes nothing to `spent_this_month`, so a monthly cap is
     a floor on reality rather than a ceiling. Naming the models is what turns
     that from a silent inaccuracy into something an admin can act on -- by
     pricing the model, or by knowing the cap does not cover it.
 
-    Resolved from the org's trigger: its `workflow_name` against the same
-    deployed `WorkflowRecord` the poller itself builds from, then every agent's
-    non-empty string `model` that has no `model_catalog` entry, plus the
-    billable embedding/query-expansion specs of the knowledge bases that team
-    searches (`_knowledge_base_specs`). Only a deployed record can run
-    automatically, so only its models can cost anything.
+    Resolved from **every** `status="deployed"` `WorkflowRecord` in the org --
+    not only the one an email trigger happens to point at. The cap it advises
+    is an org-level `SUM` over the whole ledger (`spent_this_month`), so a team
+    deployed without a trigger, run from the wizard or a share link, is exactly
+    the same blind spot. From each record: every agent's non-empty string
+    `model` that has no `model_catalog` entry, plus the billable
+    embedding/query-expansion specs of the knowledge bases that team searches
+    (`_knowledge_base_specs`).
+
+    `status="deployed"` is intended, not an oversight: a draft cannot run, so
+    it cannot spend, so it has no models the cap fails to cover. Do not widen
+    this to scan drafts.
 
     The agent step is a **narrower** rule than
     `deploy_validation.validate_agent_models` applies to the same field: that
@@ -187,32 +192,26 @@ def unpriced_models_for_org(db: Session, org_id: int) -> List[str]:
     which is exactly what this list is for. Pinned by
     `tests/test_email_filter_api.py::test_saving_a_spend_cap_names_the_models_it_cannot_cover`.
 
-    Deliberately total: no trigger, no deployed team, no models, or any failure
-    at all yields `[]`. This is advisory copy on a settings page and must never
-    be able to stop an admin saving a cap.
+    Deliberately total: no deployed team, no models, or any failure at all
+    yields `[]`. This is advisory copy on a settings page and must never be
+    able to stop an admin saving a cap.
     """
     try:
-        trigger = get_email_trigger(db, org_id)
-        if trigger is None or not trigger.workflow_name:
-            return []
-        # `status="deployed"` is intended, not an oversight: a trigger pointing
-        # at a draft cannot run, so it cannot spend, so it has no models the cap
-        # fails to cover. Do not widen this to scan drafts.
-        record = (
+        records = (
             db.query(WorkflowRecord)
-            .filter_by(name=trigger.workflow_name, org_id=org_id, status="deployed")
-            .one_or_none()
+            .filter_by(org_id=org_id, status="deployed")
+            .all()
         )
-        if record is None:
-            return []
-        raw = record.config or {}
-        specs = {
-            agent.get("model")
-            for agent in raw.get("agents") or []
-            if isinstance(agent, dict) and isinstance(agent.get("model"), str)
-            and agent.get("model")
-        }
-        specs |= _knowledge_base_specs(db, org_id, raw)
+        specs: Set[str] = set()
+        for record in records:
+            raw = record.config or {}
+            specs |= {
+                agent.get("model")
+                for agent in raw.get("agents") or []
+                if isinstance(agent, dict) and isinstance(agent.get("model"), str)
+                and agent.get("model")
+            }
+            specs |= _knowledge_base_specs(db, org_id, raw)
         if not specs:
             return []
         # `list_entries`, not `list_chat_entries`: an embedding model's row is

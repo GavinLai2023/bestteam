@@ -433,9 +433,12 @@ has no `model_catalog` entry, so a naive `SUM` under-counts and the customer
 believes in a ceiling that does not hold. Three-part answer, chosen over
 "refuse to run" (one missing catalogue row would wedge a customer's automation)
 and over silence: at configuration time `unpriced_models_for_org` resolves the
-org's trigger workflow's agent models -- **and the billable
-`embedding_model`/`query_expansion_model` of the knowledge bases that team
-searches, plus the operator's `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
+agent models of **every `status="deployed"` team in the org** -- not only the
+one the trigger points at, since the cap it advises is an org-level `SUM` over
+the whole ledger and a team deployed without a trigger spends into it just the
+same -- **and the billable `embedding_model`/`query_expansion_model` of the
+knowledge bases those teams search, plus the operator's
+`BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL`** -- against
 the catalogue, and the budget routes return a non-blocking `unpriced_models`
 list (**the cap saves either
 way** -- the admin may be about to fix the catalogue); at runtime NULL
