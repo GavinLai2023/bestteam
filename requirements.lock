@@ -22,6 +22,7 @@ certifi==2026.7.22
     #   httpx
     #   langchain-openai
     #   requests
+    #   sentry-sdk
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
 charset-normalizer==3.5.1
@@ -226,6 +227,8 @@ rich==15.0.0
     # via
     #   bestteam (pyproject.toml)
     #   typer
+sentry-sdk==2.68.0
+    # via bestteam (pyproject.toml)
 shellingham==1.5.4
     # via typer
 sniffio==1.3.1
@@ -286,7 +289,9 @@ typing-inspection==0.4.4
     #   fastapi
     #   pydantic
 urllib3==2.7.0
-    # via requests
+    # via
+    #   requests
+    #   sentry-sdk
 uuid-utils==0.17.0
     # via
     #   langchain-core

@@ -444,6 +444,33 @@ not run history) lives in the `bestteam_data` named volume, mounted at
 `/app/ui/backend/data` in the backend container. It survives
 `docker compose restart` / `docker compose down` (without `-v`).
 
+## Logs and error reporting
+
+**Where the logs are.** Both containers log to stdout, which Docker keeps as
+rotated json-file logs (backend 5 x 20 MB, frontend 3 x 10 MB -- about a week
+of an active beta at INFO). Read them with `docker compose logs -f backend`
+(add `--since 1h` / `--tail 500`); they survive a container restart but not
+`docker compose down -v` or a host rebuild, so if you need them longer, ship
+them with the log driver of your choice (`logging:` in `docker-compose.yml`)
+or a host agent that tails `/var/lib/docker/containers/*/*-json.log`. Every
+application record is `timestamp LEVEL logger: message`; `BESTTEAM_LOG_LEVEL`
+lowers or raises the floor (INFO by default). Uvicorn's own access log is
+separate and untouched.
+
+**One error channel, opt-in.** Set `BESTTEAM_SENTRY_DSN` (Sentry's free tier
+is enough for a beta; any Sentry-protocol collector such as GlitchTip works)
+and the backend reports exactly two kinds of event -- an *unhandled* request
+exception (the 500 the customer saw) and a *failed run* (the workflow's own
+failure or a crash on the worker thread) -- tagged with the run id, workflow
+name, method and path, and for a failed run the first 300 characters of the
+reason. Nothing else is captured: no ERROR-log mirroring, no request bodies,
+no stack-frame locals, no performance tracing, no user data (`send_default_pii`
+is off). This is deliberate -- the process handles customers' email and
+documents, and a report has to be safe to leave the box. `BESTTEAM_ENVIRONMENT`
+(default `production`) and `BESTTEAM_RELEASE` label the events; unset the DSN
+to turn reporting off. `sentry-sdk` ships in the image; on a bare
+`pip install`, it is part of the `ui` extra.
+
 ## Backup and restore
 
 Back up the live database (safe to run while the backend is running):

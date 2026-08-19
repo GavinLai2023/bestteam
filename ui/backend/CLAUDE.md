@@ -1686,6 +1686,25 @@ dot-segments proxies collapse), server-side, so a direct API call can't create a
 unmanageable or path-unaddressable record.
 Spec: `docs/superpowers/specs/2026-07-27-admin-org-user-management-design.md`.
 
+## Logging and error reporting (beta gate G4)
+
+`main.py` calls `logging.basicConfig` at import (level `BESTTEAM_LOG_LEVEL`,
+default INFO, `timestamp LEVEL logger: message`) -- a no-op when the root
+logger already has handlers, so pytest's capture and an operator's own
+`dictConfig` win. `error_reporting.py` is the one off-box channel: opt-in by
+`BESTTEAM_SENTRY_DSN`, initialised with `default_integrations=False`,
+`send_default_pii=False`, `max_request_body_size="never"`,
+`include_local_variables=False`, no tracing, so the SDK adds **no** capture
+points of its own. Exactly two call sites: `main.unhandled_exception_handler`
+(`report_exception`, tags method/path) and `runtime.py` -- the streaming
+loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, extras
+`reason` capped at 300 chars) and the worker-thread catch-all
+(`report_exception`, tags run_id/workflow). Both helpers are no-ops without a
+DSN or without the SDK and never raise. Adding a third call site is a
+deliberate decision, not a convenience: the rule is ids and names, never
+content. `sentry-sdk` is in the `ui` extra. Tests: `tests/test_error_reporting.py`
+(a fake `sentry_sdk` module in `sys.modules`).
+
 ## Known limitation: general-purpose cache
 
 Only local caches exist (`_workflow_cache` in `ui/backend/main.py`,
