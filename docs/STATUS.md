@@ -1529,6 +1529,22 @@
   hand (none is seeded) — without one the calls are recorded with a NULL
   `cost_estimate`. Reranking is a local cross-encoder, $0, and is deliberately
   not recorded.
+- **Reproducible Python installs** (beta gate G1 of the 2026-08-17
+  architecture review): `requirements.lock` is a `uv pip compile --universal`
+  constraints file over every extra CI and the Dockerfile install
+  (`ui,dev,tools,test,interview,providers-openai`); all five CI installs, the
+  pip cache key and the image build go through `-c requirements.lock`, so a
+  hot-fix rebuild during the beta gets the versions the last build ran on
+  rather than the day's newest. `langgraph`, `langchain-core`, `langchain` and
+  `langchain-openai` gained `<2` upper bounds (1.x is what was already
+  installed and passing). `pyproject.toml` keeps floating ranges on purpose:
+  `bestteam` is also a library. There is no `uv` in CI or the image -- the
+  lock is a plain pip constraints file, `uv` is needed only to regenerate it,
+  and `tests/test_packaging.py` is the drift guard (every declared dependency
+  pinned within its specifier; Dockerfile and CI install under the lock).
+  Not done: hash verification, `pip-audit`/Dependabot (Stage 1 of the same
+  review), and `tools-rerank` is outside the lock because nothing in CI or
+  the image installs it.
 
 ## In Progress
 
@@ -1827,6 +1843,15 @@
 
 ## Next steps / roadmap
 
+- **Beta launch gate** (architecture review 2026-08-17, Stage 0 -- ops and
+  hygiene only, no business-logic change): G1 dependency lockfile is done
+  (above). Remaining: G2 login rate limiting; G3 container/ops baseline
+  (non-root `USER`, `HEALTHCHECK`, compose `restart`, nginx
+  `client_max_body_size`, `alembic upgrade head` in the entrypoint or the
+  launch checklist, scheduled `scripts/backup-db.sh`); G4 minimum
+  observability (persistent logs + one error-reporting channel); G5 one-page
+  beta delivery notes; G6 the beta org's retention/secret/CORS checklist;
+  G7 (conditional) a live Microsoft 365 tenant smoke test.
 - **Deployment model — RESOLVED 2026-07-16:** the shared-hosted-platform
   question (raised 2026-07-15) was decided in favour of **org-scoped
   multi-tenancy, one codebase for both models** — see `DECISIONS.md`

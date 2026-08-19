@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "A business-friendly multi-agent framework wrapper built on LangGraph"
 requires-python = ">=3.10"
 dependencies = [
-    "langgraph>=0.2",
-    "langchain-core>=0.3",
+    "langgraph>=0.2,<2",
+    "langchain-core>=0.3,<2",
     "pydantic>=2.0",
     "typer>=0.12",
     "rich>=13.0",
@@ -28,7 +28,7 @@ tools        = ["tavily-python>=0.3", "pypdf>=4.0", "openpyxl>=3.1", "python-doc
 # Providers required to run the documented `openai:`-spec real-model paths
 # (langchain string model resolution) and interview transcription (openai),
 # so the official image can execute the advertised commercial paths (CR-007).
-providers-openai = ["langchain>=0.3", "langchain-openai>=0.2", "openai>=1.0"]
+providers-openai = ["langchain>=0.3,<2", "langchain-openai>=0.2,<2", "openai>=1.0"]
 interview    = ["openai>=1.0"]
 
 [project.scripts]

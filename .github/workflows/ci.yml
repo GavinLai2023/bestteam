@@ -56,6 +56,7 @@ jobs:
               - 'alembic/**'
               - 'alembic.ini'
               - 'pyproject.toml'
+              - 'requirements.lock'
               - 'examples/**'
               - 'scripts/**'
               - 'Dockerfile'
@@ -84,9 +85,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements.lock
       - name: Install dependencies
-        run: pip install -e ".[ui,dev,tools]"
+        run: pip install -c requirements.lock -e ".[ui,dev,tools]"
       # -n auto: the PR gate optimises for wall clock. backend-full below
       # deliberately does NOT, so something still checks test isolation.
       - name: Run pytest
@@ -103,9 +104,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements.lock
       - name: Install dependencies
-        run: pip install -e ".[ui,dev,tools,interview]"
+        run: pip install -c requirements.lock -e ".[ui,dev,tools,interview]"
       # 16 tests -- worker startup would cost more than it saves.
       - name: Run pytest
         run: python -m pytest -m optional
@@ -145,14 +146,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements.lock
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: ui/frontend/package-lock.json
       - name: Install backend dependencies
-        run: pip install -e ".[ui,dev,tools,test]"
+        run: pip install -c requirements.lock -e ".[ui,dev,tools,test]"
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
       - name: Install frontend dependencies
@@ -185,9 +186,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements.lock
       - name: Install dependencies
-        run: pip install -e ".[ui,dev,tools,interview]"
+        run: pip install -c requirements.lock -e ".[ui,dev,tools,interview]"
       - name: Run pytest
         run: python -m pytest -m "not e2e"
 
@@ -202,14 +203,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements.lock
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: ui/frontend/package-lock.json
       - name: Install backend dependencies
-        run: pip install -e ".[ui,dev,tools,test]"
+        run: pip install -c requirements.lock -e ".[ui,dev,tools,test]"
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
       - name: Install frontend dependencies

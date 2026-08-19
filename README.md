@@ -25,10 +25,10 @@ A commercial multi-agent framework that wraps [LangGraph](https://github.com/lan
 ## Quick start
 
 ```bash
-# 1. Install
-pip install -e ".[tools]"                        # core SDK + built-in tools
-pip install -e ".[tools,ui]"                     # + monitoring dashboard
-pip install -e ".[tools,ui,providers-openai]"    # + real openai: models & interview transcription
+# 1. Install (-c requirements.lock pins the exact versions CI and the Docker image use)
+pip install -c requirements.lock -e ".[tools]"                        # core SDK + built-in tools
+pip install -c requirements.lock -e ".[tools,ui]"                     # + monitoring dashboard
+pip install -c requirements.lock -e ".[tools,ui,providers-openai]"    # + real openai: models & interview transcription
 
 # 2. Set environment variables (copy .env.example → .env)
 export TAVILY_API_KEY=tvly-...
@@ -43,6 +43,25 @@ bestteam run workflow.yaml "Review this Python function for bugs"
 
 # 5. Visualise the agent graph
 bestteam graph workflow.yaml
+```
+
+### Updating the lockfile
+
+`requirements.lock` is a [`uv pip compile`](https://docs.astral.sh/uv/pip/compile/)
+constraints file over every extra CI and the Dockerfile install, resolved for
+all platforms and every supported Python (`--universal`). `pyproject.toml`
+keeps floating ranges because `bestteam` is also a library; the lock is what
+makes a CI run or an image rebuild reproduce the versions the last one ran on.
+Regenerate it whenever you change a dependency in `pyproject.toml`
+(`tests/test_packaging.py` fails if a declared dependency is missing from the
+lock or pinned outside its specifier), and deliberately, in its own commit,
+when you want to pick up newer upstream versions:
+
+```bash
+# after editing pyproject.toml -- keeps existing pins, adds/removes what changed
+uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai -o requirements.lock
+# to move every pin to the newest allowed version
+uv pip compile ... --upgrade -o requirements.lock
 ```
 
 ## SDK usage

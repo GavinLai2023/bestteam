@@ -69,6 +69,11 @@ docker compose build
 docker compose up -d
 ```
 
+The backend image installs under `requirements.lock`, so a rebuild -- a hot-fix
+during the beta included -- gets exactly the dependency versions the previous
+build ran on, not whatever was newest that day. Newer upstream versions arrive
+only through a deliberate lockfile update (README, "Updating the lockfile").
+
 `docker compose` automatically loads `.env` from the project root to
 substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
 is separate from the backend's `env_file: .env`), so the values you set in
