@@ -221,6 +221,25 @@ collection's teams. It polls every 3s **only while some row is processing**
 the org has no knowledge bases, so it costs an org that never uploaded
 anything one request.
 
+Each row also carries a **"Try a search"** toggle beside Delete, opening
+`components/KnowledgeBaseSearch.tsx` underneath it: one query box, and the
+passages `POST /api/org/knowledge-bases/{name}/search` returns, each under the
+same citation label the agent's own tool output cites. It is the only place a
+customer can check retrieval before a team is built on these documents rather
+than after it starts answering oddly. The toggle is enabled only for
+`kb.servable && !isProcessing(kb)` (`searchBlockedReason`, the same
+save-a-pointless-click role `deleteBlockedReason` plays), with the reason in
+its `title`. It cannot pre-empt every refusal: a legacy collection served from
+disk reports `servable`, and the endpoint refuses *that* one only when the
+search actually runs — so the box shows the backend's own message inline, the
+same way a refused delete does. A search that matched nothing renders "No
+matching passages." rather than an empty list, `text` arrives capped at 1,500
+characters server-side and is rendered `pre-wrap` (a chunk keeps the
+document's own line breaks), and the button is disabled while a search is in
+flight so one click is one search — each one can cost a query embedding. Note
+`KnowledgeBasesPanel.test.tsx`'s `../lib/api` mock factory must list
+`searchOwnKnowledgeBase`: the toggle renders this child, which calls it.
+
 ## Anonymous team sharing (`/share/:token`)
 
 The one **public, unauthenticated route** in this app (outside `RequireAuth`

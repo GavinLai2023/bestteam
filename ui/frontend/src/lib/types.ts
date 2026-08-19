@@ -284,6 +284,25 @@ export interface OrgKnowledgeBase {
   latest_job: Omit<IngestionJobStatus, 'config'> | null
 }
 
+// One passage returned by the "Try a search" panel
+// (POST /api/org/knowledge-bases/{name}/search). `citation` is the same label
+// an agent's own tool output cites, so the panel and the model name the same
+// passage; `text` is capped server-side at 1500 characters -- this is a spot
+// check on retrieval, not a document reader.
+export interface KnowledgeBaseSearchResult {
+  citation: string
+  source: string
+  page: number | null
+  heading: string | null
+  text: string
+}
+
+export interface KnowledgeBaseSearchResponse {
+  query: string
+  hit_count: number
+  results: KnowledgeBaseSearchResult[]
+}
+
 export interface ShareLink {
   id: number
   workflow_id: number
