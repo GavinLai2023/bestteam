@@ -482,7 +482,9 @@ mounted at `/app/ui/backend/data` in the backend container, and survives
 - `bestteam.db` — the SQLite database: organisations, users, teams and their
   version history, skills, knowledge-base chunks, run history and traces,
   usage, the inbox ledger, settings. This is the part a restore cannot do
-  without.
+  without. It runs in WAL mode, so `bestteam.db-wal` and `bestteam.db-shm`
+  sit beside it while the backend is up: never copy or delete the `.db` on
+  its own while the process is running — use the scripts below.
 - `knowledge_base_uploads/<org>/<name>/<version>/` — the original documents
   behind every knowledge base. Retrieval is served from the database, so a
   collection still answers without these; they are what a re-index or a
@@ -591,8 +593,11 @@ equivalent, if you would rather see each step:
    ```bash
    docker compose stop backend
    ```
-2. Copy the backup file into the container, overwriting the live database:
+2. Remove the old database's WAL/journal siblings (SQLite would otherwise
+   replay them over the restored file), then copy the backup into the
+   container, overwriting the live database:
    ```bash
+   docker compose run --rm --no-deps --user root backend sh -c 'rm -f /app/ui/backend/data/bestteam.db-wal /app/ui/backend/data/bestteam.db-shm /app/ui/backend/data/bestteam.db-journal'
    docker compose cp /path/to/backups/bestteam-2026-06-17.db backend:/app/ui/backend/data/bestteam.db
    ```
    `docker cp` writes the file as **root**, and the backend runs as uid 1000

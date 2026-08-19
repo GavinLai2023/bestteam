@@ -1620,6 +1620,31 @@
   `docs/email-smoke-test.md` §9 walked against their live tenant before
   go-live (still never done -- see Known issues). The checklist and
   `BETA_NOTES.md` both point at it.
+- **Beta pre-launch hardening** (architecture re-review 2026-08-19, items
+  B1–B5 + B8; additive, no business-logic change): (B1) `_lifespan` now
+  marks `runs` rows a dead process left `running` as `failed`
+  (`runtime.fail_interrupted_runs`, beside `ingestion.fail_interrupted_jobs`)
+  so a hot-fix restart no longer leaves a run "running" forever on the
+  Activity page; (B2) `/api/health` pings the database and answers 503 when
+  it cannot -- the container `HEALTHCHECK` was polling a constant;
+  (B3) `ui/frontend/src/components/ErrorBoundary.tsx` wraps the router, so a
+  render crash shows "Something went wrong" + Reload instead of a blank page
+  (the raw error is never rendered); (B4) `scripts/backup-files.sh` tars the
+  rest of the data volume (knowledge-base uploads, workspaces) beside the
+  online-backup `backup-db.sh`, and `scripts/restore.sh` scripts the
+  documented stop/copy/chown/start/verify restore -- `docs/deployment.md`
+  describes the volume layout and pairs both scripts in one cron line;
+  (B5) compose's frontend waits on `condition: service_healthy`; (B8) the
+  file engine sets `PRAGMA journal_mode=WAL` on connect so readers are not
+  blocked by the one writer (`busy_timeout` needed nothing -- pysqlite's
+  default is already 5 s). Tests: `tests/test_startup_run_sweep.py`,
+  `tests/test_health.py`, `tests/test_database.py`, `ErrorBoundary.test.tsx`,
+  and `tests/test_packaging.py` for the compose/scripts contracts. Not done
+  here and deliberately so: a terminal trace event or inbox-ledger release
+  for swept runs (see Known issues), an Alembic-head check in `/api/health`
+  (a mid-migration process must not be restarted for being behind), and a
+  Docker restore rehearsal (no Docker on the workstation -- an operator step
+  called out in `docs/deployment.md`).
 
 ## In Progress
 
@@ -1924,13 +1949,22 @@
 ## Next steps / roadmap
 
 - **Beta launch gate** (architecture review 2026-08-17, Stage 0 -- ops and
-  hygiene only, no business-logic change): G1–G6 are done (see Done). G7 is
-  conditional and operator-run: a live Microsoft 365 tenant smoke test
-  (`docs/email-smoke-test.md` §9) before the first M365 customer. Stage 1 of
-  the same review (ruff/mypy, `pip-audit`/Dependabot, `/api/health` DB +
-  alembic-head check, `/metrics`, `_resolve_model` move, `STATUS.md` →
-  `CHANGELOG.md` split, frontend error boundary, unified settings) runs in
-  parallel with the beta.
+  hygiene only, no business-logic change): G1–G6 are done (see Done), as is
+  the 2026-08-19 re-review's pre-launch hardening (B1–B5, B8 -- see Done).
+  G7 is conditional and operator-run: a live Microsoft 365 tenant smoke test
+  (`docs/email-smoke-test.md` §9) before the first M365 customer. Still
+  open before freeze: decide whether PR #69 (XML tree-aware chunking) ships
+  in the beta build, rehearse `scripts/restore.sh` once against a throwaway
+  stack, then freeze and name the beta build from a green `main` run of
+  `backend-full`/`e2e-full`. Stage 1 of the review (ruff/mypy,
+  `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,
+  `_resolve_model` move, `STATUS.md` → `CHANGELOG.md` split, unified
+  settings) runs in parallel with the beta. The "single process + SQLite"
+  ceiling is **not** a beta blocker and Postgres is not planned before GA:
+  write it up as an ADR with upgrade triggers (active orgs > 10, concurrent
+  runs routinely > 4, a customer needing a second account → RBAC first, an
+  HA/SLA requirement) and stop adding process-lock-dependent correctness
+  arguments meanwhile.
 - **Deployment model — RESOLVED 2026-07-16:** the shared-hosted-platform
   question (raised 2026-07-15) was decided in favour of **org-scoped
   multi-tenancy, one codebase for both models** — see `DECISIONS.md`
