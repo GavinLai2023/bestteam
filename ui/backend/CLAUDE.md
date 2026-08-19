@@ -1423,6 +1423,11 @@ that KB permanently undeletable.
   the thread pool -- hash once per thread), and only `record_success()`
   takes it back: it clears the username's failures and releases the one
   slot the attempt took from the address, not the address's other failures.
+  Username keys are a SHA-256 digest (the request puts no bound on the
+  name's length and a key lives a whole window), and the expired-key sweep
+  runs when the dict has doubled since the last one (amortised O(1) per
+  attempt -- an unknown username never reaches PBKDF2, so keys can arrive
+  as fast as the per-address budget allows).
   Behind a reverse proxy the address is the proxy's unless uvicorn
   is told to trust it (`docs/deployment.md`), which is why the username key
   exists. `tests/conftest.py` swaps in a fresh limiter per test.
@@ -1701,7 +1706,9 @@ logger already has handlers, so pytest's capture and an operator's own
 `send_default_pii=False`, `max_request_body_size="never"`,
 `include_local_variables=False`, no tracing, so the SDK adds **no** capture
 points of its own. Exactly two call sites: `main.unhandled_exception_handler`
-(`report_exception`, tags method/path) and `runtime.py` -- the streaming
+(`report_exception`, tags method + the matched route *template* --
+`/api/share/{token}/messages`, never the concrete path, whose parameter can
+be a capability token) and `runtime.py` -- the streaming
 loop's `run_failed` branch (`report_message("Run failed: <workflow>")`, tags
 only; the reason is an exception's text and stays in the run's persisted
 trace) and the worker-thread catch-all (`report_exception`, tags

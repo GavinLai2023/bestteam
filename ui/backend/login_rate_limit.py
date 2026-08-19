@@ -25,10 +25,18 @@ there are two.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Dict, Optional
+
+# The full sweep of expired keys runs when the dict has doubled since the last
+# one (never below this many keys), so its cost is amortised O(1) per admitted
+# attempt however fast keys arrive -- and they can arrive fast: an unknown
+# username never reaches PBKDF2, so a guesser rotating names and addresses is
+# bounded only by the per-address budget.
+_SWEEP_FLOOR = 64
 
 
 class LoginRateLimiter:
@@ -45,11 +53,14 @@ class LoginRateLimiter:
         self.window_seconds = window_seconds
         self._clock = clock
         self._failures: Dict[str, Deque[float]] = {}
+        self._next_sweep = _SWEEP_FLOOR
         self._lock = threading.Lock()
 
     @staticmethod
     def _keys(username: str, ip: Optional[str]):
-        yield f"user:{username.strip().lower()}"
+        # A digest, not the name: the request body puts no bound on the
+        # username's length, and a key lives for a whole window.
+        yield "user:" + hashlib.sha256(username.strip().lower().encode("utf-8")).hexdigest()[:32]
         if ip:
             yield f"ip:{ip}"
 
@@ -84,14 +95,10 @@ class LoginRateLimiter:
             if worst <= 0:
                 for key in self._keys(username, ip):
                     self._failures.setdefault(key, deque()).append(now)
-                # A guesser rotating usernames grows the dict by one key per
-                # name, so sweep expired keys here. Cheap by construction: a
-                # key is only added for an attempt that goes on to run PBKDF2
-                # (~0.76 s of CPU) in one of the pool's threads, so the dict
-                # cannot grow faster than a few keys per second and is empty
-                # again one window after the guessing stops.
-                for key in list(self._failures):
-                    self._prune(key, now)
+                if len(self._failures) >= self._next_sweep:
+                    for key in list(self._failures):
+                        self._prune(key, now)
+                    self._next_sweep = max(_SWEEP_FLOOR, 2 * len(self._failures))
                 return None
         return max(1, int(-(-worst // 1)))  # ceil
 

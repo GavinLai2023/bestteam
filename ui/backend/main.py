@@ -333,7 +333,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     server-side, reports it (ids only -- see error_reporting.py) and
     returns a generic, non-leaking 500 to the client."""
     logger.exception("Unhandled exception in %s %s", request.method, request.url.path)
-    error_reporting.report_exception(exc, method=request.method, path=request.url.path)
+    # The matched route's *template* ("/api/share/{token}/messages"), never
+    # the concrete path: a path parameter can be a capability token, and the
+    # report leaves the box.
+    route = request.scope.get("route")
+    error_reporting.report_exception(
+        exc, method=request.method, path=getattr(route, "path", None) or "<unrouted>"
+    )
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 

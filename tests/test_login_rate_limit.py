@@ -102,15 +102,36 @@ def test_missing_ip_only_counts_against_the_username():
     limiter.record_success("carol", None)  # nothing to release; must not raise
 
 
-def test_expired_keys_are_swept():
+def test_expired_keys_are_swept_with_amortised_cost():
     now, advance = _clock()
     limiter = LoginRateLimiter(username_limit=5, ip_limit=5, window_seconds=60, clock=now)
-    for i in range(50):
-        limiter.reserve(f"user{i}", f"10.0.0.{i}")
-    assert limiter.tracked_keys() == 100
+    for i in range(100):
+        limiter.reserve(f"user{i}", f"10.0.{i // 250}.{i % 250}")
+    assert limiter.tracked_keys() == 200  # nothing had expired at the sweeps so far
     advance(61)
-    limiter.reserve("late", "1.1.1.1")
-    assert limiter.tracked_keys() == 2
+    # The next sweep is due when the dict has doubled since the last one
+    # (at 128 -> due at 256): 28 more attempts get it there, and every one
+    # of the 200 stale keys goes in that single pass.
+    for i in range(28):
+        limiter.reserve(f"late{i}", f"10.9.0.{i}")
+    assert limiter.tracked_keys() == 56
+    # One window later those 56 are stale; the next sweep (due at 112, twice
+    # the 56 that survived) drops them, and only the fresh keys remain.
+    advance(61)
+    for i in range(56):
+        limiter.reserve(f"later{i}", f"10.8.0.{i}")
+    assert limiter.tracked_keys() == 112
+
+
+def test_a_huge_username_costs_a_fixed_size_key():
+    now, _ = _clock()
+    limiter = LoginRateLimiter(username_limit=2, ip_limit=100, window_seconds=60, clock=now)
+    huge = "x" * 1_000_000
+    assert limiter.reserve(huge, "1.1.1.1") is None
+    assert limiter.reserve(huge, "1.1.1.1") is None
+    assert limiter.reserve(huge, "1.1.1.1") == 60  # still one budget per name
+    assert limiter.reserve("x" * 999_999, "1.1.1.1") is None  # ...and a different name is a different one
+    assert all(len(key) < 64 for key in limiter._failures)
 
 
 # --- the login route --------------------------------------------------------

@@ -493,7 +493,8 @@ is enough for a beta; any Sentry-protocol collector such as GlitchTip works)
 and the backend reports exactly two kinds of event -- an *unhandled* request
 exception (the 500 the customer saw) and a *failed run* (the workflow's own
 failure or a crash on the worker thread) -- tagged with the run id, workflow
-name, method and path. The exception's type and stack go; its *message* does
+name, method and route template (never a concrete path, whose parameter can
+be a share token). The exception's type and stack go; its *message* does
 not (a parser error quotes the model's output, an HTTP error the URL a tool
 fetched), and neither does a failed run's reason -- both are in the run's
 trace on the box, keyed by the run id in the report. Nothing else is

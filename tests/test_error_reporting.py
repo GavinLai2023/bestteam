@@ -185,24 +185,27 @@ def client(monkeypatch, tmp_path):
     backend_main.app.dependency_overrides.clear()
 
 
-def test_unhandled_request_exceptions_are_reported(client, reporting_on):
+def test_unhandled_request_exceptions_are_reported_with_the_route_template(client, reporting_on):
     from ui.backend import main as backend_main
 
-    @backend_main.app.get("/api/_test_boom")
-    def boom():
+    # A path parameter can be a capability token (`/api/share/{token}/...`),
+    # so the report carries the route template, never the concrete path.
+    @backend_main.app.get("/api/_test_boom/{token}")
+    def boom(token: str):
         raise RuntimeError("kaboom")
 
     try:
-        resp = client.get("/api/_test_boom")
+        resp = client.get("/api/_test_boom/sekrit-capability-token")
     finally:
         backend_main.app.router.routes[:] = [
-            r for r in backend_main.app.router.routes if getattr(r, "path", None) != "/api/_test_boom"
+            r for r in backend_main.app.router.routes if getattr(r, "path", None) != "/api/_test_boom/{token}"
         ]
     assert resp.status_code == 500
     assert resp.json() == {"detail": "Internal server error"}
     ((exc, scope),) = reporting_on.exceptions
     assert str(exc) == "kaboom"
-    assert scope == {"tags": {"method": "GET", "path": "/api/_test_boom"}}
+    assert scope == {"tags": {"method": "GET", "path": "/api/_test_boom/{token}"}}
+    assert "sekrit" not in repr(scope)
 
 
 # --- wiring: failed runs ----------------------------------------------------
