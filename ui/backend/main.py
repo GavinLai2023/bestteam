@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text as sa_text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -568,7 +568,20 @@ def _get_workflow(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    """Liveness + a database ping. The container HEALTHCHECK polls this, so
+    a process that cannot reach its database (missing/unmounted volume, a
+    corrupt file) must report 503 rather than a constant "ok" -- otherwise
+    Docker keeps a dead backend alive (beta B2). Deliberately no Alembic
+    head comparison here: a migrating-but-healthy process must not be
+    restarted mid-migration; that check belongs in `admin check-env` or a
+    later `/metrics`."""
+    try:
+        with SessionLocal() as db:
+            db.execute(sa_text("SELECT 1"))
+    except Exception:  # noqa: BLE001 -- any failure to answer is "degraded"
+        logger.warning("health: database ping failed", exc_info=True)
+        return JSONResponse(status_code=503, content={"status": "degraded", "database": "error"})
+    return {"status": "ok", "database": "ok"}
 
 
 @app.get("/api/workflows")

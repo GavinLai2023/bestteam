@@ -118,8 +118,12 @@ What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
 
 - **Both services restart on their own** (`restart: unless-stopped`) after a
   crash or a host reboot, and stay down only after an explicit
-  `docker compose stop`. The backend has a `HEALTHCHECK` on `/api/health`, so
-  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`.
+  `docker compose stop`. The backend has a `HEALTHCHECK` on `/api/health`,
+  which pings the database (`SELECT 1`) and answers 503 when it cannot -- so
+  `docker compose ps` shows `healthy`/`unhealthy` rather than only `Up`, and a
+  backend whose data volume is missing or unreadable is restarted rather than
+  kept alive. It does not compare the Alembic revision: a process mid-migration
+  must not be restarted for being behind.
 - **The backend runs as an unprivileged user** (`app`, uid 1000). Only the data
   directory -- the SQLite database and knowledge-base uploads, the
   `bestteam_data` volume -- is writable. A volume created by an *earlier*
@@ -432,8 +436,9 @@ customers that plainly rather than implying it works.
 
 ## 5. Verify
 
-- `curl http://localhost:8000/api/health` → `200 {"status": "ok"}` (public,
-  no auth required).
+- `curl http://localhost:8000/api/health` → `200 {"status": "ok", "database": "ok"}`
+  (public, no auth required; `503 {"status": "degraded", "database": "error"}`
+  means the backend cannot reach its SQLite file).
 - `curl http://localhost:8000/api/workflows` → `401` (auth required).
 - `curl http://localhost:8000/api/workflows -H "Authorization: Bearer <access_token>"`
   → `200`.
