@@ -23,6 +23,10 @@
   --accent-strong: #4338ca;
   --accent-soft: #eef2ff;
   --accent-border: #c7d2fe;
+  /* Foreground for anything sitting ON `--accent`. It has to be its own token
+     rather than a literal `white`: the dark accent is a pale lavender, so the
+     white that reads at 6.3:1 in light drops to 2.6:1 in dark. */
+  --accent-contrast: #ffffff;
 
   --danger: #b91c1c;
   --danger-bg: #fef2f2;
@@ -34,6 +38,9 @@
 
   --info-bg: #eff6ff;
   --info-border: #bfdbfe;
+  /* `--danger` and `--success` double as their own text colour; info had no
+     such token, which left an info banner's foreground as a literal. */
+  --info-text: #1d4ed8;
 
   --hover: #f3f4f6;
 }
@@ -54,6 +61,7 @@
     --accent-strong: #a5b4fc;
     --accent-soft: #1e2433;
     --accent-border: #333d55;
+    --accent-contrast: #10131a;
 
     --danger: #f0857a;
     --danger-bg: #2a1917;
@@ -65,6 +73,7 @@
 
     --info-bg: #16202e;
     --info-border: #24354b;
+    --info-text: #93b4f5;
 
     --hover: #222834;
   }
@@ -85,6 +94,7 @@
   --accent-strong: #a5b4fc;
   --accent-soft: #1e2433;
   --accent-border: #333d55;
+  --accent-contrast: #10131a;
 
   --danger: #f0857a;
   --danger-bg: #2a1917;
@@ -96,6 +106,7 @@
 
   --info-bg: #16202e;
   --info-border: #24354b;
+  --info-text: #93b4f5;
 
   --hover: #222834;
 }

@@ -57,7 +57,7 @@
 
 .wizard-step.current .wizard-step-number {
   background: var(--accent);
-  color: var(--surface);
+  color: var(--accent-contrast);
 }
 
 .wizard-step-label {

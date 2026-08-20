@@ -43,6 +43,14 @@ whose only definition sits behind one never applies in the un-stamped state.
 One-off semantic hues (the per-event-type left borders in the trace) stay as
 literals on purpose.
 
+Two tokens exist because a *pair* has to stay coordinated, not just a single
+colour: **`--accent-contrast`** is the foreground for anything sitting on
+`--accent` (a literal `white` reads at 6.3:1 on the light accent and 2.6:1 on
+the pale dark one), and **`--info-text`** completes the info trio, since
+`--danger`/`--success` already double as their own text colour and info had
+none. The rule this encodes: whenever a background comes from a token, its
+foreground must come from one too, or the pair only survives in one theme.
+
 ## Confirmations (`lib/useConfirm.tsx`)
 
 There is no `window.confirm` in this app. `useConfirm()` returns

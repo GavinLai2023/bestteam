@@ -59,6 +59,11 @@ export const en = {
     // detail goes to console.error for whoever is.
     unreachable: "We can't reach the service right now. This is usually temporary.",
     teamLabel: 'Team',
+    // Only used when two teams share a friendly name, so the option a
+    // customer picks is never ambiguous. Nothing constrains `display_name`
+    // to be unique, and two identical options pointing at different teams
+    // is worse than showing one technical name.
+    teamLabelAmbiguous: '{{display}} ({{name}})',
     noTeams: 'No teams yet — build one first.',
     taskLabel: 'What should this team do?',
     taskPlaceholder: 'Describe what you would like this team to do...',

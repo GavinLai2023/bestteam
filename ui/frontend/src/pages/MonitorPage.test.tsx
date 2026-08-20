@@ -127,6 +127,62 @@ describe('MonitorPage backend error handling', () => {
     expect(await screen.findByRole('option', { name: 'wf' })).toBeInTheDocument()
     consoleError.mockRestore()
   })
+
+  // A retry that reaches the backend and is refused has still proved the
+  // service is up, so leaving "we can't reach the service" on screen beside
+  // the real reason tells the customer something false (Codex review finding).
+  it('drops the unreachable banner when a retry gets an HTTP error instead', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockedApi.listPipelines.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    renderPage()
+    const banner = await screen.findByText(/can't reach the service/i)
+
+    const err = new Error('Platform operators do not belong to an organization') as Error & { status?: number }
+    err.status = 403
+    mockedApi.listPipelines.mockRejectedValueOnce(err)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Try again'))
+    })
+
+    expect(banner).not.toBeInTheDocument()
+    expect(screen.getByText(/do not belong to an organization/i)).toBeInTheDocument()
+    consoleError.mockRestore()
+  })
+})
+
+describe('MonitorPage team picker', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('labels each team with its friendly name', async () => {
+    mockedApi.listPipelines.mockResolvedValue({
+      pipelines: ['support_wf'],
+      display_names: { support_wf: 'Support desk' },
+    })
+
+    renderPage()
+
+    expect(await screen.findByRole('option', { name: 'Support desk' })).toBeInTheDocument()
+  })
+
+  // `display_name` is free text with no uniqueness constraint, so two teams
+  // can share one. Identical options pointing at different teams would make
+  // the choice a coin flip (Codex review finding).
+  it('appends the technical name only to teams whose friendly name collides', async () => {
+    mockedApi.listPipelines.mockResolvedValue({
+      pipelines: ['support_a', 'support_b', 'billing'],
+      display_names: { support_a: 'Support desk', support_b: 'Support desk', billing: 'Billing' },
+    })
+
+    renderPage()
+
+    expect(await screen.findByRole('option', { name: 'Support desk (support_a)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Support desk (support_b)' })).toBeInTheDocument()
+    // The team that isn't ambiguous keeps the clean label.
+    expect(screen.getByRole('option', { name: 'Billing' })).toBeInTheDocument()
+  })
 })
 
 describe('MonitorPage run waiting UX', () => {

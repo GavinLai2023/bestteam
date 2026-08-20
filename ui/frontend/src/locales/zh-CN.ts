@@ -50,6 +50,8 @@ export const zhCN: Resources = {
     subtitle: '选择一个团队，交给它一项任务，然后跟进进度。',
     unreachable: '暂时连不上服务，通常稍后即可恢复。',
     teamLabel: '团队',
+    // Full-width brackets: the surrounding label is Chinese here.
+    teamLabelAmbiguous: '{{display}}（{{name}}）',
     noTeams: '还没有团队 —— 请先组建一个。',
     taskLabel: '希望这个团队做什么？',
     taskPlaceholder: '描述你希望这个团队完成的事…',

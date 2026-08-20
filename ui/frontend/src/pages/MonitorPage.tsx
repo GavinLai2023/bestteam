@@ -68,6 +68,10 @@ function MonitorPage() {
         // statusless failure (fetch rejected) is a true unreachable.
         if (err?.status !== undefined) {
           setError(err.message)
+          // The backend answered, so a banner left over from an earlier
+          // network failure is now saying something untrue -- clear it on
+          // this path too, under the same guard the success path uses.
+          setStatus((current) => (current === 'unreachable' ? 'idle' : current))
         } else {
           // Which host and what should be listening on it is an operator's
           // problem, not the customer's -- it belongs in the console, not on
@@ -173,7 +177,16 @@ function MonitorPage() {
   const finalEvent = events.find((e) => TERMINAL_TYPES.includes(e.type))
   const isWaitingForFirstProgress = status === 'running' && !events.some((e) => !NON_PROGRESS_TYPES.includes(e.type))
 
-  const teamLabel = (name: string) => displayNames[name] ?? name
+  // Nothing constrains a team's friendly name to be unique, so two deployed
+  // teams can carry the same one. Showing both as identical options would ask
+  // the customer to pick blind; the technical name is appended to the
+  // colliding ones only, so the common case stays clean.
+  const teamLabel = (name: string) => {
+    const display = displayNames[name]
+    if (!display) return name
+    const collides = pipelines.some((other) => other !== name && displayNames[other] === display)
+    return collides ? t('run.teamLabelAmbiguous', { display, name }) : display
+  }
   // Resolves an agent's technical name for the friendly feed. `agent` here is
   // whatever the engine emitted; there is no specification on this page to map
   // it against, so it passes through -- the friendly view's value is the

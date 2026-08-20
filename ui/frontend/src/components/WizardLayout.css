@@ -82,7 +82,7 @@
 
 .btn-primary {
   background: var(--accent);
-  color: var(--surface);
+  color: var(--accent-contrast);
 }
 
 .btn-primary:disabled {
@@ -127,13 +127,13 @@
 .banner-info {
   background: var(--info-bg);
   border: 1px solid var(--info-border);
-  color: #1d4ed8;
+  color: var(--info-text);
 }
 
 .banner-success {
   background: var(--success-bg);
   border: 1px solid var(--success-border);
-  color: #047857;
+  color: var(--success);
 }
 
 .tag-list {
@@ -188,7 +188,7 @@
 
 .team-flow-arrow {
   align-self: center;
-  color: #c7c9d9;
+  color: var(--border-strong);
   font-size: 1.3rem;
   line-height: 1;
 }
@@ -197,7 +197,7 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px;
-  background: #fafaff;
+  background: var(--surface-muted);
 }
 
 .team-block-header {
@@ -218,7 +218,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #6366f1;
+  color: var(--accent-strong);
   background: var(--accent-soft);
   padding: 2px 8px;
   border-radius: 999px;
@@ -255,7 +255,7 @@
 }
 
 .sequential-arrow {
-  color: #c7c9d9;
+  color: var(--border-strong);
   font-size: 1.2rem;
 }
 

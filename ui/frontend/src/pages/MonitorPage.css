@@ -70,7 +70,7 @@ header p {
   border: none;
   border-radius: 8px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   cursor: pointer;
 }
 
@@ -186,7 +186,7 @@ header p {
 .result-actions button:not(.btn-secondary) {
   border: none;
   background: var(--accent);
-  color: var(--surface);
+  color: var(--accent-contrast);
 }
 
 .result-actions .btn-secondary {
