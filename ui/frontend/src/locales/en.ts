@@ -125,6 +125,7 @@ export const en = {
     peakHour: 'Busiest hour',
     noPeakHour: 'Not enough data yet',
     heatmapCaption: 'Runs over the last 12 weeks',
+    loadFailed: "Couldn't load your activity. Check your connection and try again.",
   },
   advanced: {
     filterPlaceholder: 'Filter…',

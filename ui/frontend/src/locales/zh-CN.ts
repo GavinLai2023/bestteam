@@ -105,6 +105,7 @@ export const zhCN: Resources = {
     peakHour: '最活跃时段',
     noPeakHour: '数据还不够',
     heatmapCaption: '过去 12 周的运行情况',
+    loadFailed: '无法加载你的使用情况，请检查网络后重试。',
   },
   advanced: {
     filterPlaceholder: '筛选…',

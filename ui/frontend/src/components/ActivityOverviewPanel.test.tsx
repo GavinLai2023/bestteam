@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import ActivityOverviewPanel from './ActivityOverviewPanel'
 import { api } from '../lib/api'
 import type { ActivityOverview } from '../lib/types'
@@ -78,12 +78,29 @@ describe('ActivityOverviewPanel', () => {
     expect(screen.queryByText('0')).not.toBeInTheDocument()
   })
 
-  it('shows an error banner when the request fails', async () => {
-    mockedApi.getActivityOverview.mockRejectedValue(new Error('Service unavailable'))
+  it('shows a friendly banner when the request fails, not the raw error text', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockedApi.getActivityOverview.mockRejectedValue(new Error('{"detail": "Not Found"}'))
 
     render(<ActivityOverviewPanel />)
 
-    expect(await screen.findByText('Service unavailable')).toBeInTheDocument()
+    expect(await screen.findByText(/couldn't load your activity/i)).toBeInTheDocument()
+    expect(screen.queryByText('{"detail": "Not Found"}')).not.toBeInTheDocument()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
+
+  it('retries the fetch when Try again is clicked after a failure', async () => {
+    mockedApi.getActivityOverview.mockRejectedValueOnce(new Error('Not Found'))
+    mockedApi.getActivityOverview.mockResolvedValueOnce(OVERVIEW())
+
+    render(<ActivityOverviewPanel />)
+
+    const retryButton = await screen.findByRole('button', { name: /try again/i })
+    fireEvent.click(retryButton)
+
+    expect(await screen.findByText('67')).toBeInTheDocument()
+    expect(mockedApi.getActivityOverview).toHaveBeenCalledTimes(2)
   })
 
   it('renders one heatmap cell per day of data', async () => {

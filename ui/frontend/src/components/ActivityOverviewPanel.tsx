@@ -21,7 +21,8 @@ export default function ActivityOverviewPanel() {
   const { t } = useTranslation()
   const [overview, setOverview] = useState<ActivityOverview | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let ignore = false
@@ -31,7 +32,15 @@ export default function ActivityOverviewPanel() {
         if (!ignore) setOverview(data)
       })
       .catch((e) => {
-        if (!ignore) setError(e instanceof Error ? e.message : String(e))
+        // A raw error here is never something a customer can act on --
+        // Starlette's own default 404 body is literally {"detail": "Not
+        // Found"}, which no route in this backend writes on purpose. Log it
+        // for whoever's debugging and show a generic, actionable banner
+        // instead (same boundary as useModelCatalog/DocumentsPage).
+        if (!ignore) {
+          console.error('Failed to load activity overview:', e)
+          setFailed(true)
+        }
       })
       .finally(() => {
         if (!ignore) setLoading(false)
@@ -39,10 +48,27 @@ export default function ActivityOverviewPanel() {
     return () => {
       ignore = true
     }
-  }, [])
+  }, [attempt])
+
+  const retry = () => {
+    setLoading(true)
+    setFailed(false)
+    setAttempt((n) => n + 1)
+  }
 
   if (loading) return <p className="hint">{t('common.loading')}</p>
-  if (error) return <p className="banner banner-error">{error}</p>
+  if (failed) {
+    return (
+      <div className="banner banner-error">
+        {t('overview.loadFailed')}
+        <div className="wizard-actions" style={{ marginTop: 8 }}>
+          <button className="btn btn-secondary" onClick={retry}>
+            {t('common.tryAgain')}
+          </button>
+        </div>
+      </div>
+    )
+  }
   if (overview === null) return null
 
   if (overview.sessions === 0) {
