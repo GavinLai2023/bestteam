@@ -18,9 +18,9 @@
   width: 18px;
   height: 18px;
   border-radius: 999px;
-  border: 1px solid #d1d5db;
-  background: #fff;
-  color: #6b7280;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
@@ -56,15 +56,15 @@
 
 .session-updated {
   font-size: 0.8rem;
-  color: #6b7280;
+  color: var(--text-muted);
 }
 
 .status-badge {
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--hover);
+  color: var(--text-muted);
   padding: 1px 6px;
   border-radius: 999px;
 }
@@ -80,15 +80,27 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fff;
-  border: 1px solid #fca5a5;
+  background: var(--surface);
+  border: 1px solid var(--danger-border);
   border-radius: 6px;
-  color: #b91c1c;
+  color: var(--danger);
   cursor: pointer;
   padding: 6px;
 }
 
 .session-delete-button:hover {
-  background: #fef2f2;
-  border-color: #b91c1c;
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .session-status-header {
+    flex-wrap: wrap;
+  }
+
+  .session-card-footer {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
 }

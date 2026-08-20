@@ -7,13 +7,13 @@
 
 .runs-pager button {
   background: none;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
   padding: 4px 12px;
   font: inherit;
   font-size: 0.82rem;
   font-weight: 600;
-  color: #4b5563;
+  color: var(--text-soft);
   cursor: pointer;
 }
 

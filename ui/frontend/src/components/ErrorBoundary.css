@@ -12,5 +12,5 @@
 
 .error-boundary p {
   margin-bottom: 1.5rem;
-  color: #555;
+  color: var(--text-soft);
 }

@@ -32,14 +32,14 @@
 
 .share-chat-bubble.assistant {
   align-self: flex-start;
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--surface-muted);
+  color: var(--text);
 }
 
 .share-chat-bubble.status {
   align-self: flex-start;
   font-style: italic;
-  color: #64748b;
+  color: var(--text-muted);
   background: transparent;
 }
 
@@ -47,18 +47,18 @@
   display: flex;
   gap: 0.5rem;
   padding-top: 0.75rem;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--border);
 }
 
 .share-chat-form input {
   flex: 1;
   padding: 0.6rem 0.8rem;
   border-radius: 0.6rem;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border-strong);
 }
 
 .share-chat-unavailable {
   margin: auto;
   text-align: center;
-  color: #64748b;
+  color: var(--text-muted);
 }
