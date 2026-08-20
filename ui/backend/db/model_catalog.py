@@ -88,6 +88,13 @@ def get_entry(db: Session, spec: str) -> Optional[ModelCatalogEntry]:
 
 
 def upsert_entry(db: Session, spec: str, **fields: Any) -> ModelCatalogEntry:
+    if fields.get("is_default"):
+        # At most one entry is ever the default -- clear every other row's
+        # flag in the same call rather than requiring the caller (the CRUD
+        # route, or any other upsert_entry caller) to do it themselves.
+        db.query(ModelCatalogEntry).filter(ModelCatalogEntry.spec != spec).update(
+            {"is_default": False}
+        )
     entry = get_entry(db, spec)
     if entry is None:
         entry = ModelCatalogEntry(spec=spec, **fields)

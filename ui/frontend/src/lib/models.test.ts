@@ -10,4 +10,20 @@ describe('pickDefaultModel', () => {
     ]
     expect(pickDefaultModel(entries)).toBe('openai:gpt-4o-mini')
   })
+
+  it('prefers the entry an admin marked is_default over alphabetical order', () => {
+    const entries: ModelCatalogEntry[] = [
+      { spec: 'anthropic:claude', display_name: 'Claude' },
+      { spec: 'openai:gpt-4o-mini', display_name: 'GPT-4o mini', is_default: true },
+    ]
+    expect(pickDefaultModel(entries)).toBe('openai:gpt-4o-mini')
+  })
+
+  it('ignores is_default on a fake: entry', () => {
+    const entries: ModelCatalogEntry[] = [
+      { spec: 'fake:ok', display_name: 'Demo Assistant', is_default: true },
+      { spec: 'openai:gpt-4o-mini', display_name: 'GPT-4o mini' },
+    ]
+    expect(pickDefaultModel(entries)).toBe('openai:gpt-4o-mini')
+  })
 })

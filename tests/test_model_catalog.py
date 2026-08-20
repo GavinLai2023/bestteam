@@ -56,6 +56,17 @@ def test_upsert_updates_existing_entry(db):
     assert len(list_entries(db)) == 1
 
 
+def test_upsert_setting_is_default_clears_previous_default(db):
+    """Only one catalog entry can be `is_default` at a time -- the wizard's
+    `pickDefaultModel` treats it as the Solution Architect's model, so two
+    defaults would make that choice ambiguous."""
+    upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", is_default=True)
+    upsert_entry(db, "openai:gpt-4o", display_name="Senior Assistant", is_default=True)
+
+    assert get_entry(db, "openai:gpt-4o-mini").is_default is False
+    assert get_entry(db, "openai:gpt-4o").is_default is True
+
+
 def test_delete_entry(db):
     upsert_entry(db, "fake:hi", display_name="Demo")
 
@@ -222,6 +233,22 @@ def test_public_model_catalog_never_offers_a_fake_model(client):
     assert resp.status_code == 200
     specs = [entry["spec"] for entry in resp.json()]
     assert specs == ["openai:gpt-4o-mini"]
+
+
+def test_model_catalog_put_setting_is_default_clears_previous_default(client):
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o-mini",
+        json={"display_name": "Quick Assistant", "tier": "fast", "is_default": True},
+    )
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o",
+        json={"display_name": "Senior Assistant", "tier": "advanced", "is_default": True},
+    )
+
+    first = client.get("/api/config/model-catalog/openai:gpt-4o-mini")
+    second = client.get("/api/config/model-catalog/openai:gpt-4o")
+    assert first.json()["is_default"] is False
+    assert second.json()["is_default"] is True
 
 
 def test_read_model_catalog_requires_authentication(client):

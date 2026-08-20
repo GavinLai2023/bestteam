@@ -7,6 +7,9 @@ export interface Me {
 export interface ModelCatalogEntry {
   spec: string
   display_name: string
+  // Set by an admin to mark this entry as the platform's default (e.g. the
+  // model the wizard runs the Solution Architect on) -- see `pickDefaultModel`.
+  is_default?: boolean
 }
 
 // Whether the wizard's "smart search" toggle (DocumentsPage) has anything to
