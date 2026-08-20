@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator
@@ -288,6 +289,24 @@ def generate_specification(
                 "output; the selected model can't (for example, a demo 'fake:' model). "
                 "Choose a real model to design your team."
             ) from exc
+        except OutputParserException as exc:
+            # The completion didn't even fit the Specification schema (e.g. a full
+            # agent object nested under teams[].agents[], which must be a list of
+            # agent NAMES, or a missing top-level `name`) -- raised by
+            # `with_structured_output` before we ever get a Specification to hand to
+            # `validate_specification`. Self-correct on it the same way, instead of
+            # letting it crash the whole request.
+            last_error = ConfigurationError(str(exc))
+            messages.append(AIMessage(content=exc.llm_output or str(exc)))
+            messages.append(
+                HumanMessage(
+                    content=(
+                        f"That design doesn't work yet: {exc} "
+                        "Please revise the specification to fix this issue."
+                    )
+                )
+            )
+            continue
         spec = result if isinstance(result, Specification) else Specification.model_validate(result)
         try:
             if pre_validate is not None:
