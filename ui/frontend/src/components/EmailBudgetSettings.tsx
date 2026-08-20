@@ -7,13 +7,6 @@ function capField(cap: number | null): string {
   return cap === null ? '' : String(cap)
 }
 
-// The cap is a round figure the admin typed; the spend is measured and is
-// routinely a fraction of a penny, so it keeps the four decimals the rest of
-// the app uses for run costs (TracePage, AdminRunDetail).
-function money(value: number, decimals: number): string {
-  return `$${value.toFixed(decimals)}`
-}
-
 function dailyLine(budget: EmailBudget): string {
   const used = budget.messages_today
   return budget.daily_message_cap === null
@@ -21,33 +14,15 @@ function dailyLine(budget: EmailBudget): string {
     : `Messages handled today: ${used} of ${budget.daily_message_cap}.`
 }
 
-function monthlyLine(budget: EmailBudget): string {
-  // null is not zero: it means nothing this month could be priced at all.
-  // Printing $0.00 for it would state a measurement we do not have.
-  const spent =
-    budget.spent_this_month === null
-      ? 'nothing this month has a price yet'
-      : money(budget.spent_this_month, 4)
-  if (budget.monthly_cost_cap === null) return `Spent this month: ${spent} (no cap set).`
-  if (budget.spent_this_month === null) {
-    return `Spent this month: ${spent}. Your cap is ${money(budget.monthly_cost_cap, 2)}.`
-  }
-  return `Spent this month: ${spent} of ${money(budget.monthly_cost_cap, 2)}.`
-}
-
-// "1 run" / "3 runs" -- a count with a correctly pluralised noun.
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`
-}
-
 // How much automatic email work this organisation will do, on the Activity
-// page's Automations tab: a message count a day, an amount of spend a month,
-// and what each has used so far.
+// page's Automations tab: a message count a day and a spend cap a month, plus
+// how much of the daily message count has been used so far.
 //
-// The two "blind spot" lines are the point of the usage half. A model with no
-// price in the catalogue contributes nothing to the spend total, so the figure
-// is a floor rather than the whole amount -- that has to be on the screen, not
-// left for the admin to work out from a cap that never seems to be reached.
+// Which model handled the work, and exactly how much has been spent, are
+// admin-only figures -- this panel is reachable by any org member, not just
+// whoever manages billing, so neither one is rendered here even though the
+// API response carries both (`spent_this_month`, `unpriced_models`,
+// `unpriced_runs_this_month`).
 export default function EmailBudgetSettings() {
   const [budget, setBudget] = useState<EmailBudget | null>(null)
   const [daily, setDaily] = useState('')
@@ -131,21 +106,6 @@ export default function EmailBudgetSettings() {
       </p>
 
       <p className="muted">{dailyLine(budget)}</p>
-      <p className="muted">{monthlyLine(budget)}</p>
-      {budget.unpriced_models.length > 0 && (
-        <p className="hint">
-          The spend limit does not cover {budget.unpriced_models.join(', ')} &mdash; we
-          hold no price for{' '}
-          {budget.unpriced_models.length === 1 ? 'that model' : 'those models'}, so their
-          work adds nothing to the amount above.
-        </p>
-      )}
-      {budget.unpriced_runs_this_month > 0 && (
-        <p className="hint">
-          {plural(budget.unpriced_runs_this_month, 'run')} this month used a model we have
-          no price for, so the amount spent is at least that figure rather than exactly it.
-        </p>
-      )}
 
       <div className="field">
         <label htmlFor="budget-daily">Most messages a day</label>
