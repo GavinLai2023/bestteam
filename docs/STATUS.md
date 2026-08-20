@@ -1661,6 +1661,23 @@
 
 ## Known issues / tech debt
 
+- **The Chinese UI has never been looked at in a browser.** The frontend is
+  bilingual as of the 2026-08-20 UX pass, but **English is the default**, so
+  no automated test renders a single Chinese string: Vitest runs in `en` and
+  the Playwright E2E selectors are all English `has-text()`. Chinese is
+  typographically wider per glyph than the English it replaces, and several
+  layouts still carry fixed widths (`WizardProgress.css`'s
+  `min-width: 110px`, the wizard's `min-width: 150px` employee cards). The
+  new dark mode and the responsive breakpoints added in the same pass are
+  likewise unverified by any test. **Someone has to switch the language and
+  walk each page at desktop, tablet and phone widths before this ships.**
+- **The frontend UX audit's F1 is only structurally complete.** The i18n
+  layer, the shared copy modules and every string on the customer's daily
+  surfaces (nav, Run a team, Dashboard, the wizard) are extracted and
+  translated, but the long tail on the admin pages -- much of `TracePage`,
+  `AccountsPage`, `MemoryPage` and several settings panels -- is still
+  English-only literals. Adding them is mechanical: put the key in
+  `locales/en.ts` and `tsc` will refuse to build until `zh-CN.ts` has it too.
 - **Microsoft 365 mailbox support has never touched a live tenant.** Every test
   for it runs against fakes: they pin the SASL byte string, the token
   lifecycle, the storage round-trip and the four error mappings, but nothing in
@@ -1959,6 +1976,11 @@
 
 ## Next steps / roadmap
 
+- **Finish the frontend UX pass** (audit 2026-08-20, F1–F15). F2–F15 are
+  done; F1 (bilingual UI) has its structure and the customer-facing surfaces
+  done, with the admin long tail outstanding -- see Known issues above, along
+  with the visual verification that neither the Chinese layouts nor dark mode
+  have had.
 - **Beta launch gate** (architecture review 2026-08-17, Stage 0 -- ops and
   hygiene only, no business-logic change): G1–G6 are done (see Done), as is
   the 2026-08-19 re-review's pre-launch hardening (B1–B5, B8 -- see Done).
