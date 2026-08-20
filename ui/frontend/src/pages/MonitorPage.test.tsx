@@ -81,15 +81,51 @@ describe('MonitorPage backend error handling', () => {
     expect(
       await screen.findByText(/Platform operators do not belong to an organization/),
     ).toBeInTheDocument()
-    expect(screen.queryByText(/Can't reach the backend/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/can't reach the service/i)).not.toBeInTheDocument()
   })
 
-  it('shows "Can\'t reach the backend" on a genuine network failure (no HTTP status)', async () => {
+  it('shows a customer-facing connection message on a genuine network failure (no HTTP status)', async () => {
     mockedApi.listPipelines.mockRejectedValue(new TypeError('Failed to fetch'))
 
     renderPage()
 
-    expect(await screen.findByText(/Can't reach the backend/)).toBeInTheDocument()
+    expect(await screen.findByText(/can't reach the service/i)).toBeInTheDocument()
+  })
+
+  // The page is the customer's daily driver; which host is down and what is
+  // supposed to be listening on it belongs in the console, not on screen.
+  it('never shows the backend URL or the uvicorn command to the customer', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockedApi.listPipelines.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    renderPage()
+    await screen.findByText(/can't reach the service/i)
+
+    expect(screen.queryByText(/uvicorn/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/127\.0\.0\.1:8000/)).not.toBeInTheDocument()
+    // ...but an operator can still find it.
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('http://127.0.0.1:8000'),
+      expect.anything(),
+    )
+    consoleError.mockRestore()
+  })
+
+  it('recovers when the retry button succeeds, without needing a reload', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockedApi.listPipelines.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    renderPage()
+    const banner = await screen.findByText(/can't reach the service/i)
+
+    mockedApi.listPipelines.mockResolvedValueOnce({ pipelines: ['wf'], pipeline_ids: {} })
+    await act(async () => {
+      fireEvent.click(screen.getByText('Try again'))
+    })
+
+    expect(banner).not.toBeInTheDocument()
+    expect(await screen.findByRole('option', { name: 'wf' })).toBeInTheDocument()
+    consoleError.mockRestore()
   })
 })
 

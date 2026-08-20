@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { API_BASE, WS_BASE, api } from '../lib/api'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
 import type { TraceEvent } from '../lib/types'
@@ -12,6 +13,7 @@ type Status = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unrea
 type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected'
 
 function MonitorPage() {
+  const { t } = useTranslation()
   const [searchParams] = useSearchParams()
   const [pipelines, setPipelines] = useState<string[]>([])
   const [selected, setSelected] = useState('')
@@ -31,10 +33,14 @@ function MonitorPage() {
   const runStartedAtRef = useRef<number | null>(null)
   const lastEventAtRef = useRef<number | null>(null)
 
-  useEffect(() => {
+  const loadPipelines = useCallback(() => {
+    setError(null)
     api.listPipelines()
       .then((data) => {
         setPipelines(data.pipelines)
+        // Clear a previous unreachable banner, but never stomp on a run that
+        // is currently in flight or has already reached a terminal state.
+        setStatus((current) => (current === 'unreachable' ? 'idle' : current))
         const preferred = searchParams.get('pipeline')
         if (preferred && data.pipelines.includes(preferred)) {
           setSelected(preferred)
@@ -45,16 +51,24 @@ function MonitorPage() {
       .catch((err: { status?: number; message: string }) => {
         // A rejection with an HTTP status means the backend answered (e.g. a
         // 403 for a platform operator with no org) -- it is reachable, so show
-        // the real reason rather than the misleading "is uvicorn running?".
-        // Only a statusless failure (fetch rejected) is a true unreachable.
+        // the real reason rather than a generic connection message. Only a
+        // statusless failure (fetch rejected) is a true unreachable.
         if (err?.status !== undefined) {
           setError(err.message)
         } else {
+          // Which host and what should be listening on it is an operator's
+          // problem, not the customer's -- it belongs in the console, not on
+          // the page (see the banner below).
+          console.error(`bestteam: cannot reach the backend at ${API_BASE}`, err)
           setStatus('unreachable')
         }
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    loadPipelines()
+  }, [loadPipelines])
 
   // Close any open socket when the component unmounts.
   useEffect(() => () => wsRef.current?.close(), [])
@@ -153,9 +167,14 @@ function MonitorPage() {
       </header>
 
       {status === 'unreachable' && (
-        <p className="banner banner-error">
-          Can't reach the backend at {API_BASE}. Is `uvicorn ui.backend.main:app` running?
-        </p>
+        <div className="banner banner-error">
+          {t('run.unreachable')}
+          <div className="banner-actions">
+            <button type="button" className="btn-secondary" onClick={loadPipelines}>
+              {t('common.tryAgain')}
+            </button>
+          </div>
+        </div>
       )}
 
       {error && <p className="banner banner-error">{error}</p>}

@@ -24,6 +24,21 @@ export const en = {
     // needs to recognise their own by sight to get out.
     language: 'Language',
   },
+  common: {
+    tryAgain: 'Try again',
+  },
+  run: {
+    // Deliberately says nothing about which host is unreachable or what is
+    // meant to be running there: this page is the customer's daily driver,
+    // and the deployment's internals are not theirs to debug. The technical
+    // detail goes to console.error for whoever is.
+    unreachable: "We can't reach the service right now. This is usually temporary.",
+  },
+  modelCatalog: {
+    // Shared by every wizard stage that needs a real model to generate with.
+    loadFailed: "Couldn't load the available AI models. Check your connection and try again.",
+    empty: 'No AI models are available yet. Contact your administrator, or try again.',
+  },
 }
 
 // Note: deliberately NOT `as const`. Under `as const` every value becomes its

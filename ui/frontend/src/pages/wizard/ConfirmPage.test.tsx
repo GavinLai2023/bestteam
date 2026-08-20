@@ -100,4 +100,39 @@ describe('ConfirmPage', () => {
 
     expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents')
   })
+
+  // Every action on this page is gated on a chosen model, and ModelPicker
+  // renders nothing when there is no catalog -- so without an explicit banner
+  // the page is a dead end: a permanently disabled button and no stated
+  // reason. IntentPage/DocumentsPage already guarded this; ConfirmPage didn't.
+  describe('when no model is available', () => {
+    it('explains an empty catalog instead of silently disabling everything', async () => {
+      mockedApi.modelCatalog.mockResolvedValue([])
+
+      renderPage()
+
+      expect(await screen.findByText(/No AI models are available yet/i)).toBeInTheDocument()
+      expect(screen.getByText('Apply this change').closest('button')).toBeDisabled()
+    })
+
+    it('explains a failed catalog fetch and offers a retry that recovers', async () => {
+      mockedApi.modelCatalog.mockRejectedValueOnce(new Error('network down'))
+
+      renderPage()
+
+      expect(await screen.findByText(/Couldn't load the available AI models/i)).toBeInTheDocument()
+
+      mockedApi.modelCatalog.mockResolvedValue([
+        { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+      ])
+      fireEvent.click(screen.getByText('Try again'))
+
+      await waitFor(() =>
+        expect(screen.queryByText(/Couldn't load the available AI models/i)).not.toBeInTheDocument(),
+      )
+      await waitFor(() =>
+        expect(screen.getByText('Apply this change').closest('button')).toBeEnabled(),
+      )
+    })
+  })
 })

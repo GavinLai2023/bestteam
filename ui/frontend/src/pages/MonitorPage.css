@@ -27,6 +27,12 @@ header p {
   color: #b91c1c;
 }
 
+/* Gives the banner's recovery action room without inheriting `.controls-actions`
+   spacing, which is tuned for the much larger Run/Stop pair. */
+.banner-actions {
+  margin-top: 10px;
+}
+
 .controls {
   display: flex;
   flex-direction: column;

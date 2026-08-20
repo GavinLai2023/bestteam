@@ -19,4 +19,14 @@ export const zhCN: Resources = {
     logOut: '退出登录',
     language: '语言',
   },
+  common: {
+    tryAgain: '重试',
+  },
+  run: {
+    unreachable: '暂时连不上服务，通常稍后即可恢复。',
+  },
+  modelCatalog: {
+    loadFailed: '无法加载可用的 AI 模型，请检查网络后重试。',
+    empty: '目前还没有可用的 AI 模型，请联系管理员，或稍后重试。',
+  },
 }

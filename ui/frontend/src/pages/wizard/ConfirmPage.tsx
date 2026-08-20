@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import BulletEditor from '../../components/BulletEditor'
 import ModelPicker from '../../components/ModelPicker'
 import TeamFlow from '../../components/TeamFlow'
 import { api } from '../../lib/api'
+import { useModelCatalog } from '../../lib/useModelCatalog'
 import type { Requirements, WizardOutletContext } from '../../lib/types'
 
 const EMPTY_REQUIREMENTS: Requirements = {
@@ -18,6 +20,20 @@ const EMPTY_REQUIREMENTS: Requirements = {
 export default function ConfirmPage() {
   const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
+  const { t } = useTranslation()
+  // Both buttons on this page are gated on a chosen model, and `ModelPicker`
+  // renders nothing at all when the catalog is empty or failed to load -- so
+  // without this the page silently became a dead end: a permanently disabled
+  // "Apply this change" with no explanation anywhere on screen. IntentPage and
+  // DocumentsPage already guard the same way; this page was the one that
+  // didn't (audit finding F3).
+  const {
+    loading: catalogLoading,
+    failed: catalogFailed,
+    entries: catalogEntries,
+    retry: retryCatalog,
+  } = useModelCatalog()
+  const catalogUnavailable = catalogFailed || (!catalogLoading && catalogEntries.length === 0)
 
   const [model, setModel] = useState('')
   const [feedback, setFeedback] = useState('')
@@ -112,6 +128,17 @@ export default function ConfirmPage() {
         back to try it out again.
       </p>
 
+      {catalogUnavailable && (
+        <div className="banner banner-error">
+          {catalogFailed ? t('modelCatalog.loadFailed') : t('modelCatalog.empty')}
+          <div className="wizard-actions" style={{ marginTop: 8 }}>
+            <button className="btn btn-secondary" onClick={retryCatalog}>
+              {t('common.tryAgain')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {error && <p className="banner banner-error">{error}</p>}
 
       <TeamFlow specification={spec} />
@@ -147,7 +174,12 @@ export default function ConfirmPage() {
           Need to add or update a document? Upload it here
         </button>
       </div>
-      <ModelPicker value={model} onChange={setModel} label="Which assistant should your team use?" />
+      <ModelPicker
+        value={model}
+        onChange={setModel}
+        entries={catalogEntries}
+        label="Which assistant should your team use?"
+      />
 
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={applyFeedback} disabled={!model || busy}>
@@ -244,7 +276,12 @@ export default function ConfirmPage() {
                   placeholder="e.g. We also use Zendesk for tickets, and replies must stay under 150 words."
                 />
               </div>
-              <ModelPicker value={reqModel} onChange={setReqModel} label="Which assistant should redo this?" />
+              <ModelPicker
+                value={reqModel}
+                onChange={setReqModel}
+                entries={catalogEntries}
+                label="Which assistant should redo this?"
+              />
               <div className="wizard-actions">
                 <button
                   className="btn btn-secondary"
