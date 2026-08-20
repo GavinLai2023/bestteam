@@ -13,9 +13,15 @@ pytestmark = pytest.mark.unit
 class _FakeAnalystChatModel(BaseChatModel):
     """Cycles through pre-scripted Requirements objects via `with_structured_output`,
     independent of `bind_tools`/tool-calling -- mirrors `_FakeArchitectChatModel`
-    in tests/test_specification.py."""
+    in tests/test_specification.py.
+
+    The response index lives on the instance (not a `with_structured_output`-local
+    closure) so it still advances correctly if a caller builds a fresh
+    `with_structured_output(...)` runnable on each retry, matching how a real
+    `BaseChatModel`'s stateless `with_structured_output` behaves."""
 
     responses: List[Any] = Field(default_factory=list)
+    call_index: List[int] = Field(default_factory=lambda: [0])
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise NotImplementedError
@@ -26,12 +32,15 @@ class _FakeAnalystChatModel(BaseChatModel):
 
     def with_structured_output(self, schema, **kwargs):
         responses = self.responses
-        state = {"index": 0}
+        state = self.call_index
 
         def _invoke(_input):
-            i = min(state["index"], len(responses) - 1)
-            state["index"] += 1
-            return responses[i]
+            i = min(state[0], len(responses) - 1)
+            state[0] += 1
+            item = responses[i]
+            if isinstance(item, BaseException):
+                raise item
+            return item
 
         return RunnableLambda(_invoke)
 
@@ -118,6 +127,40 @@ def test_generate_requirements_falls_back_to_json_mode_when_model_rejects_forced
     result = generate_requirements(model, "Help me with my email.")
 
     assert result == expected
+
+
+def test_generate_requirements_retries_when_completion_fails_to_parse():
+    # Mirrors generate_specification's OutputParserException handling
+    # (tests/test_specification.py) -- the Business Analyst's completion can
+    # fail to even fit the Requirements schema, which with_structured_output
+    # raises before we ever get a Requirements to return.
+    from langchain_core.exceptions import OutputParserException
+
+    expected = Requirements(summary="Updated summary")
+    bad_completion = '{"summary": 123}'
+    parse_failure = OutputParserException(
+        f"Failed to parse Requirements from completion {bad_completion}. Got: 1 validation error",
+        llm_output=bad_completion,
+    )
+    model = _FakeAnalystChatModel(responses=[parse_failure, expected])
+
+    result = generate_requirements(model, "Help me with my email.")
+
+    assert result == expected
+
+
+def test_generate_requirements_raises_after_max_attempts_on_repeated_parse_failure():
+    from langchain_core.exceptions import OutputParserException
+
+    from bestteam.exceptions import ConfigurationError
+
+    parse_failure = OutputParserException(
+        "Failed to parse Requirements from completion {}. Got: field required", llm_output="{}"
+    )
+    model = _FakeAnalystChatModel(responses=[parse_failure])
+
+    with pytest.raises(ConfigurationError, match="could not produce valid Requirements"):
+        generate_requirements(model, "Help me with my email.", max_attempts=2)
 
 
 def test_requirements_to_prompt_renders_sections():

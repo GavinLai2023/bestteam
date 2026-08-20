@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from ..exceptions import ConfigurationError
@@ -64,26 +65,56 @@ class Requirements(BaseModel):
 
 
 def generate_requirements(
-    model: BaseChatModel, intent_text: str, as_is_text: str = "", *, feedback: Optional[str] = None
+    model: BaseChatModel,
+    intent_text: str,
+    as_is_text: str = "",
+    *,
+    feedback: Optional[str] = None,
+    max_attempts: int = 3,
 ) -> Requirements:
     """Summarize a customer's Intent/As-is description into structured Requirements.
 
     `feedback` is the customer's reply to a previous round (e.g. answers to
     `clarifying_questions`, or a correction) and is appended to the prompt so
     the analyst can revise its summary.
+
+    Self-corrects on `OutputParserException` (mirrors
+    `generate_specification`'s retry loop, see `core/specification.py`): the
+    Business Analyst's completion can fail to fit the Requirements schema at
+    all, which `with_structured_output` raises before a `Requirements`
+    instance exists to return.
     """
     content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
     if feedback:
         content += f"\n\nAdditional information from the customer:\n{feedback}"
 
-    try:
-        result, _ = invoke_structured(
-            model, Requirements, [SystemMessage(content=_ANALYST_SYSTEM_PROMPT), HumanMessage(content=content)]
-        )
-    except NotImplementedError as exc:
-        raise ConfigurationError(
-            "The Team Builder needs a real AI model that can produce structured "
-            "output; the selected model can't (for example, a demo 'fake:' model). "
-            "Choose a real model to design your team."
-        ) from exc
-    return result if isinstance(result, Requirements) else Requirements.model_validate(result)
+    messages: List[BaseMessage] = [SystemMessage(content=_ANALYST_SYSTEM_PROMPT), HumanMessage(content=content)]
+
+    last_error: Optional[OutputParserException] = None
+    method = "function_calling"
+    for _ in range(max_attempts):
+        try:
+            result, method = invoke_structured(model, Requirements, messages, method=method)
+        except NotImplementedError as exc:
+            raise ConfigurationError(
+                "The Team Builder needs a real AI model that can produce structured "
+                "output; the selected model can't (for example, a demo 'fake:' model). "
+                "Choose a real model to design your team."
+            ) from exc
+        except OutputParserException as exc:
+            last_error = exc
+            messages.append(AIMessage(content=exc.llm_output or str(exc)))
+            messages.append(
+                HumanMessage(
+                    content=(
+                        f"That didn't work yet: {exc} Please try again, matching the required format."
+                    )
+                )
+            )
+            continue
+        return result if isinstance(result, Requirements) else Requirements.model_validate(result)
+
+    raise ConfigurationError(
+        f"Business Analyst could not produce valid Requirements after {max_attempts} attempts. "
+        f"Last error: {last_error}"
+    )
