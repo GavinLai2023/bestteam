@@ -2290,6 +2290,36 @@ def test_list_pipelines_includes_pipeline_ids(client):
     assert body["pipeline_ids"]["idtest"] == expected_id
 
 
+def test_list_pipelines_reports_the_teams_friendly_display_name(client):
+    # A picker labelling a team by its technical name while the run list beside
+    # it showed the friendly one meant one screen called one team two things
+    # (frontend audit finding F4). A team whose spec has no display_name is
+    # simply absent from the map, and the caller falls back to the name.
+    with open_test_db() as db:
+        db.add(
+            PipelineRecord(
+                name="named", org_id=get_org_id(), status="deployed",
+                config={
+                    "name": "named", "agents": [],
+                    "teams": [{"name": "t", "agents": [], "display_name": "Support Crew"}],
+                    "pipeline": {"steps": []},
+                },
+            )
+        )
+        db.add(
+            PipelineRecord(
+                name="unnamed", org_id=get_org_id(), status="deployed",
+                config={"name": "unnamed", "agents": [], "teams": [{"name": "t", "agents": []}],
+                        "pipeline": {"steps": []}},
+            )
+        )
+        db.commit()
+
+    body = client.get("/api/pipelines", headers=_org_user_headers(client)).json()
+    assert body["display_names"]["named"] == "Support Crew"
+    assert "unnamed" not in body["display_names"]
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 (0.6): deploy refuses email + egress on one agent.
 # ---------------------------------------------------------------------------

@@ -178,13 +178,13 @@ describe('ActivityPage', () => {
       await Promise.resolve()
     })
 
-    expect(screen.getByText('running', { selector: '.status-badge' })).toBeInTheDocument()
+    expect(screen.getByText('Running', { selector: '.status-badge' })).toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000)
     })
 
-    expect(screen.getByText('completed', { selector: '.status-badge' })).toBeInTheDocument()
+    expect(screen.getByText('Completed', { selector: '.status-badge' })).toBeInTheDocument()
     expect(mockedApi.listRuns).toHaveBeenCalledTimes(2)
   })
 
@@ -286,7 +286,8 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(screen.getByText('Run run-42')).toBeInTheDocument()
+    // The id is no longer the panel's title, but is still on screen for support (F7).
+    expect(screen.getByText('run-42', { selector: 'code' })).toBeInTheDocument()
   })
 
   it('opens a needs-attention item at its real, persisted status -- not an assumed "completed" -- so Retry renders for a run that actually failed', async () => {
@@ -324,7 +325,8 @@ describe('ActivityPage', () => {
       fireEvent.click(viewRunButton)
     })
 
-    expect(await screen.findByText('Run run-42')).toBeInTheDocument()
+    // The id moved out of the heading into a support detail line (F7).
+    expect(await screen.findByText('run-42', { selector: 'code' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(mockedApi.listRuns).toHaveBeenCalledWith({ run_id: 'run-42', limit: 1 })
   })

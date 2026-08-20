@@ -135,3 +135,15 @@
 .run-detail-retry {
   margin-top: 14px;
 }
+
+/* The run id demoted out of the heading (F7): still present for support, but
+   as a detail line rather than the first thing a customer reads. */
+.run-detail-id {
+  margin: 2px 0 0;
+  font-size: 0.78rem;
+}
+
+.run-detail-id code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: all;
+}

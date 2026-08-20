@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import { formatDateTime } from '../lib/dateFormat'
 import DataRetentionPanel from '../components/DataRetentionPanel'
 import EmailBudgetSettings from '../components/EmailBudgetSettings'
@@ -15,8 +17,6 @@ import WebhookSettings from '../components/WebhookSettings'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
-
-const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 
 // How often to silently refresh the Runs tab while it still shows a
 // `running` row -- otherwise a row's status/badge would go stale the moment
@@ -51,6 +51,8 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
+  const { t } = useTranslation()
+  const runStatusLabel = useRunStatusLabel()
   const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted. Fetched below rather than only through
@@ -163,8 +165,8 @@ export default function ActivityPage() {
   return (
     <div className="wizard">
       <header className="wizard-header">
-        <h1>Team activity</h1>
-        <p>See automations at a glance, or dig into any run's history.</p>
+        <h1>{t('activity.title')}</h1>
+        <p>{t('activity.subtitle')}</p>
       </header>
 
       <div className="activity-tabs">
@@ -173,19 +175,20 @@ export default function ActivityPage() {
           className={tab === 'automations' ? 'active' : ''}
           onClick={() => setTab('automations')}
         >
-          Automations
+          {t('activity.tabAutomations')}
         </button>
         <button type="button" className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
-          Runs
+          {t('activity.tabRuns')}
         </button>
         <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
-          Shared
+          {t('activity.tabShared')}
         </button>
         <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
-          Alerts{unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
+          {t('activity.tabAlerts')}
+          {unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
         </button>
         <button type="button" className={tab === 'data' ? 'active' : ''} onClick={() => setTab('data')}>
-          Data
+          {t('activity.tabData')}
         </button>
       </div>
 
@@ -237,12 +240,12 @@ export default function ActivityPage() {
       {tab === 'shared' && (
         <section className="activity-shared">
           <label>
-            Team
+            {t('activity.teamLabel')}
             <select
               value={sharedPipelineId ?? ''}
               onChange={(e) => setSharedPipelineId(e.target.value ? Number(e.target.value) : null)}
             >
-              <option value="">Pick a team…</option>
+              <option value="">{t('activity.pickTeam')}</option>
               {/* Only teams with a real DB id: a YAML-only demo pipeline has
                   no `pipeline_ids` entry, so it rendered with value="" --
                   indistinguishable from the placeholder and silently doing
@@ -265,12 +268,12 @@ export default function ActivityPage() {
         <>
           <section className="activity-filters">
             <label>
-              Team
+              {t('activity.teamLabel')}
               <select
                 value={filters.pipeline}
                 onChange={(e) => setFilters((f) => ({ ...f, pipeline: e.target.value }))}
               >
-                <option value="">All teams</option>
+                <option value="">{t('activity.allTeams')}</option>
                 {pipelines.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -279,20 +282,20 @@ export default function ActivityPage() {
               </select>
             </label>
             <label>
-              Trigger
+              {t('activity.triggerLabel')}
               <select value={filters.manual} onChange={(e) => setFilters((f) => ({ ...f, manual: e.target.value as Filters['manual'] }))}>
-                <option value="">Manual + automatic</option>
-                <option value="true">Manual only</option>
-                <option value="false">Automatic only</option>
+                <option value="">{t('activity.triggerAny')}</option>
+                <option value="true">{t('activity.triggerManual')}</option>
+                <option value="false">{t('activity.triggerAutomatic')}</option>
               </select>
             </label>
             <label>
-              Status
+              {t('activity.statusLabel')}
               <select value={filters.status} onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}>
-                <option value="">Any status</option>
-                {STATUS_OPTIONS.map((s) => (
+                <option value="">{t('runStatus.any')}</option>
+                {RUN_STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {runStatusLabel(s)}
                   </option>
                 ))}
               </select>
@@ -302,9 +305,9 @@ export default function ActivityPage() {
           {error && <p className="banner banner-error">{error}</p>}
 
           {loading ? (
-            <p className="hint">Loading…</p>
+            <p className="hint">{t('common.loading')}</p>
           ) : runs.length === 0 ? (
-            <p className="hint">No runs match these filters.</p>
+            <p className="hint">{t('activity.noRuns')}</p>
           ) : (
             <ul className="session-list">
               {runs.map((run) => (
@@ -315,9 +318,10 @@ export default function ActivityPage() {
                   >
                     <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
-                      <span className="status-badge">{run.status}</span>
+                      <span className="status-badge">{runStatusLabel(run.status)}</span>
                       <span className="session-updated">
-                        {run.autonomous ? 'Automatic' : 'Manual'} · {formatDateTime(run.started_at)}
+                        {run.autonomous ? t('activity.automatic') : t('activity.manual')} ·{' '}
+                        {formatDateTime(run.started_at)}
                       </span>
                     </div>
                   </button>
@@ -331,9 +335,27 @@ export default function ActivityPage() {
           {selectedRun && (
             <section className="run-detail-panel" ref={runDetailRef}>
               <div className="run-detail-panel-header">
-                <h2>Run {selectedRun.id}</h2>
+                <div>
+                  {/* The row is only present when the run came from this list;
+                      one opened from Needs-attention may not be on the current
+                      page, so the id remains the fallback title rather than
+                      the panel losing its heading entirely. */}
+                  {(() => {
+                    const row = runs.find((r) => r.id === selectedRun.id)
+                    return row ? (
+                      <h2>
+                        {row.team_display_name ?? row.pipeline} · {formatDateTime(row.started_at)}
+                      </h2>
+                    ) : (
+                      <h2>{selectedRun.id}</h2>
+                    )
+                  })()}
+                  <p className="hint run-detail-id">
+                    {t('activity.runIdLabel')}: <code>{selectedRun.id}</code>
+                  </p>
+                </div>
                 <button type="button" onClick={() => setSelectedRun(null)}>
-                  Close
+                  {t('activity.close')}
                 </button>
               </div>
               <RunDetail

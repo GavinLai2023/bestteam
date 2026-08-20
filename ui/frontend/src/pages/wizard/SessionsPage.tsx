@@ -25,8 +25,8 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 const STATUS_EXPLANATIONS: Record<string, string> = {
-  deployed: 'Live -- this team is deployed and ready for your organization to use.',
-  in_progress: "Still being built -- you're designing, reviewing, or trying out this team before making it live.",
+  deployed: 'Live — this team is deployed and ready for your organisation to use.',
+  in_progress: "Still being built — you're designing, reviewing, or trying out this team before making it live.",
 }
 
 function bucketFor(status: string) {

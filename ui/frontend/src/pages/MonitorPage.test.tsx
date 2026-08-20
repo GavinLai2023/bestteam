@@ -55,7 +55,7 @@ async function startARun() {
 
   renderPage()
   await screen.findByRole('option', { name: 'wf' })
-  fireEvent.change(screen.getByLabelText('Input'), { target: { value: 'do the thing' } })
+  fireEvent.change(screen.getByLabelText('What should this team do?'), { target: { value: 'do the thing' } })
   await act(async () => {
     fireEvent.click(screen.getByText('Run'))
     // Flush the createRun/createWsTicket awaits so the WebSocket is constructed.
@@ -157,17 +157,17 @@ describe('MonitorPage run waiting UX', () => {
   it('shows a waiting hint until progress beyond run_queued/run_started arrives', async () => {
     const ws = await startARun()
 
-    expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for your team to start work…')).toBeInTheDocument()
 
     await act(async () => {
       ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
     })
-    expect(screen.getByText('Waiting for the agent/model…')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for your team to start work…')).toBeInTheDocument()
 
     await act(async () => {
       ws!.emit({ type: 'agent_started', pipeline: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
     })
-    expect(screen.queryByText('Waiting for the agent/model…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Waiting for your team to start work…')).not.toBeInTheDocument()
   })
 
   it('shows a Stop button while running that calls cancelRun', async () => {
@@ -207,7 +207,7 @@ describe('MonitorPage run waiting UX', () => {
 
     renderPage()
     await screen.findByRole('option', { name: 'wf' })
-    fireEvent.change(screen.getByLabelText('Input'), { target: { value: 'do the thing' } })
+    fireEvent.change(screen.getByLabelText('What should this team do?'), { target: { value: 'do the thing' } })
     fireEvent.click(screen.getByText('Run'))
 
     expect(await screen.findByText('Running…')).toBeInTheDocument()
@@ -239,7 +239,7 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.queryByText('agent step output')).not.toBeInTheDocument()
 
     const bodyText = document.body.textContent || ''
-    expect(bodyText.indexOf('Final output')).toBeLessThan(bodyText.indexOf('Live trace'))
+    expect(bodyText.indexOf('Final output')).toBeLessThan(bodyText.indexOf('Progress'))
 
     fireEvent.click(screen.getByText('Show technical trace'))
     expect(screen.getByText('agent step output')).toBeInTheDocument()
@@ -320,6 +320,30 @@ describe('MonitorPage run waiting UX', () => {
       })
     })
 
+    // A tool call is detail, so it lives in the technical trace rather than
+    // the friendly feed a customer sees by default.
+    fireEvent.click(screen.getByText('Show technical trace'))
+
     expect(screen.getByText(/echo_tool · success · 12ms — echoed: hi/)).toBeInTheDocument()
+  })
+
+  // The default view narrates the run the way the wizard's preview does,
+  // instead of showing `✓ agent done` and raw agent names (F8).
+  it('shows friendly progress by default and the technical trace on demand', async () => {
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
+      ws!.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'researcher', data: 'done', usage: [] })
+    })
+
+    expect(screen.getByText('Your team got started')).toBeInTheDocument()
+    expect(screen.getByText('researcher finished their part')).toBeInTheDocument()
+    expect(screen.queryByText('✓ agent done')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Show technical trace'))
+
+    expect(screen.getByText('✓ agent done')).toBeInTheDocument()
+    expect(screen.queryByText('Your team got started')).not.toBeInTheDocument()
   })
 })

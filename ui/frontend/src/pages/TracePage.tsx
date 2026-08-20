@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
+import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import AdminRunDetail from '../components/AdminRunDetail'
 import RunsPager from '../components/RunsPager'
 import type {
@@ -14,8 +16,6 @@ import '../components/WizardLayout.css'
 import '../pages/ActivityPage.css' // reuses .session-list/.session-card/.run-detail-panel
 import './AdvancedPage.css' // reuses .advanced/.advanced-org
 import './TracePage.css'
-
-const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 
 interface SelectedRun {
   id: string
@@ -51,6 +51,8 @@ function formatCost(value: number | null): string {
 // no new capture, no redaction changes. Follows the MemoryPage/AdvancedPage
 // admin-page conventions (master layout, org selector).
 export default function TracePage() {
+  const { t } = useTranslation()
+  const runStatusLabel = useRunStatusLabel()
   const [tab, setTab] = useState<'runs' | 'analytics' | 'models'>('runs')
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null) // null = all organisations
@@ -234,10 +236,10 @@ export default function TracePage() {
             <label>
               Status
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-                <option value="">Any status</option>
-                {STATUS_OPTIONS.map((s) => (
+                <option value="">{t('runStatus.any')}</option>
+                {RUN_STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {runStatusLabel(s)}
                   </option>
                 ))}
               </select>
@@ -260,9 +262,9 @@ export default function TracePage() {
                   >
                     <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
-                      <span className="status-badge">{run.status}</span>
+                      <span className="status-badge">{runStatusLabel(run.status)}</span>
                       <span className="session-updated">
-                        {run.org ?? 'unknown org'} · {run.autonomous ? 'Automatic' : 'Manual'} ·{' '}
+                        {run.org ?? 'unknown org'} · {run.autonomous ? t('activity.automatic') : t('activity.manual')} ·{' '}
                         {formatDateTime(run.started_at)}
                       </span>
                     </div>

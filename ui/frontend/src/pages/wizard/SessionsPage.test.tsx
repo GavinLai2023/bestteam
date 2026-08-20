@@ -247,17 +247,17 @@ describe('SessionsPage status explanations', () => {
     await screen.findByText('my-team')
 
     const helpButton = screen.getByRole('button', { name: /what does live mean/i })
-    expect(screen.queryByText(/ready for your organization/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ready for your organisation/i)).not.toBeInTheDocument()
 
     await act(async () => {
       fireEvent.click(helpButton)
     })
-    expect(screen.getByText(/ready for your organization/i)).toBeInTheDocument()
+    expect(screen.getByText(/ready for your organisation/i)).toBeInTheDocument()
 
     await act(async () => {
       fireEvent.click(helpButton)
     })
-    expect(screen.queryByText(/ready for your organization/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ready for your organisation/i)).not.toBeInTheDocument()
   })
 
   it('shows a distinct explanation for the In Progress bucket', async () => {

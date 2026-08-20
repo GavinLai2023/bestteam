@@ -228,7 +228,12 @@ export const api = {
     request<void>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
 
   // Monitoring
-  listPipelines: () => request<{ pipelines: string[]; pipeline_ids?: Record<string, number> }>('/api/pipelines'),
+  listPipelines: () =>
+    request<{
+      pipelines: string[]
+      pipeline_ids?: Record<string, number>
+      display_names?: Record<string, string>
+    }>('/api/pipelines'),
   pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
   createRun: (pipeline: string, input: string) =>
     request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ pipeline, input }) }),
@@ -333,7 +338,7 @@ export const api = {
   // Model catalog
   modelCatalog: () => request<ModelCatalogEntry[]>('/api/model-catalog'),
 
-  // Advanced config (CRUD). `org` is the organization an item belongs to; the
+  // Advanced config (CRUD). `org` is the organisation an item belongs to; the
   // backend requires it on every item route except skills (where omitting it
   // means the platform built-in tier) and the org-less model catalog.
   listOrgs: () => request<AdminOrg[]>('/api/config/orgs'),

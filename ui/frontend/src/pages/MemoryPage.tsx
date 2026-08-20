@@ -102,7 +102,7 @@ export default function MemoryPage() {
   const clearUser = async () => {
     if (!selected) return
     const name = selected.user_id
-    if (!window.confirm(`Clear ALL memory for "${name}" (every organization)? This cannot be undone.`))
+    if (!window.confirm(`Clear ALL memory for "${name}" (every organisation)? This cannot be undone.`))
       return
     setError(null)
     setMessage(null)
