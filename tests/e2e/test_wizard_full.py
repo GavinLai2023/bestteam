@@ -44,8 +44,11 @@ def test_t4_1_apply_feedback_regenerates_team(page):
     # Only one ModelPicker instance is on the page at this point ("Show
     # what we understood about your business" hasn't been expanded, so the
     # second instance in that panel isn't rendered yet) -- #model-picker is
-    # unambiguous here. Verified against ConfirmPage.tsx / ModelPicker.tsx.
+    # unambiguous once revealed. Verified against ConfirmPage.tsx.
     page.fill("#solution-feedback", "Make the team also draft a summary of each reply.")
+    # The picker is collapsed behind "Advanced settings" (F9) -- the page
+    # defaults the model without it, but this test names a specific one.
+    page.click("button:has-text('Advanced settings')")
     page.select_option("#model-picker", label="E2E Test Architect (fake, $0)")
     page.click("button:has-text('Apply this change')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)
@@ -143,7 +146,7 @@ def test_t4_5_deploy_then_run_for_real(page):
     page.wait_for_selector("text=Your team is live", timeout=20000)
 
     page.click("button:has-text('Run a team')")
-    page.wait_for_selector("select", timeout=8000)
+    page.wait_for_selector(".controls select", timeout=8000)
     page.fill("textarea", "A customer is asking about a refund.")
     page.click("button:has-text('Run')")
     # MonitorPage hides its live trace <ul> once a terminal event lands
@@ -166,6 +169,8 @@ def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
     page.fill("#solution-feedback", "Always sign off with 'Best, the Support Team'.")
+    # Collapsed behind "Advanced settings" (F9); see test_t4_1.
+    page.click("button:has-text('Advanced settings')")
     page.select_option("#model-picker", label="E2E Test Architect (fake, $0)")
     page.click("button:has-text('Apply this change')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)

@@ -101,17 +101,17 @@ def test_smoke_journey(page):
     js_errors = []
     page.on("pageerror", lambda e: js_errors.append(str(e)))
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    options = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    options = page.locator(".controls select option").all_inner_texts()
     assert len(options) > 0, "Pipeline dropdown is empty -- was BESTTEAM_DEMO_PIPELINES=1 set?"
     bad = [e for e in js_errors if "Cannot read properties of undefined" in e]
     assert not bad, f"TypeError still present: {bad[0]}"
 
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     target = "code_review" if "code_review" in opts else opts[0]
-    page.select_option("select", label=target)
+    page.select_option(".controls select", label=target)
     page.fill("textarea", "def add(a, b): return a + b")
     page.click("button:has-text('Run')")
     # The live trace list hides itself once a terminal event arrives (see
@@ -246,8 +246,8 @@ def test_smoke_journey(page):
     logout(page)
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     assert PL in opts, f"{PL} not found in Monitor dropdown for demo"
 
     # -- T5. Edge cases --
@@ -272,7 +272,7 @@ def test_smoke_journey(page):
 
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
+    page.wait_for_selector(".controls select", timeout=8000)
     page.fill("textarea", "")
     assert page.locator("button:has-text('Run')").is_disabled()
 
@@ -313,8 +313,8 @@ def test_wizard_smoke(page):
 
     page.click("button:has-text('Run a team')")
     page.wait_for_url("**/run**", timeout=8000)
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     assert any("e2e_support_team" in o or "Support Team (E2E)" in o for o in opts), (
         f"deployed fake-architect team not found in Monitor dropdown: {opts}"
     )

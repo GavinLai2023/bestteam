@@ -59,7 +59,6 @@ export default function ConfirmPage() {
     if (!catalogEntries.length) return
     // eslint-disable-next-line react-hooks/set-state-in-effect -- default once the catalog arrives
     setModel((current) => current || pickDefaultModel(catalogEntries))
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- default once the catalog arrives
     setReqModel((current) => current || pickDefaultModel(catalogEntries))
   }, [catalogEntries])
 

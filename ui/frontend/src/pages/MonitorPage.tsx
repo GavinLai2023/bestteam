@@ -80,6 +80,7 @@ function MonitorPage() {
   }, [])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch; loadPipelines is also the retry handler
     loadPipelines()
   }, [loadPipelines])
 
