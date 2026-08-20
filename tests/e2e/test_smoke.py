@@ -66,12 +66,20 @@ def open_advanced_tab(page, label):
     time.sleep(0.3)
 
 
+def confirm_dialog(page):
+    """Accept the app's own confirmation dialog.
+
+    Destructive actions no longer use `window.confirm` (frontend audit finding
+    F11), so Playwright's `page.on("dialog", ...)` hook does not see them --
+    `ConfirmDialog` is an in-page `<dialog>`, and its action button has to be
+    clicked like any other. Without this a Delete click is a silent no-op.
+    """
+    # Rendered as [Cancel, <the action>], so the action is always last -- the
+    # same rule the Vitest helper (src/test/confirmDialog.ts) relies on.
+    page.locator(".confirm-dialog button").last.click()
+
+
 def test_smoke_journey(page):
-    # AdvancedPage's Delete button gates on window.confirm(); Playwright
-    # auto-dismisses native dialogs (confirm() -> false) unless a handler
-    # accepts them, which would otherwise make every Delete click a silent
-    # no-op.
-    page.on("dialog", lambda dialog: dialog.accept())
 
     # -- T1. Authentication (as demo) --
     goto_expecting_login_redirect(page, "/", timeout=6000)
@@ -204,6 +212,7 @@ def test_smoke_journey(page):
     page.click(".advanced-editor button:has-text('Save')")
     page.wait_for_selector(".banner-success", timeout=5000)
     page.click(".advanced-editor button:has-text('Delete')")
+    confirm_dialog(page)
     pw_expect(page.locator(f".advanced-list button:has-text('{SKILL}')")).to_have_count(0, timeout=5000)
 
     CATALOG_SPEC = f"fake:model_{int(time.time())}"
