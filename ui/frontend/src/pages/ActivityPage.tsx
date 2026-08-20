@@ -187,6 +187,39 @@ export default function ActivityPage() {
     }
   }, [tab, filters, offset, hasRunningRun])
 
+  // `row` is only present when the run came from the current page of the
+  // list; one opened from Needs-attention may not be, so the id remains the
+  // fallback title rather than the panel losing its heading entirely.
+  const renderRunDetail = (selected: SelectedRun, row?: RunListItem) => (
+    <section className="run-detail-panel" ref={runDetailRef}>
+      <div className="run-detail-panel-header">
+        <div>
+          {row ? (
+            <h2>
+              {row.team_display_name ?? row.pipeline} · {formatDateTime(row.started_at)}
+            </h2>
+          ) : (
+            <h2>{selected.id}</h2>
+          )}
+          <p className="hint run-detail-id">
+            {t('activity.runIdLabel')}: <code>{selected.id}</code>
+          </p>
+        </div>
+        <button type="button" onClick={() => setSelectedRun(null)}>
+          {t('activity.close')}
+        </button>
+      </div>
+      <RunDetail
+        key={selected.id}
+        runId={selected.id}
+        status={selected.status}
+        autonomous={selected.autonomous}
+        // A retry always dispatches a new autonomous email-triggered run.
+        onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
+      />
+    </section>
+  )
+
   return (
     <div className="wizard">
       <header className="wizard-header">
@@ -350,6 +383,10 @@ export default function ActivityPage() {
                       </span>
                     </div>
                   </button>
+                  {/* Nested under the run it belongs to, not after the whole
+                      list -- for a run near the top, appending the panel at
+                      the bottom put it a full scroll away from the click. */}
+                  {selectedRun && selectedRun.id === run.id && renderRunDetail(selectedRun, run)}
                 </li>
               ))}
             </ul>
@@ -357,42 +394,9 @@ export default function ActivityPage() {
 
           <RunsPager total={page.total} limit={page.limit} offset={offset} onOffsetChange={setOffset} />
 
-          {selectedRun && (
-            <section className="run-detail-panel" ref={runDetailRef}>
-              <div className="run-detail-panel-header">
-                <div>
-                  {/* The row is only present when the run came from this list;
-                      one opened from Needs-attention may not be on the current
-                      page, so the id remains the fallback title rather than
-                      the panel losing its heading entirely. */}
-                  {(() => {
-                    const row = runs.find((r) => r.id === selectedRun.id)
-                    return row ? (
-                      <h2>
-                        {row.team_display_name ?? row.pipeline} · {formatDateTime(row.started_at)}
-                      </h2>
-                    ) : (
-                      <h2>{selectedRun.id}</h2>
-                    )
-                  })()}
-                  <p className="hint run-detail-id">
-                    {t('activity.runIdLabel')}: <code>{selectedRun.id}</code>
-                  </p>
-                </div>
-                <button type="button" onClick={() => setSelectedRun(null)}>
-                  {t('activity.close')}
-                </button>
-              </div>
-              <RunDetail
-                key={selectedRun.id}
-                runId={selectedRun.id}
-                status={selectedRun.status}
-                autonomous={selectedRun.autonomous}
-                // A retry always dispatches a new autonomous email-triggered run.
-                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
-              />
-            </section>
-          )}
+          {/* Fallback for a run opened from Needs-attention that isn't on the
+              current Runs page -- there is no row to nest it under. */}
+          {selectedRun && !runs.some((r) => r.id === selectedRun.id) && renderRunDetail(selectedRun)}
         </>
       )}
     </div>

@@ -403,6 +403,32 @@ describe('ActivityPage', () => {
     expect(mockedApi.getRunTrace).toHaveBeenCalledWith('r1')
   })
 
+  it('shows the run detail nested under the clicked run, not after the whole list', async () => {
+    // Previously the panel always rendered after the pager, at the bottom of
+    // the tab -- for a run near the top of a long list that put the detail
+    // an entire scroll away from the row the customer just clicked.
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        { id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false },
+        { id: 'r2', pipeline: 'wf-b', status: 'completed', started_at: '2026-07-31T12:00:00Z', autonomous: false },
+      ],
+    })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [{ type: 'run_completed', agent: undefined, data: 'done' }] })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Runs'))
+    })
+    const secondRunHeading = await screen.findByRole('heading', { name: 'wf-b' })
+
+    await act(async () => {
+      fireEvent.click(secondRunHeading)
+    })
+
+    const detail = await screen.findByText('Final output')
+    expect(secondRunHeading.closest('li')).toContainElement(detail)
+  })
+
   it('offers only teams with a real id in the Shared tab picker', async () => {
     // A YAML-only demo pipeline has no `pipeline_ids` entry, so it used to
     // render with value="" -- indistinguishable from the "Pick a team…"

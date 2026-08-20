@@ -111,6 +111,25 @@ describe('MonitorPage backend error handling', () => {
     consoleError.mockRestore()
   })
 
+  // Starlette's own default body for an unmatched route is literally
+  // `{"detail": "Not Found"}` -- no route in this backend ever writes that
+  // string deliberately (grepped). Showing it as a red banner right above
+  // "No teams yet -- build one first" contradicts that calm, correct hint
+  // over what is, for a brand-new org, an entirely expected empty state.
+  it('does not show the raw "Not Found" backend detail as an error banner', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const err = new Error('Not Found') as Error & { status?: number }
+    err.status = 404
+    mockedApi.listPipelines.mockRejectedValue(err)
+
+    renderPage()
+
+    expect(await screen.findByText(/no teams yet/i)).toBeInTheDocument()
+    expect(screen.queryByText('Not Found')).not.toBeInTheDocument()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
+
   it('recovers when the retry button succeeds, without needing a reload', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     mockedApi.listPipelines.mockRejectedValueOnce(new TypeError('Failed to fetch'))

@@ -67,7 +67,14 @@ function MonitorPage() {
         // the real reason rather than a generic connection message. Only a
         // statusless failure (fetch rejected) is a true unreachable.
         if (err?.status !== undefined) {
-          setError(err.message)
+          // Starlette's own default body for an unmatched route is literally
+          // `{"detail": "Not Found"}` -- no route in this app ever writes
+          // that string deliberately. It carries nothing a customer can act
+          // on, so it goes to the console (like the unreachable case above)
+          // rather than onto a banner that would contradict the calm,
+          // correct "No teams yet" hint sitting right below it.
+          if (err.message !== 'Not Found') setError(err.message)
+          else console.error('bestteam: unexpected 404 loading pipelines', err)
           // The backend answered, so a banner left over from an earlier
           // network failure is now saying something untrue -- clear it on
           // this path too, under the same guard the success path uses.
