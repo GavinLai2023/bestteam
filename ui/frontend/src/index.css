@@ -28,6 +28,16 @@
      white that reads at 6.3:1 in light drops to 2.6:1 in dark. */
   --accent-contrast: #ffffff;
 
+  /* The Activity Overview heatmap's 4 intensity steps, palest to
+     `--accent` itself -- a graduated ramp needs two more stops than the
+     accent group already has, so these are their own tokens rather than
+     repurposing `--accent-soft`/`--accent-border` (those already carry a
+     different meaning elsewhere: soft fills and input borders). */
+  --heat-1: #e0e7ff;
+  --heat-2: #c7d2fe;
+  --heat-3: #818cf8;
+  --heat-4: #4f46e5;
+
   --danger: #b91c1c;
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;
@@ -63,6 +73,11 @@
     --accent-border: #333d55;
     --accent-contrast: #10131a;
 
+    --heat-1: #262e42;
+    --heat-2: #333d55;
+    --heat-3: #5b6aa0;
+    --heat-4: #8b9cf0;
+
     --danger: #f0857a;
     --danger-bg: #2a1917;
     --danger-border: #4a2723;
@@ -95,6 +110,11 @@
   --accent-soft: #1e2433;
   --accent-border: #333d55;
   --accent-contrast: #10131a;
+
+  --heat-1: #262e42;
+  --heat-2: #333d55;
+  --heat-3: #5b6aa0;
+  --heat-4: #8b9cf0;
 
   --danger: #f0857a;
   --danger-bg: #2a1917;

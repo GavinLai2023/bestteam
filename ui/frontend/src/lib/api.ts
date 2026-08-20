@@ -1,4 +1,5 @@
 import type {
+  ActivityOverview,
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
   EmailFilterSettings, EmailTrigger, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
@@ -437,6 +438,7 @@ export const api = {
   // Run-history retention (Phase 3b): how long the org keeps run content,
   // taking a copy out before it goes, and removing it on demand. A cleanup
   // clears content and keeps accounting -- see ui/backend/retention.py.
+  getActivityOverview: () => request<ActivityOverview>('/api/org/activity-overview'),
   getRetention: () => request<RetentionSettings>('/api/org/retention'),
   // null turns the policy off (keep forever). Saving removes nothing by
   // itself -- the sweep does, on its next cycle.

@@ -86,6 +86,7 @@ export const en = {
   activity: {
     title: 'Team activity',
     subtitle: "See automations at a glance, or dig into any run's history.",
+    tabOverview: 'Overview',
     tabAutomations: 'Automations',
     tabRuns: 'Runs',
     tabShared: 'Shared',
@@ -108,6 +109,22 @@ export const en = {
     // told a customer nothing and read like a page they weren't meant to see
     // (audit finding F7).
     runIdLabel: 'Run ID',
+  },
+  // The Activity page's default landing tab: how much work the customer's
+  // teams have done for them. Deliberately no model name or token/cost figure
+  // anywhere here -- that stays admin-only (see EmailBudgetSettings and the
+  // MonitorPage "Not Found" fix for the same boundary).
+  overview: {
+    title: 'Your overview',
+    subtitle: 'How much your teams have been working for you.',
+    empty: 'No runs yet — once your teams get to work, your stats will show up here.',
+    sessions: 'Sessions',
+    activeDays: 'Active days',
+    currentStreak: 'Current streak',
+    longestStreak: 'Longest streak',
+    peakHour: 'Busiest hour',
+    noPeakHour: 'Not enough data yet',
+    heatmapCaption: 'Runs over the last 12 weeks',
   },
   confirm: {
     // A non-technical customer has no basis to choose between model specs, so

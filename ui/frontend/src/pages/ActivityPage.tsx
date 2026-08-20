@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import { formatDateTime } from '../lib/dateFormat'
-import DataRetentionPanel from '../components/DataRetentionPanel'
+import ActivityOverviewPanel from '../components/ActivityOverviewPanel'
 import EmailBudgetSettings from '../components/EmailBudgetSettings'
 import EmailFilterSettings from '../components/EmailFilterSettings'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
@@ -53,12 +53,12 @@ function runsQueryParams(filters: Filters) {
 export default function ActivityPage() {
   const { t } = useTranslation()
   const runStatusLabel = useRunStatusLabel()
-  // `null` until the org's automation state is known. Automations is the right
-  // home for an org that actually uses it, but for one that doesn't it opened
-  // the dashboard on a feature they have never touched, hiding their own runs
-  // one click away (audit finding F6). Deciding needs one cheap request, so
-  // the body shows a loading line rather than picking a tab and jumping.
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data' | null>(null)
+  // Overview is always the landing tab -- it works the same whether or not
+  // the org uses automation, which is what replaced the old guess between
+  // Automations and Runs (audit finding F6: an org that had never connected
+  // a mailbox used to land on an empty Automations tab, hiding its own runs
+  // one click away).
+  const [tab, setTab] = useState<'overview' | 'automations' | 'runs' | 'shared' | 'alerts'>('overview')
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted. Fetched below rather than only through
   // NotificationsPanel's callback: the panel is mounted only once the Alerts
@@ -109,26 +109,6 @@ export default function ActivityPage() {
     return () => {
       ignore = true
       clearInterval(id)
-    }
-  }, [])
-
-  useEffect(() => {
-    let ignore = false
-    api
-      .getEmailTrigger()
-      .then((trigger) => {
-        // Only fills the undecided case: this request can land after the
-        // customer has already clicked a tab, and a late default must never
-        // pull them off the one they chose.
-        if (!ignore) setTab((current) => current ?? (trigger?.pipeline_name ? 'automations' : 'runs'))
-      })
-      // An org that can't be asked is treated as not using automation: Runs is
-      // the tab that works for everyone.
-      .catch(() => {
-        if (!ignore) setTab((current) => current ?? 'runs')
-      })
-    return () => {
-      ignore = true
     }
   }, [])
 
@@ -228,6 +208,9 @@ export default function ActivityPage() {
       </header>
 
       <div className="activity-tabs">
+        <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>
+          {t('activity.tabOverview')}
+        </button>
         <button
           type="button"
           className={tab === 'automations' ? 'active' : ''}
@@ -245,10 +228,11 @@ export default function ActivityPage() {
           {t('activity.tabAlerts')}
           {unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
         </button>
-        <button type="button" className={tab === 'data' ? 'active' : ''} onClick={() => setTab('data')}>
-          {t('activity.tabData')}
-        </button>
+        {/* The Data tab (run-history retention/export) is shielded for beta --
+            not deleted, just not offered yet. */}
       </div>
+
+      {tab === 'overview' && <ActivityOverviewPanel />}
 
       {tab === 'alerts' && (
         <>
@@ -256,8 +240,6 @@ export default function ActivityPage() {
           <WebhookSettings />
         </>
       )}
-
-      {tab === 'data' && <DataRetentionPanel />}
 
       {tab === 'automations' && (
         <>

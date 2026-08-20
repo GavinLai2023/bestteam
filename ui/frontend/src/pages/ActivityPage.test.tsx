@@ -8,6 +8,7 @@ vi.mock('../lib/api', () => ({
   api: {
     listPipelines: vi.fn(),
     listRuns: vi.fn(),
+    getActivityOverview: vi.fn(),
     getEmailTrigger: vi.fn(),
     emailTriggerActivity: vi.fn(),
     createWsTicket: vi.fn(),
@@ -39,8 +40,12 @@ describe('ActivityPage', () => {
     vi.clearAllMocks()
     mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf-a', 'wf-b'] })
     mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'off', daily_cap: 0 })
-    // The default org above has no automation, so it now opens on the Runs
-    // tab (F6) -- which fetches. Individual tests still override this.
+    // The page now always opens on Overview (it works the same whether or
+    // not the org uses automation), so every test that needs a different
+    // tab clicks its way there explicitly.
+    mockedApi.getActivityOverview.mockResolvedValue({
+      sessions: 0, active_days: 0, current_streak: 0, longest_streak: 0, peak_hour: null, daily_counts: [],
+    })
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
     mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })
     mockedApi.automationResultsSummary.mockResolvedValue({
@@ -82,29 +87,20 @@ describe('ActivityPage', () => {
     expect(mockedApi.listNotifications).toHaveBeenCalledWith(true, 1)
   })
 
-  // Which tab opens is decided by whether the org actually uses automation:
-  // opening a customer who has never connected a mailbox on the Automations
-  // tab hid their own runs behind a click (audit finding F6).
-  it('opens on Runs for an org with no automation configured', async () => {
-    mockedApi.getEmailTrigger.mockResolvedValue({
-      enabled: false, pipeline_name: null, status: 'off', daily_cap: 0,
-    })
-    mockedApi.listRuns.mockResolvedValue({ runs: [] })
-
-    renderPage()
-
-    expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(screen.getByText('Automations')).not.toHaveClass('active')
-  })
-
-  it('opens on Automations for an org that does use it', async () => {
+  // Overview works the same for every org regardless of whether it uses
+  // automation, which is what let this replace the old F6 Automations-vs-Runs
+  // guess (an org that had never connected a mailbox used to land on an
+  // Automations tab showing nothing, hiding its own runs behind a click).
+  it('always opens on Overview, whether or not the org uses automation', async () => {
     mockedApi.getEmailTrigger.mockResolvedValue({
       enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
     })
 
     renderPage()
 
-    expect(await screen.findByText('Automations')).toHaveClass('active')
+    expect(await screen.findByText('Overview')).toHaveClass('active')
+    expect(screen.getByText('Automations')).not.toHaveClass('active')
+    expect(screen.getByText('Runs')).not.toHaveClass('active')
   })
 
   it('switching to the Runs tab lists runs and lets you filter', async () => {
@@ -273,6 +269,9 @@ describe('ActivityPage', () => {
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunsButton = await screen.findByText('View automatic runs')
 
     await act(async () => {
@@ -305,6 +304,9 @@ describe('ActivityPage', () => {
     Element.prototype.scrollIntoView = vi.fn()
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunButton = await screen.findByText('View run')
 
     await act(async () => {
@@ -350,6 +352,9 @@ describe('ActivityPage', () => {
     Element.prototype.scrollIntoView = vi.fn()
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunButton = await screen.findByText('View run')
 
     await act(async () => {

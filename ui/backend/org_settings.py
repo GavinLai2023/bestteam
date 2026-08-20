@@ -29,6 +29,7 @@ from bestteam.tools._oauth import MicrosoftClientCredentialsToken
 from bestteam.tools.email_client import _ImapBackend
 from bestteam.tools.http_client import check_host_allowed
 
+from .activity_overview import compute_overview
 from .auth_api import get_current_org
 from .db.email_budget_settings import (
     get_budget_caps,
@@ -47,7 +48,7 @@ from .db.email_credentials import (
 )
 from .db.email_filter_settings import get_filter_settings, set_filter_settings
 from .db.email_triggers import get_email_trigger
-from .db.models import Organization, iso_utc
+from .db.models import Organization, Run, iso_utc
 from .db.notifications import get_notification_settings, set_notification_settings
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
@@ -521,6 +522,17 @@ def export_org(
         content=bundle,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/activity-overview")
+def activity_overview(
+    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
+) -> Dict[str, Any]:
+    """Engagement stats for the customer-facing Activity Overview tab -- how
+    often this org's teams ran. Never a model name or a cost: see
+    activity_overview.py."""
+    timestamps = [row[0] for row in db.query(Run.created_at).filter(Run.org_id == org.id)]
+    return compute_overview(timestamps, now=datetime.now(timezone.utc))
 
 
 # --- pre-LLM mail filter and automation budgets (Phase 4a) --------------------

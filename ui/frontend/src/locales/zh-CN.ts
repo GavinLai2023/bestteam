@@ -74,6 +74,7 @@ export const zhCN: Resources = {
   activity: {
     title: '团队动态',
     subtitle: '一眼掌握自动化情况，也可以深入查看任意一次运行的历史。',
+    tabOverview: '概览',
     tabAutomations: '自动化',
     tabRuns: '运行记录',
     tabShared: '分享',
@@ -92,6 +93,18 @@ export const zhCN: Resources = {
     automatic: '自动',
     close: '关闭',
     runIdLabel: '运行编号',
+  },
+  overview: {
+    title: '概览',
+    subtitle: '看看你的团队都为你做了多少工作。',
+    empty: '还没有运行记录 —— 团队开始工作后，这里会显示你的使用情况。',
+    sessions: '运行次数',
+    activeDays: '活跃天数',
+    currentStreak: '当前连续天数',
+    longestStreak: '最长连续天数',
+    peakHour: '最活跃时段',
+    noPeakHour: '数据还不够',
+    heatmapCaption: '过去 12 周的运行情况',
   },
   confirm: {
     advancedToggleShow: '高级设置',

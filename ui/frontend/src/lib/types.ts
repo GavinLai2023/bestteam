@@ -423,6 +423,23 @@ export interface EmailBudget extends EmailBudgetInput {
   unpriced_models: string[]
 }
 
+export interface DailyRunCount {
+  date: string
+  count: number
+}
+
+// The customer-facing Activity Overview tab: how often this org's teams ran.
+// Deliberately no model name or cost anywhere here -- see
+// ui/backend/activity_overview.py.
+export interface ActivityOverview {
+  sessions: number
+  active_days: number
+  current_streak: number
+  longest_streak: number
+  peak_hour: number | null
+  daily_counts: DailyRunCount[]
+}
+
 // One message the filter skipped before any model read it. `reason` is the
 // sentence to show; `decision` is the raw rule code, for debugging only.
 export interface FilteredMessage {
