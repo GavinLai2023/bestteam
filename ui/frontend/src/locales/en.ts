@@ -126,15 +126,6 @@ export const en = {
     noPeakHour: 'Not enough data yet',
     heatmapCaption: 'Runs over the last 12 weeks',
   },
-  confirm: {
-    // A non-technical customer has no basis to choose between model specs, so
-    // the picker defaults and hides. It stays reachable, because someone who
-    // does know what they want must not be locked out (audit finding F9).
-    advancedToggleShow: 'Advanced settings',
-    advancedToggleHide: 'Hide advanced settings',
-    modelLabel: 'Which assistant should your team use?',
-    reqModelLabel: 'Which assistant should redo this?',
-  },
   advanced: {
     filterPlaceholder: 'Filter…',
     noMatches: 'Nothing matches that filter.',

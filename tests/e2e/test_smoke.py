@@ -290,8 +290,8 @@ def test_wizard_smoke(page):
     """New PR-gate scenario: intent -> generate -> Preview -> Deploy ->
     confirm the team shows up in Monitor. Uses the fake architect (reshaped
     into the catalog by the e2e_backend fixture) so no real LLM key is
-    needed. Stops at Deploy -- never opens the Confirm-page's ModelPicker
-    dropdown (that's covered by test_wizard_full.py)."""
+    needed. Stops at Deploy -- never visits the Confirm page's feedback loop
+    (that's covered by test_wizard_full.py)."""
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/wizard")
     page.wait_for_selector("#intent", timeout=8000)

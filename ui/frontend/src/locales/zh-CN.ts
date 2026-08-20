@@ -106,12 +106,6 @@ export const zhCN: Resources = {
     noPeakHour: '数据还不够',
     heatmapCaption: '过去 12 周的运行情况',
   },
-  confirm: {
-    advancedToggleShow: '高级设置',
-    advancedToggleHide: '收起高级设置',
-    modelLabel: '团队使用哪个助理模型？',
-    reqModelLabel: '由哪个助理模型重新整理？',
-  },
   advanced: {
     filterPlaceholder: '筛选…',
     noMatches: '没有匹配的条目。',

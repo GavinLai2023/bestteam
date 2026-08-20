@@ -53,14 +53,14 @@ describe('ConfirmPage', () => {
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' }])
   })
 
-  it('enables Apply this change once a model is picked, even with no described change', async () => {
+  it('enables Apply this change once the catalog loads, even with no described change', async () => {
     mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
 
     renderPage()
 
     const button = await screen.findByText('Apply this change')
-    // The model catalog resolves asynchronously and auto-picks a default --
-    // wait for that before asserting the button is enabled.
+    // The model catalog resolves asynchronously; the page picks the
+    // Architect's model itself -- there's nothing for the customer to choose.
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
 
     fireEvent.click(button)
@@ -101,34 +101,15 @@ describe('ConfirmPage', () => {
     expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents')
   })
 
-  // The picker sits behind "Advanced settings" (F9). Defaulting used to live
-  // inside ModelPicker, so collapsing it left `model` empty and both actions
-  // permanently disabled -- reintroducing F3's dead end by a different route.
-  it('picks a default model even while the picker stays collapsed', async () => {
-    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
-
+  // A customer doesn't choose which model parses their intent -- that's an
+  // internal platform choice (the admin's is_default catalog entry). There is
+  // no picker and no "Advanced settings" toggle to reveal one.
+  it('never shows a model picker or an advanced-settings toggle', async () => {
     renderPage()
 
-    const button = await screen.findByText('Apply this change')
-    // No click on "Advanced settings": the picker is never shown.
-    expect(screen.queryByLabelText(/Which assistant/)).not.toBeInTheDocument()
-    await waitFor(() => expect(button.closest('button')).toBeEnabled())
-
-    fireEvent.click(button)
-    await waitFor(() =>
-      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
-        feedback: '',
-        model: 'deepseek:friendly-assistant',
-      }),
-    )
-  })
-
-  it('reveals the model picker on demand for someone who wants it', async () => {
-    renderPage()
-
-    fireEvent.click(await screen.findByText('Advanced settings'))
-
-    expect(await screen.findByLabelText(/Which assistant should your team use/)).toBeInTheDocument()
+    await screen.findByText('Apply this change')
+    expect(screen.queryByText('Advanced settings')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/assistant/i)).not.toBeInTheDocument()
   })
 
   // Every action on this page is gated on a chosen model, and ModelPicker
