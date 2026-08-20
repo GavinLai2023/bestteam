@@ -60,17 +60,24 @@ def list_entries(db: Session) -> List[ModelCatalogEntry]:
 
 
 def list_chat_entries(db: Session) -> List[ModelCatalogEntry]:
-    """Every entry except the embedding models.
+    """Every entry except the embedding models and the fake:/fake-architect:
+    stubs.
 
     Anything that offers a model as an agent's `model` -- the wizard's
     catalog endpoint, the Solution Architect's prompt, smart search's default
     chat model -- wants this, not `list_entries`: an embedding model handed to
-    an agent produces a team that cannot answer anything. Admin CRUD still
-    uses `list_entries`, because somebody has to maintain those prices.
+    an agent produces a team that cannot answer anything, and a fake: model
+    (a $0 demo/dry-run stub) or fake-architect: (deterministic, E2E-test-only
+    -- see `docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md`)
+    handed to a real customer's team ignores their actual input. Admin CRUD
+    still uses `list_entries`, because somebody has to maintain those prices
+    and dry-run with them.
     """
     return (
         db.query(ModelCatalogEntry)
         .filter(ModelCatalogEntry.tier != EMBEDDING_TIER)
+        .filter(~ModelCatalogEntry.spec.startswith("fake:"))
+        .filter(~ModelCatalogEntry.spec.startswith("fake-architect:"))
         .order_by(ModelCatalogEntry.spec)
         .all()
     )

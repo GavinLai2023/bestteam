@@ -12,6 +12,7 @@ from ui.backend.db.model_catalog import (
     DEFAULT_MODEL_CATALOG,
     delete_entry,
     get_entry,
+    list_chat_entries,
     list_entries,
     seed_default_catalog,
     to_prompt_text,
@@ -90,6 +91,21 @@ def test_to_prompt_text_includes_spec_and_pricing(db):
 
 def test_to_prompt_text_empty_for_no_entries():
     assert to_prompt_text([]) == ""
+
+
+def test_list_chat_entries_excludes_fake_models(db):
+    """A real customer's model picker/architect prompt must never offer a
+    fake:/fake-architect: entry -- those are $0 demo/E2E-test stubs, not
+    something to build or run a real deployed team on. An admin can still add
+    one for their own dry-run/testing purposes (`list_entries`, the admin
+    listing, is unaffected); this only narrows the customer-facing set."""
+    upsert_entry(db, "fake:ok", display_name="Demo Assistant", tier="fast")
+    upsert_entry(db, "fake-architect:e2e", display_name="E2E Test Architect", tier="fast")
+    upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", tier="fast")
+
+    specs = {e.spec for e in list_chat_entries(db)}
+
+    assert specs == {"openai:gpt-4o-mini"}
 
 
 fastapi = pytest.importorskip("fastapi")
@@ -184,6 +200,28 @@ def test_org_user_can_read_model_catalog_for_wizard(client):
     assert resp.status_code == 200
     specs = [entry["spec"] for entry in resp.json()]
     assert "openai:gpt-4o-mini" in specs  # a real model, so no fake fallback
+
+
+def test_public_model_catalog_never_offers_a_fake_model(client):
+    # Regression: an admin catalog that (accidentally or for their own
+    # dry-run testing) holds a fake:/fake-architect: entry alongside real
+    # ones must not let a customer see or auto-select the fake one -- the
+    # wizard's pickDefaultModel() picks the first entry this endpoint returns.
+    client.put(
+        "/api/config/model-catalog/fake-architect:e2e",
+        json={"display_name": "E2E Test Architect", "tier": "fast"},
+    )
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o-mini",
+        json={"display_name": "Quick Assistant", "tier": "fast"},
+    )
+
+    org_token = create_user_and_login(client, username="customer2", org="acme2")
+    resp = client.get("/api/model-catalog", headers={"Authorization": f"Bearer {org_token}"})
+
+    assert resp.status_code == 200
+    specs = [entry["spec"] for entry in resp.json()]
+    assert specs == ["openai:gpt-4o-mini"]
 
 
 def test_read_model_catalog_requires_authentication(client):
