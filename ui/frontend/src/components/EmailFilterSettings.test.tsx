@@ -72,6 +72,12 @@ describe('EmailFilterSettings', () => {
     )
   })
 
+  it('points to the Automations tab for released mail, not "above" -- this panel no longer sits next to it', async () => {
+    render(<EmailFilterSettings />)
+
+    expect(await screen.findByText(/Team activity page.s Automations tab/i)).toBeInTheDocument()
+  })
+
   it('says which two pattern forms are allowed', async () => {
     // The UI has to state this: there are no regular expressions anywhere in
     // this feature, and an admin who types one and sees nothing filtered has

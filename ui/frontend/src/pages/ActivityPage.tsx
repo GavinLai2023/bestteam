@@ -4,8 +4,6 @@ import { api } from '../lib/api'
 import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import { formatDateTime } from '../lib/dateFormat'
 import ActivityOverviewPanel from '../components/ActivityOverviewPanel'
-import EmailBudgetSettings from '../components/EmailBudgetSettings'
-import EmailFilterSettings from '../components/EmailFilterSettings'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
@@ -270,10 +268,6 @@ export default function ActivityPage() {
               setTab('runs')
             }}
           />
-          {/* The two settings panels sit under the automation they govern:
-              what never reaches a model, and how much work is allowed. */}
-          <EmailFilterSettings />
-          <EmailBudgetSettings />
         </>
       )}
 

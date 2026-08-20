@@ -46,10 +46,11 @@ describe('EmailBudgetSettings', () => {
     expect(await screen.findByText(/12 of 25/)).toBeInTheDocument()
   })
 
-  // The model actually used, and exactly how much has been spent, are
-  // admin-only information -- this page is reachable by any org member, not
-  // just whoever manages billing (bug report: both leaked into this panel).
-  it('never shows a specific amount spent, in the summary or the blind-spot notes', async () => {
+  // The model actually used, exactly how much has been spent, and even the
+  // dollar cap itself are admin-only information -- this page is reachable
+  // by any org member, not just whoever manages billing (bug report: all
+  // three leaked into this panel).
+  it('never shows a dollar figure at all -- spend, cap, or blind-spot notes', async () => {
     mockedApi.getEmailBudget.mockResolvedValue(
       budget({
         spent_this_month: 1.2345,
@@ -60,11 +61,10 @@ describe('EmailBudgetSettings', () => {
     render(<EmailBudgetSettings />)
 
     await screen.findByText(/12 of 25/)
-    // "(US$)" on the cap-setting label is fine -- it's the org choosing its
-    // own limit, not a report of what has been spent.
     expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument()
-    expect(screen.queryByText(/spent/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/spend/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/runs this month/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/spend/i)).not.toBeInTheDocument()
   })
 
   it('never names the model behind an unpriced run', async () => {
@@ -88,34 +88,34 @@ describe('EmailBudgetSettings', () => {
     expect((screen.getByLabelText(/messages a day/i) as HTMLInputElement).value).toBe('')
   })
 
-  it('saves both caps', async () => {
+  it('saves the daily cap, sending the existing monthly cap back untouched', async () => {
+    // There is no field to edit the monthly cap with any more -- it must
+    // still round-trip unchanged, not silently drop to null.
     render(<EmailBudgetSettings />)
 
     fireEvent.change(await screen.findByLabelText(/messages a day/i), { target: { value: '40' } })
-    fireEvent.change(screen.getByLabelText(/spend in a month/i), { target: { value: '12.5' } })
     fireEvent.click(screen.getByRole('button', { name: /save/i }))
 
     await waitFor(() =>
       expect(mockedApi.setEmailBudget).toHaveBeenCalledWith({
         daily_message_cap: 40,
-        monthly_cost_cap: 12.5,
+        monthly_cost_cap: 50,
       }),
     )
   })
 
-  it('clearing a field sends null, not zero', async () => {
+  it('clearing the daily field sends null, not zero', async () => {
     // 0 would be a cap of zero -- automation off -- which is not what an empty
     // box means.
     render(<EmailBudgetSettings />)
 
     fireEvent.change(await screen.findByLabelText(/messages a day/i), { target: { value: '' } })
-    fireEvent.change(screen.getByLabelText(/spend in a month/i), { target: { value: '' } })
     fireEvent.click(screen.getByRole('button', { name: /save/i }))
 
     await waitFor(() => expect(mockedApi.setEmailBudget).toHaveBeenCalled())
     expect(mockedApi.setEmailBudget).toHaveBeenCalledWith({
       daily_message_cap: null,
-      monthly_cost_cap: null,
+      monthly_cost_cap: 50,
     })
   })
 

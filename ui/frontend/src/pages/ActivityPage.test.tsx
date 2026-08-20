@@ -19,10 +19,6 @@ vi.mock('../lib/api', () => ({
     listNotifications: vi.fn(),
     listFilteredMessages: vi.fn(),
     releaseFilteredMessage: vi.fn(),
-    getEmailFilter: vi.fn(),
-    setEmailFilter: vi.fn(),
-    getEmailBudget: vi.fn(),
-    setEmailBudget: vi.fn(),
   },
 }))
 
@@ -56,20 +52,6 @@ describe('ActivityPage', () => {
     mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
     mockedApi.listNotifications.mockResolvedValue({ notifications: [], unread: 0 })
     mockedApi.listFilteredMessages.mockResolvedValue({ filtered: [] })
-    mockedApi.getEmailFilter.mockResolvedValue({
-      skip_bulk: true,
-      sender_blocklist: [],
-      sender_allowlist: [],
-      subject_blocklist: [],
-    })
-    mockedApi.getEmailBudget.mockResolvedValue({
-      daily_message_cap: null,
-      monthly_cost_cap: null,
-      messages_today: 0,
-      spent_this_month: null,
-      unpriced_runs_this_month: 0,
-      unpriced_models: [],
-    })
   })
 
   it('shows the unread alert badge before the Alerts tab has ever been opened', async () => {
@@ -280,6 +262,21 @@ describe('ActivityPage', () => {
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
     expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false, offset: 0 })
+  })
+
+  it('does not show the mail-filter or volume-limit settings here -- those live on the email team\'s Deploy page', async () => {
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 0,
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
+    await screen.findByText(/Automatic runs/)
+
+    expect(screen.queryByText('Which mail to skip')).not.toBeInTheDocument()
+    expect(screen.queryByText('How much automatic work to allow')).not.toBeInTheDocument()
   })
 
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {
