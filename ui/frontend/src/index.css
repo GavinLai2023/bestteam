@@ -4,7 +4,13 @@
 
 body {
   margin: 0;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  /* The Latin faces carry no CJK glyphs, so Chinese would otherwise fall back
+     to the browser default -- SimSun on Windows, which looks dated and cramped
+     next to the Latin text beside it. The CJK families are listed after the
+     Latin ones so English keeps rendering in Segoe UI: a font stack is
+     consulted per character, not per string. */
+  font-family: 'Segoe UI', system-ui, -apple-system, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   background: #f5f6fa;
   color: #1f2430;
 }

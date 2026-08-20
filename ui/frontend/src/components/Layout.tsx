@@ -1,12 +1,15 @@
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { useMe } from '../lib/useMe'
+import { SUPPORTED_LANGUAGES, setLanguage, type LanguageCode } from '../lib/i18n'
 import './Layout.css'
 
 export default function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { isAdmin } = useMe()
+  const { t, i18n } = useTranslation()
 
   // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
   // scroll position the previous page was at, landing the new page mid-way
@@ -23,44 +26,56 @@ export default function Layout() {
   return (
     <div className="app-shell">
       <nav className="top-nav">
-        <span className="brand">bestteam</span>
+        <span className="brand">{t('nav.brand')}</span>
         <div className="top-nav-links">
           {/* Customer pages are org-scoped; a platform operator (no org) can't
               use them, so show them only to org members. */}
           {!isAdmin && (
             <>
               <NavLink to="/activity" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Dashboard
+                {t('nav.dashboard')}
               </NavLink>
               <NavLink to="/wizard" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Build a team
+                {t('nav.buildTeam')}
               </NavLink>
               <NavLink to="/teams" className={({ isActive }) => (isActive ? 'active' : '')}>
-                My teams
+                {t('nav.myTeams')}
               </NavLink>
               <NavLink to="/run" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Run a team
+                {t('nav.runTeam')}
               </NavLink>
             </>
           )}
           {isAdmin && (
             <>
               <NavLink to="/accounts" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Accounts
+                {t('nav.accounts')}
               </NavLink>
               <NavLink to="/advanced" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Advanced
+                {t('nav.advanced')}
               </NavLink>
               <NavLink to="/memory" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Memory
+                {t('nav.memory')}
               </NavLink>
               <NavLink to="/trace" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Trace
+                {t('nav.trace')}
               </NavLink>
             </>
           )}
+          <select
+            className="language-select"
+            aria-label={t('nav.language')}
+            value={i18n.resolvedLanguage}
+            onChange={(e) => setLanguage(e.target.value as LanguageCode)}
+          >
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {lang.label}
+              </option>
+            ))}
+          </select>
           <button type="button" className="logout-button" onClick={logOut}>
-            Log out
+            {t('nav.logOut')}
           </button>
         </div>
       </nav>

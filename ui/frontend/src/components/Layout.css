@@ -62,6 +62,24 @@
   color: #4338ca;
 }
 
+/* Sits in the nav row beside the links, so it matches their pill shape rather
+   than looking like a form control that wandered in. */
+.language-select {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4b5563;
+  padding: 6px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.language-select:hover {
+  background: #f3f4f6;
+}
+
 .logout-button {
   text-decoration: none;
   color: #4b5563;
