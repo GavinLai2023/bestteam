@@ -100,6 +100,15 @@ export const en = {
     // (audit finding F7).
     runIdLabel: 'Run ID',
   },
+  confirm: {
+    // A non-technical customer has no basis to choose between model specs, so
+    // the picker defaults and hides. It stays reachable, because someone who
+    // does know what they want must not be locked out (audit finding F9).
+    advancedToggleShow: 'Advanced settings',
+    advancedToggleHide: 'Hide advanced settings',
+    modelLabel: 'Which assistant should your team use?',
+    reqModelLabel: 'Which assistant should redo this?',
+  },
   modelCatalog: {
     // Shared by every wizard stage that needs a real model to generate with.
     loadFailed: "Couldn't load the available AI models. Check your connection and try again.",

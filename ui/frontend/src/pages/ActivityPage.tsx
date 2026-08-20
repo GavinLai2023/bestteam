@@ -53,7 +53,12 @@ function runsQueryParams(filters: Filters) {
 export default function ActivityPage() {
   const { t } = useTranslation()
   const runStatusLabel = useRunStatusLabel()
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
+  // `null` until the org's automation state is known. Automations is the right
+  // home for an org that actually uses it, but for one that doesn't it opened
+  // the dashboard on a feature they have never touched, hiding their own runs
+  // one click away (audit finding F6). Deciding needs one cheap request, so
+  // the body shows a loading line rather than picking a tab and jumping.
+  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data' | null>(null)
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted. Fetched below rather than only through
   // NotificationsPanel's callback: the panel is mounted only once the Alerts
@@ -104,6 +109,26 @@ export default function ActivityPage() {
     return () => {
       ignore = true
       clearInterval(id)
+    }
+  }, [])
+
+  useEffect(() => {
+    let ignore = false
+    api
+      .getEmailTrigger()
+      .then((trigger) => {
+        // Only fills the undecided case: this request can land after the
+        // customer has already clicked a tab, and a late default must never
+        // pull them off the one they chose.
+        if (!ignore) setTab((current) => current ?? (trigger?.pipeline_name ? 'automations' : 'runs'))
+      })
+      // An org that can't be asked is treated as not using automation: Runs is
+      // the tab that works for everyone.
+      .catch(() => {
+        if (!ignore) setTab((current) => current ?? 'runs')
+      })
+    return () => {
+      ignore = true
     }
   }, [])
 

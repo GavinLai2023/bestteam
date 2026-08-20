@@ -39,6 +39,9 @@ describe('ActivityPage', () => {
     vi.clearAllMocks()
     mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf-a', 'wf-b'] })
     mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'off', daily_cap: 0 })
+    // The default org above has no automation, so it now opens on the Runs
+    // tab (F6) -- which fetches. Individual tests still override this.
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
     mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })
     mockedApi.automationResultsSummary.mockResolvedValue({
       ever_used: false,
@@ -79,11 +82,29 @@ describe('ActivityPage', () => {
     expect(mockedApi.listNotifications).toHaveBeenCalledWith(true, 1)
   })
 
-  it('defaults to the Automations tab', async () => {
+  // Which tab opens is decided by whether the org actually uses automation:
+  // opening a customer who has never connected a mailbox on the Automations
+  // tab hid their own runs behind a click (audit finding F6).
+  it('opens on Runs for an org with no automation configured', async () => {
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: false, pipeline_name: null, status: 'off', daily_cap: 0,
+    })
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
+
+    renderPage()
+
+    expect(await screen.findByText('Runs')).toHaveClass('active')
+    expect(screen.getByText('Automations')).not.toHaveClass('active')
+  })
+
+  it('opens on Automations for an org that does use it', async () => {
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
+
     renderPage()
 
     expect(await screen.findByText('Automations')).toHaveClass('active')
-    expect(mockedApi.listRuns).not.toHaveBeenCalled()
   })
 
   it('switching to the Runs tab lists runs and lets you filter', async () => {
@@ -263,6 +284,11 @@ describe('ActivityPage', () => {
   })
 
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {
+    // An org with automation results necessarily has a trigger configured,
+    // which is also what opens the dashboard on the Automations tab (F6).
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
     mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
         id: 1, run_id: 'run-42', status: 'needs_attention',
@@ -296,6 +322,11 @@ describe('ActivityPage', () => {
     // guaranteed to be `completed`. Hardcoding that status used to
     // permanently hide the Retry button for exactly this case (Codex review
     // finding).
+    // An org with automation results necessarily has a trigger configured,
+    // which is also what opens the dashboard on the Automations tab (F6).
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
     mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
         id: 1, run_id: 'run-42', status: 'error',

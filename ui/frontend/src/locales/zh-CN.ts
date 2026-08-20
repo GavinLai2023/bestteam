@@ -87,6 +87,12 @@ export const zhCN: Resources = {
     close: '关闭',
     runIdLabel: '运行编号',
   },
+  confirm: {
+    advancedToggleShow: '高级设置',
+    advancedToggleHide: '收起高级设置',
+    modelLabel: '团队使用哪个助理模型？',
+    reqModelLabel: '由哪个助理模型重新整理？',
+  },
   modelCatalog: {
     loadFailed: '无法加载可用的 AI 模型，请检查网络后重试。',
     empty: '目前还没有可用的 AI 模型，请联系管理员，或稍后重试。',

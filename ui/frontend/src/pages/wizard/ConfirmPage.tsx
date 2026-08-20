@@ -5,6 +5,7 @@ import BulletEditor from '../../components/BulletEditor'
 import ModelPicker from '../../components/ModelPicker'
 import TeamFlow from '../../components/TeamFlow'
 import { api } from '../../lib/api'
+import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
 import type { Requirements, WizardOutletContext } from '../../lib/types'
 
@@ -40,12 +41,27 @@ export default function ConfirmPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Collapsed by default: a customer has no basis on which to choose between
+  // model specs, and the picker already defaults to a real one. Someone who
+  // does know what they want is one click away (audit finding F9).
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [showRequirements, setShowRequirements] = useState(false)
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
   const [reqModel, setReqModel] = useState('')
   const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
   const [reqError, setReqError] = useState<string | null>(null)
+
+  // Owned here rather than inside ModelPicker: the picker is collapsed behind
+  // "Advanced settings" (F9), and a default that only applied while it was on
+  // screen would leave both actions disabled -- the same dead end F3 fixed.
+  useEffect(() => {
+    if (!catalogEntries.length) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- default once the catalog arrives
+    setModel((current) => current || pickDefaultModel(catalogEntries))
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- default once the catalog arrives
+    setReqModel((current) => current || pickDefaultModel(catalogEntries))
+  }, [catalogEntries])
 
   useEffect(() => {
     if (session?.requirements_json) {
@@ -174,12 +190,17 @@ export default function ConfirmPage() {
           Need to add or update a document? Upload it here
         </button>
       </div>
-      <ModelPicker
-        value={model}
-        onChange={setModel}
-        entries={catalogEntries}
-        label="Which assistant should your team use?"
-      />
+      <button type="button" className="btn-link" onClick={() => setShowAdvanced((v) => !v)}>
+        {showAdvanced ? t('confirm.advancedToggleHide') : t('confirm.advancedToggleShow')}
+      </button>
+      {showAdvanced && (
+        <ModelPicker
+          value={model}
+          onChange={setModel}
+          entries={catalogEntries}
+          label={t('confirm.modelLabel')}
+        />
+      )}
 
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={applyFeedback} disabled={!model || busy}>
@@ -280,7 +301,7 @@ export default function ConfirmPage() {
                 value={reqModel}
                 onChange={setReqModel}
                 entries={catalogEntries}
-                label="Which assistant should redo this?"
+                label={t('confirm.reqModelLabel')}
               />
               <div className="wizard-actions">
                 <button

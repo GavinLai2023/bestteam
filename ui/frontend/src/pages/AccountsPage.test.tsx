@@ -122,7 +122,10 @@ describe('AccountsPage', () => {
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
     fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     await screen.findByText(/identifier may contain only letters/i)
-    expect(scrollIntoView).toHaveBeenCalled()
+    // The banner appearing and the effect that scrolls to it are separate
+    // commits, so `findByText` resolving does not mean the effect has run --
+    // asserting straight after it raced, intermittently, under parallel load.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
   })
 
   it('keeps the entered values when creation fails', async () => {

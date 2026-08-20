@@ -101,6 +101,36 @@ describe('ConfirmPage', () => {
     expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents')
   })
 
+  // The picker sits behind "Advanced settings" (F9). Defaulting used to live
+  // inside ModelPicker, so collapsing it left `model` empty and both actions
+  // permanently disabled -- reintroducing F3's dead end by a different route.
+  it('picks a default model even while the picker stays collapsed', async () => {
+    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+
+    renderPage()
+
+    const button = await screen.findByText('Apply this change')
+    // No click on "Advanced settings": the picker is never shown.
+    expect(screen.queryByLabelText(/Which assistant/)).not.toBeInTheDocument()
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
+        feedback: '',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('reveals the model picker on demand for someone who wants it', async () => {
+    renderPage()
+
+    fireEvent.click(await screen.findByText('Advanced settings'))
+
+    expect(await screen.findByLabelText(/Which assistant should your team use/)).toBeInTheDocument()
+  })
+
   // Every action on this page is gated on a chosen model, and ModelPicker
   // renders nothing when there is no catalog -- so without an explicit banner
   // the page is a dead end: a permanently disabled button and no stated
