@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import MonitorPage from './MonitorPage'
 import { api } from '../lib/api'
@@ -12,6 +12,9 @@ vi.mock('../lib/api', () => ({
     createRun: vi.fn(),
     createWsTicket: vi.fn(),
     cancelRun: vi.fn(),
+    listShareLinks: vi.fn(),
+    createShareLink: vi.fn(),
+    patchShareLink: vi.fn(),
   },
 }))
 
@@ -420,5 +423,45 @@ describe('MonitorPage run waiting UX', () => {
 
     expect(screen.getByText('✓ agent done')).toBeInTheDocument()
     expect(screen.queryByText('Your team got started')).not.toBeInTheDocument()
+  })
+})
+
+describe('MonitorPage sharing the selected team', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.listShareLinks.mockResolvedValue([])
+  })
+
+  it('offers a Share button for a team with a real deployed id', async () => {
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'], pipeline_ids: { wf: 5 } })
+
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: /share/i })).toBeInTheDocument()
+  })
+
+  // A YAML-only demo pipeline has no PipelineRecord.id, so there is nothing
+  // to hang a share link off -- ShareLinksPanel would call createShareLink
+  // with an undefined id.
+  it('offers no Share button for a team with no deployed id', async () => {
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['demo_wf'] })
+
+    renderPage()
+
+    await screen.findByRole('option', { name: 'demo_wf' })
+    expect(screen.queryByRole('button', { name: /share/i })).not.toBeInTheDocument()
+  })
+
+  it('generates a share link for the currently selected team', async () => {
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'], pipeline_ids: { wf: 5 } })
+    mockedApi.createShareLink.mockResolvedValue({
+      id: 1, pipeline_id: 5, token: 'tok', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-21T00:00:00+00:00',
+    })
+
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /share/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
+
+    await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
   })
 })

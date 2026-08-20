@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { API_BASE, WS_BASE, api } from '../lib/api'
+import ShareLinksPanel from '../components/ShareLinksPanel'
 import {
   EVENT_LABELS,
   FRIENDLY_EVENT_TYPES,
@@ -28,6 +29,10 @@ function MonitorPage() {
   // `team_display_name` while this select showed the raw slug, so one screen
   // called one team two things (audit finding F4).
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({})
+  // A YAML-only demo pipeline has no PipelineRecord.id, so there's nothing to
+  // hang a share link off -- the Share button below only renders for a team
+  // that has one.
+  const [pipelineIds, setPipelineIds] = useState<Record<string, number>>({})
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -51,6 +56,7 @@ function MonitorPage() {
       .then((data) => {
         setPipelines(data.pipelines)
         setDisplayNames(data.display_names ?? {})
+        setPipelineIds(data.pipeline_ids ?? {})
         // Clear a previous unreachable banner, but never stomp on a run that
         // is currently in flight or has already reached a terminal state.
         setStatus((current) => (current === 'unreachable' ? 'idle' : current))
@@ -235,6 +241,7 @@ function MonitorPage() {
         {status !== 'unreachable' && pipelines.length === 0 && (
           <p className="hint">{t('run.noTeams')}</p>
         )}
+        {pipelineIds[selected] != null && <ShareLinksPanel pipelineId={pipelineIds[selected]} />}
 
         <label>
           {t('run.taskLabel')}
