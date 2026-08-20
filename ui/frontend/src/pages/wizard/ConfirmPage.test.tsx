@@ -146,4 +146,56 @@ describe('ConfirmPage', () => {
       )
     })
   })
+
+  // The wizard's best-effort Requirements call at intent-creation time can
+  // fail silently (see core/requirements.py's generate_requirements) and
+  // leave a session permanently stuck with requirements_json: null -- before
+  // this, "No summary was generated for this session" was a dead end with no
+  // way to generate one from here.
+  describe('when no summary was generated for this session', () => {
+    const sessionWithoutRequirements = (): BuilderSession => ({ ...sessionWithSpec(), requirements_json: undefined })
+
+    it('offers a way to generate one instead of a dead end', async () => {
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+
+      renderPage()
+      fireEvent.click(await screen.findByText('Show what we understood about your business'))
+
+      expect(screen.getByText('No summary was generated for this session.')).toBeInTheDocument()
+      expect(await screen.findByText('Generate summary')).toBeInTheDocument()
+    })
+
+    it('generates and shows the summary once clicked', async () => {
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      const withRequirements = {
+        ...sessionWithoutRequirements(),
+        requirements_json: { summary: 'They want faster replies.', pain_points: [], goals: [], success_criteria: [], constraints: [], clarifying_questions: [] },
+      }
+      mockedApi.submitRequirements.mockResolvedValue(withRequirements)
+
+      renderPage()
+      fireEvent.click(await screen.findByText('Show what we understood about your business'))
+      const button = await screen.findByText('Generate summary')
+      await waitFor(() => expect(button.closest('button')).toBeEnabled())
+      fireEvent.click(button)
+
+      await waitFor(() =>
+        expect(mockedApi.submitRequirements).toHaveBeenCalledWith('s1', { model: 'deepseek:friendly-assistant' }),
+      )
+      expect(mockContext.setSession).toHaveBeenCalledWith(withRequirements)
+    })
+
+    it('shows an error if generating the summary fails', async () => {
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockedApi.submitRequirements.mockRejectedValue(new Error('Model call failed'))
+
+      renderPage()
+      fireEvent.click(await screen.findByText('Show what we understood about your business'))
+      const button = await screen.findByText('Generate summary')
+      await waitFor(() => expect(button.closest('button')).toBeEnabled())
+      fireEvent.click(button)
+
+      expect(await screen.findByText('Model call failed')).toBeInTheDocument()
+    })
+  })
 })

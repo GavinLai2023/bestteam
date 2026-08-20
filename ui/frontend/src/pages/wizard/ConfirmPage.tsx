@@ -109,6 +109,20 @@ export default function ConfirmPage() {
     }
   }
 
+  const generateRequirements = async () => {
+    if (catalogNotReady || reqBusy) return
+    setReqBusy(true)
+    setReqError(null)
+    try {
+      const updated = await api.submitRequirements(sessionId!, { model: pickDefaultModel(catalogEntries) })
+      setSession(updated)
+    } catch (e) {
+      setReqError((e as Error).message)
+    } finally {
+      setReqBusy(false)
+    }
+  }
+
   const regenerateRequirements = async () => {
     if (catalogNotReady || !reqFeedback.trim() || reqBusy) return
     setReqBusy(true)
@@ -196,7 +210,19 @@ export default function ConfirmPage() {
       {showRequirements && (
         <div style={{ marginTop: 16 }}>
           {!session.requirements_json ? (
-            <p className="hint">No summary was generated for this session.</p>
+            <div>
+              <p className="hint">No summary was generated for this session.</p>
+              {reqError && <p className="banner banner-error">{reqError}</p>}
+              <div className="wizard-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={generateRequirements}
+                  disabled={catalogNotReady || reqBusy}
+                >
+                  {reqBusy ? 'Generating…' : 'Generate summary'}
+                </button>
+              </div>
+            </div>
           ) : (
             <>
               {reqError && <p className="banner banner-error">{reqError}</p>}
