@@ -3,6 +3,7 @@ import KnowledgeBaseSearch from './KnowledgeBaseSearch'
 import { api } from '../lib/api'
 import { useConfirm } from '../lib/useConfirm'
 import type { OrgKnowledgeBase } from '../lib/types'
+import './KnowledgeBasesPanel.css'
 
 // Only while something is actually being indexed -- an idle "My teams" page
 // must not poll this endpoint forever (same rule as the Activity page's run
@@ -114,6 +115,10 @@ export default function KnowledgeBasesPanel() {
           Refresh
         </button>
       </div>
+      <p className="subtitle">
+        Files you've uploaded. Any team you build automatically gets to search these -- there's nothing to attach by
+        hand.
+      </p>
 
       {error && <p className="banner banner-error">{error}</p>}
 
@@ -127,7 +132,7 @@ export default function KnowledgeBasesPanel() {
           const blocked = deleteBlockedReason(kb)
           const searchBlocked = searchBlockedReason(kb)
           return (
-            <li key={kb.name} className="session-item">
+            <li key={kb.name} className="session-item kb-card">
               <h3>{kb.name}</h3>
               <p className="hint">{statusFor(kb)}</p>
               {kb.used_by.length > 0 && <p className="hint">Used by {kb.used_by.join(', ')}</p>}

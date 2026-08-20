@@ -1,6 +1,8 @@
 import { useId, useState, type FormEvent } from 'react'
 import { api } from '../lib/api'
 import type { KnowledgeBaseSearchResponse } from '../lib/types'
+import { extractXmlChunkPreview } from '../lib/xmlChunkPreview'
+import './KnowledgeBaseSearch.css'
 
 // One query against one of the org's own collections, showing the passages an
 // agent would have retrieved. The point is a customer answering "did it find
@@ -12,6 +14,19 @@ export default function KnowledgeBaseSearch({ name }: { name: string }) {
   const [result, setResult] = useState<KnowledgeBaseSearchResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // Indices of results whose raw XML markup the reader chose to reveal --
+  // collapsed by default, per result, since most passages are plain text and
+  // never need it.
+  const [openRaw, setOpenRaw] = useState<Set<number>>(new Set())
+
+  const toggleRaw = (i: number) => {
+    setOpenRaw((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
@@ -60,16 +75,31 @@ export default function KnowledgeBaseSearch({ name }: { name: string }) {
 
       {!error && result && result.results.length > 0 && (
         <ol>
-          {result.results.map((hit, i) => (
-            <li key={i}>
-              {/* The same label the agent's own tool output cites, so what the
-                  reader checks and what a model reads name one passage. */}
-              <strong>{hit.citation}</strong>
-              {/* Chunks keep the document's own line breaks, and collapsing
-                  them turns a list of clauses into one unreadable paragraph. */}
-              <p style={{ whiteSpace: 'pre-wrap' }}>{hit.text}</p>
-            </li>
-          ))}
+          {result.results.map((hit, i) => {
+            const preview = extractXmlChunkPreview(hit.text)
+            return (
+              <li key={i}>
+                {/* The same label the agent's own tool output cites, so what the
+                    reader checks and what a model reads name one passage. */}
+                <strong>{hit.citation}</strong>
+                {/* Chunks keep the document's own line breaks, and collapsing
+                    them turns a list of clauses into one unreadable paragraph. */}
+                <p style={{ whiteSpace: 'pre-wrap' }}>{preview ? preview.friendlyText : hit.text}</p>
+                {preview && (
+                  <>
+                    <button type="button" onClick={() => toggleRaw(i)}>
+                      {openRaw.has(i) ? 'Hide original text' : 'Show original text'}
+                    </button>
+                    {openRaw.has(i) && (
+                      <p className="hint" style={{ whiteSpace: 'pre-wrap' }}>
+                        {preview.rawText}
+                      </p>
+                    )}
+                  </>
+                )}
+              </li>
+            )
+          })}
         </ol>
       )}
     </div>
