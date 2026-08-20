@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { MemoryRecord, MemoryUserSummary } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
@@ -16,6 +17,7 @@ interface Identity {
 // Memory is opt-in (BESTTEAM_MEMORY_DB); when disabled the API reports
 // enabled:false and this page shows a clear "not enabled" notice.
 export default function MemoryPage() {
+  const [confirmNode, confirm] = useConfirm()
   const [enabled, setEnabled] = useState(true)
   const [users, setUsers] = useState<MemoryUserSummary[]>([])
   // A selected summary is an identity: {user_id, org_id} (org_id null = legacy).
@@ -86,7 +88,13 @@ export default function MemoryPage() {
   const scopeLabel = (orgId: number | null) => (orgId == null ? 'legacy (no org)' : `org ${orgId}`)
 
   const deleteRecord = async (id: string) => {
-    if (!window.confirm('Delete this memory record? This cannot be undone.')) return
+    const ok = await confirm({
+      title: 'Delete this memory record?',
+      body: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     setError(null)
     setMessage(null)
     try {
@@ -102,8 +110,13 @@ export default function MemoryPage() {
   const clearUser = async () => {
     if (!selected) return
     const name = selected.user_id
-    if (!window.confirm(`Clear ALL memory for "${name}" (every organisation)? This cannot be undone.`))
-      return
+    const ok = await confirm({
+      title: `Clear all memory for "${name}"?`,
+      body: 'Every record, across every organisation. This cannot be undone.',
+      confirmLabel: 'Clear all',
+      destructive: true,
+    })
+    if (!ok) return
     setError(null)
     setMessage(null)
     try {
@@ -227,6 +240,7 @@ export default function MemoryPage() {
           )}
         </div>
       </div>
+      {confirmNode}
     </div>
   )
 }

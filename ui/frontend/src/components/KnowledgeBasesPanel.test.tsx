@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import KnowledgeBasesPanel from './KnowledgeBasesPanel'
 import { api } from '../lib/api'
 import type { OrgKnowledgeBase } from '../lib/types'
+import { answerConfirm } from '../test/confirmDialog'
 
 // `searchOwnKnowledgeBase` belongs here even though no assertion below reads
 // it: the row's "Try a search" toggle renders `KnowledgeBaseSearch`, which
@@ -182,19 +183,20 @@ describe('KnowledgeBasesPanel', () => {
   })
 
   it('does nothing if the reader cancels the confirmation', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
     render(<KnowledgeBasesPanel />)
 
     const deleteButton = await screen.findByRole('button', { name: /delete/i })
     await act(async () => {
       fireEvent.click(deleteButton)
     })
+    await act(async () => {
+      await answerConfirm(false)
+    })
     expect(mockedApi.deleteOwnKnowledgeBase).not.toHaveBeenCalled()
     expect(screen.getByText('policies')).toBeInTheDocument()
   })
 
   it('deletes the collection and drops its row once confirmed', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     mockedApi.deleteOwnKnowledgeBase.mockResolvedValue(undefined)
     render(<KnowledgeBasesPanel />)
 
@@ -202,12 +204,14 @@ describe('KnowledgeBasesPanel', () => {
     await act(async () => {
       fireEvent.click(deleteButton)
     })
+    await act(async () => {
+      await answerConfirm(true)
+    })
     expect(mockedApi.deleteOwnKnowledgeBase).toHaveBeenCalledWith('policies')
     await waitFor(() => expect(screen.queryByText('policies')).not.toBeInTheDocument())
   })
 
   it("shows a refused delete's message on the row it belongs to", async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     mockedApi.deleteOwnKnowledgeBase.mockRejectedValue(
       new Error("Can't delete 'policies': it's used by deployed team(s): support_team."),
     )
@@ -216,6 +220,9 @@ describe('KnowledgeBasesPanel', () => {
     const deleteButton = await screen.findByRole('button', { name: /delete/i })
     await act(async () => {
       fireEvent.click(deleteButton)
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
     expect(await screen.findByText(/used by deployed team\(s\): support_team/)).toBeInTheDocument()
     expect(screen.getByText('policies')).toBeInTheDocument()

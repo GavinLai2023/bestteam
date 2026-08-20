@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import RunDetail from './RunDetail'
 import { api } from '../lib/api'
+import { answerConfirm } from '../test/confirmDialog'
 
 vi.mock('../lib/api', () => ({
   WS_BASE: 'ws://127.0.0.1:8000',
@@ -271,13 +272,15 @@ describe('RunDetail', () => {
   it("offers to delete this run's content", async () => {
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
     mockedApi.purgeRun.mockResolvedValue({ purged: true })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
 
     const button = await screen.findByRole('button', { name: /delete this run's content/i })
     await act(async () => {
       fireEvent.click(button)
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(mockedApi.purgeRun).toHaveBeenCalledWith('r1')
@@ -297,7 +300,6 @@ describe('RunDetail', () => {
       }],
     })
     mockedApi.purgeRun.mockResolvedValue({ purged: true })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
     // Twice: once in the event timeline, once as the final output.
@@ -307,6 +309,9 @@ describe('RunDetail', () => {
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(screen.queryAllByText('Drafted a reply to alice@example.com')).toHaveLength(0)
@@ -319,12 +324,14 @@ describe('RunDetail', () => {
 
   it('does not delete the run when the confirmation is dismissed', async () => {
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+    await act(async () => {
+      await answerConfirm(false)
     })
 
     expect(mockedApi.purgeRun).not.toHaveBeenCalled()

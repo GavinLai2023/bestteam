@@ -257,3 +257,28 @@
     grid-template-columns: 1fr;
   }
 }
+
+.advanced-filter {
+  font: inherit;
+  font-size: 0.85rem;
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Delete sat beside Save at identical weight, so the destructive action was
+   one mis-aimed click away (F15). Outlined, never filled: it should read as
+   available but deliberate. */
+.btn-danger-outline {
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+.btn-danger-outline:hover:not(:disabled) {
+  background: var(--danger-bg);
+}

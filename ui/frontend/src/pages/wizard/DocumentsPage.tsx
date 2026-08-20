@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../lib/api'
+import { useConfirm } from '../../lib/useConfirm'
 import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
 import type { WizardOutletContext } from '../../lib/types'
@@ -49,6 +50,7 @@ function slugify(label: string): string {
 }
 
 export default function DocumentsPage() {
+  const [confirmNode, confirm] = useConfirm()
   const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
   const { entries, loading: catalogLoading, failed: catalogFailed, retry: retryCatalog } = useModelCatalog()
@@ -120,13 +122,15 @@ export default function DocumentsPage() {
           // The 409 detail says what the existing collection is like today;
           // this says what it would become, so both halves of the change are
           // in the one dialog the customer has to answer.
-          if (
-            !window.confirm(
-              `${err.message}\n\nReplace it with these documents? They will be indexed with ${
-                smartSearchEnabled ? 'Enhanced' : 'Standard'
-              } search.`,
-            )
-          ) {
+          const ok = await confirm({
+            title: 'Replace these documents?',
+            body: `${err.message} They will be re-indexed with ${
+              smartSearchEnabled ? 'Enhanced' : 'Standard'
+            } search.`,
+            confirmLabel: 'Replace',
+            destructive: true,
+          })
+          if (!ok) {
             setBusy(false)
             setStage(null)
             return
@@ -338,6 +342,7 @@ export default function DocumentsPage() {
           {busy ? STAGE_LABELS[stage ?? ''] ?? 'Working…' : 'Continue'}
         </button>
       </div>
+      {confirmNode}
     </div>
   )
 }

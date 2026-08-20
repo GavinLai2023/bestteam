@@ -26,6 +26,10 @@ export const en = {
   },
   common: {
     tryAgain: 'Try again',
+    cancel: 'Cancel',
+    delete: 'Delete',
+    remove: 'Remove',
+    confirmTitle: 'Are you sure?',
     loading: 'Loading…',
     copy: 'Copy',
     copied: 'Copied!',
@@ -108,6 +112,13 @@ export const en = {
     advancedToggleHide: 'Hide advanced settings',
     modelLabel: 'Which assistant should your team use?',
     reqModelLabel: 'Which assistant should redo this?',
+  },
+  advanced: {
+    filterPlaceholder: 'Filter…',
+    noMatches: 'Nothing matches that filter.',
+    // The JSON editor's only feedback was "Not valid JSON", which does not say
+    // where to look in an 18-row document (audit finding F15).
+    invalidJson: 'Not valid JSON — {{detail}}',
   },
   modelCatalog: {
     // Shared by every wizard stage that needs a real model to generate with.

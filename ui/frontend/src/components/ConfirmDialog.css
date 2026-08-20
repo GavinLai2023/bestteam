@@ -1,0 +1,50 @@
+.confirm-dialog {
+  max-width: 30rem;
+  width: calc(100vw - 2rem);
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 18%);
+}
+
+.confirm-dialog::backdrop {
+  background: rgb(15 18 26 / 45%);
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
+.confirm-dialog p {
+  margin: 0 0 18px;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--text-soft);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* The destructive action is the one that must not be reached by muscle memory,
+   so it never shares the primary button's styling. */
+.confirm-dialog .btn-danger {
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: var(--surface);
+}
+
+@media (max-width: 480px) {
+  .confirm-dialog-actions {
+    flex-direction: column-reverse;
+  }
+
+  .confirm-dialog-actions .btn {
+    width: 100%;
+  }
+}

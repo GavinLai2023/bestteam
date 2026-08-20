@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { AdminOrg, AdminUser } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
@@ -16,6 +17,7 @@ interface UserDraft {
 // platform-account lifecycle stay CLI-only, so platform accounts are shown
 // read-only. The backend enforces admin on every /api/admin call regardless.
 export default function AccountsPage() {
+  const [confirmNode, confirm] = useConfirm()
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
@@ -89,8 +91,16 @@ export default function AccountsPage() {
     )
   }
 
-  const toggleActive = (org: AdminOrg) => {
-    if (org.active && !window.confirm(`Deactivate '${org.name}'? Its user won't be able to log in.`)) return
+  const toggleActive = async (org: AdminOrg) => {
+    if (org.active) {
+      const ok = await confirm({
+        title: `Deactivate '${org.name}'?`,
+        body: "Its user won't be able to log in until it is reactivated.",
+        confirmLabel: 'Deactivate',
+        destructive: true,
+      })
+      if (!ok) return
+    }
     run(api.setOrgActive(org.name, !org.active))
   }
 
@@ -128,8 +138,14 @@ export default function AccountsPage() {
     run(api.moveAdminUser(username, to.trim()))
   }
 
-  const removeUser = (username: string) => {
-    if (!window.confirm(`Delete user '${username}'? This also purges their memory.`)) return
+  const removeUser = async (username: string) => {
+    const ok = await confirm({
+      title: `Delete user '${username}'?`,
+      body: 'This also purges their memory, and cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     run(api.deleteAdminUser(username), `Deleted '${username}'.`)
   }
 
@@ -261,6 +277,7 @@ export default function AccountsPage() {
           ))}
         </ul>
       </section>
+      {confirmNode}
     </div>
   )
 }

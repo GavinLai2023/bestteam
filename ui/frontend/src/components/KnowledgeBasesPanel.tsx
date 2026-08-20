@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import KnowledgeBaseSearch from './KnowledgeBaseSearch'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { OrgKnowledgeBase } from '../lib/types'
 
 // Only while something is actually being indexed -- an idle "My teams" page
@@ -58,6 +59,7 @@ function searchBlockedReason(kb: OrgKnowledgeBase): string | null {
 // and remove one -- none of which previously existed outside the admin
 // Advanced page.
 export default function KnowledgeBasesPanel() {
+  const [confirmNode, confirm] = useConfirm()
   const [items, setItems] = useState<OrgKnowledgeBase[]>([])
   const [error, setError] = useState<string | null>(null)
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
@@ -85,9 +87,13 @@ export default function KnowledgeBasesPanel() {
   }, [anyProcessing, refresh])
 
   const handleDelete = async (kb: OrgKnowledgeBase) => {
-    if (!window.confirm(`Delete "${kb.name}"? Its documents are removed and teams can no longer search them.`)) {
-      return
-    }
+    const ok = await confirm({
+      title: `Delete "${kb.name}"?`,
+      body: 'Its documents are removed and teams can no longer search them.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await api.deleteOwnKnowledgeBase(kb.name)
       setItems((prev) => prev.filter((i) => i.name !== kb.name))
@@ -166,6 +172,7 @@ export default function KnowledgeBasesPanel() {
           )
         })}
       </ul>
+      {confirmNode}
     </section>
   )
 }

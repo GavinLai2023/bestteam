@@ -4,6 +4,7 @@ import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
 import type { BuilderSession, EmailTrigger } from '../../lib/types'
 import KnowledgeBasesPanel from '../../components/KnowledgeBasesPanel'
+import { useConfirm } from '../../lib/useConfirm'
 import ShareLinksPanel from '../../components/ShareLinksPanel'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
@@ -63,6 +64,7 @@ function descriptionFor(session: BuilderSession) {
 
 export default function SessionsPage() {
   const navigate = useNavigate()
+  const [confirmNode, confirm] = useConfirm()
   const [sessions, setSessions] = useState<BuilderSession[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -87,7 +89,13 @@ export default function SessionsPage() {
 
   const handleDelete = async (session: BuilderSession) => {
     const label = session.specification_json?.name ?? session.intent_text
-    if (!window.confirm(`Delete "${label}"? This can't be undone.`)) return
+    const ok = await confirm({
+      title: `Delete "${label}"?`,
+      body: "This can't be undone.",
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await api.deleteSession(session.id!)
       setSessions((prev) => prev.filter((s) => s.id !== session.id))
@@ -188,6 +196,7 @@ export default function SessionsPage() {
       {/* The documents this org uploaded, under the teams that use them --
           the panel hides itself when there are none. */}
       <KnowledgeBasesPanel />
+      {confirmNode}
     </div>
   )
 }

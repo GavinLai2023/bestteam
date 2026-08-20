@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import { formatDateTime } from '../lib/dateFormat'
 import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
 import { useRunTrace } from '../lib/useRunTrace'
@@ -19,6 +20,7 @@ type RetryState = 'idle' | 'retrying' | 'error'
 // lib/useRunTrace.ts for the live-WS-vs-historical-fetch mechanics (shared
 // with the admin Trace page's AdminRunDetail).
 export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
+  const [confirmNode, confirm] = useConfirm()
   const { events, contentPurgedAt, error } = useRunTrace(runId, status)
   const [automationResults, setAutomationResults] = useState<AutomationResult[]>([])
   const [retryState, setRetryState] = useState<RetryState>('idle')
@@ -62,7 +64,15 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
   }
 
   const purge = async () => {
-    if (!window.confirm("Remove this run's content? The message text, our drafted reply and the step-by-step trace go; what it cost and when it ran stay. This cannot be undone.")) return
+    const ok = await confirm({
+      title: "Remove this run's content?",
+      body:
+        'The message text, our drafted reply and the step-by-step trace go; ' +
+        'what it cost and when it ran stay. This cannot be undone.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    })
+    if (!ok) return
     setPurging(true)
     setPurgeError(null)
     try {
@@ -187,6 +197,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
           {purgeError && <p className="banner banner-error">{purgeError}</p>}
         </section>
       )}
+      {confirmNode}
     </div>
   )
 }

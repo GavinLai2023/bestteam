@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import SessionsPage from './SessionsPage'
 import { api } from '../../lib/api'
 import type { BuilderSession } from '../../lib/types'
+import { answerConfirm } from '../../test/confirmDialog'
 
 vi.mock('../../lib/api', () => ({
   api: {
@@ -312,13 +313,14 @@ describe('SessionsPage draft deletion', () => {
 
   it('does nothing if the user cancels the confirmation', async () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
-
     renderPage()
     const deleteButton = await screen.findByRole('button', { name: 'Delete' })
 
     await act(async () => {
       fireEvent.click(deleteButton)
+    })
+    await act(async () => {
+      await answerConfirm(false)
     })
 
     expect(mockedApi.deleteSession).not.toHaveBeenCalled()
@@ -328,13 +330,14 @@ describe('SessionsPage draft deletion', () => {
   it('deletes the session and removes its card when confirmed', async () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session({ id: 's1', pipeline_id: null })] })
     mockedApi.deleteSession.mockResolvedValue(undefined)
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     renderPage()
     const deleteButton = await screen.findByRole('button', { name: 'Delete' })
 
     await act(async () => {
       fireEvent.click(deleteButton)
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(mockedApi.deleteSession).toHaveBeenCalledWith('s1')
@@ -344,13 +347,14 @@ describe('SessionsPage draft deletion', () => {
   it('shows an error banner and keeps the card if deletion fails', async () => {
     mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
     mockedApi.deleteSession.mockRejectedValue(new Error("Can't delete right now"))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     renderPage()
     const deleteButton = await screen.findByRole('button', { name: 'Delete' })
 
     await act(async () => {
       fireEvent.click(deleteButton)
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(await screen.findByText("Can't delete right now")).toBeInTheDocument()

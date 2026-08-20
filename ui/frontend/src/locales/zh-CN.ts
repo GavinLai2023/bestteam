@@ -21,6 +21,10 @@ export const zhCN: Resources = {
   },
   common: {
     tryAgain: '重试',
+    cancel: '取消',
+    delete: '删除',
+    remove: '移除',
+    confirmTitle: '确认操作',
     loading: '加载中…',
     copy: '复制',
     copied: '已复制！',
@@ -92,6 +96,11 @@ export const zhCN: Resources = {
     advancedToggleHide: '收起高级设置',
     modelLabel: '团队使用哪个助理模型？',
     reqModelLabel: '由哪个助理模型重新整理？',
+  },
+  advanced: {
+    filterPlaceholder: '筛选…',
+    noMatches: '没有匹配的条目。',
+    invalidJson: 'JSON 格式有误 —— {{detail}}',
   },
   modelCatalog: {
     loadFailed: '无法加载可用的 AI 模型，请检查网络后重试。',
