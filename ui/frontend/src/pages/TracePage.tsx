@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
@@ -73,11 +73,20 @@ export default function TracePage() {
   const [runsLoading, setRunsLoading] = useState(true)
   const [runsError, setRunsError] = useState<string | null>(null)
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null)
+  // The run list can be long -- opening the detail panel after it (and after
+  // the pager) would otherwise leave it off-screen when the clicked run
+  // isn't near the top, same fix as the customer-facing Activity page's
+  // Runs tab.
+  const runDetailRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset pagination on filter/tab change
     setRunsOffset(0)
   }, [org, pipelineFilter, statusFilter, tab])
+
+  useEffect(() => {
+    if (selectedRun) runDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [selectedRun])
 
   useEffect(() => {
     if (tab !== 'runs') return undefined
@@ -115,6 +124,11 @@ export default function TracePage() {
   const [selectedPipeline, setSelectedPipeline] = useState<SelectedPipeline | null>(null)
   const [detail, setDetail] = useState<PipelineAnalyticsDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const pipelineDetailRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    if (selectedPipeline) pipelineDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [selectedPipeline])
 
   useEffect(() => {
     if (tab !== 'analytics') return undefined
@@ -277,7 +291,7 @@ export default function TracePage() {
           <RunsPager total={runsPage.total} limit={runsPage.limit} offset={runsOffset} onOffsetChange={setRunsOffset} />
 
           {selectedRun && (
-            <section className="run-detail-panel">
+            <section className="run-detail-panel" ref={runDetailRef}>
               <div className="run-detail-panel-header">
                 <h2>Run {selectedRun.id}</h2>
                 <button type="button" onClick={() => setSelectedRun(null)}>
@@ -339,7 +353,7 @@ export default function TracePage() {
           )}
 
           {selectedPipeline && (
-            <section className="run-detail-panel">
+            <section className="run-detail-panel" ref={pipelineDetailRef}>
               <div className="run-detail-panel-header">
                 <h2>
                   {selectedPipeline.pipeline} <span className="hint">· {selectedPipeline.org ?? 'unknown org'}</span>
