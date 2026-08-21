@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 
 _PIPELINE_TEMPLATE = """\
-# bestteam pipeline definition — agents, teams, and the pipeline that chains them.
+# BestTeam pipeline definition — agents, teams, and the pipeline that chains them.
 #
 # Model specs are resolved lazily through langchain's `init_chat_model`, so any
 # provider it supports works here ("openai:gpt-4o-mini", "anthropic:claude-sonnet-4-6", ...).

@@ -1,6 +1,6 @@
-# bestteam
+# BestTeam
 
-> 把复杂留给自己，把简单留给客户。
+> Intent in, best AI team out.
 
 **GitHub:** https://github.com/GavinLai2023/bestteam
 

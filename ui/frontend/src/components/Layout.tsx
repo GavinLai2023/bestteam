@@ -26,7 +26,13 @@ export default function Layout() {
   return (
     <div className="app-shell">
       <nav className="top-nav">
-        <span className="brand">{t('nav.brand')}</span>
+        <span className="brand">
+          <svg className="brand-mark" width="22" height="22" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+            <rect x="2" y="2" width="14" height="22" rx="7" className="brand-mark-soft" />
+            <rect x="9" y="2" width="15" height="14" rx="7" className="brand-mark-strong" />
+          </svg>
+          {t('nav.brand')}
+        </span>
         <div className="top-nav-links">
           {/* Customer pages are org-scoped; a platform operator (no org) can't
               use them, so show them only to org members. */}

@@ -16,9 +16,20 @@
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 700;
   font-size: 1.05rem;
   color: var(--accent);
+}
+
+.brand-mark-soft {
+  fill: var(--accent-border);
+}
+
+.brand-mark-strong {
+  fill: var(--accent);
 }
 
 .top-nav-links {

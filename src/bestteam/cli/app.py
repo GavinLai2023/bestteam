@@ -34,10 +34,13 @@ def main(
         "--version",
         callback=_version_callback,
         is_eager=True,
-        help="Show the bestteam version and exit.",
+        help="Show the BestTeam version and exit.",
     )
 ) -> None:
-    """bestteam — business-friendly multi-agent pipelines, powered by LangGraph under the hood."""
+    """BestTeam — intent in, best AI team out.
+
+    Business-friendly multi-agent pipelines, powered by LangGraph under the hood.
+    """
 
 
 @app.command()
@@ -45,7 +48,7 @@ def init(
     project: str = typer.Argument(..., help="Name of the project directory to create"),
     directory: Path = typer.Option(Path("."), "--dir", help="Parent directory for the new project"),
 ) -> None:
-    """Scaffold a new bestteam project with a sample reviewer/fixer pipeline."""
+    """Scaffold a new BestTeam project with a sample reviewer/fixer pipeline."""
     target = directory / project
     try:
         created = scaffold.create_project(target)
