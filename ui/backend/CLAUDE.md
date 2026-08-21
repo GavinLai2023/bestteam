@@ -1033,6 +1033,48 @@ its detail (`RunDetail.jsx`): a `running` run streams live over the same
 WebSocket the monitor page uses, anything else fetches
 `GET /api/runs/{id}/trace` once (no live/historical merge, by design).
 
+### Diagnostic re-runs (`POST /api/runs/{id}/diagnose`, admin-only)
+
+The answer to "which step went wrong?" for a poor run. A normal trace
+deliberately omits the system prompt, the per-agent input, the intermediate
+model turns, tool-call arguments and the retrieved passages (P0-5 keeps an
+org's documents out of `trace_events`). Rather than recording those on every
+run, an admin **re-runs** the original input against the team as *currently
+deployed* with `Pipeline.stream(diagnostic=True)` -- the SDK's
+`_TeamState.diagnostic` flag, same lifecycle as `memory_preamble`, so the
+cached compiled graph needs no recompile -- and the verbose events land in the
+ordinary trace of the **new** run: `agent_prompt`, one `model_turn` per model
+call, `args` on `tool_started`, `result` on `tool_completed` (a KB tool's
+`result` is the excerpts the model read). Shapes and the 20,000-char cap are
+documented on `core/trace.py`; the email tools stay redacted on every path.
+`runtime.run_in_background(..., diagnostic=)` only forwards the flag.
+
+Rules, each with a reason: **admin-only** (`get_current_admin`) because the
+payload is raw prompts and documents. **Always a new `runs` row**
+(`diagnostic_of_run_id`, migration `q4r5s6t7u8v9`) -- history is immutable,
+same as `retry_of_run_id`. **Refused with 400 for a run carrying
+`trigger_context`**: an autonomous email run would reach the org's live
+mailbox with unscoped `email_*` tools, and a shared-chat turn would append a
+reply to the visitor's session (`_safe_record_share_reply` keys off that
+context). **Refused for a diagnostic run itself** (diagnose the original) and
+**409 for a purged run** (no input left). **No `user_id`** is passed, so
+per-user memory is neither recalled nor written -- the admin must not act as
+the customer; the banner says so. **Built from the current version** via
+`_resolve_pipeline_and_version` (cached), and `version_changed` -- on the
+POST response and derived again on every `GET /api/runs` row of a diagnostic
+run (original's pinned version vs the re-run's, NULL for an ordinary run) --
+tells the UI when the team was redeployed since, so the admin knows the
+problem may no longer reproduce and the warning survives a page refresh. **Spend is metered to the
+run's org** like any run of that team, **retention applies** like any run of
+that org, and the run is **filtered out of a non-admin `GET /api/runs`**
+(`diagnostic_of_run_id IS NULL`) so it never appears on the customer's
+Activity page -- a list-cleanliness rule, not a security boundary (the org's
+own run read routes still serve it by id). Not done, on purpose for v1:
+rebuilding the *pinned* version, relevance scores on KB hits (`_Chunk` has
+none, and a fused/reranked order has no single meaningful number), an admin
+purge of one diagnostic run, excluding them from `run_analytics.py`. Spec:
+`docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md`.
+
 ## Backend API (`ui/backend/`)
 
 Beyond the existing monitoring endpoints (`/api/health`, `/api/pipelines`,

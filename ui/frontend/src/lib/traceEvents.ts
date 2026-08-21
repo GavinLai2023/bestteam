@@ -69,6 +69,9 @@ export const EVENT_LABELS: Record<string, string> = {
   memory_recalled: '🧠 memory recalled',
   memory_recorded: '🧠 memory recorded',
   memory_failed: '🧠 memory failed',
+  // Admin diagnostic re-runs only (core/trace.py) -- never on a customer run.
+  agent_prompt: '📝 prompt',
+  model_turn: '💬 model turn',
 }
 
 export const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
@@ -106,6 +109,21 @@ export function renderEventData(event: TraceEvent): string | null {
     case 'subagent_started':
     case 'subagent_completed':
       return ((data.task_summary ?? data.summary) as string | undefined) ?? null
+    case 'agent_prompt': {
+      // Sizes only -- the full text is in the raw payload; a whole system
+      // prompt on the summary line would bury the timeline.
+      const systemPrompt = (data.system_prompt as string | undefined) ?? ''
+      const input = (data.input as string | undefined) ?? ''
+      return `system prompt ${systemPrompt.length} chars · input ${input.length} chars`
+    }
+    case 'model_turn': {
+      const parts = [`turn ${data.turn as number}`]
+      const calls = (data.tool_calls as { name: string }[] | undefined) ?? []
+      if (calls.length > 0) parts.push(`calls ${calls.map((c) => c.name).join(', ')}`)
+      const content = (data.content as string | undefined) ?? ''
+      if (content) parts.push(content.length > 200 ? `${content.slice(0, 200)}…` : content)
+      return parts.join(' · ')
+    }
     default:
       return JSON.stringify(data)
   }

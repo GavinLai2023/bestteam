@@ -20,6 +20,10 @@ import './TracePage.css'
 interface SelectedRun {
   id: string
   status: string
+  // Set when the selected run is an admin's diagnostic re-run -- from the
+  // list row, or from the diagnose response that just created it.
+  diagnosticOfRunId?: string | null
+  versionChanged?: boolean
 }
 
 interface SelectedPipeline {
@@ -87,6 +91,25 @@ export default function TracePage() {
   useEffect(() => {
     if (selectedRun) runDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [selectedRun])
+
+  // "Open original run" from a diagnostic run's banner: the original may be
+  // on another page of the list, so resolve its real status the way the
+  // Activity page's Needs-attention "View run" does, falling back to
+  // completed only if that lookup itself fails.
+  function openRun(runId: string) {
+    api
+      .listRuns({ run_id: runId })
+      .then((d) => {
+        const row = d.runs[0]
+        setSelectedRun({
+          id: runId,
+          status: row?.status ?? 'completed',
+          diagnosticOfRunId: row?.diagnostic_of_run_id ?? null,
+          versionChanged: row?.version_changed ?? undefined,
+        })
+      })
+      .catch(() => setSelectedRun({ id: runId, status: 'completed' }))
+  }
 
   useEffect(() => {
     if (tab !== 'runs') return undefined
@@ -272,11 +295,19 @@ export default function TracePage() {
                 <li key={run.id}>
                   <button
                     className="wizard-card session-card"
-                    onClick={() => setSelectedRun({ id: run.id, status: run.status })}
+                    onClick={() =>
+                      setSelectedRun({
+                        id: run.id,
+                        status: run.status,
+                        diagnosticOfRunId: run.diagnostic_of_run_id ?? null,
+                        versionChanged: run.version_changed ?? undefined,
+                      })
+                    }
                   >
                     <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
                       <span className="status-badge">{runStatusLabel(run.status)}</span>
+                      {run.diagnostic_of_run_id && <span className="status-badge">diagnostic</span>}
                       <span className="session-updated">
                         {run.org ?? 'unknown org'} · {run.autonomous ? t('activity.automatic') : t('activity.manual')} ·{' '}
                         {formatDateTime(run.started_at)}
@@ -298,7 +329,22 @@ export default function TracePage() {
                   Close
                 </button>
               </div>
-              <AdminRunDetail key={selectedRun.id} runId={selectedRun.id} status={selectedRun.status} />
+              <AdminRunDetail
+                key={selectedRun.id}
+                runId={selectedRun.id}
+                status={selectedRun.status}
+                diagnosticOfRunId={selectedRun.diagnosticOfRunId}
+                versionChanged={selectedRun.versionChanged}
+                onDiagnosed={(result) =>
+                  setSelectedRun({
+                    id: result.run_id,
+                    status: 'running',
+                    diagnosticOfRunId: result.diagnostic_of_run_id,
+                    versionChanged: result.version_changed,
+                  })
+                }
+                onOpenRun={openRun}
+              />
             </section>
           )}
         </>

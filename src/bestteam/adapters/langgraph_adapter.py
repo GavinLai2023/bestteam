@@ -64,6 +64,12 @@ class _TeamState(TypedDict):
     # prompt (see core/memory.py). Plain (no reducer): nodes only read it, and
     # it's set once by `_initial_state` and never written by a node.
     memory_preamble: str
+    # Admin diagnostic re-run (see core/trace.py): when True, `_run_agent`
+    # additionally emits `agent_prompt`/`model_turn` events and adds
+    # `args`/`result` to the tool events. Plain field, same lifecycle as
+    # `memory_preamble` -- read by nodes, set once by `_initial_state`, so the
+    # cached compiled graph needs no recompile to switch it on.
+    diagnostic: bool
 
 
 def _fake_architect_specification() -> "Specification":
@@ -188,6 +194,53 @@ def _model_spec(agent: Agent) -> str:
     if isinstance(agent.model, str):
         return agent.model
     return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
+
+
+# Upper bound on each string field of a diagnostic-only event (`agent_prompt`,
+# `model_turn`, `tool_completed.result`). Generous on purpose -- the point of
+# a diagnostic run is to show what the model actually saw -- but still a bound,
+# since every one of these lands in a `trace_events` row.
+_MAX_DIAGNOSTIC_CHARS = 20_000
+
+
+def _diagnostic_text(value: Any) -> str:
+    """Stringify a diagnostic payload, capped at `_MAX_DIAGNOSTIC_CHARS`."""
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= _MAX_DIAGNOSTIC_CHARS:
+        return text
+    return f"{text[:_MAX_DIAGNOSTIC_CHARS]}…[truncated]"
+
+
+def _diagnostic_args(value: Any) -> Any:
+    """Size-bound a tool call's args for a diagnostic event: every string in
+    the (possibly nested) JSON structure goes through `_diagnostic_text`, so a
+    model-authored 100k-character argument can't produce an unbounded
+    `tool_started`/`model_turn` row. Shape and non-string values are kept."""
+    if isinstance(value, str):
+        return _diagnostic_text(value)
+    if isinstance(value, dict):
+        return {k: _diagnostic_args(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_diagnostic_args(v) for v in value]
+    return value
+
+
+def _model_turn_data(turn: int, response: Any) -> Dict[str, Any]:
+    """`model_turn` data for a diagnostic run: the model's text and the tool
+    calls it asked for. Never the provider's call ids. An email tool's args are
+    model-authored mail content (a message id, a draft body) and are dropped
+    here for the same reason `_redacted_email_tool_data` exists."""
+    tool_calls = []
+    for call in getattr(response, "tool_calls", None) or []:
+        name = call.get("name")
+        tool_calls.append(
+            {
+                "name": name,
+                "args": None if name in _EMAIL_TOOLS_NEEDING_REDACTION else _diagnostic_args(call.get("args")),
+            }
+        )
+    content = getattr(response, "content", response)
+    return {"turn": turn, "content": _diagnostic_text(content), "tool_calls": tool_calls}
 
 
 def _summarize(value: Any, limit: int = 200) -> str:
@@ -362,8 +415,15 @@ def _run_agent(
     require_tool_use_on_first_call: bool = False,
     usage_sink: Optional[List[Dict[str, Any]]] = None,
     on_event: Optional[Callable[[TraceEvent], None]] = None,
+    diagnostic: bool = False,
 ) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
+
+    `diagnostic` (an admin diagnostic re-run, see `core/trace.py`) additionally
+    emits `agent_prompt` (the exact system prompt and input) and one
+    `model_turn` per model call, and adds `args` to `tool_started` / `result`
+    to `tool_completed` -- except for the email tools, which keep their
+    redaction on every path. With it off, the event stream is unchanged.
 
     Shared by `_agent_node` (SEQUENTIAL/PARALLEL team members) and
     `_make_delegate_tool` (a HIERARCHICAL manager's subordinates), so both
@@ -414,8 +474,15 @@ def _run_agent(
         HumanMessage(content=input_text),
     ]
     _emit("agent_started", {"role": agent.role, "goal": agent.goal})
+    if diagnostic:
+        _emit(
+            "agent_prompt",
+            {"system_prompt": _diagnostic_text(system_prompt), "input": _diagnostic_text(input_text)},
+        )
     response = first_call_model.invoke(messages)
     _record_usage(agent, response, usage_sink)
+    if diagnostic:
+        _emit("model_turn", _model_turn_data(1, response))
 
     for i in range(_MAX_TOOL_ITERATIONS):
         tool_calls = getattr(response, "tool_calls", None)
@@ -427,7 +494,13 @@ def _run_agent(
             if tool_fn is None:
                 result = f"Error: unknown tool '{call['name']}'"
             else:
-                _emit("tool_started", {"tool": call["name"]})
+                # An email tool's args/result are mail content -- redacted on
+                # every path, diagnostic or not (see _EMAIL_TOOLS_NEEDING_REDACTION).
+                reveal = diagnostic and call["name"] not in _EMAIL_TOOLS_NEEDING_REDACTION
+                started_data: Dict[str, Any] = {"tool": call["name"]}
+                if reveal:
+                    started_data["args"] = _diagnostic_args(call["args"])
+                _emit("tool_started", started_data)
                 start = time.monotonic()
                 try:
                     with tool_call_context() as tool_ctx:
@@ -443,6 +516,11 @@ def _run_agent(
                         "duration_ms": int((time.monotonic() - start) * 1000),
                         "summary": "Tool call failed",
                     }
+                    if reveal:
+                        # What the model is about to read (the ToolMessage
+                        # below) -- the raw exception text stays out of the
+                        # business-safe `summary` as before.
+                        failure_data["result"] = _diagnostic_text(result)
                     if call["name"] in ("email_read", "email_read_attachment", "email_draft_reply"):
                         # Retain the bounded message id on failure too, same as a
                         # successful call's redacted data -- otherwise a failed
@@ -459,6 +537,8 @@ def _run_agent(
                         extra_data = _kb_tool_trace_data(tool_ctx.trace)
                     else:
                         extra_data = {"summary": _summarize(result)}
+                    if reveal:
+                        extra_data["result"] = _diagnostic_text(result)
                     _emit(
                         "tool_completed",
                         {
@@ -480,6 +560,8 @@ def _run_agent(
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = model.invoke(messages)
         _record_usage(agent, response, usage_sink)
+        if diagnostic:
+            _emit("model_turn", _model_turn_data(i + 2, response))
 
     if getattr(response, "tool_calls", None):
         # The loop ran out while the model was still asking for tools, so it
@@ -495,6 +577,7 @@ def _make_delegate_tool(
     extra_system_prompt: str = "",
     on_event: Optional[Callable[[TraceEvent], None]] = None,
     manager_name: str = "",
+    diagnostic: bool = False,
 ) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
@@ -542,6 +625,7 @@ def _make_delegate_tool(
             require_tool_use_on_first_call=bool(agent.tools),
             usage_sink=usage_sink,
             on_event=on_event,
+            diagnostic=diagnostic,
         )
         if on_event is not None:
             on_event(
@@ -590,6 +674,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
             extra_system_prompt=state.get("memory_preamble", ""),
             usage_sink=usage_sink,
             on_event=sub_events.append,
+            diagnostic=state.get("diagnostic", False),
         )
 
         update: Dict[str, Any] = {
@@ -650,6 +735,7 @@ def _hierarchical_node(team: Team):
         usage_sink: List[Dict[str, Any]] = []
         sub_events: List[TraceEvent] = []
         preamble = state.get("memory_preamble", "")
+        diagnostic = state.get("diagnostic", False)
         # Subordinates get the recalled user memory (like sequential/parallel
         # agents) but not the manager's delegation guidance, which is manager-only.
         delegate_tools = [
@@ -659,6 +745,7 @@ def _hierarchical_node(team: Team):
                 extra_system_prompt=preamble,
                 on_event=sub_events.append,
                 manager_name=manager.name,
+                diagnostic=diagnostic,
             )
             for agent in team.agents
         ]
@@ -671,6 +758,7 @@ def _hierarchical_node(team: Team):
             require_tool_use_on_first_call=True,
             usage_sink=usage_sink,
             on_event=sub_events.append,
+            diagnostic=diagnostic,
         )
         return {
             "contributions": {manager.name: text},
@@ -683,7 +771,7 @@ def _hierarchical_node(team: Team):
     return node
 
 
-def _initial_state(input: str, memory_preamble: str = "") -> _TeamState:
+def _initial_state(input: str, memory_preamble: str = "", diagnostic: bool = False) -> _TeamState:
     return {
         "input": input,
         "context": "",
@@ -692,6 +780,7 @@ def _initial_state(input: str, memory_preamble: str = "") -> _TeamState:
         "trace_events": {},
         "output": "",
         "memory_preamble": memory_preamble,
+        "diagnostic": diagnostic,
     }
 
 
@@ -792,9 +881,11 @@ class LangGraphAdapter(EngineAdapter):
         graph.add_node(node_name, _hierarchical_node(team))
         return node_name, node_name
 
-    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> PipelineResult:
+    def execute(
+        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+    ) -> PipelineResult:
         try:
-            final_state = compiled.invoke(_initial_state(input, memory_preamble))
+            final_state = compiled.invoke(_initial_state(input, memory_preamble, diagnostic))
         except BestTeamError:
             # Already a framework-level error (e.g. ConfigurationError raised
             # lazily during model resolution) — surface it as-is rather than
@@ -816,7 +907,9 @@ class LangGraphAdapter(EngineAdapter):
     def to_mermaid(self, compiled: Any) -> str:
         return compiled.get_graph().draw_mermaid()
 
-    def stream(self, compiled: Any, input: str, memory_preamble: str = "") -> Iterator[TraceEvent]:
+    def stream(
+        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+    ) -> Iterator[TraceEvent]:
         """Yield an `agent_completed` TraceEvent each time a node finishes.
 
         Built on LangGraph's `stream_mode="updates"`, which yields exactly the
@@ -824,7 +917,9 @@ class LangGraphAdapter(EngineAdapter):
         just that node's own entry, never a merged view of the whole run.
         """
         try:
-            for update in compiled.stream(_initial_state(input, memory_preamble), stream_mode="updates"):
+            for update in compiled.stream(
+                _initial_state(input, memory_preamble, diagnostic), stream_mode="updates"
+            ):
                 for partial in update.values():
                     if not isinstance(partial, dict):
                         continue

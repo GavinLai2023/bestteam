@@ -600,6 +600,13 @@ class Run(Base):
     # The run this run retried, if any -- lets the UI show a retry chain and
     # keeps history immutable (a retry always creates a new row).
     retry_of_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # The run this run is an admin's diagnostic re-run of, if any
+    # (`POST /api/runs/{id}/diagnose`, main.py): same input, same team as
+    # currently deployed, `Pipeline.stream(diagnostic=True)` so the trace
+    # carries prompts/model turns/tool args+results. NULL for every ordinary
+    # run. Hidden from a customer's `GET /api/runs`; an org's retention purge
+    # treats it like any other run of that org.
+    diagnostic_of_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     # Phase 3b: when this run's content (input/output/trace/item payloads) was
     # cleared by a retention purge. The row itself survives -- usage_records
     # hangs off it and carries the org's cost history. NULL = never purged.

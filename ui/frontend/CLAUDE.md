@@ -372,6 +372,17 @@ that both read `lib/useMe.ts` (one `GET /api/auth/me` → `{username, is_admin,
 org}`) and render `null` while it loads:
 
 - `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory` + `/trace`; non-admins are sent to `/`.
+  On `/trace` (`pages/TracePage.tsx`), `components/AdminRunDetail.tsx` offers
+  **"Diagnose this run"** on a finished, non-diagnostic run
+  (`api.diagnoseRun` → `POST /api/runs/{id}/diagnose`, see
+  `ui/backend/CLAUDE.md`); the page then selects the new run, which streams
+  into the same panel under a banner naming the original (with an "Open
+  original run" button and a redeployed-since notice when `version_changed`).
+  `lib/traceEvents.ts` carries labels/summaries for the diagnostic-only
+  `agent_prompt`/`model_turn` events, and the detail view collapses those
+  payloads (and a `tool_completed.result`) behind a `<details>` so one long
+  prompt doesn't bury the timeline. The run list badges diagnostic runs; the
+  customer's Activity page never receives one (filtered server-side).
 - `RequireOrgMember` wraps the customer routes (`/`, `/run`, `/teams`, `/activity`, `/wizard/*`);
   operators are sent to `/advanced`, since every org-scoped surface 403s an
   org-less operator. The `*` catch-all stays **outside** both guards so an

@@ -12,6 +12,7 @@ vi.mock('../lib/api', () => ({
     getPipelineAnalytics: vi.fn(),
     getRunTrace: vi.fn(),
     createWsTicket: vi.fn(),
+    diagnoseRun: vi.fn(),
   },
 }))
 
@@ -42,7 +43,9 @@ describe('TracePage', () => {
 
   it('switching the org selector re-fetches runs scoped to that org', async () => {
     render(<TracePage />)
-    await screen.findByDisplayValue('All organisations')
+    // The select's options come from the async listOrgs -- wait for them, or a
+    // change to 'org_a' on a slow runner is a no-op on an option-less select.
+    await screen.findByRole('option', { name: 'Org A' })
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Organisation'), { target: { value: 'org_a' } })
@@ -247,7 +250,9 @@ describe('TracePage', () => {
 
   it('switching the org selector on the By model tab re-fetches scoped to that org', async () => {
     render(<TracePage />)
-    await screen.findByDisplayValue('All organisations')
+    // The select's options come from the async listOrgs -- wait for them, or a
+    // change to 'org_a' on a slow runner is a no-op on an option-less select.
+    await screen.findByRole('option', { name: 'Org A' })
     await act(async () => {
       fireEvent.click(screen.getByText('By model'))
     })
@@ -257,5 +262,43 @@ describe('TracePage', () => {
     })
 
     expect(mockedApi.listModelAnalytics).toHaveBeenLastCalledWith(expect.objectContaining({ org: 'org_a' }))
+  })
+
+  it('badges diagnostic runs in the list and opens the new run after "Diagnose this run"', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        { id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false, diagnostic_of_run_id: null },
+        { id: 'r0', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T10:00:00Z', autonomous: false, diagnostic_of_run_id: 'r-old', version_changed: true },
+      ],
+      total: 2, limit: 50, offset: 0,
+    })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.diagnoseRun.mockResolvedValue({ run_id: 'r2', diagnostic_of_run_id: 'r1', version_changed: false })
+    Element.prototype.scrollIntoView = vi.fn()
+
+    render(<TracePage />)
+    expect(await screen.findByText('diagnostic')).toBeInTheDocument()
+
+    // Reselecting a diagnostic run from the list restores the redeployment
+    // warning from the row's derived `version_changed`, not just from the
+    // POST response that created it.
+    const [, oldRunHeading] = await screen.findAllByRole('heading', { name: 'wf-a' })
+    await act(async () => {
+      fireEvent.click(oldRunHeading)
+    })
+    expect(await screen.findByText(/Diagnostic re-run of run r-old/)).toBeInTheDocument()
+    expect(screen.getByText(/redeployed after the original run/)).toBeInTheDocument()
+
+    const [runHeading] = await screen.findAllByRole('heading', { name: 'wf-a' })
+    await act(async () => {
+      fireEvent.click(runHeading)
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Diagnose this run' }))
+    })
+
+    expect(mockedApi.diagnoseRun).toHaveBeenCalledWith('r1')
+    expect(await screen.findByRole('heading', { name: 'Run r2' })).toBeInTheDocument()
+    expect(screen.getByText(/Diagnostic re-run of run r1/)).toBeInTheDocument()
   })
 })
