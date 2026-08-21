@@ -44,6 +44,14 @@ export function setLanguage(code: LanguageCode): void {
   void i18n.changeLanguage(code)
 }
 
+// Keeps <html lang> in step with the active language for screen readers,
+// spellcheckers and browser translation tools -- i18next itself only swaps
+// rendered strings. Covers both the initial `init()` and every later
+// `changeLanguage()` call (e.g. from `setLanguage()` below) from one place.
+i18n.on('languageChanged', (lng) => {
+  document.documentElement.lang = lng
+})
+
 void i18n.use(initReactI18next).init({
   resources: {
     en: { translation: en },
