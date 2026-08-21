@@ -111,7 +111,7 @@ export default function KnowledgeBasesPanel() {
     <section className="knowledge-bases-panel">
       <div className="session-status-header">
         <h2>My documents</h2>
-        <button type="button" onClick={() => void refresh()}>
+        <button type="button" className="btn btn-secondary" onClick={() => void refresh()}>
           Refresh
         </button>
       </div>
@@ -140,6 +140,7 @@ export default function KnowledgeBasesPanel() {
                 <>
                   <button
                     type="button"
+                    className="btn-link"
                     onClick={() => setOpenSkipped((n) => (n === kb.name ? null : kb.name))}
                   >
                     {skippedCount} file{skippedCount === 1 ? '' : 's'} skipped
@@ -158,6 +159,7 @@ export default function KnowledgeBasesPanel() {
               {rowErrors[kb.name] && <p className="banner banner-error">{rowErrors[kb.name]}</p>}
               <button
                 type="button"
+                className="btn btn-secondary"
                 disabled={searchBlocked !== null}
                 title={searchBlocked ?? 'Try a search'}
                 onClick={() => setOpenSearch((n) => (n === kb.name ? null : kb.name))}
@@ -166,6 +168,7 @@ export default function KnowledgeBasesPanel() {
               </button>
               <button
                 type="button"
+                className="btn btn-danger-outline"
                 disabled={blocked !== null}
                 title={blocked ?? 'Delete'}
                 onClick={() => void handleDelete(kb)}

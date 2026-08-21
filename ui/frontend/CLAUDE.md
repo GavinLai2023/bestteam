@@ -341,18 +341,21 @@ backend: `ui/backend/CLAUDE.md`.
   to one short non-technical line. It's cosmetic only — the backend already
   strips everything but the event `type` (plus the final answer) before it
   reaches this socket, so devtools show nothing more than the UI does.
-- Org side: `components/ShareLinksPanel.tsx` is the click-to-expand "Share"
-  panel (generate/copy/revoke links for one deployed team), and
+- Org side, both on **My teams**' team cards only (`pages/wizard/
+  SessionsPage.tsx`, gated on `session.pipeline_id != null` — a YAML-only
+  demo pipeline has no `PipelineRecord.id` to hang a share link off):
+  `components/ShareLinksPanel.tsx` is the click-to-expand "Share" panel
+  (generate/copy/revoke links for that team), and
   `components/SharedSessionsPanel.tsx` is the read-only audit view beside it
-  (list the selected team's visitor sessions, read a session's transcript).
-  Both render on **My teams**' team cards *and* on **Run a team**
-  (`pages/MonitorPage.tsx`, gated on `pipelineIds[selected] != null` — a
-  YAML-only demo pipeline has no `PipelineRecord.id` to hang a share link
-  off). They used to also back a separate **Shared** tab on
-  `pages/ActivityPage.tsx` (the Dashboard); that tab was removed — sharing a
-  team and auditing who used the link now live on the one page where a
-  customer already picks the team, not on a monitoring page (audit finding,
-  2026-08-21).
+  (list the team's visitor sessions, read a session's transcript), behind its
+  own "Shared sessions" toggle — `SessionsPage`'s own `openAudit` state, not
+  `SharedSessionsPanel`'s concern, so a page listing many teams doesn't fire a
+  `listShareLinks`/`listShareSessions` fetch per card on load (same reasoning
+  as `ShareLinksPanel`'s own collapse-by-default "Share" button). Both used to
+  also render on **Run a team** (`pages/MonitorPage.tsx`) — removed as
+  redundant with My teams (audit finding, 2026-08-21) — and, before that, a
+  separate **Shared** tab on `pages/ActivityPage.tsx` (the Dashboard) — also
+  removed, same reasoning, one round earlier.
 
 ## Auth and login UI
 

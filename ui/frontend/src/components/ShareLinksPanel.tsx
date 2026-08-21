@@ -68,7 +68,7 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
 
   if (!open) {
     return (
-      <button type="button" onClick={() => setOpen(true)}>
+      <button type="button" className="btn btn-secondary" onClick={() => setOpen(true)}>
         Share
       </button>
     )
@@ -77,7 +77,7 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
   return (
     <div className="share-links-panel" onClick={(e) => e.stopPropagation()}>
       {error && <p className="banner banner-error">{error}</p>}
-      <button type="button" onClick={handleCreate}>
+      <button type="button" className="btn btn-primary" onClick={handleCreate}>
         Generate a new link
       </button>
       <ul>
@@ -86,10 +86,10 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
             <span>{link.active ? 'Active' : 'Revoked'}</span>
             {link.active && (
               <>
-                <button type="button" onClick={() => handleCopy(link)}>
+                <button type="button" className="btn btn-secondary" onClick={() => handleCopy(link)}>
                   {copiedId === link.id ? 'Copied!' : 'Copy link'}
                 </button>
-                <button type="button" onClick={() => handleRevoke(link.id)}>
+                <button type="button" className="btn btn-danger-outline" onClick={() => handleRevoke(link.id)}>
                   Revoke
                 </button>
               </>
@@ -97,7 +97,7 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
           </li>
         ))}
       </ul>
-      <button type="button" onClick={() => setOpen(false)}>
+      <button type="button" className="btn-link" onClick={() => setOpen(false)}>
         Close
       </button>
     </div>

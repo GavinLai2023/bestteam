@@ -12,6 +12,8 @@ vi.mock('../../lib/api', () => ({
     getEmailTrigger: vi.fn(),
     deleteSession: vi.fn(),
     listOwnKnowledgeBases: vi.fn().mockResolvedValue([]),
+    listShareLinks: vi.fn(),
+    listShareSessions: vi.fn(),
   },
 }))
 
@@ -407,5 +409,53 @@ describe('SessionsPage session-less deployed pipelines', () => {
     })
 
     expect(mockNavigate).toHaveBeenCalledWith('/run?pipeline=orphan_team')
+  })
+})
+
+// Consolidated here from Run a team (audit finding, 2026-08-21): a team's
+// Share button already lived on this card, so its sharing audit view now
+// does too instead of being duplicated on a second page.
+describe('SessionsPage sharing audit', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.listShareLinks.mockResolvedValue([])
+  })
+
+  it('offers a "Shared sessions" toggle for a deployed team with a real id', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5 })] })
+
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'Shared sessions' })).toBeInTheDocument()
+  })
+
+  it('offers no "Shared sessions" toggle for a session-less draft with no pipeline id', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
+
+    renderPage()
+
+    await screen.findByText('my-team')
+    expect(screen.queryByRole('button', { name: 'Shared sessions' })).not.toBeInTheDocument()
+  })
+
+  it('fetches and shows the audit view only after the toggle is clicked', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5 })] })
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 1, pipeline_id: 5, token: 'tok', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-21T00:00:00+00:00' },
+    ])
+    mockedApi.listShareSessions.mockResolvedValue([
+      { id: 9, created_at: '2026-08-21T00:00:00+00:00', last_active_at: '2026-08-21T01:00:00+00:00', turns_today: 3 },
+    ])
+
+    renderPage()
+    expect(mockedApi.listShareLinks).not.toHaveBeenCalled()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Shared sessions' }))
+
+    // Real fetched data, not just the panel's own empty-state hint, which
+    // would render synchronously regardless of whether the fetch fired.
+    expect(await screen.findByText(/3 turns today/)).toBeInTheDocument()
+    expect(mockedApi.listShareLinks).toHaveBeenCalledWith(5)
   })
 })

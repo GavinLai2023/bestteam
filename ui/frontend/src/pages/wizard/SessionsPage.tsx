@@ -6,6 +6,7 @@ import type { BuilderSession, EmailTrigger } from '../../lib/types'
 import KnowledgeBasesPanel from '../../components/KnowledgeBasesPanel'
 import { useConfirm } from '../../lib/useConfirm'
 import ShareLinksPanel from '../../components/ShareLinksPanel'
+import SharedSessionsPanel from '../../components/SharedSessionsPanel'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
 
@@ -72,6 +73,11 @@ export default function SessionsPage() {
   // missing/failed fetch just means no card gets the tag (best-effort).
   const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
   const [openStatus, setOpenStatus] = useState<string | null>(null)
+  // Which deployed team's sharing audit is expanded, keyed by pipeline_id --
+  // collapsed by default so a page listing many teams doesn't fire a
+  // listShareLinks/listShareSessions fetch per card on every load (same
+  // reasoning as ShareLinksPanel's own collapse-by-default "Share" button).
+  const [openAudit, setOpenAudit] = useState<number | null>(null)
 
   useEffect(() => {
     api
@@ -156,7 +162,19 @@ export default function SessionsPage() {
                       </div>
                     </button>
                     {session.status === 'deployed' && session.pipeline_id != null && (
-                      <ShareLinksPanel pipelineId={session.pipeline_id} />
+                      <>
+                        <ShareLinksPanel pipelineId={session.pipeline_id} />
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() =>
+                            setOpenAudit((id) => (id === session.pipeline_id ? null : session.pipeline_id!))
+                          }
+                        >
+                          Shared sessions
+                        </button>
+                        {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
+                      </>
                     )}
                     {session.pipeline_id == null && (
                       <button
