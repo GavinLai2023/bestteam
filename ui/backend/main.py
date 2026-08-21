@@ -984,6 +984,25 @@ def list_runs(
         {o.id: o.name for o in db.query(Organization).filter(Organization.id.in_(org_ids))} if org_ids else {}
     )
 
+    # For a diagnostic re-run, whether the team had been redeployed between the
+    # original run and the re-run -- derived from the two rows' pinned versions
+    # (the same comparison `diagnose_run` returns), so the Trace page's
+    # redeployment warning survives a page refresh or reselecting the run.
+    original_ids = {row.diagnostic_of_run_id for row in rows if row.diagnostic_of_run_id is not None}
+    original_versions = (
+        {
+            run_id: version_id
+            for run_id, version_id in db.query(Run.id, Run.pipeline_version_id).filter(Run.id.in_(original_ids))
+        }
+        if original_ids
+        else {}
+    )
+
+    def _version_changed(row: Run) -> Optional[bool]:
+        if row.diagnostic_of_run_id is None:
+            return None
+        return original_versions.get(row.diagnostic_of_run_id) != row.pipeline_version_id
+
     return {
         "runs": [
             {
@@ -997,6 +1016,7 @@ def list_runs(
                 "org_id": row.org_id,
                 "org": org_names.get(row.org_id),
                 "diagnostic_of_run_id": row.diagnostic_of_run_id,
+                "version_changed": _version_changed(row),
             }
             for row in rows
         ],

@@ -211,6 +211,20 @@ def _diagnostic_text(value: Any) -> str:
     return f"{text[:_MAX_DIAGNOSTIC_CHARS]}…[truncated]"
 
 
+def _diagnostic_args(value: Any) -> Any:
+    """Size-bound a tool call's args for a diagnostic event: every string in
+    the (possibly nested) JSON structure goes through `_diagnostic_text`, so a
+    model-authored 100k-character argument can't produce an unbounded
+    `tool_started`/`model_turn` row. Shape and non-string values are kept."""
+    if isinstance(value, str):
+        return _diagnostic_text(value)
+    if isinstance(value, dict):
+        return {k: _diagnostic_args(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_diagnostic_args(v) for v in value]
+    return value
+
+
 def _model_turn_data(turn: int, response: Any) -> Dict[str, Any]:
     """`model_turn` data for a diagnostic run: the model's text and the tool
     calls it asked for. Never the provider's call ids. An email tool's args are
@@ -220,7 +234,10 @@ def _model_turn_data(turn: int, response: Any) -> Dict[str, Any]:
     for call in getattr(response, "tool_calls", None) or []:
         name = call.get("name")
         tool_calls.append(
-            {"name": name, "args": None if name in _EMAIL_TOOLS_NEEDING_REDACTION else call.get("args")}
+            {
+                "name": name,
+                "args": None if name in _EMAIL_TOOLS_NEEDING_REDACTION else _diagnostic_args(call.get("args")),
+            }
         )
     content = getattr(response, "content", response)
     return {"turn": turn, "content": _diagnostic_text(content), "tool_calls": tool_calls}
@@ -482,7 +499,7 @@ def _run_agent(
                 reveal = diagnostic and call["name"] not in _EMAIL_TOOLS_NEEDING_REDACTION
                 started_data: Dict[str, Any] = {"tool": call["name"]}
                 if reveal:
-                    started_data["args"] = call["args"]
+                    started_data["args"] = _diagnostic_args(call["args"])
                 _emit("tool_started", started_data)
                 start = time.monotonic()
                 try:

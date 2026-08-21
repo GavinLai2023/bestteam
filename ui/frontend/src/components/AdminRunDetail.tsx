@@ -21,11 +21,13 @@ interface AdminRunDetailProps {
 const RUN_LEVEL = '(run-level)'
 
 // Event payloads only a diagnostic run carries: a whole system prompt, a
-// model turn, a tool's full result. Rendered collapsed so one long prompt
-// doesn't push the rest of the timeline off-screen.
+// model turn, a tool's args and full result. Rendered collapsed so one long
+// prompt doesn't push the rest of the timeline off-screen.
 function isDiagnosticPayload(event: TraceEvent): boolean {
   if (event.type === 'agent_prompt' || event.type === 'model_turn') return true
-  return event.type === 'tool_completed' && typeof event.data === 'object' && event.data !== null && 'result' in event.data
+  if (typeof event.data !== 'object' || event.data === null) return false
+  if (event.type === 'tool_started') return 'args' in event.data
+  return event.type === 'tool_completed' && 'result' in event.data
 }
 
 function groupByAgent(events: TraceEvent[]): [string, TraceEvent[]][] {

@@ -136,7 +136,9 @@ def test_diagnostic_run_is_hidden_from_the_customer_list_but_listed_for_the_admi
 
     admin_runs = {r["id"]: r for r in client.get("/api/runs", headers=headers["op"]).json()["runs"]}
     assert admin_runs[new_id]["diagnostic_of_run_id"] == original
+    assert admin_runs[new_id]["version_changed"] is False
     assert admin_runs[original]["diagnostic_of_run_id"] is None
+    assert admin_runs[original]["version_changed"] is None
 
 
 def test_org_member_cannot_diagnose(rig):
@@ -201,6 +203,9 @@ def test_version_changed_is_reported_after_a_redeploy(rig):
     assert resp.json()["version_changed"] is True
     new_id = resp.json()["run_id"]
     assert _wait_finished(client, headers, new_id)["status"] == "completed"
+    # Derived again on the list, so the Trace page keeps the warning on revisit.
+    listed = client.get("/api/runs", headers=headers["op"], params={"run_id": new_id}).json()["runs"][0]
+    assert listed["version_changed"] is True
     trace = client.get(f"/api/runs/{new_id}/trace", headers=headers["op"]).json()
     turn = next(e for e in trace["events"] if e["type"] == "model_turn")
     assert turn["data"]["content"] == "v2"

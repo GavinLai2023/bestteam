@@ -49,7 +49,8 @@ class TraceEvent:
     extensions: `tool_started` gains `"args": dict` and `tool_completed` gains
     `"result": str`, the full string returned to the model (a knowledge base
     tool's `result` is therefore the retrieved excerpts the model read). Every
-    diagnostic string is capped (`_MAX_DIAGNOSTIC_CHARS` in the adapter). The
+    diagnostic string is capped (`_MAX_DIAGNOSTIC_CHARS` in the adapter),
+    including each string nested anywhere inside a tool call's `args`. The
     email tools are exempt on every path -- no `args`, no `result`, and `None`
     args in `model_turn` -- because their args/results are mail content.
 

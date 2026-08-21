@@ -1679,8 +1679,9 @@
 
 - **A diagnostic re-run diagnoses the *current* team, not the run's pinned
   version.** `POST /api/runs/{id}/diagnose` builds through the cached
-  `_resolve_pipeline_and_version`; the response's `version_changed` flags a
-  redeploy since the original run, but nothing rebuilds the pinned
+  `_resolve_pipeline_and_version`; `version_changed` (on the response and on
+  the run-list row) flags a redeploy since the original run, but nothing
+  rebuilds the pinned
   `pipeline_versions` config. Also deliberately absent from v1: relevance
   scores on knowledge-base hits (`_Chunk` carries none and the fused/reranked
   order has no single meaningful number -- the trace shows rank order plus

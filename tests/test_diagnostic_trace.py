@@ -150,6 +150,18 @@ def test_diagnostic_fields_are_truncated(monkeypatch):
     assert tool_completed.data["result"] == "x" * 50 + "…[truncated]"
 
 
+def test_diagnostic_tool_args_are_bounded_too(monkeypatch):
+    monkeypatch.setattr(langgraph_adapter, "_MAX_DIAGNOSTIC_CHARS", 50)
+    args = {"text": "y" * 300, "nested": {"items": ["z" * 300, 7]}}
+
+    _agent, pipeline = _tool_pipeline(_echo, "_echo", args, final="done")
+    events = list(pipeline.stream("do the thing", diagnostic=True))
+
+    bounded = {"text": "y" * 50 + "…[truncated]", "nested": {"items": ["z" * 50 + "…[truncated]", 7]}}
+    assert next(e for e in events if e.type == "tool_started").data["args"] == bounded
+    assert next(e for e in events if e.type == "model_turn").data["tool_calls"][0]["args"] == bounded
+
+
 def test_hierarchical_subordinate_inherits_the_diagnostic_flag():
     researcher_model = FakeMessagesListChatModel(responses=[AIMessage(content="research findings")])
     researcher = Agent(name="researcher", role="Researcher", goal="research things", model=researcher_model)

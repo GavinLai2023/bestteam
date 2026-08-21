@@ -102,6 +102,9 @@ export interface RunListItem {
   // Set when this run is an admin's diagnostic re-run of another run (Trace
   // page only -- the customer's Activity page never lists one).
   diagnostic_of_run_id?: string | null
+  // Diagnostic runs only: the team was redeployed between the original run
+  // and this re-run (derived server-side from the two pinned versions).
+  version_changed?: boolean | null
 }
 
 export interface DiagnoseRunResult {

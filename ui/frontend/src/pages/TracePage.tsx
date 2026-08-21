@@ -105,6 +105,7 @@ export default function TracePage() {
           id: runId,
           status: row?.status ?? 'completed',
           diagnosticOfRunId: row?.diagnostic_of_run_id ?? null,
+          versionChanged: row?.version_changed ?? undefined,
         })
       })
       .catch(() => setSelectedRun({ id: runId, status: 'completed' }))
@@ -299,6 +300,7 @@ export default function TracePage() {
                         id: run.id,
                         status: run.status,
                         diagnosticOfRunId: run.diagnostic_of_run_id ?? null,
+                        versionChanged: run.version_changed ?? undefined,
                       })
                     }
                   >

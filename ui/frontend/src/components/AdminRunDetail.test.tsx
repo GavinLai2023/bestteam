@@ -141,6 +141,7 @@ describe('AdminRunDetail', () => {
       events: [
         { type: 'agent_prompt', agent: 'a', data: { system_prompt: 'You are a.', input: 'hi' } },
         { type: 'model_turn', agent: 'a', data: { turn: 1, content: 'done', tool_calls: [] } },
+        { type: 'tool_started', agent: 'a', data: { tool: 'docs', args: { query: 'refund policy' } } },
         {
           type: 'tool_completed',
           agent: 'a',
@@ -154,11 +155,12 @@ describe('AdminRunDetail', () => {
     render(<AdminRunDetail runId="run-2" status="completed" diagnosticOfRunId="run-1" />)
 
     await screen.findByText('system prompt 10 chars · input 2 chars')
-    // The three diagnostic payloads are in a <details>; the ordinary
+    // The four diagnostic payloads are in a <details>; the ordinary
     // agent_started raw JSON stays inline as before.
     const details = document.querySelectorAll('details.admin-run-detail-raw-details')
-    expect(details).toHaveLength(3)
+    expect(details).toHaveLength(4)
     expect(screen.getByText(/"system_prompt": "You are a\."/)).toBeInTheDocument()
+    expect(screen.getByText(/"query": "refund policy"/).closest('details')).not.toBeNull()
     expect(screen.getByText(/"result": "full excerpt text"/)).toBeInTheDocument()
     expect(screen.getByText(/"role": "R"/).closest('details')).toBeNull()
   })

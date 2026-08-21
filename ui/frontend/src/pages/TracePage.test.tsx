@@ -264,7 +264,7 @@ describe('TracePage', () => {
     mockedApi.listRuns.mockResolvedValue({
       runs: [
         { id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false, diagnostic_of_run_id: null },
-        { id: 'r0', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T10:00:00Z', autonomous: false, diagnostic_of_run_id: 'r-old' },
+        { id: 'r0', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T10:00:00Z', autonomous: false, diagnostic_of_run_id: 'r-old', version_changed: true },
       ],
       total: 2, limit: 50, offset: 0,
     })
@@ -274,6 +274,16 @@ describe('TracePage', () => {
 
     render(<TracePage />)
     expect(await screen.findByText('diagnostic')).toBeInTheDocument()
+
+    // Reselecting a diagnostic run from the list restores the redeployment
+    // warning from the row's derived `version_changed`, not just from the
+    // POST response that created it.
+    const [, oldRunHeading] = await screen.findAllByRole('heading', { name: 'wf-a' })
+    await act(async () => {
+      fireEvent.click(oldRunHeading)
+    })
+    expect(await screen.findByText(/Diagnostic re-run of run r-old/)).toBeInTheDocument()
+    expect(screen.getByText(/redeployed after the original run/)).toBeInTheDocument()
 
     const [runHeading] = await screen.findAllByRole('heading', { name: 'wf-a' })
     await act(async () => {

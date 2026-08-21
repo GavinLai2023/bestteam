@@ -1060,9 +1060,11 @@ context). **Refused for a diagnostic run itself** (diagnose the original) and
 **409 for a purged run** (no input left). **No `user_id`** is passed, so
 per-user memory is neither recalled nor written -- the admin must not act as
 the customer; the banner says so. **Built from the current version** via
-`_resolve_pipeline_and_version` (cached), and the response's
-`version_changed` tells the UI when the team was redeployed since, so the
-admin knows the problem may no longer reproduce. **Spend is metered to the
+`_resolve_pipeline_and_version` (cached), and `version_changed` -- on the
+POST response and derived again on every `GET /api/runs` row of a diagnostic
+run (original's pinned version vs the re-run's, NULL for an ordinary run) --
+tells the UI when the team was redeployed since, so the admin knows the
+problem may no longer reproduce and the warning survives a page refresh. **Spend is metered to the
 run's org** like any run of that team, **retention applies** like any run of
 that org, and the run is **filtered out of a non-admin `GET /api/runs`**
 (`diagnostic_of_run_id IS NULL`) so it never appears on the customer's
