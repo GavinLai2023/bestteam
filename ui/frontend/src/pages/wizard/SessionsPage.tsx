@@ -4,7 +4,9 @@ import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
 import type { BuilderSession, EmailTrigger } from '../../lib/types'
 import KnowledgeBasesPanel from '../../components/KnowledgeBasesPanel'
+import { useConfirm } from '../../lib/useConfirm'
 import ShareLinksPanel from '../../components/ShareLinksPanel'
+import SharedSessionsPanel from '../../components/SharedSessionsPanel'
 import '../../components/WizardLayout.css'
 import './SessionsPage.css'
 
@@ -25,8 +27,8 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 const STATUS_EXPLANATIONS: Record<string, string> = {
-  deployed: 'Live -- this team is deployed and ready for your organization to use.',
-  in_progress: "Still being built -- you're designing, reviewing, or trying out this team before making it live.",
+  deployed: 'Live — this team is deployed and ready for your organisation to use.',
+  in_progress: "Still being built — you're designing, reviewing, or trying out this team before making it live.",
 }
 
 function bucketFor(status: string) {
@@ -63,6 +65,7 @@ function descriptionFor(session: BuilderSession) {
 
 export default function SessionsPage() {
   const navigate = useNavigate()
+  const [confirmNode, confirm] = useConfirm()
   const [sessions, setSessions] = useState<BuilderSession[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +73,11 @@ export default function SessionsPage() {
   // missing/failed fetch just means no card gets the tag (best-effort).
   const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
   const [openStatus, setOpenStatus] = useState<string | null>(null)
+  // Which deployed team's sharing audit is expanded, keyed by pipeline_id --
+  // collapsed by default so a page listing many teams doesn't fire a
+  // listShareLinks/listShareSessions fetch per card on every load (same
+  // reasoning as ShareLinksPanel's own collapse-by-default "Share" button).
+  const [openAudit, setOpenAudit] = useState<number | null>(null)
 
   useEffect(() => {
     api
@@ -87,7 +95,13 @@ export default function SessionsPage() {
 
   const handleDelete = async (session: BuilderSession) => {
     const label = session.specification_json?.name ?? session.intent_text
-    if (!window.confirm(`Delete "${label}"? This can't be undone.`)) return
+    const ok = await confirm({
+      title: `Delete "${label}"?`,
+      body: "This can't be undone.",
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await api.deleteSession(session.id!)
       setSessions((prev) => prev.filter((s) => s.id !== session.id))
@@ -148,7 +162,19 @@ export default function SessionsPage() {
                       </div>
                     </button>
                     {session.status === 'deployed' && session.pipeline_id != null && (
-                      <ShareLinksPanel pipelineId={session.pipeline_id} />
+                      <>
+                        <ShareLinksPanel pipelineId={session.pipeline_id} />
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() =>
+                            setOpenAudit((id) => (id === session.pipeline_id ? null : session.pipeline_id!))
+                          }
+                        >
+                          Shared sessions
+                        </button>
+                        {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
+                      </>
                     )}
                     {session.pipeline_id == null && (
                       <button
@@ -188,6 +214,7 @@ export default function SessionsPage() {
       {/* The documents this org uploaded, under the teams that use them --
           the panel hides itself when there are none. */}
       <KnowledgeBasesPanel />
+      {confirmNode}
     </div>
   )
 }

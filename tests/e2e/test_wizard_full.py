@@ -36,17 +36,15 @@ def _build_to_confirm(page, intent: str):
 
 
 def test_t4_1_apply_feedback_regenerates_team(page):
-    """Regeneration loop via the Confirm page's "Which assistant should
-    your team use?" ModelPicker + feedback box."""
+    """Regeneration loop via the Confirm page's feedback box. There is no
+    model picker on this page any more -- the customer doesn't choose which
+    model runs the Architect (that's the admin's `is_default` catalog
+    entry); the e2e catalog's sole entry (`fake-architect:e2e`) is what
+    pickDefaultModel resolves to automatically."""
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
 
-    # Only one ModelPicker instance is on the page at this point ("Show
-    # what we understood about your business" hasn't been expanded, so the
-    # second instance in that panel isn't rendered yet) -- #model-picker is
-    # unambiguous here. Verified against ConfirmPage.tsx / ModelPicker.tsx.
     page.fill("#solution-feedback", "Make the team also draft a summary of each reply.")
-    page.select_option("#model-picker", label="E2E Test Architect (fake, $0)")
     page.click("button:has-text('Apply this change')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)
     assert "summary" in page.locator(".banner-info").inner_text().lower()
@@ -70,29 +68,24 @@ def test_t4_2_test_run_before_deploy(page):
 
 
 def test_t4_3_apply_button_requires_a_model(page):
-    """The Confirm page's "Apply this change" button is gated on a model
-    being selected (ConfirmPage.tsx's applyFeedback: `if (!model || busy)
-    return`), not on feedback text -- feedback itself is optional ("the
-    customer may just be switching which assistant/model their team uses,
-    with nothing else to describe", per the component's own comment).
-    ModelPicker auto-selects a default the moment the model catalog loads
-    (pickDefaultModel), so the button becomes enabled almost immediately
-    after the Confirm page mounts -- confirmed by running this headed: the
-    brief's original version of this test asserted the button stayed
-    disabled after typing feedback, which does not hold in the real app.
-    This exercises the actual guard instead: apply with blank feedback and
-    the auto-selected model still succeeds (model, not feedback, is what's
-    required). Also confirmed headed: the backend (builder.py's
-    submit_solution_feedback) only appends a feedback_history entry `if
-    req.feedback.strip()`, so a blank-feedback apply does NOT show the
-    "Adjustments so far" banner -- that's expected, not a bug."""
+    """The Confirm page's "Apply this change" button is gated on the model
+    catalog having loaded (ConfirmPage.tsx's applyFeedback: `if
+    (catalogNotReady || busy) return`), not on feedback text -- feedback
+    itself is optional (an empty description still re-runs the Architect,
+    e.g. after uploading new documents). The page picks the Architect's
+    model itself via pickDefaultModel, with nothing for the customer to
+    choose, so the button becomes enabled almost immediately after the
+    Confirm page mounts. This exercises the actual guard instead: apply with
+    blank feedback and it still succeeds (the catalog being ready, not
+    feedback text, is what's required). Also confirmed headed: the backend
+    (builder.py's submit_solution_feedback) only appends a feedback_history
+    entry `if req.feedback.strip()`, so a blank-feedback apply does NOT show
+    the "Adjustments so far" banner -- that's expected, not a bug."""
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
 
     apply_button = page.locator("button:has-text('Apply this change')")
-    # The auto-selected default model makes the button enabled without any
-    # feedback text typed at all -- pw_expect retries until the catalog
-    # fetch + ModelPicker's auto-select effect have settled.
+    # pw_expect retries until the catalog fetch has settled.
     pw_expect(apply_button).to_be_enabled(timeout=8000)
     assert page.locator("#solution-feedback").input_value() == ""
 
@@ -117,15 +110,6 @@ def test_t4_4_regenerate_requirements_summary(page):
     page.click("button:has-text('Show what we understood about your business')")
     page.wait_for_selector("#req-feedback", timeout=5000)
     page.fill("#req-feedback", "We also handle billing questions, not just support.")
-    # ModelPicker.tsx uses a fixed id="model-picker" for every instance --
-    # ConfirmPage now renders two (the solution-feedback one above, plus
-    # this panel's "redo this" one). Scope by the label's adjacent select
-    # (unique per instance) rather than the ambiguous #model-picker id;
-    # `.last` as a fallback since this panel's picker is the second one in
-    # DOM order. Verified against ConfirmPage.tsx / ModelPicker.tsx.
-    page.locator("label:has-text('Which assistant should redo this?') + select, select#model-picker").last.select_option(
-        label="E2E Test Architect (fake, $0)"
-    )
     page.click("button:has-text('Regenerate summary')")
     page.wait_for_selector("#summary", timeout=15000)
     assert page.locator("#summary").input_value()
@@ -143,7 +127,7 @@ def test_t4_5_deploy_then_run_for_real(page):
     page.wait_for_selector("text=Your team is live", timeout=20000)
 
     page.click("button:has-text('Run a team')")
-    page.wait_for_selector("select", timeout=8000)
+    page.wait_for_selector(".controls select", timeout=8000)
     page.fill("textarea", "A customer is asking about a refund.")
     page.click("button:has-text('Run')")
     # MonitorPage hides its live trace <ul> once a terminal event lands
@@ -166,7 +150,6 @@ def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
     page.fill("#solution-feedback", "Always sign off with 'Best, the Support Team'.")
-    page.select_option("#model-picker", label="E2E Test Architect (fake, $0)")
     page.click("button:has-text('Apply this change')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)
 

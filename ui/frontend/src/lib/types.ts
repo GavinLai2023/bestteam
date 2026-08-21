@@ -7,6 +7,9 @@ export interface Me {
 export interface ModelCatalogEntry {
   spec: string
   display_name: string
+  // Set by an admin to mark this entry as the platform's default (e.g. the
+  // model the wizard runs the Solution Architect on) -- see `pickDefaultModel`.
+  is_default?: boolean
 }
 
 // Whether the wizard's "smart search" toggle (DocumentsPage) has anything to
@@ -421,6 +424,30 @@ export interface EmailBudget extends EmailBudgetInput {
   spent_this_month: number | null
   unpriced_runs_this_month: number
   unpriced_models: string[]
+}
+
+export interface DailyRunCount {
+  date: string
+  count: number
+}
+
+export interface TeamCount {
+  pipeline: string
+  count: number
+}
+
+// The customer-facing Activity Overview tab: how often this org's teams ran,
+// and how much they completed. Deliberately no model name or cost anywhere
+// here -- see ui/backend/activity_overview.py.
+export interface ActivityOverview {
+  sessions: number
+  active_days: number
+  current_streak: number
+  longest_streak: number
+  peak_hour: number | null
+  daily_counts: DailyRunCount[]
+  completed_count: number
+  team_counts: TeamCount[]
 }
 
 // One message the filter skipped before any model read it. `reason` is the

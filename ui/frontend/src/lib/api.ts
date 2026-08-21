@@ -1,4 +1,5 @@
 import type {
+  ActivityOverview,
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
   EmailFilterSettings, EmailTrigger, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
@@ -228,7 +229,12 @@ export const api = {
     request<void>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
 
   // Monitoring
-  listPipelines: () => request<{ pipelines: string[]; pipeline_ids?: Record<string, number> }>('/api/pipelines'),
+  listPipelines: () =>
+    request<{
+      pipelines: string[]
+      pipeline_ids?: Record<string, number>
+      display_names?: Record<string, string>
+    }>('/api/pipelines'),
   pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
   createRun: (pipeline: string, input: string) =>
     request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ pipeline, input }) }),
@@ -333,7 +339,7 @@ export const api = {
   // Model catalog
   modelCatalog: () => request<ModelCatalogEntry[]>('/api/model-catalog'),
 
-  // Advanced config (CRUD). `org` is the organization an item belongs to; the
+  // Advanced config (CRUD). `org` is the organisation an item belongs to; the
   // backend requires it on every item route except skills (where omitting it
   // means the platform built-in tier) and the org-less model catalog.
   listOrgs: () => request<AdminOrg[]>('/api/config/orgs'),
@@ -432,6 +438,7 @@ export const api = {
   // Run-history retention (Phase 3b): how long the org keeps run content,
   // taking a copy out before it goes, and removing it on demand. A cleanup
   // clears content and keeps accounting -- see ui/backend/retention.py.
+  getActivityOverview: () => request<ActivityOverview>('/api/org/activity-overview'),
   getRetention: () => request<RetentionSettings>('/api/org/retention'),
   // null turns the policy off (keep forever). Saving removes nothing by
   // itself -- the sweep does, on its next cycle.

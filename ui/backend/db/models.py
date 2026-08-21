@@ -718,6 +718,10 @@ class ModelCatalogEntry(Base):
     tier: Mapped[str] = mapped_column(default="balanced")
     input_price_per_1k: Mapped[float] = mapped_column(default=0.0)
     output_price_per_1k: Mapped[float] = mapped_column(default=0.0)
+    # The operator's chosen default for the wizard's model pickers (e.g. the
+    # Solution Architect model DocumentsPage runs on "Continue"). At most one
+    # row is ever True -- enforced in model_catalog.py::upsert_entry, not here.
+    is_default: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import AccountsPage from './AccountsPage'
 import { api } from '../lib/api'
+import { answerConfirm } from '../test/confirmDialog'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -122,7 +123,10 @@ describe('AccountsPage', () => {
     fireEvent.change(screen.getByLabelText('Confirm password for beta'), { target: { value: 'pw' } })
     fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     await screen.findByText(/identifier may contain only letters/i)
-    expect(scrollIntoView).toHaveBeenCalled()
+    // The banner appearing and the effect that scrolls to it are separate
+    // commits, so `findByText` resolving does not mean the effect has run --
+    // asserting straight after it raced, intermittently, under parallel load.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
   })
 
   it('keeps the entered values when creation fails', async () => {
@@ -149,18 +153,22 @@ describe('AccountsPage', () => {
   })
 
   it('deactivates an active org after confirm', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.click(screen.getByRole('button', { name: /deactivate/i }))
+    await act(async () => {
+      await answerConfirm(true)
+    })
     await waitFor(() => expect(mockedApi.setOrgActive).toHaveBeenCalledWith('acme', false))
   })
 
   it('deletes an org member after confirm', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<AccountsPage />)
     await screen.findByText('Acme Corp')
     fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await act(async () => {
+      await answerConfirm(true)
+    })
     await waitFor(() => expect(mockedApi.deleteAdminUser).toHaveBeenCalledWith('alice'))
   })
 })

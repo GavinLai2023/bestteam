@@ -1,10 +1,171 @@
+/* Design tokens. Before this, the same handful of colours were repeated as raw
+   hex across 14 stylesheets, which is what made a dark mode impossible to add
+   without touching all of them (audit findings F10/F12).
+
+   Light is defined on bare `:root` so it is the un-stamped default; dark is
+   redefined under `prefers-color-scheme` for viewers who have not chosen, and
+   again under `[data-theme="dark"]` so an explicit choice wins either way.
+   Components must read these tokens and never redeclare a colour inside a
+   media block -- a colour whose only definition sits behind one never applies
+   in the un-stamped state. */
+:root {
+  --bg: #f5f6fa;
+  --surface: #ffffff;
+  --surface-muted: #f9fafb;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  --text: #1f2430;
+  --text-muted: #6b7280;
+  --text-soft: #4b5563;
+
+  --accent: #4f46e5;
+  --accent-strong: #4338ca;
+  --accent-soft: #eef2ff;
+  --accent-border: #c7d2fe;
+  /* Foreground for anything sitting ON `--accent`. It has to be its own token
+     rather than a literal `white`: the dark accent is a pale lavender, so the
+     white that reads at 6.3:1 in light drops to 2.6:1 in dark. */
+  --accent-contrast: #ffffff;
+
+  /* The Activity Overview heatmap's 4 intensity steps, palest to
+     `--accent` itself -- a graduated ramp needs two more stops than the
+     accent group already has, so these are their own tokens rather than
+     repurposing `--accent-soft`/`--accent-border` (those already carry a
+     different meaning elsewhere: soft fills and input borders). */
+  --heat-1: #e0e7ff;
+  --heat-2: #c7d2fe;
+  --heat-3: #818cf8;
+  --heat-4: #4f46e5;
+
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+
+  --success: #166534;
+  --success-bg: #f0fdf4;
+  --success-border: #bbf7d0;
+
+  --info-bg: #eff6ff;
+  --info-border: #bfdbfe;
+  /* `--danger` and `--success` double as their own text colour; info had no
+     such token, which left an info banner's foreground as a literal. */
+  --info-text: #1d4ed8;
+
+  --hover: #f3f4f6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #10131a;
+    --surface: #171b23;
+    --surface-muted: #1c212a;
+    --border: #2a313c;
+    --border-strong: #3a424f;
+
+    --text: #e6e9ef;
+    --text-muted: #8b95a4;
+    --text-soft: #b3bcc9;
+
+    --accent: #8b9cf0;
+    --accent-strong: #a5b4fc;
+    --accent-soft: #1e2433;
+    --accent-border: #333d55;
+    --accent-contrast: #10131a;
+
+    --heat-1: #262e42;
+    --heat-2: #333d55;
+    --heat-3: #5b6aa0;
+    --heat-4: #8b9cf0;
+
+    --danger: #f0857a;
+    --danger-bg: #2a1917;
+    --danger-border: #4a2723;
+
+    --success: #6ec08b;
+    --success-bg: #14241a;
+    --success-border: #24422f;
+
+    --info-bg: #16202e;
+    --info-border: #24354b;
+    --info-text: #93b4f5;
+
+    --hover: #222834;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #10131a;
+  --surface: #171b23;
+  --surface-muted: #1c212a;
+  --border: #2a313c;
+  --border-strong: #3a424f;
+
+  --text: #e6e9ef;
+  --text-muted: #8b95a4;
+  --text-soft: #b3bcc9;
+
+  --accent: #8b9cf0;
+  --accent-strong: #a5b4fc;
+  --accent-soft: #1e2433;
+  --accent-border: #333d55;
+  --accent-contrast: #10131a;
+
+  --heat-1: #262e42;
+  --heat-2: #333d55;
+  --heat-3: #5b6aa0;
+  --heat-4: #8b9cf0;
+
+  --danger: #f0857a;
+  --danger-bg: #2a1917;
+  --danger-border: #4a2723;
+
+  --success: #6ec08b;
+  --success-bg: #14241a;
+  --success-border: #24422f;
+
+  --info-bg: #16202e;
+  --info-border: #24354b;
+  --info-text: #93b4f5;
+
+  --hover: #222834;
+}
+
 * {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: #f5f6fa;
-  color: #1f2430;
+  /* The Latin faces carry no CJK glyphs, so Chinese would otherwise fall back
+     to the browser default -- SimSun on Windows, which looks dated and cramped
+     next to the Latin text beside it. The CJK families are listed after the
+     Latin ones so English keeps rendering in Segoe UI: a font stack is
+     consulted per character, not per string. */
+  font-family: 'Segoe UI', system-ui, -apple-system, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* One visible, consistent focus ring. Nothing here previously set `:focus` at
+   all -- the browser default was still in place (so keyboard navigation was
+   never broken, contrary to a first reading), but it was unstyled and looked
+   different on the many custom `background: none; border: none` buttons.
+   `:focus-visible` keeps it off mouse clicks. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

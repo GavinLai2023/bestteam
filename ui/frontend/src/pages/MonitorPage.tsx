@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { API_BASE, WS_BASE, api } from '../lib/api'
-import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
+import {
+  EVENT_LABELS,
+  FRIENDLY_EVENT_TYPES,
+  RESULT_LABELS,
+  TERMINAL_TYPES,
+  renderEventData,
+  useFriendlyEventTitle,
+} from '../lib/traceEvents'
 import type { TraceEvent } from '../lib/types'
 import './MonitorPage.css'
 
@@ -12,8 +20,14 @@ type Status = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unrea
 type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected'
 
 function MonitorPage() {
+  const { t } = useTranslation()
   const [searchParams] = useSearchParams()
   const [pipelines, setPipelines] = useState<string[]>([])
+  // Technical name -> the team's own friendly name, so the picker labels a
+  // team the way every other surface does. The list beside it already showed
+  // `team_display_name` while this select showed the raw slug, so one screen
+  // called one team two things (audit finding F4).
+  const [displayNames, setDisplayNames] = useState<Record<string, string>>({})
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -31,10 +45,15 @@ function MonitorPage() {
   const runStartedAtRef = useRef<number | null>(null)
   const lastEventAtRef = useRef<number | null>(null)
 
-  useEffect(() => {
+  const loadPipelines = useCallback(() => {
+    setError(null)
     api.listPipelines()
       .then((data) => {
         setPipelines(data.pipelines)
+        setDisplayNames(data.display_names ?? {})
+        // Clear a previous unreachable banner, but never stomp on a run that
+        // is currently in flight or has already reached a terminal state.
+        setStatus((current) => (current === 'unreachable' ? 'idle' : current))
         const preferred = searchParams.get('pipeline')
         if (preferred && data.pipelines.includes(preferred)) {
           setSelected(preferred)
@@ -45,16 +64,36 @@ function MonitorPage() {
       .catch((err: { status?: number; message: string }) => {
         // A rejection with an HTTP status means the backend answered (e.g. a
         // 403 for a platform operator with no org) -- it is reachable, so show
-        // the real reason rather than the misleading "is uvicorn running?".
-        // Only a statusless failure (fetch rejected) is a true unreachable.
+        // the real reason rather than a generic connection message. Only a
+        // statusless failure (fetch rejected) is a true unreachable.
         if (err?.status !== undefined) {
-          setError(err.message)
+          // Starlette's own default body for an unmatched route is literally
+          // `{"detail": "Not Found"}` -- no route in this app ever writes
+          // that string deliberately. It carries nothing a customer can act
+          // on, so it goes to the console (like the unreachable case above)
+          // rather than onto a banner that would contradict the calm,
+          // correct "No teams yet" hint sitting right below it.
+          if (err.message !== 'Not Found') setError(err.message)
+          else console.error('bestteam: unexpected 404 loading pipelines', err)
+          // The backend answered, so a banner left over from an earlier
+          // network failure is now saying something untrue -- clear it on
+          // this path too, under the same guard the success path uses.
+          setStatus((current) => (current === 'unreachable' ? 'idle' : current))
         } else {
+          // Which host and what should be listening on it is an operator's
+          // problem, not the customer's -- it belongs in the console, not on
+          // the page (see the banner below).
+          console.error(`bestteam: cannot reach the backend at ${API_BASE}`, err)
           setStatus('unreachable')
         }
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch; loadPipelines is also the retry handler
+    loadPipelines()
+  }, [loadPipelines])
 
   // Close any open socket when the component unmounts.
   useEffect(() => () => wsRef.current?.close(), [])
@@ -145,50 +184,74 @@ function MonitorPage() {
   const finalEvent = events.find((e) => TERMINAL_TYPES.includes(e.type))
   const isWaitingForFirstProgress = status === 'running' && !events.some((e) => !NON_PROGRESS_TYPES.includes(e.type))
 
+  // Nothing constrains a team's friendly name to be unique, so two deployed
+  // teams can carry the same one. Showing both as identical options would ask
+  // the customer to pick blind; the technical name is appended to the
+  // colliding ones only, so the common case stays clean.
+  const teamLabel = (name: string) => {
+    const display = displayNames[name]
+    if (!display) return name
+    const collides = pipelines.some((other) => other !== name && displayNames[other] === display)
+    return collides ? t('run.teamLabelAmbiguous', { display, name }) : display
+  }
+  // Resolves an agent's technical name for the friendly feed. `agent` here is
+  // whatever the engine emitted; there is no specification on this page to map
+  // it against, so it passes through -- the friendly view's value is the
+  // sentence around it, not the name itself.
+  const friendlyTitle = useFriendlyEventTitle((agentName) => agentName)
+  const friendlyEvents = events.filter((e) => FRIENDLY_EVENT_TYPES.includes(e.type))
+
   return (
     <div className="dashboard">
       <header>
-        <h1>Run a team</h1>
-        <p>Choose a team, give it a task, and follow its progress.</p>
+        <h1>{t('run.title')}</h1>
+        <p>{t('run.subtitle')}</p>
       </header>
 
       {status === 'unreachable' && (
-        <p className="banner banner-error">
-          Can't reach the backend at {API_BASE}. Is `uvicorn ui.backend.main:app` running?
-        </p>
+        <div className="banner banner-error">
+          {t('run.unreachable')}
+          <div className="banner-actions">
+            <button type="button" className="btn-secondary" onClick={loadPipelines}>
+              {t('common.tryAgain')}
+            </button>
+          </div>
+        </div>
       )}
 
       {error && <p className="banner banner-error">{error}</p>}
 
       <section className="controls">
         <label>
-          Team
+          {t('run.teamLabel')}
           <select value={selected} onChange={(e) => setSelected(e.target.value)}>
             {pipelines.map((name) => (
               <option key={name} value={name}>
-                {name}
+                {teamLabel(name)}
               </option>
             ))}
           </select>
         </label>
-
+        {status !== 'unreachable' && pipelines.length === 0 && (
+          <p className="hint">{t('run.noTeams')}</p>
+        )}
         <label>
-          Input
+          {t('run.taskLabel')}
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Describe what you would like this team to do..."
+            placeholder={t('run.taskPlaceholder')}
             rows={3}
           />
         </label>
 
         <div className="controls-actions">
           <button onClick={startRun} disabled={status === 'running' || !selected || !input.trim()}>
-            {status === 'running' ? 'Running…' : 'Run'}
+            {status === 'running' ? t('run.running') : t('run.start')}
           </button>
           {status === 'running' && hasRunId && (
             <button type="button" className="cancel-button" onClick={cancelRun} disabled={cancelling}>
-              {cancelling ? 'Stopping…' : 'Stop'}
+              {cancelling ? t('run.stopping') : t('run.stop')}
             </button>
           )}
         </div>
@@ -197,16 +260,16 @@ function MonitorPage() {
       {status === 'running' && (
         <section className="run-status">
           <span className="run-status-spinner" aria-hidden="true" />
-          <span>Running for {elapsedSeconds}s</span>
+          <span>{t('run.runningFor', { seconds: elapsedSeconds })}</span>
           <span className="run-status-connection">
-            {connectionStatus === 'connected' && 'Connected'}
-            {connectionStatus === 'connecting' && 'Connecting…'}
-            {connectionStatus === 'disconnected' && 'Disconnected'}
+            {connectionStatus === 'connected' && t('run.connected')}
+            {connectionStatus === 'connecting' && t('run.connecting')}
+            {connectionStatus === 'disconnected' && t('run.disconnected')}
           </span>
-          {isWaitingForFirstProgress && <p className="hint">Waiting for the agent/model…</p>}
+          {isWaitingForFirstProgress && <p className="hint">{t('run.waitingFirstStep')}</p>}
           {secondsSinceLastEvent !== null && secondsSinceLastEvent >= STALE_HINT_SECONDS && (
             <p className="banner run-status-stale">
-              No update for {secondsSinceLastEvent}s — still working, this can take a while for longer tasks.
+              {t('run.stale', { seconds: secondsSinceLastEvent })}
             </p>
           )}
         </section>
@@ -235,39 +298,52 @@ function MonitorPage() {
                 }
               }}
             >
-              {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? "Couldn't copy" : 'Copy'}
+              {copyState === 'copied'
+                ? t('common.copied')
+                : copyState === 'failed'
+                  ? t('common.copyFailed')
+                  : t('common.copy')}
             </button>
             <button type="button" onClick={startRun}>
-              Run again
+              {t('run.runAgain')}
             </button>
           </div>
         </section>
       )}
 
+      {/* Two registers, and which one is the default is the point: the wizard
+          already narrated this same stream in plain language while this page
+          showed `✓ agent done` and raw agent names. The friendly feed is now
+          what a customer sees, and the technical trace is one click away for
+          whoever wants it (audit finding F8). */}
       <section className="trace">
         <div className="trace-header">
-          <h2>Live trace</h2>
-          {finalEvent && (
-            <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
-              {traceExpanded ? 'Hide technical trace' : 'Show technical trace'}
-            </button>
-          )}
+          <h2>{t('run.progress')}</h2>
+          <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
+            {traceExpanded ? t('run.hideTechnical') : t('run.showTechnical')}
+          </button>
         </div>
-        {!finalEvent || traceExpanded ? (
-          events.length === 0 ? (
-            <p className="hint">No run yet — pick a team and hit Run.</p>
-          ) : (
-            <ul>
-              {events.map((event, i) => (
-                <li key={i} className={`event event-${event.type}`}>
-                  <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
-                  {event.agent && <span className="event-agent">{event.agent}</span>}
-                  <p className="event-data">{renderEventData(event)}</p>
-                </li>
-              ))}
-            </ul>
-          )
-        ) : null}
+        {events.length === 0 ? (
+          <p className="hint">{t('run.noRunYet')}</p>
+        ) : traceExpanded ? (
+          <ul>
+            {events.map((event, i) => (
+              <li key={i} className={`event event-${event.type}`}>
+                <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
+                {event.agent && <span className="event-agent">{event.agent}</span>}
+                <p className="event-data">{renderEventData(event)}</p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <ul>
+            {friendlyEvents.map((event, i) => (
+              <li key={i} className={`event event-${event.type}`}>
+                <span className="event-type">{friendlyTitle(event)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   )

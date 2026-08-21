@@ -11,7 +11,7 @@ const STATUS_META: Record<string, { badge: string; text: string }> = {
   active: { badge: 'Active', text: 'Watching for new email.' },
   off: { badge: 'Off', text: 'Automatic runs are turned off.' },
   disabled: { badge: 'Paused', text: 'Paused by the operator.' },
-  paused_cap: { badge: 'Paused', text: "Today's run limit was reached -- resumes tomorrow." },
+  paused_cap: { badge: 'Paused', text: "Today's run limit was reached — resumes tomorrow." },
   error: { badge: 'Problem', text: 'Problem checking the mailbox.' },
 }
 

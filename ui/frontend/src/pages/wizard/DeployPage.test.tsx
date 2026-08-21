@@ -14,6 +14,10 @@ vi.mock('../../lib/api', () => ({
     testOrgEmail: vi.fn(),
     clearOrgEmail: vi.fn(),
     deploySession: vi.fn(),
+    getEmailFilter: vi.fn(),
+    setEmailFilter: vi.fn(),
+    getEmailBudget: vi.fn(),
+    setEmailBudget: vi.fn(),
   },
 }))
 
@@ -57,6 +61,20 @@ describe('DeployPage live automatic-runs mailbox connection', () => {
       status: 'off',
       daily_cap: 50,
     })
+    mockedApi.getEmailFilter.mockResolvedValue({
+      skip_bulk: true,
+      sender_blocklist: [],
+      sender_allowlist: [],
+      subject_blocklist: [],
+    })
+    mockedApi.getEmailBudget.mockResolvedValue({
+      daily_message_cap: null,
+      monthly_cost_cap: null,
+      messages_today: 0,
+      spent_this_month: null,
+      unpriced_runs_this_month: 0,
+      unpriced_models: [],
+    })
   })
 
   it('shows a way to connect the mailbox on the live/Go Live page when the team uses email but no mailbox is connected', async () => {
@@ -68,5 +86,14 @@ describe('DeployPage live automatic-runs mailbox connection', () => {
     // this screen, not just see an opaque "connect your mailbox" error after
     // clicking the automatic-runs toggle.
     expect(await screen.findByText('Connect your mailbox')).toBeInTheDocument()
+  })
+
+  it("shows the email team's mail-filter and volume-limit settings on its own Deploy page, not on Activity", async () => {
+    mockedApi.getOrgEmail.mockResolvedValue({ connected: true, host: 'imap.example.com', username: 'a@example.com' })
+
+    renderPage()
+
+    expect(await screen.findByText('Which mail to skip')).toBeInTheDocument()
+    expect(screen.getByText('How much automatic work to allow')).toBeInTheDocument()
   })
 })

@@ -1,22 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import { formatDateTime } from '../lib/dateFormat'
-import DataRetentionPanel from '../components/DataRetentionPanel'
-import EmailBudgetSettings from '../components/EmailBudgetSettings'
-import EmailFilterSettings from '../components/EmailFilterSettings'
+import ActivityOverviewPanel from '../components/ActivityOverviewPanel'
 import EmailTriggerActivity from '../components/EmailTriggerActivity'
 import MaintenanceInboxSummary from '../components/MaintenanceInboxSummary'
 import NeedsAttentionList from '../components/NeedsAttentionList'
 import NotificationsPanel from '../components/NotificationsPanel'
 import RunDetail from '../components/RunDetail'
 import RunsPager from '../components/RunsPager'
-import SharedSessionsPanel from '../components/SharedSessionsPanel'
 import WebhookSettings from '../components/WebhookSettings'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './ActivityPage.css'
-
-const STATUS_OPTIONS = ['running', 'completed', 'failed', 'cancelled']
 
 // How often to silently refresh the Runs tab while it still shows a
 // `running` row -- otherwise a row's status/badge would go stale the moment
@@ -51,7 +48,14 @@ function runsQueryParams(filters: Filters) {
 }
 
 export default function ActivityPage() {
-  const [tab, setTab] = useState<'automations' | 'runs' | 'shared' | 'alerts' | 'data'>('automations')
+  const { t } = useTranslation()
+  const runStatusLabel = useRunStatusLabel()
+  // Overview is always the landing tab -- it works the same whether or not
+  // the org uses automation, which is what replaced the old guess between
+  // Automations and Runs (audit finding F6: an org that had never connected
+  // a mailbox used to land on an empty Automations tab, hiding its own runs
+  // one click away).
+  const [tab, setTab] = useState<'overview' | 'automations' | 'runs' | 'alerts'>('overview')
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted. Fetched below rather than only through
   // NotificationsPanel's callback: the panel is mounted only once the Alerts
@@ -67,8 +71,6 @@ export default function ActivityPage() {
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState({ total: 0, limit: 50 })
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
-  const [sharedPipelineId, setSharedPipelineId] = useState<number | null>(null)
-  const [pipelineIds, setPipelineIds] = useState<Record<string, number>>({})
   const hasRunningRun = runs.some((run) => run.status === 'running')
   const runDetailRef = useRef<HTMLElement>(null)
 
@@ -110,7 +112,6 @@ export default function ActivityPage() {
       .listPipelines()
       .then((d) => {
         setPipelines(d.pipelines)
-        setPipelineIds(d.pipeline_ids ?? {})
       })
       .catch(() => {})
   }, [])
@@ -160,34 +161,69 @@ export default function ActivityPage() {
     }
   }, [tab, filters, offset, hasRunningRun])
 
+  // `row` is only present when the run came from the current page of the
+  // list; one opened from Needs-attention may not be, so the id remains the
+  // fallback title rather than the panel losing its heading entirely.
+  const renderRunDetail = (selected: SelectedRun, row?: RunListItem) => (
+    <section className="run-detail-panel" ref={runDetailRef}>
+      <div className="run-detail-panel-header">
+        <div>
+          {row ? (
+            <h2>
+              {row.team_display_name ?? row.pipeline} · {formatDateTime(row.started_at)}
+            </h2>
+          ) : (
+            <h2>{selected.id}</h2>
+          )}
+          <p className="hint run-detail-id">
+            {t('activity.runIdLabel')}: <code>{selected.id}</code>
+          </p>
+        </div>
+        <button type="button" onClick={() => setSelectedRun(null)}>
+          {t('activity.close')}
+        </button>
+      </div>
+      <RunDetail
+        key={selected.id}
+        runId={selected.id}
+        status={selected.status}
+        autonomous={selected.autonomous}
+        // A retry always dispatches a new autonomous email-triggered run.
+        onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
+      />
+    </section>
+  )
+
   return (
     <div className="wizard">
       <header className="wizard-header">
-        <h1>Team activity</h1>
-        <p>See automations at a glance, or dig into any run's history.</p>
+        <h1>{t('activity.title')}</h1>
+        <p>{t('activity.subtitle')}</p>
       </header>
 
       <div className="activity-tabs">
+        <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>
+          {t('activity.tabOverview')}
+        </button>
         <button
           type="button"
           className={tab === 'automations' ? 'active' : ''}
           onClick={() => setTab('automations')}
         >
-          Automations
+          {t('activity.tabAutomations')}
         </button>
         <button type="button" className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
-          Runs
-        </button>
-        <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
-          Shared
+          {t('activity.tabRuns')}
         </button>
         <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
-          Alerts{unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
+          {t('activity.tabAlerts')}
+          {unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
         </button>
-        <button type="button" className={tab === 'data' ? 'active' : ''} onClick={() => setTab('data')}>
-          Data
-        </button>
+        {/* The Data tab (run-history retention/export) is shielded for beta --
+            not deleted, just not offered yet. */}
       </div>
+
+      {tab === 'overview' && <ActivityOverviewPanel />}
 
       {tab === 'alerts' && (
         <>
@@ -195,8 +231,6 @@ export default function ActivityPage() {
           <WebhookSettings />
         </>
       )}
-
-      {tab === 'data' && <DataRetentionPanel />}
 
       {tab === 'automations' && (
         <>
@@ -227,50 +261,19 @@ export default function ActivityPage() {
               setTab('runs')
             }}
           />
-          {/* The two settings panels sit under the automation they govern:
-              what never reaches a model, and how much work is allowed. */}
-          <EmailFilterSettings />
-          <EmailBudgetSettings />
         </>
-      )}
-
-      {tab === 'shared' && (
-        <section className="activity-shared">
-          <label>
-            Team
-            <select
-              value={sharedPipelineId ?? ''}
-              onChange={(e) => setSharedPipelineId(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">Pick a team…</option>
-              {/* Only teams with a real DB id: a YAML-only demo pipeline has
-                  no `pipeline_ids` entry, so it rendered with value="" --
-                  indistinguishable from the placeholder and silently doing
-                  nothing when picked. Such a pipeline can't have share links
-                  at all (no PipelineRecord.id to hang one off). */}
-              {pipelines
-                .filter((name) => pipelineIds[name] != null)
-                .map((name) => (
-                  <option key={name} value={pipelineIds[name]}>
-                    {name}
-                  </option>
-                ))}
-            </select>
-          </label>
-          {sharedPipelineId != null && <SharedSessionsPanel pipelineId={sharedPipelineId} />}
-        </section>
       )}
 
       {tab === 'runs' && (
         <>
           <section className="activity-filters">
             <label>
-              Team
+              {t('activity.teamLabel')}
               <select
                 value={filters.pipeline}
                 onChange={(e) => setFilters((f) => ({ ...f, pipeline: e.target.value }))}
               >
-                <option value="">All teams</option>
+                <option value="">{t('activity.allTeams')}</option>
                 {pipelines.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -279,20 +282,20 @@ export default function ActivityPage() {
               </select>
             </label>
             <label>
-              Trigger
+              {t('activity.triggerLabel')}
               <select value={filters.manual} onChange={(e) => setFilters((f) => ({ ...f, manual: e.target.value as Filters['manual'] }))}>
-                <option value="">Manual + automatic</option>
-                <option value="true">Manual only</option>
-                <option value="false">Automatic only</option>
+                <option value="">{t('activity.triggerAny')}</option>
+                <option value="true">{t('activity.triggerManual')}</option>
+                <option value="false">{t('activity.triggerAutomatic')}</option>
               </select>
             </label>
             <label>
-              Status
+              {t('activity.statusLabel')}
               <select value={filters.status} onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}>
-                <option value="">Any status</option>
-                {STATUS_OPTIONS.map((s) => (
+                <option value="">{t('runStatus.any')}</option>
+                {RUN_STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {runStatusLabel(s)}
                   </option>
                 ))}
               </select>
@@ -302,9 +305,9 @@ export default function ActivityPage() {
           {error && <p className="banner banner-error">{error}</p>}
 
           {loading ? (
-            <p className="hint">Loading…</p>
+            <p className="hint">{t('common.loading')}</p>
           ) : runs.length === 0 ? (
-            <p className="hint">No runs match these filters.</p>
+            <p className="hint">{t('activity.noRuns')}</p>
           ) : (
             <ul className="session-list">
               {runs.map((run) => (
@@ -315,12 +318,17 @@ export default function ActivityPage() {
                   >
                     <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">
-                      <span className="status-badge">{run.status}</span>
+                      <span className="status-badge">{runStatusLabel(run.status)}</span>
                       <span className="session-updated">
-                        {run.autonomous ? 'Automatic' : 'Manual'} · {formatDateTime(run.started_at)}
+                        {run.autonomous ? t('activity.automatic') : t('activity.manual')} ·{' '}
+                        {formatDateTime(run.started_at)}
                       </span>
                     </div>
                   </button>
+                  {/* Nested under the run it belongs to, not after the whole
+                      list -- for a run near the top, appending the panel at
+                      the bottom put it a full scroll away from the click. */}
+                  {selectedRun && selectedRun.id === run.id && renderRunDetail(selectedRun, run)}
                 </li>
               ))}
             </ul>
@@ -328,24 +336,9 @@ export default function ActivityPage() {
 
           <RunsPager total={page.total} limit={page.limit} offset={offset} onOffsetChange={setOffset} />
 
-          {selectedRun && (
-            <section className="run-detail-panel" ref={runDetailRef}>
-              <div className="run-detail-panel-header">
-                <h2>Run {selectedRun.id}</h2>
-                <button type="button" onClick={() => setSelectedRun(null)}>
-                  Close
-                </button>
-              </div>
-              <RunDetail
-                key={selectedRun.id}
-                runId={selectedRun.id}
-                status={selectedRun.status}
-                autonomous={selectedRun.autonomous}
-                // A retry always dispatches a new autonomous email-triggered run.
-                onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
-              />
-            </section>
-          )}
+          {/* Fallback for a run opened from Needs-attention that isn't on the
+              current Runs page -- there is no row to nest it under. */}
+          {selectedRun && !runs.some((r) => r.id === selectedRun.id) && renderRunDetail(selectedRun)}
         </>
       )}
     </div>

@@ -69,6 +69,32 @@ describe('KnowledgeBaseSearch', () => {
     expect(await screen.findByText(/no completed ingestion yet/)).toBeInTheDocument()
   })
 
+  it('shows a plain-language preview for an XML chunk, with the raw markup collapsed', async () => {
+    mockedApi.searchOwnKnowledgeBase.mockResolvedValue(
+      response({
+        results: [
+          {
+            citation: 'diagram.xml § bpmn:process',
+            source: 'diagram.xml',
+            page: null,
+            heading: 'bpmn:process',
+            text: '<bpmn:userTask id="Activity_1" name="The employee is based at Capalaba Library">',
+          },
+        ],
+      }),
+    )
+    render(<KnowledgeBaseSearch name="policies" />)
+    await submit()
+
+    expect(await screen.findByText('The employee is based at Capalaba Library')).toBeInTheDocument()
+    expect(screen.queryByText(/bpmn:userTask/)).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /show original text/i }))
+    })
+    expect(screen.getByText(/<bpmn:userTask/)).toBeInTheDocument()
+  })
+
   it('disables the button while a search is in flight, so one click is one search', async () => {
     let resolve: (value: KnowledgeBaseSearchResponse) => void = () => {}
     mockedApi.searchOwnKnowledgeBase.mockReturnValue(

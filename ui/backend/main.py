@@ -604,19 +604,34 @@ def list_pipelines(
     # - Personal teams: user-created via builder, visible only to creator
     # - Shared templates: admin-created via /api/config, visible to all org members
     # Plus the global YAML demos only where they're deliberately enabled.
-    id_by_name = {
-        row.name: row.id
-        for row in db.query(PipelineRecord.name, PipelineRecord.id).filter(
-            PipelineRecord.org_id == org.id,
-            PipelineRecord.status == "deployed",
-            or_(PipelineRecord.created_by == user.principal_id, PipelineRecord.created_by.is_(None)),
-        )
-    }
+    id_by_name = {}
+    # The customer-facing team name, so a picker can label a team the way "My
+    # teams" and a run's own card already do. Taken from the CURRENT config
+    # rather than a pinned version (unlike `GET /api/runs`, which must show
+    # each run as it was when it happened): this list is for choosing a team
+    # to run now. A team whose spec has no display_name is simply absent, and
+    # the caller falls back to the technical name.
+    display_by_name = {}
+    for row in db.query(PipelineRecord.name, PipelineRecord.id, PipelineRecord.config).filter(
+        PipelineRecord.org_id == org.id,
+        PipelineRecord.status == "deployed",
+        or_(PipelineRecord.created_by == user.principal_id, PipelineRecord.created_by.is_(None)),
+    ):
+        id_by_name[row.name] = row.id
+        teams = (row.config or {}).get("teams") or []
+        display_name = teams[0].get("display_name") if teams else None
+        if display_name:
+            display_by_name[row.name] = display_name
+
     db_names = set(id_by_name)
     yaml_names = (
         {p.stem for p in PIPELINES_DIR.glob("*.yaml")} if demo_pipelines_enabled() else set()
     )
-    return {"pipelines": sorted(db_names | yaml_names), "pipeline_ids": id_by_name}
+    return {
+        "pipelines": sorted(db_names | yaml_names),
+        "pipeline_ids": id_by_name,
+        "display_names": display_by_name,
+    }
 
 
 @app.get("/api/pipelines/{name}/graph")

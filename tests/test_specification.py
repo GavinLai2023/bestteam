@@ -48,7 +48,10 @@ class _FakeArchitectChatModel(BaseChatModel):
         def _invoke(_input):
             i = min(state[0], len(responses) - 1)
             state[0] += 1
-            return responses[i]
+            item = responses[i]
+            if isinstance(item, BaseException):
+                raise item
+            return item
 
         return RunnableLambda(_invoke)
 
@@ -405,6 +408,42 @@ def test_generate_specification_retries_after_validation_error(tmp_path):
 def test_generate_specification_raises_after_max_attempts(tmp_path):
     invalid = _basic_spec(agent_tools=["does_not_exist"])
     model = _FakeArchitectChatModel(responses=[invalid])
+
+    with pytest.raises(ConfigurationError, match="could not produce a valid specification"):
+        generate_specification(
+            model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml", max_attempts=2
+        )
+
+
+def test_generate_specification_retries_when_completion_fails_to_parse(tmp_path):
+    # A real model sometimes returns JSON that doesn't even fit the Specification
+    # schema (e.g. nesting full agent objects under teams[].agents[], which must be
+    # a list of agent NAMES, or omitting the top-level `name`). `with_structured_output`
+    # raises `OutputParserException` for that -- before we ever have a `Specification`
+    # to hand to `validate_specification`. This should self-correct like any other
+    # invalid design, not crash the whole request.
+    from langchain_core.exceptions import OutputParserException
+
+    valid = _basic_spec()
+    bad_completion = '{"teams": [{"name": "t", "agents": [{"name": "a"}]}]}'
+    parse_failure = OutputParserException(
+        f"Failed to parse Specification from completion {bad_completion}. Got: 2 validation errors",
+        llm_output=bad_completion,
+    )
+    model = _FakeArchitectChatModel(responses=[parse_failure, valid])
+
+    spec = generate_specification(model, "We need help answering customer questions.", source=tmp_path / "pipeline.yaml")
+
+    assert spec == valid
+
+
+def test_generate_specification_raises_after_max_attempts_on_repeated_parse_failure(tmp_path):
+    from langchain_core.exceptions import OutputParserException
+
+    parse_failure = OutputParserException(
+        "Failed to parse Specification from completion {}. Got: field required", llm_output="{}"
+    )
+    model = _FakeArchitectChatModel(responses=[parse_failure])
 
     with pytest.raises(ConfigurationError, match="could not produce a valid specification"):
         generate_specification(

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import KnowledgeBaseSearch from './KnowledgeBaseSearch'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { OrgKnowledgeBase } from '../lib/types'
+import './KnowledgeBasesPanel.css'
 
 // Only while something is actually being indexed -- an idle "My teams" page
 // must not poll this endpoint forever (same rule as the Activity page's run
@@ -58,6 +60,7 @@ function searchBlockedReason(kb: OrgKnowledgeBase): string | null {
 // and remove one -- none of which previously existed outside the admin
 // Advanced page.
 export default function KnowledgeBasesPanel() {
+  const [confirmNode, confirm] = useConfirm()
   const [items, setItems] = useState<OrgKnowledgeBase[]>([])
   const [error, setError] = useState<string | null>(null)
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
@@ -85,9 +88,13 @@ export default function KnowledgeBasesPanel() {
   }, [anyProcessing, refresh])
 
   const handleDelete = async (kb: OrgKnowledgeBase) => {
-    if (!window.confirm(`Delete "${kb.name}"? Its documents are removed and teams can no longer search them.`)) {
-      return
-    }
+    const ok = await confirm({
+      title: `Delete "${kb.name}"?`,
+      body: 'Its documents are removed and teams can no longer search them.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await api.deleteOwnKnowledgeBase(kb.name)
       setItems((prev) => prev.filter((i) => i.name !== kb.name))
@@ -104,10 +111,14 @@ export default function KnowledgeBasesPanel() {
     <section className="knowledge-bases-panel">
       <div className="session-status-header">
         <h2>My documents</h2>
-        <button type="button" onClick={() => void refresh()}>
+        <button type="button" className="btn btn-secondary" onClick={() => void refresh()}>
           Refresh
         </button>
       </div>
+      <p className="subtitle">
+        Files you've uploaded. Any team you build automatically gets to search these -- there's nothing to attach by
+        hand.
+      </p>
 
       {error && <p className="banner banner-error">{error}</p>}
 
@@ -121,7 +132,7 @@ export default function KnowledgeBasesPanel() {
           const blocked = deleteBlockedReason(kb)
           const searchBlocked = searchBlockedReason(kb)
           return (
-            <li key={kb.name} className="session-item">
+            <li key={kb.name} className="session-item kb-card">
               <h3>{kb.name}</h3>
               <p className="hint">{statusFor(kb)}</p>
               {kb.used_by.length > 0 && <p className="hint">Used by {kb.used_by.join(', ')}</p>}
@@ -129,6 +140,7 @@ export default function KnowledgeBasesPanel() {
                 <>
                   <button
                     type="button"
+                    className="btn-link"
                     onClick={() => setOpenSkipped((n) => (n === kb.name ? null : kb.name))}
                   >
                     {skippedCount} file{skippedCount === 1 ? '' : 's'} skipped
@@ -147,6 +159,7 @@ export default function KnowledgeBasesPanel() {
               {rowErrors[kb.name] && <p className="banner banner-error">{rowErrors[kb.name]}</p>}
               <button
                 type="button"
+                className="btn btn-secondary"
                 disabled={searchBlocked !== null}
                 title={searchBlocked ?? 'Try a search'}
                 onClick={() => setOpenSearch((n) => (n === kb.name ? null : kb.name))}
@@ -155,6 +168,7 @@ export default function KnowledgeBasesPanel() {
               </button>
               <button
                 type="button"
+                className="btn btn-danger-outline"
                 disabled={blocked !== null}
                 title={blocked ?? 'Delete'}
                 onClick={() => void handleDelete(kb)}
@@ -166,6 +180,7 @@ export default function KnowledgeBasesPanel() {
           )
         })}
       </ul>
+      {confirmNode}
     </section>
   )
 }

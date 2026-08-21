@@ -64,7 +64,7 @@ export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelP
   if (transcript) {
     return (
       <div className="shared-sessions-transcript">
-        <button type="button" onClick={() => setTranscript(null)}>
+        <button type="button" className="btn-link" onClick={() => setTranscript(null)}>
           Back
         </button>
         <ul>
@@ -90,7 +90,7 @@ export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelP
               <li key={session.id}>
                 <span>Last active {formatDateTime(session.last_active_at)}</span>
                 <span>{session.turns_today} turns today</span>
-                <button type="button" onClick={() => openTranscript(link.id, session.id)}>
+                <button type="button" className="btn btn-secondary" onClick={() => openTranscript(link.id, session.id)}>
                   View transcript
                 </button>
               </li>

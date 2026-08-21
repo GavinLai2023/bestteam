@@ -7,13 +7,6 @@ function capField(cap: number | null): string {
   return cap === null ? '' : String(cap)
 }
 
-// The cap is a round figure the admin typed; the spend is measured and is
-// routinely a fraction of a penny, so it keeps the four decimals the rest of
-// the app uses for run costs (TracePage, AdminRunDetail).
-function money(value: number, decimals: number): string {
-  return `$${value.toFixed(decimals)}`
-}
-
 function dailyLine(budget: EmailBudget): string {
   const used = budget.messages_today
   return budget.daily_message_cap === null
@@ -21,37 +14,20 @@ function dailyLine(budget: EmailBudget): string {
     : `Messages handled today: ${used} of ${budget.daily_message_cap}.`
 }
 
-function monthlyLine(budget: EmailBudget): string {
-  // null is not zero: it means nothing this month could be priced at all.
-  // Printing $0.00 for it would state a measurement we do not have.
-  const spent =
-    budget.spent_this_month === null
-      ? 'nothing this month has a price yet'
-      : money(budget.spent_this_month, 4)
-  if (budget.monthly_cost_cap === null) return `Spent this month: ${spent} (no cap set).`
-  if (budget.spent_this_month === null) {
-    return `Spent this month: ${spent}. Your cap is ${money(budget.monthly_cost_cap, 2)}.`
-  }
-  return `Spent this month: ${spent} of ${money(budget.monthly_cost_cap, 2)}.`
-}
-
-// "1 run" / "3 runs" -- a count with a correctly pluralised noun.
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`
-}
-
-// How much automatic email work this organisation will do, on the Activity
-// page's Automations tab: a message count a day, an amount of spend a month,
-// and what each has used so far.
+// How much automatic email work this organisation will do, on the deployed
+// email team's Deploy page: a message count a day, plus how much of it has
+// been used so far.
 //
-// The two "blind spot" lines are the point of the usage half. A model with no
-// price in the catalogue contributes nothing to the spend total, so the figure
-// is a floor rather than the whole amount -- that has to be on the screen, not
-// left for the admin to work out from a cap that never seems to be reached.
+// Which model handled the work, exactly how much has been spent, and even
+// the monthly spend cap itself are admin-only figures -- this panel is
+// reachable by any org member, not just whoever manages billing, so none of
+// the three render here. The API response carries the first two
+// (`spent_this_month`, `unpriced_models`, `unpriced_runs_this_month`), and
+// this component itself loads the third (`monthly_cost_cap`) so `save()` can
+// send it back unchanged -- there is no field here to edit it with.
 export default function EmailBudgetSettings() {
   const [budget, setBudget] = useState<EmailBudget | null>(null)
   const [daily, setDaily] = useState('')
-  const [monthly, setMonthly] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -60,7 +36,6 @@ export default function EmailBudgetSettings() {
   const apply = (data: EmailBudget) => {
     setBudget(data)
     setDaily(capField(data.daily_message_cap))
-    setMonthly(capField(data.monthly_cost_cap))
   }
 
   useEffect(() => {
@@ -77,12 +52,11 @@ export default function EmailBudgetSettings() {
 
   const save = async () => {
     const dailyCap = parseCap(daily)
-    const monthlyCap = parseCap(monthly)
     // Refused here rather than sent: an unreadable figure must not reach the
     // API as null, which would mean "no limit" and remove a real cap.
-    if (dailyCap === undefined || monthlyCap === undefined) {
+    if (dailyCap === undefined) {
       setSaved(false)
-      setError('Please enter a number, or leave a box empty for no limit.')
+      setError('Please enter a number, or leave the box empty for no limit.')
       return
     }
 
@@ -93,7 +67,8 @@ export default function EmailBudgetSettings() {
       apply(
         await api.setEmailBudget({
           daily_message_cap: dailyCap,
-          monthly_cost_cap: monthlyCap,
+          // Sent back exactly as loaded -- see the module docstring.
+          monthly_cost_cap: budget!.monthly_cost_cap,
         }),
       )
       setSaved(true)
@@ -125,27 +100,11 @@ export default function EmailBudgetSettings() {
     <section className="email-budget-settings wizard-card">
       <h3>How much automatic work to allow</h3>
       <p className="hint">
-        Leave a box empty for no limit. Reaching a limit pauses automatic runs
-        &mdash; the daily one until tomorrow, the monthly one until the start of
-        next month &mdash; and nothing else in your organisation is affected.
+        Leave the box empty for no limit. Reaching it pauses automatic runs until tomorrow, and nothing else in your
+        organisation is affected.
       </p>
 
       <p className="muted">{dailyLine(budget)}</p>
-      <p className="muted">{monthlyLine(budget)}</p>
-      {budget.unpriced_models.length > 0 && (
-        <p className="hint">
-          The spend limit does not cover {budget.unpriced_models.join(', ')} &mdash; we
-          hold no price for{' '}
-          {budget.unpriced_models.length === 1 ? 'that model' : 'those models'}, so their
-          work adds nothing to the amount above.
-        </p>
-      )}
-      {budget.unpriced_runs_this_month > 0 && (
-        <p className="hint">
-          {plural(budget.unpriced_runs_this_month, 'run')} this month used a model we have
-          no price for, so the amount spent is at least that figure rather than exactly it.
-        </p>
-      )}
 
       <div className="field">
         <label htmlFor="budget-daily">Most messages a day</label>
@@ -156,19 +115,6 @@ export default function EmailBudgetSettings() {
           step="1"
           value={daily}
           onChange={(e) => setDaily(e.target.value)}
-          placeholder="No limit"
-        />
-      </div>
-
-      <div className="field">
-        <label htmlFor="budget-monthly">Most to spend in a month (US$)</label>
-        <input
-          id="budget-monthly"
-          type="number"
-          min="0.01"
-          step="0.01"
-          value={monthly}
-          onChange={(e) => setMonthly(e.target.value)}
           placeholder="No limit"
         />
       </div>

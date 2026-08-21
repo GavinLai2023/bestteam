@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import RunDetail from './RunDetail'
 import { api } from '../lib/api'
+import { answerConfirm } from '../test/confirmDialog'
 
 vi.mock('../lib/api', () => ({
   WS_BASE: 'ws://127.0.0.1:8000',
@@ -61,7 +62,8 @@ describe('RunDetail', () => {
       ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
     })
 
-    expect(screen.getByText('▶ started')).toBeInTheDocument()
+    // Friendly view is the default now (F8) -- '▶ started' is the technical label.
+    expect(screen.getByText('Your team got started')).toBeInTheDocument()
     expect(mockedApi.getRunTrace).not.toHaveBeenCalled()
   })
 
@@ -98,7 +100,8 @@ describe('RunDetail', () => {
 
     render(<RunDetail runId="run-1" status="completed" autonomous={false} />)
 
-    expect(await screen.findByText('● completed')).toBeInTheDocument()
+    // Friendly view is the default now (F8) -- '● completed' is the technical label.
+    expect(await screen.findByText('All done!')).toBeInTheDocument()
     expect(screen.getByText('Final output')).toBeInTheDocument()
     expect(mockedApi.createWsTicket).not.toHaveBeenCalled()
   })
@@ -252,6 +255,31 @@ describe('RunDetail', () => {
     expect(screen.getByText('Risk: active_water_leak')).toBeInTheDocument()
   })
 
+  // MonitorPage already narrates the same event stream in plain language by
+  // default, with the raw feed one click away (audit finding F8) -- this run
+  // detail view skipped that and always showed the jargon register, which is
+  // what a non-technical customer sees for every run on the Activity page.
+  it('narrates the trace in plain language by default, with the technical feed one click away', async () => {
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [
+        { type: 'run_started', agent: undefined, data: null },
+        { type: 'agent_completed', agent: 'triage', data: null },
+        { type: 'run_completed', agent: undefined, data: 'done' },
+      ],
+    })
+
+    render(<RunDetail runId="run-1" status="completed" autonomous={false} />)
+
+    expect(await screen.findByText('Your team got started')).toBeInTheDocument()
+    expect(screen.getByText('triage finished their part')).toBeInTheDocument()
+    expect(screen.queryByText('▶ started')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /show technical trace/i }))
+
+    expect(screen.getByText('▶ started')).toBeInTheDocument()
+    expect(screen.queryByText('Your team got started')).not.toBeInTheDocument()
+  })
+
   it('says the content was removed rather than showing an empty timeline', async () => {
     // A purged run has no trace events left, which looks exactly like a bug
     // unless the panel says who removed them and what survived.
@@ -271,13 +299,15 @@ describe('RunDetail', () => {
   it("offers to delete this run's content", async () => {
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
     mockedApi.purgeRun.mockResolvedValue({ purged: true })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
 
     const button = await screen.findByRole('button', { name: /delete this run's content/i })
     await act(async () => {
       fireEvent.click(button)
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(mockedApi.purgeRun).toHaveBeenCalledWith('r1')
@@ -297,9 +327,11 @@ describe('RunDetail', () => {
       }],
     })
     mockedApi.purgeRun.mockResolvedValue({ purged: true })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
+    // The friendly view (default) doesn't repeat event data, so switch to the
+    // technical trace to check both render sites clear on purge.
+    fireEvent.click(await screen.findByRole('button', { name: /show technical trace/i }))
     // Twice: once in the event timeline, once as the final output.
     expect(await screen.findByText('Final output')).toBeInTheDocument()
     expect(screen.getAllByText('Drafted a reply to alice@example.com')).toHaveLength(2)
@@ -307,6 +339,9 @@ describe('RunDetail', () => {
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+    await act(async () => {
+      await answerConfirm(true)
     })
 
     expect(screen.queryAllByText('Drafted a reply to alice@example.com')).toHaveLength(0)
@@ -319,12 +354,14 @@ describe('RunDetail', () => {
 
   it('does not delete the run when the confirmation is dismissed', async () => {
     mockedApi.getRunTrace.mockResolvedValue({ events: [] })
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: /delete this run's content/i }))
+    })
+    await act(async () => {
+      await answerConfirm(false)
     })
 
     expect(mockedApi.purgeRun).not.toHaveBeenCalled()

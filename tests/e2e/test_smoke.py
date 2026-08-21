@@ -66,12 +66,20 @@ def open_advanced_tab(page, label):
     time.sleep(0.3)
 
 
+def confirm_dialog(page):
+    """Accept the app's own confirmation dialog.
+
+    Destructive actions no longer use `window.confirm` (frontend audit finding
+    F11), so Playwright's `page.on("dialog", ...)` hook does not see them --
+    `ConfirmDialog` is an in-page `<dialog>`, and its action button has to be
+    clicked like any other. Without this a Delete click is a silent no-op.
+    """
+    # Rendered as [Cancel, <the action>], so the action is always last -- the
+    # same rule the Vitest helper (src/test/confirmDialog.ts) relies on.
+    page.locator(".confirm-dialog button").last.click()
+
+
 def test_smoke_journey(page):
-    # AdvancedPage's Delete button gates on window.confirm(); Playwright
-    # auto-dismisses native dialogs (confirm() -> false) unless a handler
-    # accepts them, which would otherwise make every Delete click a silent
-    # no-op.
-    page.on("dialog", lambda dialog: dialog.accept())
 
     # -- T1. Authentication (as demo) --
     goto_expecting_login_redirect(page, "/", timeout=6000)
@@ -101,17 +109,17 @@ def test_smoke_journey(page):
     js_errors = []
     page.on("pageerror", lambda e: js_errors.append(str(e)))
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    options = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    options = page.locator(".controls select option").all_inner_texts()
     assert len(options) > 0, "Pipeline dropdown is empty -- was BESTTEAM_DEMO_PIPELINES=1 set?"
     bad = [e for e in js_errors if "Cannot read properties of undefined" in e]
     assert not bad, f"TypeError still present: {bad[0]}"
 
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     target = "code_review" if "code_review" in opts else opts[0]
-    page.select_option("select", label=target)
+    page.select_option(".controls select", label=target)
     page.fill("textarea", "def add(a, b): return a + b")
     page.click("button:has-text('Run')")
     # The live trace list hides itself once a terminal event arrives (see
@@ -204,6 +212,7 @@ def test_smoke_journey(page):
     page.click(".advanced-editor button:has-text('Save')")
     page.wait_for_selector(".banner-success", timeout=5000)
     page.click(".advanced-editor button:has-text('Delete')")
+    confirm_dialog(page)
     pw_expect(page.locator(f".advanced-list button:has-text('{SKILL}')")).to_have_count(0, timeout=5000)
 
     CATALOG_SPEC = f"fake:model_{int(time.time())}"
@@ -246,8 +255,8 @@ def test_smoke_journey(page):
     logout(page)
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     assert PL in opts, f"{PL} not found in Monitor dropdown for demo"
 
     # -- T5. Edge cases --
@@ -272,7 +281,7 @@ def test_smoke_journey(page):
 
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/run")
-    page.wait_for_selector("select", timeout=8000)
+    page.wait_for_selector(".controls select", timeout=8000)
     page.fill("textarea", "")
     assert page.locator("button:has-text('Run')").is_disabled()
 
@@ -281,8 +290,8 @@ def test_wizard_smoke(page):
     """New PR-gate scenario: intent -> generate -> Preview -> Deploy ->
     confirm the team shows up in Monitor. Uses the fake architect (reshaped
     into the catalog by the e2e_backend fixture) so no real LLM key is
-    needed. Stops at Deploy -- never opens the Confirm-page's ModelPicker
-    dropdown (that's covered by test_wizard_full.py)."""
+    needed. Stops at Deploy -- never visits the Confirm page's feedback loop
+    (that's covered by test_wizard_full.py)."""
     login_ui(page, DEMO)
     page.goto(BASE_URL + "/wizard")
     page.wait_for_selector("#intent", timeout=8000)
@@ -313,8 +322,8 @@ def test_wizard_smoke(page):
 
     page.click("button:has-text('Run a team')")
     page.wait_for_url("**/run**", timeout=8000)
-    page.wait_for_selector("select", timeout=8000)
-    opts = page.locator("select option").all_inner_texts()
+    page.wait_for_selector(".controls select", timeout=8000)
+    opts = page.locator(".controls select option").all_inner_texts()
     assert any("e2e_support_team" in o or "Support Team (E2E)" in o for o in opts), (
         f"deployed fake-architect team not found in Monitor dropdown: {opts}"
     )

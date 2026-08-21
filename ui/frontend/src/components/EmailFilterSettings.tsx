@@ -14,7 +14,7 @@ function parseList(text: string): string[] {
     .filter((line) => line !== '')
 }
 
-// Which mail never reaches a model, on the Activity page's Automations tab.
+// Which mail never reaches a model, on the deployed email team's Deploy page.
 //
 // The copy states the two pattern forms the backend actually accepts (a full
 // address, or `*@domain`) because there is nothing else to find out from: a
@@ -95,8 +95,9 @@ export default function EmailFilterSettings() {
       <h3>Which mail to skip</h3>
       <p className="hint">
         These rules are applied before any AI model reads a message, so skipped
-        mail costs you nothing. Anything skipped is listed under &ldquo;Mail we
-        skipped&rdquo; above, where you can release it if a rule got one wrong.
+        mail costs you nothing. Anything skipped is listed on your Team
+        activity page&rsquo;s Automations tab, where you can release it if a
+        rule got one wrong.
       </p>
       <p className="hint">
         Both sender lists take one entry per line &mdash; a full address (

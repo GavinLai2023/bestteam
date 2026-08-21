@@ -2,7 +2,7 @@
   display: flex;
   gap: 6px;
   margin: 4px 0 20px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
 }
 
 .trace-tabs button {
@@ -11,14 +11,14 @@
   background: none;
   font-weight: 600;
   font-size: 0.9rem;
-  color: #6b7280;
+  color: var(--text-muted);
   cursor: pointer;
   border-bottom: 2px solid transparent;
 }
 
 .trace-tabs button.active {
-  color: #4f46e5;
-  border-bottom-color: #4f46e5;
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .trace-analytics-table-wrap {
@@ -34,15 +34,15 @@
 .trace-analytics-table th {
   text-align: left;
   padding: 8px 10px;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.75rem;
   text-transform: uppercase;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
 }
 
 .trace-analytics-table td {
   padding: 8px 10px;
-  border-bottom: 1px solid #f3f4f6;
+  border-bottom: 1px solid var(--hover);
 }
 
 .trace-analytics-table tr {
@@ -50,11 +50,11 @@
 }
 
 .trace-analytics-table tr:hover {
-  background: #f9fafb;
+  background: var(--surface-muted);
 }
 
 .trace-analytics-table tr.active {
-  background: #eef2ff;
+  background: var(--accent-soft);
 }
 
 .trace-analytics-table-static tr {
@@ -77,4 +77,18 @@
 
 .trace-agent-stats .status-badge {
   margin-right: 8px;
+}
+
+/* An admin trace table is wide by nature: let it scroll inside its own
+   container rather than making the whole page scroll sideways (F10). */
+@media (max-width: 900px) {
+  .trace-analytics-table-wrap {
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .advanced {
+    padding: 24px 16px 48px;
+  }
 }

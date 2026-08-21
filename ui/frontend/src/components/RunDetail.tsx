@@ -1,10 +1,19 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import { formatDateTime } from '../lib/dateFormat'
-import { EVENT_LABELS, RESULT_LABELS, TERMINAL_TYPES, renderEventData } from '../lib/traceEvents'
+import {
+  EVENT_LABELS,
+  FRIENDLY_EVENT_TYPES,
+  RESULT_LABELS,
+  TERMINAL_TYPES,
+  renderEventData,
+  useFriendlyEventTitle,
+} from '../lib/traceEvents'
 import { useRunTrace } from '../lib/useRunTrace'
 import type { AutomationResult } from '../lib/types'
-import '../pages/MonitorPage.css' // reuses .event/.event-*/.result styling
+import '../pages/MonitorPage.css' // reuses .event/.event-*/.result/.trace styling
 
 interface RunDetailProps {
   runId: string
@@ -19,6 +28,8 @@ type RetryState = 'idle' | 'retrying' | 'error'
 // lib/useRunTrace.ts for the live-WS-vs-historical-fetch mechanics (shared
 // with the admin Trace page's AdminRunDetail).
 export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
+  const { t } = useTranslation()
+  const [confirmNode, confirm] = useConfirm()
   const { events, contentPurgedAt, error } = useRunTrace(runId, status)
   const [automationResults, setAutomationResults] = useState<AutomationResult[]>([])
   const [retryState, setRetryState] = useState<RetryState>('idle')
@@ -26,6 +37,11 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
   const [purgedAt, setPurgedAt] = useState<string | null>(null)
   const [purging, setPurging] = useState(false)
   const [purgeError, setPurgeError] = useState<string | null>(null)
+  const [traceExpanded, setTraceExpanded] = useState(false)
+  // No TeamSpec is loaded here, so there is no friendly display name to
+  // resolve an agent name against -- same passthrough MonitorPage uses.
+  const friendlyTitle = useFriendlyEventTitle((agentName) => agentName)
+  const friendlyEvents = events.filter((e) => FRIENDLY_EVENT_TYPES.includes(e.type))
 
   // Property Maintenance Inbox: this run's structured results, if any (most
   // runs have none -- only autonomous email-triggered runs whose output
@@ -62,7 +78,15 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
   }
 
   const purge = async () => {
-    if (!window.confirm("Remove this run's content? The message text, our drafted reply and the step-by-step trace go; what it cost and when it ran stay. This cannot be undone.")) return
+    const ok = await confirm({
+      title: "Remove this run's content?",
+      body:
+        'The message text, our drafted reply and the step-by-step trace go; ' +
+        'what it cost and when it ran stay. This cannot be undone.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    })
+    if (!ok) return
     setPurging(true)
     setPurgeError(null)
     try {
@@ -104,15 +128,35 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
       ) : events.length === 0 && !error ? (
         <p className="hint">{status === 'running' ? 'Waiting for events…' : 'No trace recorded for this run.'}</p>
       ) : (
-        <ul className="run-detail-events">
-          {events.map((event, i) => (
-            <li key={i} className={`event event-${event.type}`}>
-              <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
-              {event.agent && <span className="event-agent">{event.agent}</span>}
-              <p className="event-data">{renderEventData(event)}</p>
-            </li>
-          ))}
-        </ul>
+        <>
+          {/* Same two registers as MonitorPage, and the same default (audit
+              finding F8): a customer reads what their team actually did, the
+              jargon feed is one click away for whoever wants it. */}
+          <div className="trace-header">
+            <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
+              {traceExpanded ? t('run.hideTechnical') : t('run.showTechnical')}
+            </button>
+          </div>
+          {traceExpanded ? (
+            <ul className="run-detail-events">
+              {events.map((event, i) => (
+                <li key={i} className={`event event-${event.type}`}>
+                  <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
+                  {event.agent && <span className="event-agent">{event.agent}</span>}
+                  <p className="event-data">{renderEventData(event)}</p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <ul className="run-detail-events">
+              {friendlyEvents.map((event, i) => (
+                <li key={i} className={`event event-${event.type}`}>
+                  <span className="event-type">{friendlyTitle(event)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
       {finalEvent && !purged && (
         <section className={`result result-${finalEvent.type}`}>
@@ -187,6 +231,7 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
           {purgeError && <p className="banner banner-error">{purgeError}</p>}
         </section>
       )}
+      {confirmNode}
     </div>
   )
 }

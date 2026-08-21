@@ -1,5 +1,10 @@
 import '@testing-library/jest-dom/vitest'
 import { configure } from '@testing-library/dom'
+// Initialises i18next for every test file, so `t()` returns real copy rather
+// than the raw key. The language is NOT pinned here: `initialLanguage()`
+// already defaults to English (localStorage is empty in jsdom), which is what
+// the suite's existing assertions are written against.
+import '../lib/i18n'
 
 // testing-library's 1s default for waitFor/findBy* is tuned for a developer's
 // idle laptop. CI runs 24 test files in parallel on a 2-core runner, where a

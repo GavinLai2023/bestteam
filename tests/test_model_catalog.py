@@ -12,6 +12,7 @@ from ui.backend.db.model_catalog import (
     DEFAULT_MODEL_CATALOG,
     delete_entry,
     get_entry,
+    list_chat_entries,
     list_entries,
     seed_default_catalog,
     to_prompt_text,
@@ -55,6 +56,17 @@ def test_upsert_updates_existing_entry(db):
     assert len(list_entries(db)) == 1
 
 
+def test_upsert_setting_is_default_clears_previous_default(db):
+    """Only one catalog entry can be `is_default` at a time -- the wizard's
+    `pickDefaultModel` treats it as the Solution Architect's model, so two
+    defaults would make that choice ambiguous."""
+    upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", is_default=True)
+    upsert_entry(db, "openai:gpt-4o", display_name="Senior Assistant", is_default=True)
+
+    assert get_entry(db, "openai:gpt-4o-mini").is_default is False
+    assert get_entry(db, "openai:gpt-4o").is_default is True
+
+
 def test_delete_entry(db):
     upsert_entry(db, "fake:hi", display_name="Demo")
 
@@ -90,6 +102,29 @@ def test_to_prompt_text_includes_spec_and_pricing(db):
 
 def test_to_prompt_text_empty_for_no_entries():
     assert to_prompt_text([]) == ""
+
+
+def test_list_chat_entries_includes_fake_models(db):
+    """fake:/fake-architect: entries stay in the customer-facing set.
+
+    A real deployment never has one -- fake-architect: is deliberately never
+    seeded into DEFAULT_MODEL_CATALOG (see
+    test_fake_architect_is_never_in_the_default_catalog below), so this only
+    matters for the E2E harness, which relies on `/api/model-catalog`
+    returning exactly this entry so pickDefaultModel()/ModelPicker resolve to
+    it (docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md,
+    "Fake-architect mechanism"). Excluding it here broke that harness (Codex
+    review finding, 2026-08-21): the E2E fixture reshapes a catalog down to
+    just fake:ok + fake-architect:e2e, and this filter turned that into an
+    empty customer-facing catalog, permanently disabling the wizard's "Start
+    building my team" button."""
+    upsert_entry(db, "fake:ok", display_name="Demo Assistant", tier="fast")
+    upsert_entry(db, "fake-architect:e2e", display_name="E2E Test Architect", tier="fast")
+    upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick Assistant", tier="fast")
+
+    specs = {e.spec for e in list_chat_entries(db)}
+
+    assert specs == {"fake:ok", "fake-architect:e2e", "openai:gpt-4o-mini"}
 
 
 fastapi = pytest.importorskip("fastapi")
@@ -184,6 +219,48 @@ def test_org_user_can_read_model_catalog_for_wizard(client):
     assert resp.status_code == 200
     specs = [entry["spec"] for entry in resp.json()]
     assert "openai:gpt-4o-mini" in specs  # a real model, so no fake fallback
+
+
+def test_public_model_catalog_includes_fake_architect_for_e2e(client):
+    # The E2E harness reshapes a real deployment's catalog down to just
+    # fake:ok + fake-architect:e2e and depends on this exact endpoint
+    # returning fake-architect:e2e so the wizard's pickDefaultModel()/
+    # ModelPicker resolve to it automatically -- see
+    # docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md.
+    # A real deployment never has this entry in the first place (fake-
+    # architect: is never in DEFAULT_MODEL_CATALOG), so there is nothing to
+    # additionally hide here.
+    client.put(
+        "/api/config/model-catalog/fake-architect:e2e",
+        json={"display_name": "E2E Test Architect", "tier": "fast"},
+    )
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o-mini",
+        json={"display_name": "Quick Assistant", "tier": "fast"},
+    )
+
+    org_token = create_user_and_login(client, username="customer2", org="acme2")
+    resp = client.get("/api/model-catalog", headers={"Authorization": f"Bearer {org_token}"})
+
+    assert resp.status_code == 200
+    specs = {entry["spec"] for entry in resp.json()}
+    assert specs == {"fake-architect:e2e", "openai:gpt-4o-mini"}
+
+
+def test_model_catalog_put_setting_is_default_clears_previous_default(client):
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o-mini",
+        json={"display_name": "Quick Assistant", "tier": "fast", "is_default": True},
+    )
+    client.put(
+        "/api/config/model-catalog/openai:gpt-4o",
+        json={"display_name": "Senior Assistant", "tier": "advanced", "is_default": True},
+    )
+
+    first = client.get("/api/config/model-catalog/openai:gpt-4o-mini")
+    second = client.get("/api/config/model-catalog/openai:gpt-4o")
+    assert first.json()["is_default"] is False
+    assert second.json()["is_default"] is True
 
 
 def test_read_model_catalog_requires_authentication(client):

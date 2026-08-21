@@ -1,8 +1,55 @@
+import { useTranslation } from 'react-i18next'
 import type { TraceEvent } from './types'
 
 // Shared trace-event rendering for MonitorPage's live view and the Activity
 // page's run-detail view (live and historical), so both render the same
 // event stream identically instead of duplicating the mapping.
+//
+// Two registers live here on purpose. `EVENT_LABELS` below is the technical
+// one (`✓ agent done`), for the collapsed "technical trace". Above it,
+// `useFriendlyEventTitle` is the one a customer reads by default -- it was
+// previously inlined in the wizard's PreviewPage, which meant the same event
+// stream was narrated politely during the wizard and in jargon everywhere
+// afterwards (audit finding F8).
+
+// Narrates an event in the customer's own terms. `displayNameFor` resolves an
+// agent's technical name to its friendly `display_name`; pass through the
+// agent name itself when there is no specification to resolve against.
+export function useFriendlyEventTitle(displayNameFor: (agentName: string) => string) {
+  const { t } = useTranslation()
+  return (event: TraceEvent): string => {
+    switch (event.type) {
+      case 'run_queued':
+        return t('traceEvents.queued')
+      case 'run_started':
+        return t('traceEvents.started')
+      case 'agent_completed':
+        return t('traceEvents.agentDone', { agent: displayNameFor(event.agent ?? '') })
+      case 'run_completed':
+        return t('traceEvents.completed')
+      case 'run_failed':
+        return t('traceEvents.failed')
+      case 'run_cancelled':
+        return t('traceEvents.cancelled')
+      default:
+        // Intermediate types (tool_*, delegation_*, memory_*) have no friendly
+        // phrasing; the caller filters them out of the friendly view rather
+        // than this returning an invented sentence for them.
+        return event.type
+    }
+  }
+}
+
+// The event types the friendly view knows how to narrate. Anything else is
+// detail that belongs in the technical trace, not on a customer's screen.
+export const FRIENDLY_EVENT_TYPES = [
+  'run_queued',
+  'run_started',
+  'agent_completed',
+  'run_completed',
+  'run_failed',
+  'run_cancelled',
+]
 
 export const EVENT_LABELS: Record<string, string> = {
   run_queued: '⏳ queued',

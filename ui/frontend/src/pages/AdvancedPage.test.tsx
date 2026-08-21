@@ -144,3 +144,45 @@ describe('AdvancedPage upload flow', () => {
     expect(screen.getByText('Advanced configuration')).toBeInTheDocument()
   })
 })
+
+describe('AdvancedPage item filter', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.listOrgs.mockResolvedValue([{ name: 'acme', display_name: 'Acme', active: true }])
+    mockedApi.listConfig.mockResolvedValue([
+      { name: 'refund_policy' },
+      { name: 'delivery_policy' },
+      { name: 'staff_handbook' },
+    ])
+  })
+
+  // An org with dozens of collections had no way to find one but to scan the
+  // list by eye (audit finding F15).
+  it('narrows the list to matching names, and says so when nothing matches', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
+    await screen.findByText('refund_policy')
+
+    fireEvent.change(screen.getByPlaceholderText('Filter…'), { target: { value: 'policy' } })
+
+    expect(screen.getByText('refund_policy')).toBeInTheDocument()
+    expect(screen.getByText('delivery_policy')).toBeInTheDocument()
+    expect(screen.queryByText('staff_handbook')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('Filter…'), { target: { value: 'zzz' } })
+    expect(screen.getByText('Nothing matches that filter.')).toBeInTheDocument()
+  })
+
+  // Filtering is display-only: it must never change which org a mutation
+  // targets, so switching tabs clears it rather than carrying it across.
+  it('clears the filter when the tab changes', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
+    await screen.findByText('refund_policy')
+
+    fireEvent.change(screen.getByPlaceholderText('Filter…'), { target: { value: 'policy' } })
+    fireEvent.click(screen.getByText('Skills'))
+
+    await waitFor(() => expect(screen.getByPlaceholderText('Filter…')).toHaveValue(''))
+  })
+})

@@ -67,6 +67,18 @@ def list_chat_entries(db: Session) -> List[ModelCatalogEntry]:
     chat model -- wants this, not `list_entries`: an embedding model handed to
     an agent produces a team that cannot answer anything. Admin CRUD still
     uses `list_entries`, because somebody has to maintain those prices.
+
+    Deliberately does NOT filter fake:/fake-architect: entries: neither is
+    ever in `DEFAULT_MODEL_CATALOG`, so a real deployment's catalog never
+    holds one unless an admin adds it themselves -- and this same
+    customer-facing endpoint is the one channel the E2E harness has to make
+    `pickDefaultModel()`/`ModelPicker` resolve to `fake-architect:e2e` (see
+    `docs/superpowers/specs/2026-08-13-e2e-and-ci-test-tiering-design.md`,
+    "Fake-architect mechanism"). A prior attempt to filter both prefixes out
+    here (2026-08-20) broke that harness: the E2E fixture reshapes a catalog
+    down to just `fake:ok` + `fake-architect:e2e`, and filtering both left
+    this endpoint empty, permanently disabling the wizard's "Start building
+    my team" button (Codex review finding, 2026-08-21).
     """
     return (
         db.query(ModelCatalogEntry)
@@ -81,6 +93,13 @@ def get_entry(db: Session, spec: str) -> Optional[ModelCatalogEntry]:
 
 
 def upsert_entry(db: Session, spec: str, **fields: Any) -> ModelCatalogEntry:
+    if fields.get("is_default"):
+        # At most one entry is ever the default -- clear every other row's
+        # flag in the same call rather than requiring the caller (the CRUD
+        # route, or any other upsert_entry caller) to do it themselves.
+        db.query(ModelCatalogEntry).filter(ModelCatalogEntry.spec != spec).update(
+            {"is_default": False}
+        )
     entry = get_entry(db, spec)
     if entry is None:
         entry = ModelCatalogEntry(spec=spec, **fields)

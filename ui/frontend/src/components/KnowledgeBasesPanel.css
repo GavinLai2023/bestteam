@@ -1,0 +1,31 @@
+/* A visible break from "My teams" above -- the two lists share the base
+   .session-list/.session-item classes, which previously left them reading as
+   one continuous list with no indication these are a different kind of
+   thing. */
+.knowledge-bases-panel {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.knowledge-bases-panel .subtitle {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.kb-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--surface);
+}
+
+.kb-card h3 {
+  margin: 0 0 4px;
+}
+
+.kb-card > button {
+  margin-top: 8px;
+  margin-right: 8px;
+}

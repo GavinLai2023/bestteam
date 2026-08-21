@@ -9,7 +9,7 @@
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 0;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
 
@@ -19,7 +19,7 @@
 }
 
 .org-member {
-  color: #555;
+  color: var(--text-soft);
   min-width: 7rem;
 }
 
@@ -32,13 +32,13 @@
 }
 
 .badge-active {
-  background: #e6f4ea;
-  color: #1e7e34;
+  background: var(--success-bg);
+  color: var(--success);
 }
 
 .badge-inactive {
-  background: #fdecea;
-  color: #b02a37;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 .inline-form {
@@ -54,11 +54,26 @@
 }
 
 .btn-danger {
-  color: #b02a37;
-  border-color: #b02a37;
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .banner-success {
-  background: #e6f4ea;
-  color: #1e7e34;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+@media (max-width: 640px) {
+  /* The org/user rows are laid out as columns of fixed minimum width, which
+     overflowed instead of stacking on a phone (F10). */
+  .org-row,
+  .inline-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .org-row > *,
+  .inline-form > * {
+    min-width: 0;
+  }
 }

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { AdminOrg, ConfigItem } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
@@ -58,6 +60,11 @@ function editableJson(kind: Kind, item: ConfigItem): ConfigItem {
 // already-deployed configuration. Hidden behind its own nav entry -- the
 // wizard is the primary way to build a team.
 export default function AdvancedPage() {
+  const [confirmNode, confirm] = useConfirm()
+  const { t } = useTranslation()
+  // An org with dozens of knowledge bases had no way to find one but to scan
+  // the list by eye (audit finding F15).
+  const [filter, setFilter] = useState('')
   const [activeKey, setActiveKey] = useState(KINDS[0].key)
   const [items, setItems] = useState<ConfigItem[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -102,6 +109,11 @@ export default function AdvancedPage() {
       ? items.filter((it) => it.org == null)
       : items
   const selectedItem = visibleItems.find((it) => itemId(kind, it) === selectedId)
+  // Filtering is display-only: `visibleItems` remains the org-scoping decision
+  // above, so a hidden row can never become a mutation target.
+  const filteredItems = filter.trim()
+    ? visibleItems.filter((it) => itemId(kind, it).toLowerCase().includes(filter.trim().toLowerCase()))
+    : visibleItems
 
   useEffect(() => {
     activeKeyRef.current = activeKey
@@ -160,6 +172,7 @@ export default function AdvancedPage() {
     setNewId('')
     setCreateMode('manual')
     setUploadFiles([])
+    setFilter('')
   }
 
   // Switching tabs keeps whatever organisation the user has selected -- it
@@ -249,8 +262,10 @@ export default function AdvancedPage() {
     let parsed: ConfigItem
     try {
       parsed = JSON.parse(jsonText)
-    } catch {
-      setError('Not valid JSON')
+    } catch (e) {
+      // The parser's own message names the position, which is the only way to
+      // find the problem in an 18-row document.
+      setError(t('advanced.invalidJson', { detail: (e as Error).message }))
       return
     }
 
@@ -271,7 +286,13 @@ export default function AdvancedPage() {
 
   const remove = async () => {
     if (!selectedId) return
-    if (!window.confirm(`Delete "${selectedId}" from ${kind.label}? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: `Delete "${selectedId}"?`,
+      body: `It will be removed from ${kind.label}. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     const startedFor = activeKey
     setSaving(true)
     setError(null)
@@ -319,13 +340,25 @@ export default function AdvancedPage() {
         </nav>
 
         <div className="advanced-list">
+          {!loading && visibleItems.length > 0 && (
+            <input
+              type="search"
+              className="advanced-filter"
+              placeholder={t('advanced.filterPlaceholder')}
+              aria-label={t('advanced.filterPlaceholder')}
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          )}
           {loading ? (
-            <p className="hint">Loading…</p>
+            <p className="hint">{t('common.loading')}</p>
           ) : visibleItems.length === 0 ? (
             <p className="hint">None yet.</p>
+          ) : filteredItems.length === 0 ? (
+            <p className="hint">{t('advanced.noMatches')}</p>
           ) : (
             <ul>
-              {visibleItems.map((item) => {
+              {filteredItems.map((item) => {
                 const id = itemId(kind, item)
                 return (
                   <li key={id}>
@@ -411,7 +444,9 @@ export default function AdvancedPage() {
                 <button className="btn btn-primary" onClick={save} disabled={saving}>
                   {saving ? 'Saving…' : 'Save'}
                 </button>
-                <button className="btn btn-secondary" onClick={remove} disabled={saving}>
+                {/* Never the same visual weight as Save: this one is not
+                    reachable by muscle memory (F15). */}
+                <button className="btn btn-danger-outline" onClick={remove} disabled={saving}>
                   Delete
                 </button>
               </div>
@@ -419,6 +454,7 @@ export default function AdvancedPage() {
           )}
         </div>
       </div>
+      {confirmNode}
     </div>
   )
 }

@@ -160,7 +160,11 @@ export default function PreviewPage() {
       )}
 
       <div className="wizard-actions" style={{ marginTop: 16 }}>
-        <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
+        <button
+          className="btn btn-primary"
+          onClick={() => navigate(`/wizard/${sessionId}/confirm`)}
+          disabled={status === 'running'}
+        >
           Continue
         </button>
       </div>

@@ -2,7 +2,7 @@
   display: flex;
   gap: 6px;
   margin-bottom: 20px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
 }
 
 .activity-tabs button {
@@ -11,14 +11,14 @@
   background: none;
   font-weight: 600;
   font-size: 0.9rem;
-  color: #6b7280;
+  color: var(--text-muted);
   cursor: pointer;
   border-bottom: 2px solid transparent;
 }
 
 .activity-tabs button.active {
-  color: #4f46e5;
-  border-bottom-color: #4f46e5;
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .activity-filters {
@@ -34,13 +34,13 @@
   gap: 4px;
   font-size: 0.8rem;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-soft);
 }
 
 .activity-filters select {
   font: inherit;
   padding: 6px 8px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
 }
 
@@ -57,8 +57,8 @@
 
 .run-detail-panel {
   margin-top: 20px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 18px 20px;
 }
@@ -88,7 +88,7 @@
 
 .maintenance-summary-grid dt {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--text-muted);
   margin: 0;
 }
 
@@ -110,7 +110,7 @@
 
 .needs-attention-item,
 .automation-results-list li {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
 }
@@ -128,10 +128,41 @@
 }
 
 .status-badge.priority-possible_emergency {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 .run-detail-retry {
   margin-top: 14px;
+}
+
+/* The run id demoted out of the heading (F7): still present for support, but
+   as a detail line rather than the first thing a customer reads. */
+.run-detail-id {
+  margin: 2px 0 0;
+  font-size: 0.78rem;
+}
+
+.run-detail-id code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: all;
+}
+
+/* The filter row and tab strip both overflowed rather than wrapping (F10). */
+@media (max-width: 640px) {
+  .activity-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .activity-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .run-detail-panel-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
 }

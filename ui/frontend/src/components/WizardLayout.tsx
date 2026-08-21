@@ -13,7 +13,7 @@ export default function WizardLayout() {
   return (
     <div className="wizard">
       <header className="wizard-header">
-        <h1>Build your AI team</h1>
+        <h1>Intent in, your best AI team out</h1>
         <p>Answer a few questions and we'll design, test, and launch a custom AI team for you.</p>
       </header>
 

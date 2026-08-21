@@ -53,6 +53,57 @@ describe('TracePage', () => {
     )
   })
 
+  it('scrolls the run detail panel into view when a run is selected, like the customer-facing Activity page', async () => {
+    // The panel used to render after the whole runs list + pager, off-screen
+    // for any run not right at the top -- ActivityPage.tsx already solved
+    // this the same way for the customer-facing Runs tab.
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [{ id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false }],
+      total: 1, limit: 50, offset: 0,
+    })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+
+    render(<TracePage />)
+    const runHeading = await screen.findByRole('heading', { name: 'wf-a' })
+
+    await act(async () => {
+      fireEvent.click(runHeading)
+    })
+
+    expect(scrollIntoView).toHaveBeenCalled()
+  })
+
+  it('scrolls the pipeline detail panel into view when a pipeline row is selected', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
+        {
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
+          running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+        },
+      ],
+    })
+    mockedApi.getPipelineAnalytics.mockResolvedValue({
+      org_id: 1, pipeline: 'wf', per_agent: [], per_model: [], common_failure_points: [],
+    })
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+    const row = await screen.findByText('wf')
+
+    await act(async () => {
+      fireEvent.click(row)
+    })
+
+    expect(scrollIntoView).toHaveBeenCalled()
+  })
+
   it('switching to the Analytics tab fetches cross-org pipeline summaries by default', async () => {
     render(<TracePage />)
     await screen.findByDisplayValue('All organisations')

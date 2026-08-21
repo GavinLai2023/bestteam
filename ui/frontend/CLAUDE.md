@@ -4,15 +4,71 @@ Directory-scoped notes for the monitoring dashboard and Team Builder wizard
 frontend. See the root `CLAUDE.md` for project overview, architecture, and
 commands; see `ui/backend/CLAUDE.md` for the API this frontend talks to.
 
-> **Note:** the section below still describes the original six-stage wizard
-> (`/wizard/:sessionId/{requirements|team|refine|test|deploy}`). A later
-> commit (`0d2490a`, "reorder Team Builder wizard from 6 stages to 4
-> customer-facing stages") changed the routes to `PreviewPage`/
-> `ConfirmPage`/etc. This file was split out of the root `CLAUDE.md`
-> verbatim; refreshing it to describe the current 4-stage flow is a separate
-> follow-up.
+## Internationalisation (`lib/i18n.ts`, `locales/`)
 
-## Frontend — wizard UI (Phase 4, `ui/frontend/src/`)
+The UI is bilingual, **English by default**, switchable from the nav at any
+time. Three things about the design are load-bearing:
+
+- **No `navigator.language` detection.** Resolution is
+  `localStorage['bestteam_lang']` then `'en'`, full stop. Auto-detecting would
+  make the default drift with each visitor's browser and would make both the
+  Vitest suite and the Playwright E2E run depend on the locale of whatever
+  machine executes them. It is also what let this land without touching the
+  suite's ~600 English assertions or `tests/e2e`'s 69 `has-text()` selectors.
+- **`locales/en.ts` is the key source of truth** and is deliberately *not*
+  `as const`. Under `as const` every value becomes its own literal type, so
+  `zhCN: Resources` would demand the English string at each key -- exactly
+  backwards. Plain inference keeps the key structure required while letting
+  values differ, so a missing translation fails `tsc` (TS2741) instead of
+  rendering a raw key at a customer.
+- **The switcher labels each language in its own language** and never
+  translates them: someone who has landed in a language they cannot read has
+  to recognise their own by sight to get out.
+
+`src/test/setup.ts` imports `lib/i18n` so `t()` returns real copy in tests;
+it does **not** pin a language, because English is already the default.
+
+Two shared modules exist so copy cannot drift between surfaces again:
+`lib/runStatus.ts` (a run's wire status to a readable label; an unrecognised
+status renders as-is rather than being hidden) and `lib/traceEvents.ts`'s
+`useFriendlyEventTitle` (the customer-facing narration, alongside the existing
+technical `EVENT_LABELS`).
+
+## Styling (`index.css`)
+
+The palette lives as CSS custom properties on `:root`, with dark redefined
+under `prefers-color-scheme` **and** under `[data-theme="dark"]`. Components
+read tokens and must never declare a colour inside a media block -- a colour
+whose only definition sits behind one never applies in the un-stamped state.
+One-off semantic hues (the per-event-type left borders in the trace) stay as
+literals on purpose.
+
+Two tokens exist because a *pair* has to stay coordinated, not just a single
+colour: **`--accent-contrast`** is the foreground for anything sitting on
+`--accent` (a literal `white` reads at 6.3:1 on the light accent and 2.6:1 on
+the pale dark one), and **`--info-text`** completes the info trio, since
+`--danger`/`--success` already double as their own text colour and info had
+none. The rule this encodes: whenever a background comes from a token, its
+foreground must come from one too, or the pair only survives in one theme.
+
+## Confirmations (`lib/useConfirm.tsx`)
+
+There is no `window.confirm` in this app. `useConfirm()` returns
+`[node, confirm]` and is promise-shaped so a call site reads
+`if (!(await confirm({...}))) return`, matching the shape it replaced.
+`ConfirmDialog` uses `<dialog showModal()>` for focus trapping and Escape;
+tests answer it via `test/confirmDialog.ts`, which finds the dialog by its
+Cancel button because jsdom has no `showModal()`.
+
+## Frontend — wizard UI (`ui/frontend/src/`)
+
+The Team Builder wizard is **five steps**
+(`components/WizardProgress.tsx`'s `STEPS`): Your challenge (`/wizard`,
+`IntentPage`), Your documents (`documents`), Meet your team (`preview`),
+Confirm (`confirm`), Go live (`deploy`). A step is unlocked by **data
+presence** (`session.requirements_json` / `specification_json`), not by the
+session's `status` string, so revisiting an earlier stage never relocks a
+later one.
 
 `react-router-dom` (`main.tsx` wraps `<App/>` in `<BrowserRouter>`, itself
 inside `components/ErrorBoundary.tsx` — the one render-error boundary, so a
@@ -23,19 +79,27 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
 
 - **`/`** — `pages/LandingPage.tsx`: not a page but a router. It forwards an
   org member to `/activity` (the Dashboard), or to `/wizard` if the org has no
-  deployed workflow yet; `RequireOrgMember` sends an admin to `/advanced`
+  deployed pipeline yet; `RequireOrgMember` sends an admin to `/advanced`
   before it renders. "Run a team" is a deliberate destination (`/run`), not
   the daily home.
 - **`/run`** — `pages/MonitorPage.tsx`, "Run a team" (renamed from "Talk to
-  your team"): reads an optional `?workflow=` query param via
-  `useSearchParams` to pre-select a workflow, shows a running timer/WS
-  connection status/"waiting for the agent" hint/stale-run banner while a
+  your team"): reads an optional `?pipeline=` query param via
+  `useSearchParams` to pre-select a team, shows a running timer/WS
+  connection status/"waiting for your team" hint/stale-run banner while a
   run is in flight, and a Stop button (`POST /api/runs/{id}/cancel`) gated
   on the new run's id having actually arrived, so an early click can't
   silently no-op or target the previous run. Live events render via the
   shared `lib/traceEvents.ts` helpers (`EVENT_LABELS`/`RESULT_LABELS`/
   `TERMINAL_TYPES`/`renderEventData`), also used by `components/RunDetail.tsx`.
-- **`/activity`** — `pages/ActivityPage.tsx`: an Automations tab
+- **`/activity`** — `pages/ActivityPage.tsx`. **Which tab opens depends on
+  whether the org actually uses automation** (`getEmailTrigger()`): otherwise
+  a customer who has never connected a mailbox landed on a feature they don't
+  use, with their own runs a click away. The tab strip renders immediately
+  (each panel keys off `tab === '...'`, so an undecided tab shows none) and
+  the late-arriving default is applied through `setTab(current => current ??
+  ...)` so it can only fill the undecided case -- a customer who clicked while
+  the request was in flight must not be pulled off their choice. The tabs: an
+  Automations tab
   (`components/EmailTriggerActivity.tsx`, plus — for the Property Maintenance
   Inbox vertical template, see `ui/backend/CLAUDE.md` — `components/
   MaintenanceInboxSummary.tsx` fetching `GET /api/automation-results/summary`
@@ -79,29 +143,37 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   `autonomous: true`, since every automation result belongs to an autonomous
   run by construction). See `ui/backend/CLAUDE.md` ("Granular trace events,
   cancellation, and run history", "Property Maintenance Inbox").
-  The Automations tab also carries email Phase 4a's two settings panels,
-  `components/EmailFilterSettings.tsx` (the `skip_bulk` checkbox and the three
-  pattern lists, one entry per line) and `components/EmailBudgetSettings.tsx`
-  (the daily message cap and monthly spend cap, each shown with what has been
-  used against it), both mounted under `EmailTriggerActivity` — which is what
-  makes the filter panel's reference to the skipped-mail section *above* it
-  true. Four things there are deliberate. **Neither panel renders a form when
-  its initial GET failed** (unlike `WebhookSettings`, whose skeleton they
+  Email Phase 4a's two settings panels, `components/EmailFilterSettings.tsx`
+  (the `skip_bulk` checkbox and the three pattern lists, one entry per line)
+  and `components/EmailBudgetSettings.tsx` (the daily message cap, shown with
+  what has been used against it today), live on the **deployed email team's
+  own Deploy page** (`pages/wizard/DeployPage.tsx`, gated on `session.uses_email`
+  alongside the existing `EmailConnect`/`EmailTriggerToggle`), not on the
+  Activity page — they configure that team, the same way those two already
+  do; a customer looking for "how does my email team behave" shouldn't have
+  to go hunting in a monitoring tab for it. (They used to sit under
+  `EmailTriggerActivity` on the Automations tab; moved because both are
+  settings, not activity — audit finding, 2026-08-20.) `EmailFilterSettings`'s
+  own copy points back to the Automations tab's "Mail we skipped" list by
+  name rather than "above" it, since the two are no longer on the same page.
+  Three things there are deliberate. **Neither panel renders a form when its
+  initial GET failed** (unlike `WebhookSettings`, whose skeleton they
   otherwise follow): saving an empty form here is a data-loss path, since empty
-  textareas replace real filter rules with none and empty cap boxes send
-  `null`/`null` and remove real caps. **An empty cap box sends `null`, not
+  textareas replace real filter rules with none and an empty cap box sends
+  `null` and removes a real cap. **An empty cap box sends `null`, not
   `0`** — `lib/budgetCaps.ts`'s `parseCap` returns `null` for empty,
   `undefined` for something that is not a number (which `save()` refuses with
   an error line rather than letting `NaN` serialise to `null`, i.e. "no
   limit"), and a literal `0` stays `0`, because a cap of zero is a real
   setting; it lives in `lib/` with its own tests because exporting a helper
   from a component file is a `react-refresh/only-export-components` lint
-  error. **`unpriced_models` is advisory, not an error** — rendered as
-  `className="hint"`, never `className="error"`, which is reserved for a failed
-  request — and `unpriced_runs_this_month` gets its own line so the spend
-  figure's blind spot is a stated number rather than something to infer. And a
-  null `spent_this_month` renders as "nothing this month has a price yet",
-  never as `$0.00`, which would be a measured claim about an unmeasured month.
+  error. **The monthly spend cap (`monthly_cost_cap`) has no field here at
+  all** — like the model actually used and exactly how much has been spent
+  (`spent_this_month`/`unpriced_models`/`unpriced_runs_this_month`, still
+  absent from the API-response fields this panel renders), a dollar figure is
+  admin-only; `EmailBudgetSettings` still loads `monthly_cost_cap` from
+  `GET`, purely so `save()` can send it back unedited rather than the PUT's
+  full-replace semantics silently clearing an existing cap.
 
   `EmailTriggerActivity` gained a second card, **"Mail we skipped"**
   (`GET /api/org/email-trigger/filtered`), listing each filtered message's
@@ -121,7 +193,7 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   30s poll, so a response already in flight when Release was clicked cannot put
   the row back on screen. Note the section lives *inside* `EmailTriggerActivity`,
   after its two early returns, so it renders only when a trigger with a
-  `workflow_name` is configured: right today (filtered rows cannot exist before
+  `pipeline_name` is configured: right today (filtered rows cannot exist before
   a trigger has polled), but historical filtered rows become unreachable if a
   customer later disconnects the mailbox.
 
@@ -162,18 +234,22 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   created" line, which would assert something false: `source_key`/`status`
   survive a purge precisely to record that a draft does exist.
 - **`/advanced`** — `pages/AdvancedPage.tsx`, raw-JSON CRUD over
-  `/api/config/{workflows|skills|knowledge_bases|model-catalog}` plus a
+  `/api/config/{pipelines|skills|knowledge_bases|model-catalog}` plus a
   read-only `tools` tab — the operator-only "advanced view" for direct edits.
-  Tabs run whole-then-parts (Workflows → Skills → Knowledge bases → Tools →
+  Tabs run whole-then-parts (Pipelines → Skills → Knowledge bases → Tools →
   Model catalog). Each `KINDS` entry carries an `orgScope` mirroring the
   backend: `required` (`?org=` or 422), `optional` (skills — omitted means the
-  platform built-in tier), `none` (org-less). **A workflow is what the wizard
+  platform built-in tier), `none` (org-less). **A pipeline is what the wizard
   and customer UI call an "AI team"**; this page uses the technical noun
   because it matches the JSON keys the operator is editing.
   Skill rows show their current immutable version; saving appends a version,
   while already-deployed teams keep their pinned version until redeployed.
-- **`/wizard`** (+ `/wizard/:sessionId/{requirements|team|refine|test|deploy}`)
-  — the six-stage Team Builder wizard, `components/WizardLayout.tsx` as the
+  The item list carries a display-only filter (`filteredItems` derives from
+  `visibleItems`, which remains the org-scoping decision, so a hidden row can
+  never become a mutation target; it clears on tab/org change alongside the
+  selection). Delete is outlined-danger rather than sharing Save's weight.
+- **`/wizard`** (+ `/wizard/:sessionId/{documents|preview|confirm|deploy}`)
+  — the five-step Team Builder wizard, `components/WizardLayout.tsx` as the
   shared chrome:
   - `lib/api.ts` — shared `fetch` wrapper (`API_BASE`/`WS_BASE` default to
     `http://localhost:8000`) exposing every backend endpoint as `api.*`
@@ -182,20 +258,22 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     hooks; `WizardLayout` calls `useBuilderSession(sessionId)` once and hands
     `{session, setSession, loading, refresh, sessionId}` to the active stage
     page via `useOutletContext()`.
-  - `components/WizardProgress.tsx` — the 6-step progress bar. A step is
+  - `components/WizardProgress.tsx` — the 5-step progress bar. A step is
     "unlocked" based on **data presence** (`session.requirements_json` /
     `session.specification_json`), not the session's `status` string, so
     revisiting earlier stages after a `solution`/`testing`/`deployed` status
     doesn't relock later steps.
-  - `pages/wizard/*.tsx` — one page per stage (`IntentPage` has no
+  - `pages/wizard/*.tsx` — one page per step. `IntentPage` has no
     `sessionId` yet and creates the session via `api.createSession()`;
-    `RequirementsPage`/`TeamPage`/`RefinePage` each support both a "generate
-    with `model` (+ optional `feedback`)" path and a "confirm/edit the
-    drafted JSON directly" path via `BulletEditor`/raw field edits;
-    `TestPage` runs `api.createTestRun()` then streams the same
-    `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `DeployPage` calls
-    `api.deploySession()` and links to `/?workflow=<name>` for "Run a
-    team").
+    `DocumentsPage` uploads a knowledge base (or skips) and then generates --
+    or, revisiting after a spec exists, *refines* -- the Specification;
+    `PreviewPage` renders `TeamFlow` and runs a test run over the same
+    `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `ConfirmPage` applies
+    solution feedback and hides the model picker behind "Advanced settings"
+    (the page, not `ModelPicker`, owns the catalog and the default model --
+    defaulting from inside a collapsed component left the page's actions
+    permanently disabled); `DeployPage` calls `api.deploySession()` and links
+    to `/run?pipeline=<name>`.
   - `components/TeamFlow.tsx` + `EmployeeCard.tsx` — the customer-facing
     "meet your team" diagram: renders `Specification.teams`/`agents` as
     grouped "virtual employee" cards (avatar-initial + `display_name` +
@@ -263,12 +341,21 @@ backend: `ui/backend/CLAUDE.md`.
   to one short non-technical line. It's cosmetic only — the backend already
   strips everything but the event `type` (plus the final answer) before it
   reaches this socket, so devtools show nothing more than the UI does.
-- Org side: `components/ShareLinksPanel.tsx` is the click-to-expand "Share"
-  panel on **My teams** (generate/copy/revoke links for one deployed team),
-  and `components/SharedSessionsPanel.tsx` backs the **Shared** audit tab on
-  `pages/ActivityPage.tsx` (pick a team, list its visitor sessions, read a
-  session's transcript). The Shared tab's team picker lists only workflows
-  with a real DB id — a YAML-only demo can't have share links.
+- Org side, both on **My teams**' team cards only (`pages/wizard/
+  SessionsPage.tsx`, gated on `session.pipeline_id != null` — a YAML-only
+  demo pipeline has no `PipelineRecord.id` to hang a share link off):
+  `components/ShareLinksPanel.tsx` is the click-to-expand "Share" panel
+  (generate/copy/revoke links for that team), and
+  `components/SharedSessionsPanel.tsx` is the read-only audit view beside it
+  (list the team's visitor sessions, read a session's transcript), behind its
+  own "Shared sessions" toggle — `SessionsPage`'s own `openAudit` state, not
+  `SharedSessionsPanel`'s concern, so a page listing many teams doesn't fire a
+  `listShareLinks`/`listShareSessions` fetch per card on load (same reasoning
+  as `ShareLinksPanel`'s own collapse-by-default "Share" button). Both used to
+  also render on **Run a team** (`pages/MonitorPage.tsx`) — removed as
+  redundant with My teams (audit finding, 2026-08-21) — and, before that, a
+  separate **Shared** tab on `pages/ActivityPage.tsx` (the Dashboard) — also
+  removed, same reasoning, one round earlier.
 
 ## Auth and login UI
 

@@ -589,6 +589,7 @@ class ModelCatalogEntrySpec(BaseModel):
     tier: str = "balanced"
     input_price_per_1k: float = 0.0
     output_price_per_1k: float = 0.0
+    is_default: bool = False
 
 
 def _model_catalog_entry_to_dict(entry) -> Dict[str, Any]:
@@ -599,6 +600,7 @@ def _model_catalog_entry_to_dict(entry) -> Dict[str, Any]:
         "tier": entry.tier,
         "input_price_per_1k": entry.input_price_per_1k,
         "output_price_per_1k": entry.output_price_per_1k,
+        "is_default": entry.is_default,
     }
 
 

@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import BulletEditor from '../../components/BulletEditor'
-import ModelPicker from '../../components/ModelPicker'
 import TeamFlow from '../../components/TeamFlow'
 import { api } from '../../lib/api'
+import { pickDefaultModel } from '../../lib/models'
+import { useModelCatalog } from '../../lib/useModelCatalog'
 import type { Requirements, WizardOutletContext } from '../../lib/types'
 
 const EMPTY_REQUIREMENTS: Requirements = {
@@ -18,15 +20,30 @@ const EMPTY_REQUIREMENTS: Requirements = {
 export default function ConfirmPage() {
   const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
+  const { t } = useTranslation()
+  // Both actions on this page call the Solution Architect internally, but
+  // which model runs it is a platform choice the customer never sees or
+  // picks (see the admin's `is_default` catalog entry, `pickDefaultModel`) --
+  // they only care about the models their own team's agents end up using,
+  // which the Architect assigns. Gating on catalogUnavailable/catalogLoading,
+  // the same pattern IntentPage/DocumentsPage use, is what keeps this from
+  // becoming a dead end when the catalog is empty or failed to load (audit
+  // finding F3).
+  const {
+    loading: catalogLoading,
+    failed: catalogFailed,
+    entries: catalogEntries,
+    retry: retryCatalog,
+  } = useModelCatalog()
+  const catalogUnavailable = catalogFailed || (!catalogLoading && catalogEntries.length === 0)
+  const catalogNotReady = catalogLoading || catalogUnavailable
 
-  const [model, setModel] = useState('')
   const [feedback, setFeedback] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [showRequirements, setShowRequirements] = useState(false)
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
-  const [reqModel, setReqModel] = useState('')
   const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
   const [reqError, setReqError] = useState<string | null>(null)
@@ -59,13 +76,16 @@ export default function ConfirmPage() {
   const history = (session.feedback_history ?? []).filter((entry) => entry.stage === 'solution')
 
   const applyFeedback = async () => {
-    // Feedback is optional -- the customer may just be switching which
-    // assistant/model their team uses, with nothing else to describe.
-    if (!model || busy) return
+    // Feedback is optional -- an empty description still re-runs the
+    // Architect (e.g. after uploading new documents).
+    if (catalogNotReady || busy) return
     setBusy(true)
     setError(null)
     try {
-      const updated = await api.submitSolution(sessionId!, { feedback: feedback.trim(), model })
+      const updated = await api.submitSolution(sessionId!, {
+        feedback: feedback.trim(),
+        model: pickDefaultModel(catalogEntries),
+      })
       setSession(updated)
       setFeedback('')
     } catch (e) {
@@ -89,12 +109,29 @@ export default function ConfirmPage() {
     }
   }
 
-  const regenerateRequirements = async () => {
-    if (!reqModel || !reqFeedback.trim() || reqBusy) return
+  const generateRequirements = async () => {
+    if (catalogNotReady || reqBusy) return
     setReqBusy(true)
     setReqError(null)
     try {
-      const updated = await api.submitRequirements(sessionId!, { model: reqModel, feedback: reqFeedback.trim() })
+      const updated = await api.submitRequirements(sessionId!, { model: pickDefaultModel(catalogEntries) })
+      setSession(updated)
+    } catch (e) {
+      setReqError((e as Error).message)
+    } finally {
+      setReqBusy(false)
+    }
+  }
+
+  const regenerateRequirements = async () => {
+    if (catalogNotReady || !reqFeedback.trim() || reqBusy) return
+    setReqBusy(true)
+    setReqError(null)
+    try {
+      const updated = await api.submitRequirements(sessionId!, {
+        model: pickDefaultModel(catalogEntries),
+        feedback: reqFeedback.trim(),
+      })
       setSession(updated)
       setReqFeedback('')
     } catch (e) {
@@ -111,6 +148,17 @@ export default function ConfirmPage() {
         Here's your team again. If something's off, describe the change and we'll redesign it — you can always go
         back to try it out again.
       </p>
+
+      {catalogUnavailable && (
+        <div className="banner banner-error">
+          {catalogFailed ? t('modelCatalog.loadFailed') : t('modelCatalog.empty')}
+          <div className="wizard-actions" style={{ marginTop: 8 }}>
+            <button className="btn btn-secondary" onClick={retryCatalog}>
+              {t('common.tryAgain')}
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && <p className="banner banner-error">{error}</p>}
 
@@ -147,10 +195,8 @@ export default function ConfirmPage() {
           Need to add or update a document? Upload it here
         </button>
       </div>
-      <ModelPicker value={model} onChange={setModel} label="Which assistant should your team use?" />
-
       <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={applyFeedback} disabled={!model || busy}>
+        <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
           {busy ? 'Updating…' : 'Apply this change'}
         </button>
       </div>
@@ -164,7 +210,19 @@ export default function ConfirmPage() {
       {showRequirements && (
         <div style={{ marginTop: 16 }}>
           {!session.requirements_json ? (
-            <p className="hint">No summary was generated for this session.</p>
+            <div>
+              <p className="hint">No summary was generated for this session.</p>
+              {reqError && <p className="banner banner-error">{reqError}</p>}
+              <div className="wizard-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={generateRequirements}
+                  disabled={catalogNotReady || reqBusy}
+                >
+                  {reqBusy ? 'Generating…' : 'Generate summary'}
+                </button>
+              </div>
+            </div>
           ) : (
             <>
               {reqError && <p className="banner banner-error">{reqError}</p>}
@@ -244,12 +302,11 @@ export default function ConfirmPage() {
                   placeholder="e.g. We also use Zendesk for tickets, and replies must stay under 150 words."
                 />
               </div>
-              <ModelPicker value={reqModel} onChange={setReqModel} label="Which assistant should redo this?" />
               <div className="wizard-actions">
                 <button
                   className="btn btn-secondary"
                   onClick={regenerateRequirements}
-                  disabled={!reqModel || !reqFeedback.trim() || reqBusy}
+                  disabled={catalogNotReady || !reqFeedback.trim() || reqBusy}
                 >
                   {reqBusy ? 'Thinking…' : 'Regenerate summary'}
                 </button>

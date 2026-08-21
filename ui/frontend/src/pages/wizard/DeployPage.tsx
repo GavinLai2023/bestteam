@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import EmailBudgetSettings from '../../components/EmailBudgetSettings'
 import EmailConnect from '../../components/EmailConnect'
+import EmailFilterSettings from '../../components/EmailFilterSettings'
 import EmailTriggerToggle from '../../components/EmailTriggerToggle'
 import { api } from '../../lib/api'
 import type { WizardOutletContext } from '../../lib/types'
@@ -53,6 +55,11 @@ export default function DeployPage() {
         <p className="banner banner-success">"{spec.name}" is up and running and ready to take on real requests.</p>
         {session.uses_email && <EmailConnect />}
         {session.uses_email && <EmailTriggerToggle pipelineName={spec.name} />}
+        {/* This team's mail-handling settings live here, not on the Activity
+            page's Automations tab -- they configure this team, the same way
+            EmailConnect/EmailTriggerToggle above already do. */}
+        {session.uses_email && <EmailFilterSettings />}
+        {session.uses_email && <EmailBudgetSettings />}
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
             Make more adjustments

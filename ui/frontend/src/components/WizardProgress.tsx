@@ -19,9 +19,9 @@ function pathFor(stage: string, sessionId: string | undefined) {
   return `/wizard/${sessionId}/${stage}`
 }
 
-// Renders the four-stage progress bar. `session` (may be null while the
-// Intent stage hasn't created one yet) determines which later stages are
-// reachable -- a customer can always look back, but can't skip ahead of
+// Renders the five-step progress bar (`STEPS` above). `session` (may be null
+// while the Intent stage hasn't created one yet) determines which later stages
+// are reachable -- a customer can always look back, but can't skip ahead of
 // what's actually been generated.
 export default function WizardProgress({ session }: WizardProgressProps) {
   const { sessionId } = useParams()

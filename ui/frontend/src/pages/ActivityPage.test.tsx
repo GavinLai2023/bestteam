@@ -8,6 +8,7 @@ vi.mock('../lib/api', () => ({
   api: {
     listPipelines: vi.fn(),
     listRuns: vi.fn(),
+    getActivityOverview: vi.fn(),
     getEmailTrigger: vi.fn(),
     emailTriggerActivity: vi.fn(),
     createWsTicket: vi.fn(),
@@ -18,10 +19,6 @@ vi.mock('../lib/api', () => ({
     listNotifications: vi.fn(),
     listFilteredMessages: vi.fn(),
     releaseFilteredMessage: vi.fn(),
-    getEmailFilter: vi.fn(),
-    setEmailFilter: vi.fn(),
-    getEmailBudget: vi.fn(),
-    setEmailBudget: vi.fn(),
   },
 }))
 
@@ -39,6 +36,14 @@ describe('ActivityPage', () => {
     vi.clearAllMocks()
     mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf-a', 'wf-b'] })
     mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'off', daily_cap: 0 })
+    // The page now always opens on Overview (it works the same whether or
+    // not the org uses automation), so every test that needs a different
+    // tab clicks its way there explicitly.
+    mockedApi.getActivityOverview.mockResolvedValue({
+      sessions: 0, active_days: 0, current_streak: 0, longest_streak: 0, peak_hour: null, daily_counts: [],
+      completed_count: 0, team_counts: [],
+    })
+    mockedApi.listRuns.mockResolvedValue({ runs: [] })
     mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })
     mockedApi.automationResultsSummary.mockResolvedValue({
       ever_used: false,
@@ -48,20 +53,6 @@ describe('ActivityPage', () => {
     mockedApi.listAutomationResults.mockResolvedValue({ results: [] })
     mockedApi.listNotifications.mockResolvedValue({ notifications: [], unread: 0 })
     mockedApi.listFilteredMessages.mockResolvedValue({ filtered: [] })
-    mockedApi.getEmailFilter.mockResolvedValue({
-      skip_bulk: true,
-      sender_blocklist: [],
-      sender_allowlist: [],
-      subject_blocklist: [],
-    })
-    mockedApi.getEmailBudget.mockResolvedValue({
-      daily_message_cap: null,
-      monthly_cost_cap: null,
-      messages_today: 0,
-      spent_this_month: null,
-      unpriced_runs_this_month: 0,
-      unpriced_models: [],
-    })
   })
 
   it('shows the unread alert badge before the Alerts tab has ever been opened', async () => {
@@ -79,11 +70,20 @@ describe('ActivityPage', () => {
     expect(mockedApi.listNotifications).toHaveBeenCalledWith(true, 1)
   })
 
-  it('defaults to the Automations tab', async () => {
+  // Overview works the same for every org regardless of whether it uses
+  // automation, which is what let this replace the old F6 Automations-vs-Runs
+  // guess (an org that had never connected a mailbox used to land on an
+  // Automations tab showing nothing, hiding its own runs behind a click).
+  it('always opens on Overview, whether or not the org uses automation', async () => {
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
+
     renderPage()
 
-    expect(await screen.findByText('Automations')).toHaveClass('active')
-    expect(mockedApi.listRuns).not.toHaveBeenCalled()
+    expect(await screen.findByText('Overview')).toHaveClass('active')
+    expect(screen.getByText('Automations')).not.toHaveClass('active')
+    expect(screen.getByText('Runs')).not.toHaveClass('active')
   })
 
   it('switching to the Runs tab lists runs and lets you filter', async () => {
@@ -178,13 +178,13 @@ describe('ActivityPage', () => {
       await Promise.resolve()
     })
 
-    expect(screen.getByText('running', { selector: '.status-badge' })).toBeInTheDocument()
+    expect(screen.getByText('Running', { selector: '.status-badge' })).toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000)
     })
 
-    expect(screen.getByText('completed', { selector: '.status-badge' })).toBeInTheDocument()
+    expect(screen.getByText('Completed', { selector: '.status-badge' })).toBeInTheDocument()
     expect(mockedApi.listRuns).toHaveBeenCalledTimes(2)
   })
 
@@ -252,6 +252,9 @@ describe('ActivityPage', () => {
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunsButton = await screen.findByText('View automatic runs')
 
     await act(async () => {
@@ -262,7 +265,27 @@ describe('ActivityPage', () => {
     expect(mockedApi.listRuns).toHaveBeenCalledWith({ manual: false, offset: 0 })
   })
 
+  it('does not show the mail-filter or volume-limit settings here -- those live on the email team\'s Deploy page', async () => {
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 0,
+    })
+
+    renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
+    await screen.findByText(/Automatic runs/)
+
+    expect(screen.queryByText('Which mail to skip')).not.toBeInTheDocument()
+    expect(screen.queryByText('How much automatic work to allow')).not.toBeInTheDocument()
+  })
+
   it('clicking "View run" on a needs-attention item jumps to the Runs tab and opens that run', async () => {
+    // An org with automation results necessarily has a trigger configured,
+    // which is also what opens the dashboard on the Automations tab (F6).
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
     mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
         id: 1, run_id: 'run-42', status: 'needs_attention',
@@ -279,6 +302,9 @@ describe('ActivityPage', () => {
     Element.prototype.scrollIntoView = vi.fn()
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunButton = await screen.findByText('View run')
 
     await act(async () => {
@@ -286,7 +312,8 @@ describe('ActivityPage', () => {
     })
 
     expect(await screen.findByText('Runs')).toHaveClass('active')
-    expect(screen.getByText('Run run-42')).toBeInTheDocument()
+    // The id is no longer the panel's title, but is still on screen for support (F7).
+    expect(screen.getByText('run-42', { selector: 'code' })).toBeInTheDocument()
   })
 
   it('opens a needs-attention item at its real, persisted status -- not an assumed "completed" -- so Retry renders for a run that actually failed', async () => {
@@ -295,6 +322,11 @@ describe('ActivityPage', () => {
     // guaranteed to be `completed`. Hardcoding that status used to
     // permanently hide the Retry button for exactly this case (Codex review
     // finding).
+    // An org with automation results necessarily has a trigger configured,
+    // which is also what opens the dashboard on the Automations tab (F6).
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: true, pipeline_name: 'wf-a', status: 'active', daily_cap: 50,
+    })
     mockedApi.listAutomationResults.mockResolvedValue({
       results: [{
         id: 1, run_id: 'run-42', status: 'error',
@@ -318,13 +350,17 @@ describe('ActivityPage', () => {
     Element.prototype.scrollIntoView = vi.fn()
 
     renderPage()
+    await act(async () => {
+      fireEvent.click(screen.getByText('Automations'))
+    })
     const viewRunButton = await screen.findByText('View run')
 
     await act(async () => {
       fireEvent.click(viewRunButton)
     })
 
-    expect(await screen.findByText('Run run-42')).toBeInTheDocument()
+    // The id moved out of the heading into a support detail line (F7).
+    expect(await screen.findByText('run-42', { selector: 'code' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(mockedApi.listRuns).toHaveBeenCalledWith({ run_id: 'run-42', limit: 1 })
   })
@@ -370,22 +406,29 @@ describe('ActivityPage', () => {
     expect(mockedApi.getRunTrace).toHaveBeenCalledWith('r1')
   })
 
-  it('offers only teams with a real id in the Shared tab picker', async () => {
-    // A YAML-only demo pipeline has no `pipeline_ids` entry, so it used to
-    // render with value="" -- indistinguishable from the "Pick a team…"
-    // placeholder and silently doing nothing when selected. Such a pipeline
-    // can't have share links at all.
-    mockedApi.listPipelines.mockResolvedValue({
-      pipelines: ['db-team', 'yaml-only-demo'],
-      pipeline_ids: { 'db-team': 7 },
+  it('shows the run detail nested under the clicked run, not after the whole list', async () => {
+    // Previously the panel always rendered after the pager, at the bottom of
+    // the tab -- for a run near the top of a long list that put the detail
+    // an entire scroll away from the row the customer just clicked.
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        { id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false },
+        { id: 'r2', pipeline: 'wf-b', status: 'completed', started_at: '2026-07-31T12:00:00Z', autonomous: false },
+      ],
     })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [{ type: 'run_completed', agent: undefined, data: 'done' }] })
 
     renderPage()
     await act(async () => {
-      fireEvent.click(screen.getByText('Shared'))
+      fireEvent.click(screen.getByText('Runs'))
+    })
+    const secondRunHeading = await screen.findByRole('heading', { name: 'wf-b' })
+
+    await act(async () => {
+      fireEvent.click(secondRunHeading)
     })
 
-    expect(await screen.findByRole('option', { name: 'db-team' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'yaml-only-demo' })).not.toBeInTheDocument()
+    const detail = await screen.findByText('Final output')
+    expect(secondRunHeading.closest('li')).toContainElement(detail)
   })
 })

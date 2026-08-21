@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import DocumentsPage from './DocumentsPage'
 import { api } from '../../lib/api'
 import type { BuilderSession } from '../../lib/types'
+import { answerConfirm, confirmDialogBody } from '../../test/confirmDialog'
 
 vi.mock('../../lib/api', () => ({
   api: {
@@ -379,8 +380,6 @@ describe('DocumentsPage', () => {
     )
     mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     renderPage()
     await screen.findByText('Search quality')
 
@@ -391,13 +390,18 @@ describe('DocumentsPage', () => {
 
     fireEvent.click(screen.getByText('Continue'))
 
-    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
-    const prompt = confirmSpy.mock.calls[0][0] as string
-    expect(prompt).toContain('It currently uses Standard search.')
-    expect(prompt).toContain('They will be indexed with Enhanced search.')
+    // Both halves of the change must be in the one dialog the customer answers:
+    // what the collection is like today, and what it would become.
+    const body = await confirmDialogBody()
+    expect(body).toContain('It currently uses Standard search.')
+    expect(body).toContain('re-indexed with Enhanced search.')
+
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
     await waitFor(() =>
       expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenLastCalledWith('policies', [file], true, true, undefined),
     )
-    confirmSpy.mockRestore()
   })
 })
