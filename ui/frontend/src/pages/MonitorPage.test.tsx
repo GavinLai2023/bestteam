@@ -15,6 +15,8 @@ vi.mock('../lib/api', () => ({
     listShareLinks: vi.fn(),
     createShareLink: vi.fn(),
     patchShareLink: vi.fn(),
+    listShareSessions: vi.fn(),
+    getShareSessionMessages: vi.fn(),
   },
 }))
 
@@ -430,6 +432,7 @@ describe('MonitorPage sharing the selected team', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockedApi.listShareLinks.mockResolvedValue([])
+    mockedApi.listShareSessions.mockResolvedValue([])
   })
 
   it('offers a Share button for a team with a real deployed id', async () => {
@@ -463,5 +466,45 @@ describe('MonitorPage sharing the selected team', () => {
     fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
+  })
+})
+
+// Moved here from the Dashboard's "Shared" tab, which used to render this as
+// a separate audit view (SharedSessionsPanel) reachable only from
+// ActivityPage.tsx -- everything about sharing a team now lives on the one
+// page where a customer picks the team in the first place.
+describe('MonitorPage sharing audit for the selected team', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows the sharing audit view for a team with a real deployed id', async () => {
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'], pipeline_ids: { wf: 5 } })
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 1, pipeline_id: 5, token: 'tok', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-21T00:00:00+00:00' },
+    ])
+    mockedApi.listShareSessions.mockResolvedValue([
+      { id: 9, created_at: '2026-08-21T00:00:00+00:00', last_active_at: '2026-08-21T01:00:00+00:00', turns_today: 3 },
+    ])
+
+    renderPage()
+
+    // Real fetched data, not just the panel's own empty-state hint (which
+    // renders synchronously before the fetch resolves and would pass this
+    // assertion even if the panel were never wired up to the right team).
+    expect(await screen.findByText(/3 turns today/)).toBeInTheDocument()
+    expect(mockedApi.listShareLinks).toHaveBeenCalledWith(5)
+  })
+
+  // A YAML-only demo pipeline has no PipelineRecord.id, so there is nothing
+  // to look up sessions against.
+  it('shows no sharing audit view for a team with no deployed id', async () => {
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: ['demo_wf'] })
+
+    renderPage()
+
+    await screen.findByRole('option', { name: 'demo_wf' })
+    expect(screen.queryByText('No share links for this team yet.')).not.toBeInTheDocument()
+    expect(mockedApi.listShareLinks).not.toHaveBeenCalled()
   })
 })

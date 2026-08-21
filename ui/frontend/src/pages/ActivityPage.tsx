@@ -10,7 +10,6 @@ import NeedsAttentionList from '../components/NeedsAttentionList'
 import NotificationsPanel from '../components/NotificationsPanel'
 import RunDetail from '../components/RunDetail'
 import RunsPager from '../components/RunsPager'
-import SharedSessionsPanel from '../components/SharedSessionsPanel'
 import WebhookSettings from '../components/WebhookSettings'
 import type { RunListItem } from '../lib/types'
 import '../components/WizardLayout.css'
@@ -56,7 +55,7 @@ export default function ActivityPage() {
   // Automations and Runs (audit finding F6: an org that had never connected
   // a mailbox used to land on an empty Automations tab, hiding its own runs
   // one click away).
-  const [tab, setTab] = useState<'overview' | 'automations' | 'runs' | 'shared' | 'alerts'>('overview')
+  const [tab, setTab] = useState<'overview' | 'automations' | 'runs' | 'alerts'>('overview')
   // Kept here so the tab label can carry the unread badge without the
   // panel having to be mounted. Fetched below rather than only through
   // NotificationsPanel's callback: the panel is mounted only once the Alerts
@@ -72,8 +71,6 @@ export default function ActivityPage() {
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState({ total: 0, limit: 50 })
   const [selectedRun, setSelectedRun] = useState<SelectedRun | null>(null) // { id, status } | null
-  const [sharedPipelineId, setSharedPipelineId] = useState<number | null>(null)
-  const [pipelineIds, setPipelineIds] = useState<Record<string, number>>({})
   const hasRunningRun = runs.some((run) => run.status === 'running')
   const runDetailRef = useRef<HTMLElement>(null)
 
@@ -115,7 +112,6 @@ export default function ActivityPage() {
       .listPipelines()
       .then((d) => {
         setPipelines(d.pipelines)
-        setPipelineIds(d.pipeline_ids ?? {})
       })
       .catch(() => {})
   }, [])
@@ -219,9 +215,6 @@ export default function ActivityPage() {
         <button type="button" className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
           {t('activity.tabRuns')}
         </button>
-        <button type="button" className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
-          {t('activity.tabShared')}
-        </button>
         <button type="button" className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}>
           {t('activity.tabAlerts')}
           {unreadAlerts > 0 && <span className="badge">{unreadAlerts}</span>}
@@ -269,33 +262,6 @@ export default function ActivityPage() {
             }}
           />
         </>
-      )}
-
-      {tab === 'shared' && (
-        <section className="activity-shared">
-          <label>
-            {t('activity.teamLabel')}
-            <select
-              value={sharedPipelineId ?? ''}
-              onChange={(e) => setSharedPipelineId(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">{t('activity.pickTeam')}</option>
-              {/* Only teams with a real DB id: a YAML-only demo pipeline has
-                  no `pipeline_ids` entry, so it rendered with value="" --
-                  indistinguishable from the placeholder and silently doing
-                  nothing when picked. Such a pipeline can't have share links
-                  at all (no PipelineRecord.id to hang one off). */}
-              {pipelines
-                .filter((name) => pipelineIds[name] != null)
-                .map((name) => (
-                  <option key={name} value={pipelineIds[name]}>
-                    {name}
-                  </option>
-                ))}
-            </select>
-          </label>
-          {sharedPipelineId != null && <SharedSessionsPanel pipelineId={sharedPipelineId} />}
-        </section>
       )}
 
       {tab === 'runs' && (

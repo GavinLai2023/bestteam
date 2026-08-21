@@ -342,11 +342,17 @@ backend: `ui/backend/CLAUDE.md`.
   strips everything but the event `type` (plus the final answer) before it
   reaches this socket, so devtools show nothing more than the UI does.
 - Org side: `components/ShareLinksPanel.tsx` is the click-to-expand "Share"
-  panel on **My teams** (generate/copy/revoke links for one deployed team),
-  and `components/SharedSessionsPanel.tsx` backs the **Shared** audit tab on
-  `pages/ActivityPage.tsx` (pick a team, list its visitor sessions, read a
-  session's transcript). The Shared tab's team picker lists only pipelines
-  with a real DB id — a YAML-only demo can't have share links.
+  panel (generate/copy/revoke links for one deployed team), and
+  `components/SharedSessionsPanel.tsx` is the read-only audit view beside it
+  (list the selected team's visitor sessions, read a session's transcript).
+  Both render on **My teams**' team cards *and* on **Run a team**
+  (`pages/MonitorPage.tsx`, gated on `pipelineIds[selected] != null` — a
+  YAML-only demo pipeline has no `PipelineRecord.id` to hang a share link
+  off). They used to also back a separate **Shared** tab on
+  `pages/ActivityPage.tsx` (the Dashboard); that tab was removed — sharing a
+  team and auditing who used the link now live on the one page where a
+  customer already picks the team, not on a monitoring page (audit finding,
+  2026-08-21).
 
 ## Auth and login UI
 

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { API_BASE, WS_BASE, api } from '../lib/api'
 import ShareLinksPanel from '../components/ShareLinksPanel'
+import SharedSessionsPanel from '../components/SharedSessionsPanel'
 import {
   EVENT_LABELS,
   FRIENDLY_EVENT_TYPES,
@@ -242,6 +243,7 @@ function MonitorPage() {
           <p className="hint">{t('run.noTeams')}</p>
         )}
         {pipelineIds[selected] != null && <ShareLinksPanel pipelineId={pipelineIds[selected]} />}
+        {pipelineIds[selected] != null && <SharedSessionsPanel pipelineId={pipelineIds[selected]} />}
 
         <label>
           {t('run.taskLabel')}

@@ -430,23 +430,4 @@ describe('ActivityPage', () => {
     const detail = await screen.findByText('Final output')
     expect(secondRunHeading.closest('li')).toContainElement(detail)
   })
-
-  it('offers only teams with a real id in the Shared tab picker', async () => {
-    // A YAML-only demo pipeline has no `pipeline_ids` entry, so it used to
-    // render with value="" -- indistinguishable from the "Pick a team…"
-    // placeholder and silently doing nothing when selected. Such a pipeline
-    // can't have share links at all.
-    mockedApi.listPipelines.mockResolvedValue({
-      pipelines: ['db-team', 'yaml-only-demo'],
-      pipeline_ids: { 'db-team': 7 },
-    })
-
-    renderPage()
-    await act(async () => {
-      fireEvent.click(screen.getByText('Shared'))
-    })
-
-    expect(await screen.findByRole('option', { name: 'db-team' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'yaml-only-demo' })).not.toBeInTheDocument()
-  })
 })
