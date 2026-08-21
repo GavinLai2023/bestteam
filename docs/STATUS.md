@@ -1655,12 +1655,42 @@
   healthy), and a Docker restore rehearsal (no Docker on the workstation --
   an operator step called out in `docs/deployment.md`).
 
+- **Diagnostic re-runs (2026-08-21).** "Which step went wrong?" for a poor
+  run, admin-only: `POST /api/runs/{id}/diagnose` re-runs the original input
+  against the team as currently deployed with the SDK's new
+  `Pipeline.stream(diagnostic=True)`, and the new run's trace carries each
+  agent's exact prompt (`agent_prompt`), every model turn including the one
+  that chose a tool (`model_turn`), tool-call `args`, and the full tool
+  `result` -- for a knowledge base tool, the excerpts the model actually read.
+  Normal runs are byte-identical to before (P0-5's "no document text in
+  `trace_events`" still holds for them); the email tools stay redacted on
+  every path. The Trace page's run detail gets a "Diagnose this run" button,
+  the new run streams into the same panel with a banner back to the original,
+  and the customer's own Runs tab never lists a diagnostic run. Refused for
+  autonomous/shared-chat runs (they would reach the mailbox / the visitor),
+  for a diagnostic run itself and for a purged run; never engages per-user
+  memory. Spec: `docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md`.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
 
+- **A diagnostic re-run diagnoses the *current* team, not the run's pinned
+  version.** `POST /api/runs/{id}/diagnose` builds through the cached
+  `_resolve_pipeline_and_version`; the response's `version_changed` flags a
+  redeploy since the original run, but nothing rebuilds the pinned
+  `pipeline_versions` config. Also deliberately absent from v1: relevance
+  scores on knowledge-base hits (`_Chunk` carries none and the fused/reranked
+  order has no single meaningful number -- the trace shows rank order plus
+  the text the model read), the original run's memory preamble (a diagnostic
+  run passes no `user_id`, so it can't recall the customer's memory without
+  acting as them), an admin "purge this diagnostic run" action (the org's
+  retention sweep still covers it), and excluding diagnostic runs from
+  `run_analytics.py` (they are real spend). A model's non-determinism means a
+  re-run may simply not reproduce the original answer -- the mechanism shows
+  what the team does with that input now, with full visibility.
 - **The Chinese UI has never been looked at in a browser.** The frontend is
   bilingual as of the 2026-08-20 UX pass, but **English is the default**, so
   no automated test renders a single Chinese string: Vitest runs in `en` and

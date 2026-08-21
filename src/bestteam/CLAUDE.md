@@ -27,6 +27,14 @@ sequential and parallel collaboration modes.
   deterministic dry-run models (`FakeListChatModel` under the hood) without
   needing real API keys. Use this for demos/tests — see
   `ui/backend/pipelines/*.yaml`.
+- **`diagnostic` is a run-level switch, not a config**: `Pipeline.run/stream(
+  ..., diagnostic=True)` travels as `_TeamState.diagnostic` (plain field, set
+  once by `_initial_state`, like `memory_preamble`) into `_run_agent`, which
+  then also emits `agent_prompt`/`model_turn` and adds `args`/`result` to the
+  tool events -- see `core/trace.py` for the shapes. Default off keeps the
+  event stream byte-identical; the email tools stay redacted either way. The
+  backend's admin diagnostic re-run (`ui/backend/CLAUDE.md`) is its only
+  caller today.
 - **Preserve `BestTeamError` subtypes through adapter boundaries**: always
   `except BestTeamError: raise` *before* a broad `except Exception` in
   adapter code, otherwise `ConfigurationError`/etc. get masked as a generic
