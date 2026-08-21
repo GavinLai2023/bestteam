@@ -93,19 +93,23 @@ class Pipeline:
         *,
         user_id: Optional[str] = None,
         memory: Optional["MemoryManager"] = None,
+        diagnostic: bool = False,
     ) -> PipelineResult:
         """Execute the pipeline end-to-end and return a normalized result.
 
         When both `user_id` and `memory` are given, per-user memory is recalled
         into every agent's system prompt before the run and the run is recorded
         afterward (see `core/memory.py`). Both default to None → no memory,
-        current behavior unchanged.
+        current behavior unchanged. `diagnostic` is forwarded to the adapter
+        (see `stream`).
         """
         if self._compiled is None:
             self._compiled = self._adapter.compile(self)
 
         recall_result = _safe_recall(memory, user_id, input)
-        result = self._adapter.execute(self._compiled, input, memory_preamble=recall_result.preamble)
+        result = self._adapter.execute(
+            self._compiled, input, memory_preamble=recall_result.preamble, diagnostic=diagnostic
+        )
         if memory:
             # Surface recall + recording instrumentation for parity with stream()
             # (reviews r4 #3 / r6 #3). Both stay None when memory is disabled.
@@ -124,9 +128,14 @@ class Pipeline:
         *,
         user_id: Optional[str] = None,
         memory: Optional["MemoryManager"] = None,
+        diagnostic: bool = False,
     ) -> Iterator[TraceEvent]:
         """Run the pipeline while yielding live TraceEvents — what the
         monitoring UI subscribes to.
+
+        `diagnostic=True` (an admin's diagnostic re-run) makes the adapter also
+        emit the prompts, model turns and tool args/results a normal trace
+        leaves out -- see `core/trace.py`. Default off: the stream is unchanged.
 
         Wraps the adapter's raw event stream with run-level bookends
         (`run_started`/`run_completed`/`run_failed`) and stamps every event
@@ -172,7 +181,7 @@ class Pipeline:
         last_output = ""
         try:
             for event in self._adapter.stream(
-                self._compiled, input, memory_preamble=recall_result.preamble
+                self._compiled, input, memory_preamble=recall_result.preamble, diagnostic=diagnostic
             ):
                 event = dataclasses.replace(event, pipeline=self.name)
                 if event.type == "agent_completed":

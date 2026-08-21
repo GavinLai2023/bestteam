@@ -39,6 +39,20 @@ class TraceEvent:
     — a consumer that stops on the terminal event won't see them, but the backend
     drains the full stream to meter/record them.
 
+    **Diagnostic runs only** (`Pipeline.run/stream(..., diagnostic=True)`, an
+    admin's diagnostic re-run of a poor run -- never a customer-initiated run):
+    "agent_prompt" (`data` = {"system_prompt": str, "input": str}, the exact
+    messages the agent's first model call received, emitted right after
+    `agent_started`), "model_turn" (`data` = {"turn": int, "content": str,
+    "tool_calls": [{"name": str, "args": dict | None}]}, one per model call,
+    including the final one -- never the provider's call ids), and two
+    extensions: `tool_started` gains `"args": dict` and `tool_completed` gains
+    `"result": str`, the full string returned to the model (a knowledge base
+    tool's `result` is therefore the retrieved excerpts the model read). Every
+    diagnostic string is capped (`_MAX_DIAGNOSTIC_CHARS` in the adapter). The
+    email tools are exempt on every path -- no `args`, no `result`, and `None`
+    args in `model_turn` -- because their args/results are mail content.
+
     `usage` holds zero or more per-model-call token usage entries (each
     `{"model": <spec str>, "input_tokens": int, "output_tokens": int}`)
     recorded while producing this event -- empty for engines/models that

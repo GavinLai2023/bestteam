@@ -21,11 +21,15 @@ class EngineAdapter(ABC):
         """Build and return an executable representation of the pipeline."""
 
     @abstractmethod
-    def execute(self, compiled: Any, input: str, memory_preamble: str = "") -> "PipelineResult":
+    def execute(
+        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+    ) -> "PipelineResult":
         """Run the compiled pipeline against `input` and normalize the result.
 
         `memory_preamble`, if non-empty, is recalled per-user memory injected
         into each agent's system prompt for this run (see `core/memory.py`).
+        `diagnostic` asks the engine to also surface what a normal trace leaves
+        out (prompts, model turns, tool args/results) -- see `core/trace.py`.
         """
 
     @abstractmethod
@@ -33,8 +37,10 @@ class EngineAdapter(ABC):
         """Render the compiled graph as Mermaid markup, for the CLI/UI to display."""
 
     @abstractmethod
-    def stream(self, compiled: Any, input: str, memory_preamble: str = "") -> Iterator["TraceEvent"]:
+    def stream(
+        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+    ) -> Iterator["TraceEvent"]:
         """Yield TraceEvents live as the pipeline executes, for monitoring/observability.
 
-        `memory_preamble` behaves as in `execute`.
+        `memory_preamble` and `diagnostic` behave as in `execute`.
         """
