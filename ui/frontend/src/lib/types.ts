@@ -99,6 +99,17 @@ export interface RunListItem {
   // for the customer-facing Activity page, which is always one org's own runs.
   org?: string | null
   org_id?: number | null
+  // Set when this run is an admin's diagnostic re-run of another run (Trace
+  // page only -- the customer's Activity page never lists one).
+  diagnostic_of_run_id?: string | null
+}
+
+export interface DiagnoseRunResult {
+  run_id: string
+  diagnostic_of_run_id: string
+  // The team was redeployed since the original run: the diagnostic run
+  // exercises the current version, which may no longer reproduce the problem.
+  version_changed: boolean
 }
 
 export interface UsageRecord {

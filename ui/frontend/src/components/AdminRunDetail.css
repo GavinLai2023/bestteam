@@ -39,3 +39,36 @@
   max-height: 240px;
   overflow: auto;
 }
+
+.admin-run-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.admin-run-detail-diagnostic {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.admin-run-detail-diagnostic p {
+  margin: 0;
+}
+
+.admin-run-detail-raw-details {
+  margin-top: 4px;
+}
+
+.admin-run-detail-raw-details summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+
+.admin-run-detail-raw-details .admin-run-detail-raw {
+  max-height: 480px;
+}

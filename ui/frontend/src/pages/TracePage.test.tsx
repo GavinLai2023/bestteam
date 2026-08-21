@@ -12,6 +12,7 @@ vi.mock('../lib/api', () => ({
     getPipelineAnalytics: vi.fn(),
     getRunTrace: vi.fn(),
     createWsTicket: vi.fn(),
+    diagnoseRun: vi.fn(),
   },
 }))
 
@@ -257,5 +258,33 @@ describe('TracePage', () => {
     })
 
     expect(mockedApi.listModelAnalytics).toHaveBeenLastCalledWith(expect.objectContaining({ org: 'org_a' }))
+  })
+
+  it('badges diagnostic runs in the list and opens the new run after "Diagnose this run"', async () => {
+    mockedApi.listRuns.mockResolvedValue({
+      runs: [
+        { id: 'r1', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T11:00:00Z', autonomous: false, diagnostic_of_run_id: null },
+        { id: 'r0', pipeline: 'wf-a', status: 'completed', started_at: '2026-07-31T10:00:00Z', autonomous: false, diagnostic_of_run_id: 'r-old' },
+      ],
+      total: 2, limit: 50, offset: 0,
+    })
+    mockedApi.getRunTrace.mockResolvedValue({ events: [] })
+    mockedApi.diagnoseRun.mockResolvedValue({ run_id: 'r2', diagnostic_of_run_id: 'r1', version_changed: false })
+    Element.prototype.scrollIntoView = vi.fn()
+
+    render(<TracePage />)
+    expect(await screen.findByText('diagnostic')).toBeInTheDocument()
+
+    const [runHeading] = await screen.findAllByRole('heading', { name: 'wf-a' })
+    await act(async () => {
+      fireEvent.click(runHeading)
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Diagnose this run' }))
+    })
+
+    expect(mockedApi.diagnoseRun).toHaveBeenCalledWith('r1')
+    expect(await screen.findByRole('heading', { name: 'Run r2' })).toBeInTheDocument()
+    expect(screen.getByText(/Diagnostic re-run of run r1/)).toBeInTheDocument()
   })
 })

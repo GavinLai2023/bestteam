@@ -5,6 +5,7 @@ import type {
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
   Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
+  DiagnoseRunResult,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
   Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, PipelineAnalyticsDetail, PipelineAnalyticsSummary,
@@ -249,6 +250,12 @@ export const api = {
   // exact original UID batch -- always a new run (see ui/backend/CLAUDE.md,
   // "Property Maintenance Inbox").
   retryRun: (id: string) => request<{ run_id: string }>(`/api/runs/${id}/retry`, { method: 'POST' }),
+  // Admin: re-run a run's input against the team as currently deployed with
+  // the SDK's diagnostic switch on, so the new run's trace carries prompts,
+  // model turns and tool args/results -- always a new run (see
+  // ui/backend/CLAUDE.md, "Diagnostic re-runs").
+  diagnoseRun: (id: string) =>
+    request<DiagnoseRunResult>(`/api/runs/${id}/diagnose`, { method: 'POST' }),
   listRuns: (filters: Record<string, string | number | boolean | undefined | null> = {}) => {
     const params = new URLSearchParams(
       Object.fromEntries(
