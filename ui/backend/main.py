@@ -42,7 +42,14 @@ from . import interview
 from . import retention
 from . import runtime
 from . import secret_store
-from .auth_api import OrgScope, get_current_org, get_current_org_or_admin, get_current_user, router as auth_router
+from .auth_api import (
+    OrgScope,
+    get_current_admin,
+    get_current_org,
+    get_current_org_or_admin,
+    get_current_user,
+    router as auth_router,
+)
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
@@ -778,6 +785,84 @@ def retry_run(
     return {"run_id": new_run_id}
 
 
+@app.post("/api/runs/{run_id}/diagnose")
+def diagnose_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """An admin's diagnostic re-run of a poor run: the same input, against
+    the team as CURRENTLY deployed, with `Pipeline.stream(diagnostic=True)`
+    so the new run's trace carries the prompts, model turns and tool
+    args/results a normal trace leaves out (see `core/trace.py`). Always a
+    NEW run (`diagnostic_of_run_id` points back); the original is untouched.
+
+    Refused for a run with a `trigger_context` -- an autonomous email run
+    would reach the org's live mailbox with unscoped tools, and a shared-chat
+    turn would append a reply to the visitor's session -- for a run that is
+    itself a diagnostic run (diagnose the original instead), and for a purged
+    run (no input left to re-run). No `user_id` is passed, so per-user memory
+    is neither recalled nor written: the admin must not act as the customer.
+    Spend is metered to the run's org like any other run of that team.
+    Design: docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md.
+    """
+    run_row = db.get(Run, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    if run_row.trigger_context is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Autonomous email runs and shared-chat turns can't be diagnosed: a re-run "
+                "would reach the org's mailbox or the visitor's session."
+            ),
+        )
+    if run_row.diagnostic_of_run_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This is already a diagnostic run. Diagnose the original run '{run_row.diagnostic_of_run_id}' instead.",
+        )
+    if run_row.content_purged_at is not None:
+        raise HTTPException(status_code=409, detail="This run's content was purged; there is no input left to re-run.")
+
+    pipeline, version_id, pipeline_id = _resolve_pipeline_and_version(run_row.pipeline, db, org_id=run_row.org_id)
+    run = registry.create(run_row.pipeline, run_row.input, org_id=run_row.org_id, username=admin.username)
+    # Persisted here, before dispatch, so `diagnostic_of_run_id` is on the row
+    # from the start -- run_in_background keeps a row a caller already wrote
+    # (the autonomous trigger does the same with `trigger_context`).
+    db.add(
+        Run(
+            id=run.id,
+            pipeline=run_row.pipeline,
+            input=run_row.input,
+            org_id=run_row.org_id,
+            username=admin.username,
+            pipeline_version_id=version_id,
+            diagnostic_of_run_id=run_row.id,
+        )
+    )
+    db.commit()
+    _executor.submit(
+        run_in_background,
+        run.id,
+        pipeline,
+        run_row.input,
+        engine=db.get_bind(),
+        org_id=run_row.org_id,
+        username=admin.username,
+        pipeline_version_id=version_id,
+        pipeline_id=pipeline_id,
+        diagnostic=True,
+    )
+    return {
+        "run_id": run.id,
+        "diagnostic_of_run_id": run_row.id,
+        # The team was redeployed since the original run -- this diagnoses
+        # the current version, which may no longer reproduce the problem.
+        "version_changed": run_row.pipeline_version_id != version_id,
+    }
+
+
 @app.post("/api/runs/{run_id}/purge")
 def purge_run_content(
     run_id: str,
@@ -848,6 +933,10 @@ def list_runs(
     query = db.query(Run)
     if scope.org_id is not None:
         query = query.filter(Run.org_id == scope.org_id)
+    if not scope.is_admin:
+        # An admin's diagnostic re-runs belong to the org (spend, retention)
+        # but are not the customer's own activity -- kept off their Runs tab.
+        query = query.filter(Run.diagnostic_of_run_id.is_(None))
     if run_id:
         query = query.filter(Run.id == run_id)
     if pipeline:
@@ -907,6 +996,7 @@ def list_runs(
                 "autonomous": row.username == email_trigger.TRIGGER_USERNAME,
                 "org_id": row.org_id,
                 "org": org_names.get(row.org_id),
+                "diagnostic_of_run_id": row.diagnostic_of_run_id,
             }
             for row in rows
         ],

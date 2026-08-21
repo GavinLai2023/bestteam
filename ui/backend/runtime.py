@@ -518,9 +518,14 @@ def run_in_background(
     username: Optional[str] = None,
     pipeline_version_id: Optional[int] = None,
     pipeline_id: Optional[int] = None,
+    diagnostic: bool = False,
 ) -> None:
     """Drain `Pipeline.stream()` on a worker thread and publish each event to
     the registry (thread-safe) so WebSocket subscribers see it as it happens.
+
+    `diagnostic` is forwarded to `Pipeline.stream` (an admin's diagnostic
+    re-run, `main.py::diagnose_run`): the extra events it produces are
+    persisted and published like any other -- nothing else here changes.
 
     If `engine` is given, each `agent_completed` event's per-model-call
     `usage` entries (see `core/trace.py`) are persisted as `usage_records`
@@ -674,7 +679,7 @@ def run_in_background(
             # behind other runs on the thread pool) -- skip streaming entirely.
             _mark_cancelled()
         else:
-            stream_iter = pipeline.stream(input, user_id=user_id, memory=memory)
+            stream_iter = pipeline.stream(input, user_id=user_id, memory=memory, diagnostic=diagnostic)
             for event in stream_iter:
                 raw_run_completed_output: Optional[str] = None
                 if is_pm_contract_run and (
