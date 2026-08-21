@@ -43,7 +43,9 @@ describe('TracePage', () => {
 
   it('switching the org selector re-fetches runs scoped to that org', async () => {
     render(<TracePage />)
-    await screen.findByDisplayValue('All organisations')
+    // The select's options come from the async listOrgs -- wait for them, or a
+    // change to 'org_a' on a slow runner is a no-op on an option-less select.
+    await screen.findByRole('option', { name: 'Org A' })
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Organisation'), { target: { value: 'org_a' } })
@@ -248,7 +250,9 @@ describe('TracePage', () => {
 
   it('switching the org selector on the By model tab re-fetches scoped to that org', async () => {
     render(<TracePage />)
-    await screen.findByDisplayValue('All organisations')
+    // The select's options come from the async listOrgs -- wait for them, or a
+    // change to 'org_a' on a slow runner is a no-op on an option-less select.
+    await screen.findByRole('option', { name: 'Org A' })
     await act(async () => {
       fireEvent.click(screen.getByText('By model'))
     })
