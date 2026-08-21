@@ -1,3 +1,57 @@
+.overview-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.overview-hero-value {
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent-strong);
+}
+
+.overview-hero-label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.overview-team-breakdown {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.overview-team-breakdown li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+
+.overview-team-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.overview-team-count {
+  color: var(--text-muted);
+}
+
 .overview-stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -23,6 +77,11 @@
 
 .overview-stat-label {
   font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.overview-stat-sublabel {
+  font-size: 0.76rem;
   color: var(--text-muted);
 }
 

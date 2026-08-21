@@ -7,27 +7,28 @@ import type { ActivityOverview } from '../lib/types'
 vi.mock('../lib/api', () => ({
   api: {
     getActivityOverview: vi.fn(),
+    listPipelines: vi.fn(),
   },
 }))
 
 const mockedApi = vi.mocked(api)
 
-const OVERVIEW = (overrides: Partial<ActivityOverview> = {}): ActivityOverview => ({
-  sessions: 67,
-  active_days: 50,
-  current_streak: 13,
-  longest_streak: 16,
+const overview = (overrides: Partial<ActivityOverview> = {}): ActivityOverview => ({
+  sessions: 7,
+  active_days: 3,
+  current_streak: 2,
+  longest_streak: 2,
   peak_hour: 14,
-  daily_counts: Array.from({ length: 84 }, (_, i) => ({
-    date: `2026-06-${String((i % 28) + 1).padStart(2, '0')}`,
-    count: i % 3,
-  })),
+  daily_counts: [{ date: '2026-08-20', count: 3 }],
+  completed_count: 5,
+  team_counts: [],
   ...overrides,
 })
 
 describe('ActivityOverviewPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockedApi.listPipelines.mockResolvedValue({ pipelines: [] })
   })
 
   it('shows a loading hint before the data arrives', () => {
@@ -38,44 +39,73 @@ describe('ActivityOverviewPanel', () => {
     expect(screen.getByText(/loading/i)).toBeInTheDocument()
   })
 
-  it('shows each headline stat once loaded', async () => {
-    mockedApi.getActivityOverview.mockResolvedValue(OVERVIEW())
+  it('shows the completed-task count as the headline, not a bare "Sessions" count', async () => {
+    mockedApi.getActivityOverview.mockResolvedValue(overview({ completed_count: 5 }))
 
     render(<ActivityOverviewPanel />)
 
-    expect(await screen.findByText('67')).toBeInTheDocument()
-    expect(screen.getByText('50')).toBeInTheDocument()
-    expect(screen.getByText('13')).toBeInTheDocument()
-    expect(screen.getByText('16')).toBeInTheDocument()
+    expect(await screen.findByText('5')).toBeInTheDocument()
+    expect(screen.getByText('Tasks completed')).toBeInTheDocument()
+    expect(screen.queryByText('Sessions')).not.toBeInTheDocument()
   })
 
-  it('formats the peak hour as 12-hour time', async () => {
-    mockedApi.getActivityOverview.mockResolvedValue(OVERVIEW({ peak_hour: 14 }))
+  it('does not show a busiest-hour card', async () => {
+    mockedApi.getActivityOverview.mockResolvedValue(overview())
 
     render(<ActivityOverviewPanel />)
 
-    expect(await screen.findByText('2 PM')).toBeInTheDocument()
+    await screen.findByText('Tasks completed')
+    expect(screen.queryByText('Busiest hour')).not.toBeInTheDocument()
   })
 
-  it('shows a fallback instead of a broken value when there is no peak hour yet', async () => {
-    mockedApi.getActivityOverview.mockResolvedValue(OVERVIEW({ sessions: 1, peak_hour: null }))
-
-    render(<ActivityOverviewPanel />)
-
-    await screen.findByText('1')
-    expect(screen.queryByText('null')).not.toBeInTheDocument()
-    expect(screen.queryByText('NaN')).not.toBeInTheDocument()
-  })
-
-  it('shows a friendly empty state instead of an all-zero stat grid', async () => {
+  it("breaks completed work down by each team's friendly display name", async () => {
     mockedApi.getActivityOverview.mockResolvedValue(
-      OVERVIEW({ sessions: 0, active_days: 0, current_streak: 0, longest_streak: 0, peak_hour: null, daily_counts: [] }),
+      overview({
+        team_counts: [
+          { pipeline: 'payroll_qa', count: 5 },
+          { pipeline: 'sales_bot', count: 2 },
+        ],
+      }),
     )
+    mockedApi.listPipelines.mockResolvedValue({
+      pipelines: ['payroll_qa', 'sales_bot'],
+      display_names: { payroll_qa: 'Payroll Q&A Team' },
+    })
 
     render(<ActivityOverviewPanel />)
 
-    expect(await screen.findByText(/no runs yet/i)).toBeInTheDocument()
-    expect(screen.queryByText('0')).not.toBeInTheDocument()
+    expect(await screen.findByText('Payroll Q&A Team')).toBeInTheDocument()
+    expect(screen.getByText('5 tasks')).toBeInTheDocument()
+    // No friendly name on record for sales_bot -- falls back to the raw name
+    // rather than hiding the row.
+    expect(screen.getByText('sales_bot')).toBeInTheDocument()
+    expect(screen.getByText('2 tasks')).toBeInTheDocument()
+  })
+
+  it('shows the longest-streak note only when there is a personal best to report', async () => {
+    mockedApi.getActivityOverview.mockResolvedValue(overview({ current_streak: 2, longest_streak: 5 }))
+
+    render(<ActivityOverviewPanel />)
+
+    expect(await screen.findByText('Personal best: 5 days')).toBeInTheDocument()
+  })
+
+  it('omits the streak note entirely when there is no streak yet', async () => {
+    mockedApi.getActivityOverview.mockResolvedValue(overview({ current_streak: 0, longest_streak: 0 }))
+
+    render(<ActivityOverviewPanel />)
+
+    await screen.findByText('Tasks completed')
+    expect(screen.queryByText(/Personal best/)).not.toBeInTheDocument()
+  })
+
+  it('still shows the empty state for an org with no runs at all', async () => {
+    mockedApi.getActivityOverview.mockResolvedValue(overview({ sessions: 0, completed_count: 0 }))
+
+    render(<ActivityOverviewPanel />)
+
+    expect(await screen.findByText(/No runs yet/)).toBeInTheDocument()
+    expect(screen.queryByText('Tasks completed')).not.toBeInTheDocument()
   })
 
   it('shows a friendly banner when the request fails, not the raw error text', async () => {
@@ -92,22 +122,24 @@ describe('ActivityOverviewPanel', () => {
 
   it('retries the fetch when Try again is clicked after a failure', async () => {
     mockedApi.getActivityOverview.mockRejectedValueOnce(new Error('Not Found'))
-    mockedApi.getActivityOverview.mockResolvedValueOnce(OVERVIEW())
+    mockedApi.getActivityOverview.mockResolvedValueOnce(overview({ completed_count: 1 }))
 
     render(<ActivityOverviewPanel />)
 
     const retryButton = await screen.findByRole('button', { name: /try again/i })
     fireEvent.click(retryButton)
 
-    expect(await screen.findByText('67')).toBeInTheDocument()
+    expect(await screen.findByText('Tasks completed')).toBeInTheDocument()
     expect(mockedApi.getActivityOverview).toHaveBeenCalledTimes(2)
   })
 
   it('renders one heatmap cell per day of data', async () => {
-    mockedApi.getActivityOverview.mockResolvedValue(OVERVIEW())
+    mockedApi.getActivityOverview.mockResolvedValue(
+      overview({ daily_counts: Array.from({ length: 84 }, (_, i) => ({ date: `2026-06-${String((i % 28) + 1).padStart(2, '0')}`, count: i % 3 })) }),
+    )
 
     const { container } = render(<ActivityOverviewPanel />)
-    await screen.findByText('67')
+    await screen.findByText('Tasks completed')
 
     expect(container.querySelectorAll('.overview-heatmap-cell')).toHaveLength(84)
   })

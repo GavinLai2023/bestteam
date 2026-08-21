@@ -529,10 +529,12 @@ def activity_overview(
     db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
 ) -> Dict[str, Any]:
     """Engagement stats for the customer-facing Activity Overview tab -- how
-    often this org's teams ran. Never a model name or a cost: see
-    activity_overview.py."""
-    timestamps = [row[0] for row in db.query(Run.created_at).filter(Run.org_id == org.id)]
-    return compute_overview(timestamps, now=datetime.now(timezone.utc))
+    often this org's teams ran, and how much they completed. Never a model
+    name or a cost: see activity_overview.py."""
+    rows = db.query(Run.created_at, Run.status, Run.pipeline).filter(Run.org_id == org.id).all()
+    timestamps = [row[0] for row in rows]
+    completed_pipelines = [row[2] for row in rows if row[1] == "completed"]
+    return compute_overview(timestamps, now=datetime.now(timezone.utc), completed_pipelines=completed_pipelines)
 
 
 # --- pre-LLM mail filter and automation budgets (Phase 4a) --------------------

@@ -431,9 +431,14 @@ export interface DailyRunCount {
   count: number
 }
 
-// The customer-facing Activity Overview tab: how often this org's teams ran.
-// Deliberately no model name or cost anywhere here -- see
-// ui/backend/activity_overview.py.
+export interface TeamCount {
+  pipeline: string
+  count: number
+}
+
+// The customer-facing Activity Overview tab: how often this org's teams ran,
+// and how much they completed. Deliberately no model name or cost anywhere
+// here -- see ui/backend/activity_overview.py.
 export interface ActivityOverview {
   sessions: number
   active_days: number
@@ -441,6 +446,8 @@ export interface ActivityOverview {
   longest_streak: number
   peak_hour: number | null
   daily_counts: DailyRunCount[]
+  completed_count: number
+  team_counts: TeamCount[]
 }
 
 // One message the filter skipped before any model read it. `reason` is the

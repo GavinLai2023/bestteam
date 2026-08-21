@@ -47,11 +47,11 @@ def client(monkeypatch, tmp_path):
         backend_main.app.dependency_overrides.pop(get_db, None)
 
 
-def _seed_run(db, org_id, *, run_id, age_days=0):
+def _seed_run(db, org_id, *, run_id, age_days=0, pipeline="support", status="completed"):
     created = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=age_days)
     db.add(Run(
-        id=run_id, pipeline="support", input="do the thing", output="done",
-        status="completed", org_id=org_id, created_at=created,
+        id=run_id, pipeline=pipeline, input="do the thing", output="done",
+        status=status, org_id=org_id, created_at=created,
     ))
 
 
@@ -88,6 +88,25 @@ def test_never_leaks_another_orgs_runs(client):
     body = client.get("/api/org/activity-overview").json()
 
     assert body["sessions"] == 0
+
+
+def test_completed_count_and_team_breakdown_reflect_only_completed_runs(client):
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        _seed_run(db, org_id, run_id="r1", pipeline="support", status="completed")
+        _seed_run(db, org_id, run_id="r2", pipeline="support", status="completed")
+        _seed_run(db, org_id, run_id="r3", pipeline="sales", status="completed")
+        _seed_run(db, org_id, run_id="r4", pipeline="sales", status="failed")
+        db.commit()
+
+    body = client.get("/api/org/activity-overview").json()
+
+    assert body["sessions"] == 4
+    assert body["completed_count"] == 3
+    assert body["team_counts"] == [
+        {"pipeline": "support", "count": 2},
+        {"pipeline": "sales", "count": 1},
+    ]
 
 
 def test_response_never_names_a_model_or_a_cost(client):

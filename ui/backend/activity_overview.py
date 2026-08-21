@@ -29,6 +29,11 @@ class DailyCount(TypedDict):
     count: int
 
 
+class TeamCount(TypedDict):
+    pipeline: str
+    count: int
+
+
 class OverviewStats(TypedDict):
     sessions: int
     active_days: int
@@ -36,6 +41,8 @@ class OverviewStats(TypedDict):
     longest_streak: int
     peak_hour: Optional[int]
     daily_counts: List[DailyCount]
+    completed_count: int
+    team_counts: List[TeamCount]
 
 
 def compute_overview(
@@ -43,6 +50,13 @@ def compute_overview(
     *,
     now: datetime,
     heatmap_weeks: int = HEATMAP_WEEKS,
+    # The pipeline name of each run whose status is "completed" -- one entry
+    # per completed run, independent of run_timestamps (not index-parallel to
+    # it): a failed/running run simply isn't in this list. This is the
+    # accomplishment half of the tab ("your teams did N things for you"),
+    # separate from sessions/streaks/heatmap above, which count every run
+    # regardless of outcome (engagement, not accomplishment).
+    completed_pipelines: Optional[List[str]] = None,
 ) -> OverviewStats:
     active_days: Set[date] = {ts.date() for ts in run_timestamps}
     today = now.date()
@@ -62,6 +76,12 @@ def compute_overview(
         for i in range(heatmap_weeks * 7)
     ]
 
+    completed_pipelines = completed_pipelines or []
+    team_counts: List[TeamCount] = [
+        {"pipeline": name, "count": count}
+        for name, count in sorted(Counter(completed_pipelines).items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
     return {
         "sessions": len(run_timestamps),
         "active_days": len(active_days),
@@ -69,6 +89,8 @@ def compute_overview(
         "longest_streak": _longest_streak(active_days),
         "peak_hour": peak_hour,
         "daily_counts": daily_counts,
+        "completed_count": len(completed_pipelines),
+        "team_counts": team_counts,
     }
 
 

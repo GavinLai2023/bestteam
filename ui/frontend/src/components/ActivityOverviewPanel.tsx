@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
-import { formatHour } from '../lib/dateFormat'
 import type { ActivityOverview } from '../lib/types'
 import './ActivityOverviewPanel.css'
 
@@ -20,6 +19,10 @@ function heatLevel(count: number, max: number): number {
 export default function ActivityOverviewPanel() {
   const { t } = useTranslation()
   const [overview, setOverview] = useState<ActivityOverview | null>(null)
+  // A team's friendly display name for the per-team breakdown below --
+  // best-effort only (never blocks or fails the tab): a raw pipeline slug
+  // beside a task count still says something, just less nicely.
+  const [displayNames, setDisplayNames] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -45,10 +48,18 @@ export default function ActivityOverviewPanel() {
       .finally(() => {
         if (!ignore) setLoading(false)
       })
+    api
+      .listPipelines()
+      .then((d) => {
+        if (!ignore) setDisplayNames(d.display_names ?? {})
+      })
+      .catch(() => {})
     return () => {
       ignore = true
     }
   }, [attempt])
+
+  const teamLabel = (pipeline: string) => displayNames[pipeline] ?? pipeline
 
   const retry = () => {
     setLoading(true)
@@ -83,11 +94,29 @@ export default function ActivityOverviewPanel() {
 
   return (
     <section className="activity-overview">
+      {/* The accomplishment headline (completed work), replacing the old bare
+          "Sessions" count -- a customer doesn't know what a "session" is, but
+          they know what a completed task is (audit finding, 2026-08-21). */}
+      <div className="overview-hero">
+        <span className="overview-hero-value">{overview.completed_count}</span>
+        <span className="overview-hero-label">{t('overview.completedLabel')}</span>
+      </div>
+
+      {/* Which of the customer's own teams did the work -- concrete credit to
+          a named team, not just an abstract total, even for a single-team
+          org (it still reads as "this specific team did this for you"). */}
+      {overview.team_counts.length > 0 && (
+        <ul className="overview-team-breakdown">
+          {overview.team_counts.map((tc) => (
+            <li key={tc.pipeline}>
+              <span className="overview-team-name">{teamLabel(tc.pipeline)}</span>
+              <span className="overview-team-count">{t('overview.teamTaskCount', { count: tc.count })}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="overview-stats-grid">
-        <div className="overview-stat-card">
-          <span className="overview-stat-value">{overview.sessions}</span>
-          <span className="overview-stat-label">{t('overview.sessions')}</span>
-        </div>
         <div className="overview-stat-card">
           <span className="overview-stat-value">{overview.active_days}</span>
           <span className="overview-stat-label">{t('overview.activeDays')}</span>
@@ -95,16 +124,11 @@ export default function ActivityOverviewPanel() {
         <div className="overview-stat-card">
           <span className="overview-stat-value">{overview.current_streak}</span>
           <span className="overview-stat-label">{t('overview.currentStreak')}</span>
-        </div>
-        <div className="overview-stat-card">
-          <span className="overview-stat-value">{overview.longest_streak}</span>
-          <span className="overview-stat-label">{t('overview.longestStreak')}</span>
-        </div>
-        <div className="overview-stat-card">
-          <span className="overview-stat-value">
-            {overview.peak_hour === null ? t('overview.noPeakHour') : formatHour(overview.peak_hour)}
-          </span>
-          <span className="overview-stat-label">{t('overview.peakHour')}</span>
+          {overview.longest_streak > 0 && (
+            <span className="overview-stat-sublabel">
+              {t('overview.longestStreakNote', { count: overview.longest_streak })}
+            </span>
+          )}
         </div>
       </div>
 

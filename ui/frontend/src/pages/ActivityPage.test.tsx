@@ -41,6 +41,7 @@ describe('ActivityPage', () => {
     // tab clicks its way there explicitly.
     mockedApi.getActivityOverview.mockResolvedValue({
       sessions: 0, active_days: 0, current_streak: 0, longest_streak: 0, peak_hour: null, daily_counts: [],
+      completed_count: 0, team_counts: [],
     })
     mockedApi.listRuns.mockResolvedValue({ runs: [] })
     mockedApi.emailTriggerActivity.mockResolvedValue({ runs: [] })

@@ -103,3 +103,44 @@ def test_a_run_older_than_the_heatmap_window_still_counts_toward_sessions_and_st
     assert stats["sessions"] == 1
     assert stats["active_days"] == 1
     assert all(day["count"] == 0 for day in stats["daily_counts"])
+
+
+def test_completed_count_and_team_counts_default_to_zero_when_omitted():
+    # A caller that hasn't started passing which runs completed (or existing
+    # tests above, unchanged) still gets a valid, empty accomplishment view
+    # rather than a crash.
+    stats = compute_overview([_at(0), _at(1)], now=NOW)
+
+    assert stats["completed_count"] == 0
+    assert stats["team_counts"] == []
+
+
+def test_completed_count_counts_only_the_runs_marked_completed():
+    # completed_pipelines is independent of run_timestamps -- it is exactly
+    # the pipeline name of each run whose status is "completed", one entry
+    # per completed run; a failed/running run simply isn't in this list.
+    stats = compute_overview(
+        [_at(0), _at(1), _at(2)], now=NOW, completed_pipelines=["support", "support"]
+    )
+
+    assert stats["completed_count"] == 2
+
+
+def test_team_counts_breaks_completed_runs_down_by_pipeline_descending():
+    stats = compute_overview(
+        [], now=NOW, completed_pipelines=["a", "b", "a", "a", "b"]
+    )
+
+    assert stats["team_counts"] == [
+        {"pipeline": "a", "count": 3},
+        {"pipeline": "b", "count": 2},
+    ]
+
+
+def test_team_counts_ties_break_alphabetically_for_determinism():
+    stats = compute_overview([], now=NOW, completed_pipelines=["b", "a"])
+
+    assert stats["team_counts"] == [
+        {"pipeline": "a", "count": 1},
+        {"pipeline": "b", "count": 1},
+    ]
