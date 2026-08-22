@@ -312,6 +312,7 @@ export const en = {
   // the composer and the fallback replies by these phrases.
   share: {
     placeholder: 'Type a message…',
+    composerLabel: 'Your message',
     send: 'Send',
     sendHint: 'Enter to send · Shift+Enter for a new line',
     unavailable: 'This share link is no longer available.',
@@ -341,12 +342,14 @@ export const en = {
     toggle: 'Share',
     generate: 'Generate a new link',
     messagesPerDay: 'Messages per day',
+    invalidCap: 'Messages per day must be a whole number from 1 to 1000.',
     expiresOn: 'Expires on (optional)',
     active: 'Active',
     revoked: 'Revoked',
     // `{{n}}`, not `{{count}}`: i18next treats `count` as a plural selector
-    // and would go looking for `_one`/`_other` keys.
-    perDay: '{{n}} messages per day',
+    // and would go looking for `_one`/`_other` keys. Phrased "label: value"
+    // so the English needs no plural form either ("Daily limit: 1").
+    perDay: 'Daily limit: {{n}}',
     expires: 'Expires {{when}}',
     noExpiry: 'No expiry',
     copyLink: 'Copy link',
@@ -362,7 +365,7 @@ export const en = {
     activeLink: 'Active link',
     revokedLink: 'Revoked link',
     lastActive: 'Last active {{when}}',
-    turnsToday: '{{n}} turns today',
+    turnsToday: 'Turns today: {{n}}',
     viewTranscript: 'View transcript',
   },
   modelCatalog: {

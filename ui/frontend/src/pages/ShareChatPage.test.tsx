@@ -88,6 +88,39 @@ describe('ShareChatPage', () => {
     expect(await screen.findByText('正在发送…')).toBeInTheDocument()
   })
 
+  it('re-renders a visible notice when the language changes', async () => {
+    // Notices are stored as keys, not translated text, so a switch mid-notice
+    // doesn't leave one sentence in the old language (Codex review).
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('[]'), { status: 422 }))
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'way too long' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText(/^that message is too long/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(screen.getByText(/消息太长了/)).toBeInTheDocument())
+  })
+
+  it('does not echo the backend detail of a 409 on this public page', async () => {
+    mockedApi.sendMessage.mockRejectedValue(
+      Object.assign(new Error('internal: lock held by worker bestteam-run_7'), { status: 409 }),
+    )
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText(/please wait for the previous reply to finish/i)).toBeInTheDocument()
+    expect(screen.queryByText(/lock held/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the language control on the unavailable page', async () => {
+    mockedApi.getMessages.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+    renderPage()
+    expect(await screen.findByText(/no longer available/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(screen.getByText('这个分享链接已失效。')).toBeInTheDocument())
+  })
+
   it('sends on Enter and keeps Shift+Enter for a new line', async () => {
     mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
     renderPage()

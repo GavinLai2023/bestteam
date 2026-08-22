@@ -814,7 +814,13 @@ def diagnose_run(
     run_row = db.get(Run, run_id)
     if run_row is None:
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
-    if run_row.trigger_context is not None and "share_session_id" not in run_row.trigger_context:
+    # A share turn is recognised the way the share code itself recognises one
+    # -- a real session id (share_chat.py stamps an int; record_share_reply
+    # and stream_share_run `.get()` it), not mere key presence, so a malformed
+    # context is refused rather than admitted (Codex review).
+    share_session_id = (run_row.trigger_context or {}).get("share_session_id")
+    is_share_turn = isinstance(share_session_id, int) and not isinstance(share_session_id, bool) and share_session_id > 0
+    if run_row.trigger_context is not None and not is_share_turn:
         raise HTTPException(
             status_code=400,
             detail="Autonomous email runs can't be diagnosed: a re-run would reach the org's mailbox.",

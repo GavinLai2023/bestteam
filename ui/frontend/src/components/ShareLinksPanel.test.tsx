@@ -40,10 +40,29 @@ describe('ShareLinksPanel', () => {
     await waitFor(() =>
       expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, {
         daily_cap: 10,
-        // End of the chosen day in the browser's own time zone, sent with an offset.
-        expires_at: new Date(2030, 0, 2, 23, 59, 59).toISOString(),
+        // The last instant of the chosen day in the browser's own time zone, sent with an offset.
+        expires_at: new Date(new Date(2030, 0, 3).getTime() - 1).toISOString(),
       }),
     )
+  })
+
+  it('refuses a non-integer or out-of-range daily cap instead of sending it', async () => {
+    // The form's own constraints (min/max/step) stop the submit in the
+    // browser -- jsdom enforces them too, so the submit handler never runs
+    // and the API is never called. The handler's own check is the fallback.
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    const cap = await screen.findByLabelText(/messages per day/i)
+    fireEvent.change(cap, { target: { value: '10.5' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(cap).toBeInvalid()
+    fireEvent.change(cap, { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(cap).toBeInvalid()
+    fireEvent.change(cap, { target: { value: '1001' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(cap).toBeInvalid()
+    expect(mockedApi.createShareLink).not.toHaveBeenCalled()
   })
 
   it('creates a link with the default cap and no expiry when the form is left alone', async () => {
@@ -63,9 +82,9 @@ describe('ShareLinksPanel', () => {
     ])
     render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
-    expect(await screen.findByText('30 messages per day')).toBeInTheDocument()
+    expect(await screen.findByText('Daily limit: 30')).toBeInTheDocument()
     expect(screen.getByText('No expiry')).toBeInTheDocument()
-    expect(screen.getByText('5 messages per day')).toBeInTheDocument()
+    expect(screen.getByText('Daily limit: 5')).toBeInTheDocument()
     expect(screen.getByText(/^Expires .*2030/)).toBeInTheDocument()
   })
 

@@ -97,11 +97,22 @@ Decisions taken in brainstorming (2026-08-22):
   message. `handleSend` takes `{ preventDefault(): void }` so the form submit
   and the keydown path share it. A one-line `.hint` under the form shows
   `share.sendHint`.
-- **Copy reply:** a `btn-link` under each assistant bubble using
+- **Copy reply:** a `btn-link` under each real assistant bubble using
   `common.copy` / `common.copied` / `common.copyFailed`, with the clipboard
   guarded exactly as `ShareLinksPanel.handleCopy` does (rejects on a
-  non-secure origin). The one nice-to-have kept, because copy was named as a
-  priority.
+  non-secure origin). The two fallback replies ("something went wrong…")
+  deliberately get no Copy control — there is nothing useful to copy. The
+  one nice-to-have kept, because copy was named as a priority.
+- Transient notices (recovered / pending turn / too long / send failed /
+  copy failed) are stored as i18n keys and translated at render, so a
+  language switch re-renders them; a 409's backend detail is never echoed on
+  this public page. The header with the language control also renders on the
+  "link unavailable" page. The composer has an accessible label and is
+  described by the keyboard hint; status and notices live in polite live
+  regions. (All four from the Codex review of the first cut.)
+- `lib/dateFormat.ts::formatDateTime` is locale-aware (Chinese dates in
+  Chinese — it was interpolating "02 JAN 2030" into translated sentences),
+  and `endOfLocalDay` lives there too.
 
 ### 1.3 `ShareLinksPanel` — cap/expiry + i18n; `SharedSessionsPanel` — i18n
 

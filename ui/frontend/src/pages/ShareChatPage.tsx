@@ -11,6 +11,16 @@ const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
 
 const MAX_MESSAGE_LENGTH = 4000 // matches share_chat.py's own cap
 
+// A transient notice under the conversation. Stored as a key (plus
+// interpolation values) and translated at render, so a language switch while
+// it is showing re-renders it like everything else (Codex review). A 409's
+// backend detail is deliberately NOT shown: this is a public surface and the
+// key says the same thing in the visitor's language.
+interface Notice {
+  key: 'share.recovered' | 'share.pendingTurn' | 'share.tooLong' | 'share.sendFailed' | 'common.copyFailed'
+  values?: { max: number }
+}
+
 // The public, anonymous, multi-turn counterpart to MonitorPage's one-shot
 // "Run a team" -- a colleague reaches this page via a link an org member
 // generated (ShareLinksPanel), never logs in, and gets a real back-and-forth
@@ -27,9 +37,7 @@ export default function ShareChatPage() {
   // An i18n key, translated at render so a language switch re-renders it.
   const [unavailableKey, setUnavailableKey] = useState<'share.unavailable' | 'share.loadFailed' | null>(null)
   const [rateLimited, setRateLimited] = useState(false)
-  // Already-translated text: set at the moment of failure, transient, and a
-  // 409's detail comes from the backend as a sentence rather than a key.
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -146,7 +154,7 @@ export default function ShareChatPage() {
           .catch(() => {})
           .finally(() => {
             setSending(false)
-            setNotice(t('share.recovered'))
+            setNotice({ key: 'share.recovered' })
           })
       }
     } catch (e) {
@@ -176,15 +184,16 @@ export default function ShareChatPage() {
       } else if (status === 404) {
         setUnavailableKey('share.unavailable')
       } else if (status === 409) {
-        // The message was never persisted/no run was created for it -- the
-        // backend's own detail text already says what to do.
-        setNotice((e as Error).message || t('share.pendingTurn'))
+        // The message was never persisted/no run was created for it (the
+        // previous reply is still in flight) -- say so in the visitor's
+        // language rather than echoing the backend's English detail.
+        setNotice({ key: 'share.pendingTurn' })
       } else if (status === 422) {
         // The backend's length cap (Pydantic validation) -- its own detail is
         // a validation-error structure, not a sentence a visitor can read.
-        setNotice(t('share.tooLong', { max: MAX_MESSAGE_LENGTH }))
+        setNotice({ key: 'share.tooLong', values: { max: MAX_MESSAGE_LENGTH } })
       } else {
-        setNotice(t('share.sendFailed'))
+        setNotice({ key: 'share.sendFailed' })
       }
       setDraft(content)
     }
@@ -209,13 +218,24 @@ export default function ShareChatPage() {
       setCopiedIndex(index)
       setTimeout(() => setCopiedIndex(null), 2000)
     } catch {
-      setNotice(t('common.copyFailed'))
+      setNotice({ key: 'common.copyFailed' })
     }
   }
+
+  // The header (brand + language control) renders on the unavailable page
+  // too: a visitor who lands on an expired link in a language they can't
+  // read must still be able to switch (Codex review).
+  const header = (
+    <header className="share-chat-header">
+      <span className="share-chat-brand">{t('nav.brand')}</span>
+      <LanguageSelect />
+    </header>
+  )
 
   if (unavailableKey) {
     return (
       <div className="share-chat">
+        {header}
         <p className="share-chat-unavailable">{t(unavailableKey)}</p>
       </div>
     )
@@ -223,10 +243,7 @@ export default function ShareChatPage() {
 
   return (
     <div className="share-chat">
-      <header className="share-chat-header">
-        <span className="share-chat-brand">{t('nav.brand')}</span>
-        <LanguageSelect />
-      </header>
+      {header}
       <div className="share-chat-messages">
         {messages.map((m, i) => {
           if (m.role === 'user') {
@@ -250,11 +267,17 @@ export default function ShareChatPage() {
             </div>
           )
         })}
-        {sending && <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>}
+        {/* A polite live region, so assistive technology hears the progress
+            line and any notice change without the focus moving. */}
+        <div role="status" aria-live="polite">
+          {sending && <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>}
+        </div>
         <div ref={messagesEndRef} />
       </div>
-      {rateLimited && <p className="share-chat-bubble status">{t('share.rateLimited')}</p>}
-      {notice && <p className="share-chat-bubble status">{notice}</p>}
+      <div role="status" aria-live="polite">
+        {rateLimited && <p className="share-chat-bubble status">{t('share.rateLimited')}</p>}
+        {notice && <p className="share-chat-bubble status">{t(notice.key, notice.values)}</p>}
+      </div>
       <form className="share-chat-form" onSubmit={handleSend}>
         <textarea
           rows={2}
@@ -263,13 +286,17 @@ export default function ShareChatPage() {
           onKeyDown={handleKeyDown}
           maxLength={MAX_MESSAGE_LENGTH}
           placeholder={t('share.placeholder')}
+          aria-label={t('share.composerLabel')}
+          aria-describedby="share-chat-hint"
           disabled={sending || rateLimited}
         />
         <button type="submit" disabled={sending || rateLimited || !draft.trim()}>
           {t('share.send')}
         </button>
       </form>
-      <p className="hint share-chat-hint">{t('share.sendHint')}</p>
+      <p id="share-chat-hint" className="hint share-chat-hint">
+        {t('share.sendHint')}
+      </p>
     </div>
   )
 }

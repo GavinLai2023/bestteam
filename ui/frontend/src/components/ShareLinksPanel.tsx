@@ -1,25 +1,17 @@
-import { useEffect, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
-import { formatDateTime } from '../lib/dateFormat'
+import { endOfLocalDay, formatDateTime } from '../lib/dateFormat'
 import type { ShareLink } from '../lib/types'
 
 interface ShareLinksPanelProps {
   pipelineId: number
 }
 
-const DEFAULT_DAILY_CAP = 30 // mirrors share_links_api.ShareLinkCreate's default
+const DEFAULT_DAILY_CAP = 30 // mirrors share_links_api.ShareLinkCreate's default and 1..1000 range
 
 function shareUrlFor(token: string): string {
   return `${window.location.origin}/share/${token}`
-}
-
-// "2030-01-02" from <input type="date"> -> the last second of that day in the
-// browser's own time zone. Sent via toISOString() (an offset-aware instant),
-// which the backend normalises to naive UTC for `share_chat._is_expired`.
-function endOfLocalDay(date: string): Date {
-  const [year, month, day] = date.split('-').map(Number)
-  return new Date(year, month - 1, day, 23, 59, 59)
 }
 
 // Lets the org's one user generate/revoke anonymous, continuous-chat links
@@ -51,12 +43,19 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  const handleCreate = async () => {
-    // Clamp to the API's own 1..1000 range so a stray value is a sensible
-    // link rather than a 422 the user has to decode.
-    const cap = Math.min(1000, Math.max(1, Number(dailyCap) || DEFAULT_DAILY_CAP))
+  const handleCreate = async (event: FormEvent) => {
+    event.preventDefault()
+    // Validate here rather than rely on the browser: the API field is an
+    // integer in 1..1000, and a 422 from it is not a sentence a customer can
+    // act on (Codex review).
+    const cap = Number(dailyCap)
+    if (!Number.isInteger(cap) || cap < 1 || cap > 1000) {
+      setError(t('shareLinks.invalidCap'))
+      return
+    }
     const payload: { daily_cap: number; expires_at?: string } = { daily_cap: cap }
     if (expiresOn) payload.expires_at = endOfLocalDay(expiresOn).toISOString()
+    setError(null)
     try {
       await api.createShareLink(pipelineId, payload)
       refresh()
@@ -98,19 +97,26 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
   return (
     <div className="share-links-panel" onClick={(e) => e.stopPropagation()}>
       {error && <p className="banner banner-error">{error}</p>}
-      <div className="share-links-form">
+      <form className="share-links-form" onSubmit={(e) => void handleCreate(e)}>
         <label>
           {t('shareLinks.messagesPerDay')}
-          <input type="number" min={1} max={1000} value={dailyCap} onChange={(e) => setDailyCap(e.target.value)} />
+          <input
+            type="number"
+            min={1}
+            max={1000}
+            step={1}
+            value={dailyCap}
+            onChange={(e) => setDailyCap(e.target.value)}
+          />
         </label>
         <label>
           {t('shareLinks.expiresOn')}
           <input type="date" value={expiresOn} onChange={(e) => setExpiresOn(e.target.value)} />
         </label>
-        <button type="button" className="btn btn-primary" onClick={handleCreate}>
+        <button type="submit" className="btn btn-primary">
           {t('shareLinks.generate')}
         </button>
-      </div>
+      </form>
       <ul>
         {links.map((link) => (
           <li key={link.id}>
