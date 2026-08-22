@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import codecs
+import csv
 import io
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from xml.sax.saxutils import escape, quoteattr
 
 from ..exceptions import ConfigurationError
@@ -86,8 +88,10 @@ def parse_bytes(data: bytes, filename: str, *, lenient_text: bool = False) -> st
         return _parse_docx_bytes(data, filename)
     if suffix == ".xml":
         return _parse_xml_bytes(data, filename)
+    if suffix == ".csv":
+        return _parse_csv_bytes(data, filename, lenient_text=lenient_text)
     if suffix in _TEXT_SUFFIXES:
-        return _decode_text(data, lenient=lenient_text)
+        return _decode_text(data, filename, lenient=lenient_text)
 
     raise ConfigurationError(
         f"Unsupported file type '{suffix}'. "
@@ -95,22 +99,78 @@ def parse_bytes(data: bytes, filename: str, *, lenient_text: bool = False) -> st
     )
 
 
-def _decode_text(data: bytes, *, lenient: bool = False) -> str:
-    """Decode plain-text bytes the way `Path.read_text` would.
+def _decode_text(data: bytes, name: str, *, lenient: bool = False) -> str:
+    """Decode plain-text bytes, trying the encodings customers actually send.
 
-    Strict by default, which is what `Path.read_text(encoding="utf-8")` did: a
-    mis-encoded document should be reported to whoever owns it, not stored as
-    mojibake. `lenient` swaps in `errors="replace"` for the attachment path,
-    where a sender can name anything `.txt` and a UnicodeDecodeError escaping
-    into the poller would fail a whole run over one bad file.
+    UTF-8 first, then the BOM-announced encodings, then GB18030 -- because a
+    plain-text document produced on a Chinese Windows machine usually is not
+    UTF-8. Notepad and Excel's "CSV (comma delimited)" export both write GBK;
+    Excel's "Unicode text" export writes UTF-16 with a BOM. Each of those used
+    to reach the customer as a raw `UnicodeDecodeError` naming a byte offset.
+
+    Still strict about the thing strictness was protecting: a document that
+    decodes as none of these is reported, not stored as mojibake. GB18030 is
+    the reason the CJK check exists -- it is a very permissive codec, and any
+    Western-encoded document whose high bytes happen to form valid pairs would
+    otherwise stop failing loudly and start being indexed as Chinese nonsense.
+    A GB18030 result is therefore accepted only when it actually contains CJK
+    characters, which is the only reason we try that codec at all. The cost is
+    that a genuinely GB18030-encoded document containing no CJK is refused --
+    a loud refusal the customer fixes by re-saving as UTF-8, chosen over a
+    silent one nobody would ever notice.
+
+    `lenient` keeps the attachment path's contract: a sender can name anything
+    `.txt`, and a decode error escaping into the poller would fail a whole run
+    over one bad attachment. It is the last resort, though, not the first --
+    an attachment that IS GB18030 arrives as its own text, not as U+FFFDs.
 
     Line endings are translated either way, because the path-based reader this
     replaces opened files in text mode (universal newlines) and its output must
     not change.
     """
-    errors = "replace" if lenient else "strict"
-    decoded = data.decode("utf-8", errors=errors)
+    decoded = _decoded_or_none(data)
+    if decoded is None:
+        if not lenient:
+            raise ConfigurationError(
+                f"Could not read '{name}': it is not UTF-8, GB18030 or UTF-16 text. "
+                "Open it and save it again as UTF-8, then upload it once more."
+            )
+        decoded = data.decode("utf-8", errors="replace")
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# CJK Unified Ideographs, plus Extension A -- what a GB18030 document is for.
+# See `_decode_text` for why a decode that yields none of these is rejected.
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def _decoded_or_none(data: bytes) -> Optional[str]:
+    """The first encoding in the chain that reads `data`, or None.
+
+    A BOM is an explicit declaration by whoever wrote the file, so it is
+    honoured before anything is guessed. It is also consumed: a UTF-8 BOM is
+    read with `utf-8-sig` rather than `utf-8`, which would otherwise leave it
+    as the document's first character, where it becomes part of whatever the
+    first line is -- a heading, or a spreadsheet's first column name.
+
+    A BOM is a claim, not a guarantee, so a file that opens with one and then
+    fails to decode still falls through to the rest of the chain.
+    """
+    if data.startswith(codecs.BOM_UTF8):
+        candidates = ("utf-8-sig", "gb18030")
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        candidates = ("utf-16", "utf-8", "gb18030")
+    else:
+        candidates = ("utf-8", "gb18030")
+    for encoding in candidates:
+        try:
+            decoded = data.decode(encoding)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if encoding == "gb18030" and not _CJK_RE.search(decoded):
+            continue
+        return decoded
+    return None
 
 
 # The delimiter `_parse_pdf_bytes` joins a PDF's pages with, so a page boundary
@@ -347,6 +407,48 @@ def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
             if tail:
                 items.append((TAIL, escape(tail), depth + 1))
         stack.extend(reversed(items))
+
+
+def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> str:
+    """Render a CSV as one marker line and one row per line.
+
+    A CSV used to be decoded and handed on as prose, which cost it everything
+    the same table gets as a `.xlsx`: the knowledge base repeats a table
+    block's marker and column header at the top of every chunk it cuts, and
+    without a marker a CSV was packed on the generic separators instead --
+    losing the column names after the first chunk and cutting rows in half.
+    The marker is what buys that back (`core/knowledge_base.py`).
+
+    Read through `csv.reader` rather than split on newlines, because the two
+    disagree exactly where it matters: Excel writes a cell containing a line
+    break as a quoted field spanning two physical lines, and every column
+    after such a break would otherwise sit under the wrong header. Written
+    back through `csv.writer` for the same reason in reverse -- a value
+    containing a comma has to stay one field, or it silently becomes two
+    columns that no longer line up with the header row being repeated above
+    it. Cell text is collapsed to a single line, so a row is always one line
+    and stays one row all the way through chunking.
+
+    Not sniffed: a semicolon- or tab-delimited export reads as one field per
+    row and is rendered back unchanged, which is exactly what it did before.
+    """
+    text = _decode_text(data, name, lenient=lenient_text)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    try:
+        for row in csv.reader(io.StringIO(text)):
+            writer.writerow([_one_line(field) for field in row])
+    except csv.Error as exc:
+        # Reachable from an ordinary malformed file, not just a hostile one:
+        # one unbalanced quote makes the reader swallow everything after it
+        # as a single field, and past its 128KB limit that is a bare
+        # `field larger than field limit (131072)`. `ui/backend/ingestion.py`
+        # shows a failed document's message to the customer who uploaded it.
+        raise ConfigurationError(
+            f"Could not read '{name}' as CSV: {exc}. "
+            "Check for an unclosed quotation mark."
+        ) from exc
+    return f"[CSV: {name}]\n" + out.getvalue().strip("\n")
 
 
 def _parse_excel_bytes(data: bytes, name: str) -> str:

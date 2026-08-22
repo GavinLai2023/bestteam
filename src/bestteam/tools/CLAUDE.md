@@ -398,9 +398,9 @@ of it, so the shape is a contract between the two modules.
 
 | Element | Form | Read by |
 |---|---|---|
-| Document header | one bracketed line, `[PDF: name — N page(s)]` / `[Word: name]` / `[Excel: name]` / `[XML: name]` | `_PARSER_HEADER_RE` (`_has_extractable_text`, and the heading reader, which must not let it shadow a section) |
+| Document header | one bracketed line, `[PDF: name — N page(s)]` / `[Word: name]` / `[Excel: name]` / `[CSV: name]` / `[XML: name]` | `_PARSER_HEADER_RE` (`_has_extractable_text`, and the heading reader, which must not let it shadow a section) |
 | Section heading | Markdown `# ` … `#### `, deeper levels clamped | `MARKDOWN_HEADING_RE` (defined here, imported there) → `_Chunk.heading` |
-| Table | `[Table N]` / `[Sheet: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `_TABLE_MARKER_RE`, `_chunk_table_block` (repeats marker + header row) |
+| Table | `[Table N]` / `[Sheet: name]` / `[CSV: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `_TABLE_MARKER_RE`, `_chunk_table_block` (repeats marker + header row) |
 | PDF page break | `PAGE_BREAK` (`\f`) | `_chunk_document` → `_Chunk.page` |
 | XML element | `<tag attr="v"> text`, two spaces of indent per level | `_chunk_xml_document` (indentation *is* the tree) |
 
@@ -425,6 +425,23 @@ structure from a document's own text:
   citation. Cells need no escaping — a table block is split on the default
   separators and cited by its marker, so nothing reads a heading out of a row.
 
+- A `.csv` is rendered as a table block, not as prose. Its own document header
+  line **is** the block's marker (`[CSV: name]`, matched by `_TABLE_MARKER_RE`)
+  — a CSV is a single table, so a separate `[Sheet: …]` line under it would
+  name the same thing twice. Before this, the same table exported as `.csv`
+  instead of `.xlsx` was packed on the generic separators: it lost its column
+  names after the first chunk and its rows were cut in half. Rows go through
+  `csv.reader`/`csv.writer` rather than a newline split and a `,`.join,
+  because both directions matter — Excel writes a cell containing a line break
+  as a quoted field across two physical lines (which would become two rows,
+  every column under the wrong header), and a value containing a comma has to
+  stay quoted on the way out (or it becomes two columns that no longer line up
+  with the header being repeated above them). The delimiter is **not** sniffed:
+  a semicolon- or tab-delimited export reads as one field per row and is
+  rendered back unchanged, exactly as before. Note the asymmetry this leaves:
+  `_parse_excel_bytes` still joins cells with a bare `,`, so a *spreadsheet*
+  cell containing a comma still splits into two apparent columns.
+
 And **a heavier parser can be swapped
 in behind this contract without the chunker changing**: docling's
 `export_to_markdown()` already produces `#` headings and in-order content, which
@@ -433,6 +450,29 @@ of `parse_bytes` — lightweight parsers for documents they handle well, an
 out-of-process heavy stack for the ones they don't (scanned PDFs, multi-column
 layouts, PDF tables). None of that exists yet; only the output contract it would
 have to satisfy does.
+
+### Plain-text encodings
+
+`_decode_text` tries UTF-8, then whatever a BOM declares, then GB18030 —
+because a plain-text document a customer produces is very often not UTF-8.
+Chinese Windows' Notepad and Excel's "CSV (comma delimited)" export both write
+GBK; Excel's "Unicode text" export writes UTF-16 with a BOM; Excel's "CSV
+UTF-8" writes a UTF-8 BOM, which is read with `utf-8-sig` so it does not
+survive as the document's first character (and hence as part of its first
+heading or first column name). Each of those used to reach a self-service
+customer as a raw `UnicodeDecodeError` naming a byte offset.
+
+What did **not** change is what strictness was protecting: a document in none
+of those encodings is still reported rather than indexed as mojibake, now as a
+`ConfigurationError` naming the file and telling the customer to re-save it as
+UTF-8. GB18030 is why the chain needs a guard — it is permissive enough that a
+Western-encoded document whose high bytes happen to form valid pairs decodes
+into Chinese nonsense, so its result is accepted only when it actually contains
+CJK characters. That refuses the rare genuine GB18030 document containing no
+CJK at all; a loud refusal the customer can act on was preferred to a silent
+one nobody would notice. `lenient_text` (the attachment path) is unchanged in
+contract — it still never raises — but it is now the last resort rather than
+the first, so a GBK attachment arrives as its own text instead of U+FFFDs.
 
 ### Two notes on the bytes refactor
 

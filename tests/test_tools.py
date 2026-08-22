@@ -404,6 +404,53 @@ def test_parse_file_reads_csv(tmp_path):
     assert "a,b" in parse_file(str(f))
 
 
+def test_parse_file_csv_gets_a_table_marker(tmp_path):
+    # A CSV is a table, and the knowledge base only knows that from the
+    # parser's own marker line -- without it the file chunks as prose.
+    f = tmp_path / "items.csv"
+    f.write_text("sku,name\nA1,Widget\n", encoding="utf-8")
+    assert parse_file(str(f)).splitlines() == ["[CSV: items.csv]", "sku,name", "A1,Widget"]
+
+
+def test_parse_file_csv_quoted_newline_stays_one_row(tmp_path):
+    # Excel writes a cell containing a line break as a quoted field spanning
+    # two physical lines. Passed through verbatim it becomes two rows, and
+    # every column after the break belongs to the wrong header.
+    f = tmp_path / "notes.csv"
+    f.write_text('sku,note\nA1,"first line\nsecond line"\n', encoding="utf-8")
+    assert parse_file(str(f)).splitlines() == [
+        "[CSV: notes.csv]",
+        "sku,note",
+        'A1,first line second line',
+    ]
+
+
+def test_parse_file_csv_keeps_a_comma_inside_a_field_quoted(tmp_path):
+    # Re-joining fields bare would turn one value into two columns, silently
+    # shifting every column after it out from under the repeated header row.
+    f = tmp_path / "items.csv"
+    f.write_text('sku,name\nA1,"Widget, large"\n', encoding="utf-8")
+    assert parse_file(str(f)).splitlines()[-1] == 'A1,"Widget, large"'
+
+
+def test_parse_file_csv_written_by_chinese_excel(tmp_path):
+    # The whole point of both halves of this change: Excel's "CSV (comma
+    # delimited)" export on a Chinese Windows box, which is GBK.
+    f = tmp_path / "订单.csv"
+    f.write_bytes("编号,名称\n1,螺丝\n".encode("gbk"))
+    assert parse_file(str(f)).splitlines() == ["[CSV: 订单.csv]", "编号,名称", "1,螺丝"]
+
+
+def test_parse_file_csv_reports_an_unreadable_row_readably(tmp_path):
+    # An unbalanced quote makes `csv.reader` swallow the rest of the file as
+    # one field, and past its 128KB field limit that surfaces as `_csv.Error`
+    # -- which ingestion.py would hand to a self-service customer verbatim.
+    f = tmp_path / "broken.csv"
+    f.write_text('sku,name\nA1,"' + "x" * 200_000, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="broken.csv"):
+        parse_file(str(f))
+
+
 def test_parse_file_rejects_unsupported_type(tmp_path):
     f = tmp_path / "image.png"
     f.write_bytes(b"\x89PNG")

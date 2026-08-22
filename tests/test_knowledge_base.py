@@ -205,22 +205,39 @@ def test_skips_file_with_configuration_error_and_warns(tmp_path, monkeypatch):
     assert "bad.txt" not in sources
 
 
-def test_skips_a_mis_encoded_document_instead_of_ingesting_mojibake(tmp_path):
+def test_ingests_a_gbk_document_as_its_own_text(tmp_path):
     # No monkeypatching: this is a real GBK-encoded file, the kind an
-    # operator actually drops into a knowledge folder. Phase 4b's byte
-    # refactor briefly made `parse_file` lenient, which turned this from
-    # 'skipped with a warning' into 'silently indexed as replacement
-    # characters' -- searchable nonsense nobody was told about.
+    # operator actually drops into a knowledge folder -- and the kind Chinese
+    # Windows' Notepad writes by default. It used to be skipped with a
+    # warning; it is now decoded and indexed.
     (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
     (tmp_path / "legacy.txt").write_bytes("你好，这是一份旧文档。".encode("gbk"))
 
-    with pytest.warns(UserWarning, match="legacy.txt"):
+    kb = LocalFolderKnowledgeBase("kb", tmp_path)
+
+    sources = {chunk.source for chunk in kb._chunks}
+    assert sources == {"good.txt", "legacy.txt"}
+    legacy = next(chunk for chunk in kb._chunks if chunk.source == "legacy.txt")
+    assert legacy.text == "你好，这是一份旧文档。"
+    # And nothing partially-decoded leaked into the index.
+    assert not any("�" in chunk.text for chunk in kb._chunks)
+
+
+def test_skips_an_undecodable_document_instead_of_ingesting_mojibake(tmp_path):
+    # The half of the old behaviour that still holds: a document in none of
+    # the encodings the parser tries is skipped with a warning, not indexed
+    # as replacement characters -- searchable nonsense nobody was told about.
+    # Phase 4b's byte refactor briefly made `parse_file` lenient and did
+    # exactly that.
+    (tmp_path / "good.txt").write_text("Apples are great fruit.", encoding="utf-8")
+    (tmp_path / "broken.txt").write_bytes(bytes([0x81, 0x30, 0xFF]))
+
+    with pytest.warns(UserWarning, match="broken.txt"):
         kb = LocalFolderKnowledgeBase("kb", tmp_path)
 
     sources = {chunk.source for chunk in kb._chunks}
     assert "good.txt" in sources
-    assert "legacy.txt" not in sources
-    # And nothing partially-decoded leaked into the index.
+    assert "broken.txt" not in sources
     assert not any("�" in chunk.text for chunk in kb._chunks)
 
 
@@ -1396,3 +1413,34 @@ def test_format_results_cites_sheet_heading():
 
     assert _citation(chunk) == "sales.xlsx § Sheet: Q1"
     assert "1. [source: sales.xlsx § Sheet: Q1]" in format_results("docs", "units", [chunk])
+
+
+def test_csv_repeats_its_header_row_in_every_chunk():
+    """The same table exported as .xlsx already gets this; as .csv it used to
+    lose the column names after the first chunk and cut rows in half."""
+    rows = "\n".join(f"SKU-{i},Widget {i},{i * 3}" for i in range(120))
+    text = "[CSV: items.csv]\nsku,name,price\n" + rows
+    chunks = _chunk_document("items.csv", text, chunk_size=400, chunk_overlap=0, suffix=".csv")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.text.startswith("[CSV: items.csv]\nsku,name,price\n")
+        assert chunk.heading == "CSV: items.csv"
+
+
+def test_csv_chunks_never_cut_a_row_in_half():
+    rows = [f"SKU-{i},Widget {i},{i * 3}" for i in range(120)]
+    text = "[CSV: items.csv]\nsku,name,price\n" + "\n".join(rows)
+    chunks = _chunk_document("items.csv", text, chunk_size=400, chunk_overlap=0, suffix=".csv")
+
+    body_lines = []
+    for chunk in chunks:
+        # Drop the repeated marker + header prefix; what is left is body rows.
+        body_lines.extend(chunk.text.split("\n")[2:])
+    assert [line for line in body_lines if line] == rows
+
+
+def test_a_csv_with_only_a_header_line_contributes_nothing():
+    # `_has_extractable_text` gates ingestion: a document that parses to its
+    # own marker and nothing else must not become a content-free chunk.
+    assert not _has_extractable_text("[CSV: empty.csv]\n")

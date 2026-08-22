@@ -21,8 +21,11 @@ def test_plain_text_round_trips():
 
 
 def test_each_text_suffix_is_supported():
-    for suffix in (".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"):
+    for suffix in (".txt", ".md", ".json", ".yaml", ".yml", ".log"):
         assert parse_bytes(b"x", f"f{suffix}") == "x"
+    # `.csv` is still plain text on the way in, but it leaves as a table
+    # block: the marker is what earns it the same chunking a spreadsheet gets.
+    assert parse_bytes(b"x", "f.csv") == "[CSV: f.csv]\nx"
 
 
 def test_an_unsupported_type_raises_with_the_type_named():
@@ -40,10 +43,12 @@ def test_the_suffix_is_read_case_insensitively():
 
 
 def test_undecodable_text_raises_by_default():
-    # Strict is the default so `parse_bytes` and `parse_file` agree. A
-    # mis-encoded document belongs in a warning to whoever owns it, not in a
-    # knowledge base as mojibake nobody can search.
-    with pytest.raises(UnicodeDecodeError):
+    # Strict is still the default once the encoding chain is exhausted, so
+    # `parse_bytes` and `parse_file` agree and a mis-encoded document belongs
+    # in a warning to whoever owns it, not in a knowledge base as mojibake
+    # nobody can search. These bytes open with a UTF-16 BOM and then aren't
+    # UTF-16, so they exercise the fall-through past a BOM's own claim.
+    with pytest.raises(ConfigurationError):
         parse_bytes(bytes([0xFF, 0xFE, 0x00]) + b"binary", "notes.txt")
 
 
@@ -56,13 +61,20 @@ def test_undecodable_text_is_replaced_when_lenient():
     assert isinstance(result, str)
 
 
-def test_parse_file_raises_on_a_mis_encoded_document(tmp_path):
-    # What `Path.read_text(encoding="utf-8")` did before the byte refactor,
-    # and what lets a knowledge base skip the file with a warning rather
-    # than ingest it as mojibake.
+def test_parse_file_reads_a_gbk_document(tmp_path):
+    # This used to raise: `Path.read_text(encoding="utf-8")` was what the
+    # byte refactor preserved, and GBK is what a Chinese Windows box writes.
     target = tmp_path / "legacy.txt"
     target.write_bytes("你好".encode("gbk"))
-    with pytest.raises(UnicodeDecodeError):
+    assert parse_file(str(target)) == "你好"
+
+
+def test_parse_file_raises_on_a_mis_encoded_document(tmp_path):
+    # A document in none of the chain's encodings is still skipped with a
+    # warning rather than ingested as mojibake.
+    target = tmp_path / "legacy.txt"
+    target.write_bytes(bytes([0x81, 0x30, 0xFF]))
+    with pytest.raises(ConfigurationError):
         parse_file(str(target))
 
 
@@ -235,3 +247,71 @@ def test_pdf_pages_are_joined_by_the_page_break_constant():
 
     assert PAGE_BREAK == "\f"
     assert result == f"[PDF: doc.pdf — 2 page(s)]\none{PAGE_BREAK}two"
+
+
+# --- Text encodings beyond UTF-8 -------------------------------------------
+#
+# A plain-text document a customer produces on a Chinese Windows box is very
+# often not UTF-8: Notepad and Excel's own "CSV (comma delimited)" export both
+# write GBK, and Excel's "Unicode text" export writes UTF-16 with a BOM. Every
+# one of those used to reach the customer as a raw UnicodeDecodeError naming a
+# byte offset.
+
+
+def test_gbk_text_is_decoded():
+    assert parse_bytes("季度报告".encode("gbk"), "notes.txt") == "季度报告"
+
+
+def test_gb18030_text_is_decoded():
+    # GBK's superset, and the encoding actually tried -- it covers GB2312 and
+    # GBK documents as well as its own.
+    assert parse_bytes("季度报告".encode("gb18030"), "notes.txt") == "季度报告"
+
+
+def test_a_utf8_byte_order_mark_is_stripped():
+    # Excel's "CSV UTF-8" export writes one. Left in place it becomes the
+    # first character of the document -- and so of its first heading.
+    decoded = parse_bytes("﻿Hello".encode("utf-8"), "notes.txt")
+    assert decoded == "Hello"
+
+
+def test_utf16_text_is_decoded():
+    # Excel's "Unicode text" export: UTF-16 with a BOM.
+    assert parse_bytes("Hello\tworld".encode("utf-16"), "notes.txt") == "Hello\tworld"
+
+
+def test_a_gb18030_decode_without_cjk_is_refused():
+    # These bytes DO decode as GB18030 -- to "αβ total", no CJK anywhere.
+    # That is the shape a Western-encoded document takes when its high bytes
+    # happen to form valid GB18030 pairs, and accepting it would turn a loud
+    # failure into silently indexed mojibake. Refusing it also refuses the
+    # rare genuine GB18030 document that contains no Chinese; that trade is
+    # deliberate (see `_decode_text`).
+    payload = bytes([0xA6, 0xC1, 0xA6, 0xC2]) + b" total"
+    assert payload.decode("gb18030") == "αβ total"
+    with pytest.raises(ConfigurationError):
+        parse_bytes(payload, "notes.txt")
+
+
+def test_an_undecodable_document_names_the_file_and_the_fix():
+    # What a self-service customer sees in the upload panel, via
+    # ui/backend/ingestion.py. "invalid start byte at position 0" is not
+    # something they can act on; "save it as UTF-8" is.
+    with pytest.raises(ConfigurationError) as excinfo:
+        parse_bytes(bytes([0x81, 0x30, 0xFF]), "notes.txt")
+    message = str(excinfo.value)
+    assert "notes.txt" in message
+    assert "UTF-8" in message
+
+
+def test_lenient_decoding_still_never_raises():
+    # The attachment path's contract is unchanged: a sender can name anything
+    # `.txt`, and one bad attachment must not fail a customer's whole run.
+    result = parse_bytes(bytes([0x81, 0x30, 0xFF]), "notes.txt", lenient_text=True)
+    assert isinstance(result, str)
+
+
+def test_lenient_decoding_prefers_a_real_encoding_over_replacement():
+    # Leniency is the last resort, not the first: an attachment that IS
+    # decodable as GBK should arrive as its own text, not as U+FFFDs.
+    assert parse_bytes("季度报告".encode("gbk"), "notes.txt", lenient_text=True) == "季度报告"
