@@ -196,6 +196,59 @@ def _model_spec(agent: Agent) -> str:
     return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
 
 
+# Emitted through `on_token` when a model call that had already produced text
+# turns out to be a tool call after all: the consumer must discard what it has
+# shown. A NUL-prefixed sentinel cannot collide with model output, and one
+# callback stays a smaller interface change than two (see
+# docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+STREAM_RESET = "\x00bestteam:reset"
+
+
+def _supports_stream_usage(model: Any) -> bool:
+    """True if this model reports token usage while streaming.
+
+    ChatOpenAI and family declare a `stream_usage` field; binding it makes the
+    aggregated chunk carry `usage_metadata`, so metering is unchanged. Binding
+    it on a model that does NOT declare it would push an unexpected kwarg down
+    into its `_stream()`, so this is checked before the bind, on the resolved
+    model rather than on a `RunnableBinding` wrapper.
+    """
+    return "stream_usage" in getattr(type(model), "model_fields", {})
+
+
+def _should_stream(model: BaseChatModel) -> bool:
+    """Whether this model's calls may be streamed.
+
+    Streaming a billable model that does not report usage while streaming
+    would silently stop metering the largest call in the run, so it is
+    refused -- an unstreamed reply is better than an unmetered one. A fake
+    reports no usage on any path, so streaming it loses nothing; that is also
+    what makes this feature testable at zero cost.
+    """
+    return _supports_stream_usage(model) or isinstance(model, FakeListChatModel)
+
+
+def _chunk_text(chunk: Any) -> str:
+    """The plain text of one streamed chunk.
+
+    `content` is a string for every provider we support today; the list form
+    (content blocks) is handled so a provider that returns one degrades to its
+    text parts rather than to `str(list)` on a visitor's screen. Deliberately
+    avoids `BaseMessage.text`, which is a method in langchain-core 0.3 and a
+    property in 1.x.
+    """
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
 # Upper bound on each string field of a diagnostic-only event (`agent_prompt`,
 # `model_turn`, `tool_completed.result`). Generous on purpose -- the point of
 # a diagnostic run is to show what the model actually saw -- but still a bound,
@@ -416,6 +469,9 @@ def _run_agent(
     usage_sink: Optional[List[Dict[str, Any]]] = None,
     on_event: Optional[Callable[[TraceEvent], None]] = None,
     diagnostic: bool = False,
+    streams: bool = False,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
 
@@ -446,6 +502,17 @@ def _run_agent(
     (agent_started/tool_started/tool_completed/agent_progress) as this turn
     progresses -- `LangGraphAdapter.stream()` buffers these per-node and
     flushes them just before that node's `agent_completed`.
+
+    `streams` (set at wiring time for the one agent whose text IS the run's
+    output) plus an `on_token` sink makes each model call stream, with every
+    text delta handed to the sink as it arrives. This is a side channel out of
+    the node on purpose: `LangGraphAdapter.stream()` only yields at node
+    boundaries, so nothing on that path can reach a subscriber while the reply
+    is still being written. `should_cancel`, if given, is polled between
+    deltas so a long reply can be stopped mid-generation rather than merely
+    ignored. Streaming is refused for a model whose usage would be lost (see
+    `_should_stream`); with `streams=False` or no sink, behaviour here is
+    identical to a plain `invoke()`.
     """
 
     def _emit(event_type: str, data: Any = None) -> None:
@@ -453,6 +520,7 @@ def _run_agent(
             on_event(TraceEvent(type=event_type, pipeline="", agent=agent.name, data=data))
 
     model = _resolve_model(agent.model)
+    raw_model = model
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
     first_call_model = model
@@ -464,6 +532,52 @@ def _run_agent(
             )
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
+
+    stream_reply = streams and on_token is not None and _should_stream(raw_model)
+    if stream_reply and _supports_stream_usage(raw_model):
+        # Bound after bind_tools: `.bind()` on a RunnableBinding merges kwargs,
+        # so both bindings survive. Without this the aggregated chunk carries
+        # no `usage_metadata` and the run's largest call goes unmetered.
+        model = model.bind(stream_usage=True)
+        first_call_model = first_call_model.bind(stream_usage=True)
+
+    def _call(bound_model: Any, msgs: List[Any]) -> Any:
+        """One model call -- streamed with deltas, or a plain `invoke`.
+
+        The streamed branch accumulates chunks into a message equivalent to
+        what `invoke()` would have returned (tool calls merged, usage attached),
+        so everything downstream of this function is unaware of the difference.
+        """
+        if not stream_reply or on_token is None:
+            return bound_model.invoke(msgs)
+        full = None
+        emitted = False
+        tool_call_seen = False
+        for chunk in bound_model.stream(msgs):
+            full = chunk if full is None else full + chunk
+            if getattr(chunk, "tool_call_chunks", None) and not tool_call_seen:
+                tool_call_seen = True
+                if emitted:
+                    # Text already went out for what turns out to be a tool
+                    # call -- tell the consumer to discard it. Providers
+                    # normally emit tool calls from the first chunk, so this is
+                    # insurance rather than a common path.
+                    on_token(STREAM_RESET)
+            if not tool_call_seen:
+                text = _chunk_text(chunk)
+                if text:
+                    on_token(text)
+                    emitted = True
+            if should_cancel is not None and should_cancel():
+                # Stop generating rather than merely ignoring the result. The
+                # node then finishes early and the caller's own cancellation
+                # handling does the rest -- no new terminal path. The
+                # provider's usage arrives in a final chunk this never reads,
+                # so a cancelled call goes unmetered: a bounded, deliberate
+                # cost, since draining the stream would spend exactly the
+                # tokens we are stopping.
+                break
+        return full if full is not None else bound_model.invoke(msgs)
 
     system_prompt = agent.system_prompt()
     if extra_system_prompt:
@@ -479,7 +593,7 @@ def _run_agent(
             "agent_prompt",
             {"system_prompt": _diagnostic_text(system_prompt), "input": _diagnostic_text(input_text)},
         )
-    response = first_call_model.invoke(messages)
+    response = _call(first_call_model, messages)
     _record_usage(agent, response, usage_sink)
     if diagnostic:
         _emit("model_turn", _model_turn_data(1, response))
@@ -558,7 +672,7 @@ def _run_agent(
                     usage_sink.extend(tool_ctx.usage)
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
-        response = model.invoke(messages)
+        response = _call(model, messages)
         _record_usage(agent, response, usage_sink)
         if diagnostic:
             _emit("model_turn", _model_turn_data(i + 2, response))
