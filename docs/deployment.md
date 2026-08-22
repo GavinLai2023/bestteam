@@ -15,6 +15,74 @@ behind Docker Compose.
 > customer's mailbox per-org with `admin set-email` instead (§4c). The
 > process-wide caveat still applies to any other process-wide integration env.
 
+## 0. First customer, in order
+
+Every step below has its own section with the detail; this is the running
+order, because the sections are organised by topic and the order matters in
+three places (the checklist runs *before* the first `up`, migrations run
+*before* provisioning, and the mailbox type has to be known before you ask the
+customer's IT for anything).
+
+| # | Step | Where |
+|---|------|-------|
+| 1 | Provision a host with Docker, clone the repo, write `.env` | §1 |
+| 2 | **Work out the customer's mailbox type** — do not ask them | §0a |
+| 3 | Run the launch checklist against the real environment | §1, "Beta launch checklist" |
+| 4 | `docker compose build && docker compose up -d` | §2 |
+| 5 | `alembic upgrade head` | §3 |
+| 6 | `create-org` (skip on a single-customer instance — "default" is seeded) | §4 |
+| 7 | `create-user` for the customer's one member | §4 |
+| 8 | `create-user --platform` + `promote` for yourself | §4b |
+| 9 | `set-email <org> ... --test` | §4c |
+| 10 | **If the mailbox is on Microsoft 365**, walk `docs/email-smoke-test.md` §9 against the live tenant, with the customer | §4c |
+| 11 | Set a retention period, if the customer wants one bounded | §4, "Keeping and removing run history" |
+| 12 | Install the nightly backup cron, and copy backups off the host | "Backup and restore" |
+| 13 | Store `BESTTEAM_SECRETS_KEY` in a password manager, **not** beside the backups | "Backup and restore" |
+| 14 | Rehearse `scripts/restore.sh` on a throwaway stack — once, before the customer is live | "Backup and restore" |
+| 15 | Hand the customer `docs/BETA_NOTES.md` | — |
+
+Steps 12–14 are the ones that get skipped under time pressure and are the ones
+that cost the most when skipped. A restore script that has never been run is
+not a backup strategy.
+
+### 0a. Which mailbox does the customer have?
+
+**Do not ask the customer "is it Microsoft 365 or IMAP?"** — it is not a
+question a non-technical person can answer, and a wrong answer sends their IT
+department off configuring the wrong thing. Work it out from the address:
+
+| Address | Verdict |
+|---------|---------|
+| `@outlook.com`, `@hotmail.com`, `@live.*`, `@msn.com` | **Personal Microsoft account — not supported.** Microsoft disabled basic-auth IMAP for these, and the app-only OAuth path needs an Entra tenant, which a personal account is not in. The customer needs a work mailbox. |
+| `@gmail.com` | IMAP with an **app password** (not the account password); the customer needs 2-step verification enabled to create one. |
+| `@qq.com`, `@163.com`, `@126.com` and similar | IMAP, with a provider-issued **authorisation code** rather than the login password. The customer enables IMAP in their mailbox settings first. |
+| A company domain | Look up the MX record (below). |
+
+For a company domain, one command decides it:
+
+```bash
+# Linux/macOS
+dig +short MX example.com
+# Windows
+nslookup -type=mx example.com
+```
+
+- Answers pointing at **`*.mail.protection.outlook.com`** → **Microsoft 365**.
+  Use `--auth microsoft-oauth` (§4c), and their IT has to create the app
+  registration, consent to `IMAP.AccessAsApp`, and grant the app access to
+  that one mailbox — see "Microsoft 365 mailboxes" in §4c for the exact
+  PowerShell. **Budget real time for this**: it is a change in the customer's
+  tenant, made by someone who is not in your meeting.
+- Answers pointing at **`*.google.com` / `*.googlemail.com`** → Google
+  Workspace. IMAP with an app password, as Gmail above.
+- Anything else → ordinary IMAP. Ask their IT for the IMAP hostname, the
+  username, and whether the mailbox needs an app-specific password. `--test`
+  (§4c) verifies a real login before anything is stored, so a wrong answer
+  costs one command, not a support cycle.
+
+Whatever the answer, the customer only ever needs one mailbox: one org, one
+mailbox, one automated team (see `docs/BETA_NOTES.md`).
+
 ## 1. Configure environment
 
 ```bash
