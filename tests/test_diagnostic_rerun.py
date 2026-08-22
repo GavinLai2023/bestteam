@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import Run
+from ui.backend.db.models import Run, ShareMessage
 from ui.backend.db_session import get_db
 
 _PIPELINE_CONFIG = {
@@ -154,7 +154,7 @@ def test_unknown_run_is_404(rig):
     assert client.post("/api/runs/nope/diagnose", headers=headers["op"]).status_code == 404
 
 
-def test_autonomous_or_shared_chat_runs_are_refused(rig):
+def test_autonomous_email_runs_are_refused(rig):
     client, headers = rig
     org_id = get_org_id("org_a")
     with open_test_db() as db:
@@ -166,6 +166,33 @@ def test_autonomous_or_shared_chat_runs_are_refused(rig):
 
     assert resp.status_code == 400
     assert "mailbox" in resp.json()["detail"].lower()
+
+
+def test_a_shared_chat_turn_can_be_diagnosed_without_touching_the_visitor_session(rig):
+    """A share-link turn is a regular run stamped with
+    trigger_context["share_session_id"]. Its diagnostic re-run is a NEW row
+    with no trigger_context, so share_transcript.record_share_reply is a
+    no-op and nothing reaches the visitor's transcript -- the blanket
+    refusal was protecting nothing (spec 2026-08-22)."""
+    client, headers = rig
+    _deploy(client, headers)
+    org_id = get_org_id("org_a")
+    with open_test_db() as db:
+        db.add(Run(id="share-1", pipeline="wf", input="<user>hi</user>", status="completed", org_id=org_id,
+                   username="share-link",
+                   trigger_context={"share_link_id": 1, "share_session_id": 1, "turn_number": 1}))
+        db.commit()
+
+    resp = client.post("/api/runs/share-1/diagnose", headers=headers["op"])
+
+    assert resp.status_code == 200, resp.text
+    new_id = resp.json()["run_id"]
+    assert _wait_finished(client, headers, new_id)["status"] == "completed"
+    with open_test_db() as db:
+        new_row = db.get(Run, new_id)
+        assert new_row.diagnostic_of_run_id == "share-1"
+        assert new_row.trigger_context is None
+        assert db.query(ShareMessage).count() == 0
 
 
 def test_a_diagnostic_run_cannot_itself_be_diagnosed(rig):

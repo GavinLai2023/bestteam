@@ -1126,11 +1126,12 @@ documented on `core/trace.py`; the email tools stay redacted on every path.
 Rules, each with a reason: **admin-only** (`get_current_admin`) because the
 payload is raw prompts and documents. **Always a new `runs` row**
 (`diagnostic_of_run_id`, migration `q4r5s6t7u8v9`) -- history is immutable,
-same as `retry_of_run_id`. **Refused with 400 for a run carrying
-`trigger_context`**: an autonomous email run would reach the org's live
-mailbox with unscoped `email_*` tools, and a shared-chat turn would append a
-reply to the visitor's session (`_safe_record_share_reply` keys off that
-context). **Refused for a diagnostic run itself** (diagnose the original) and
+same as `retry_of_run_id`. **Refused with 400 for an autonomous email run**
+(a `trigger_context` without a `share_session_id`): it would reach the org's
+live mailbox with unscoped `email_*` tools. A shared-chat turn is allowed --
+the diagnostic row has no `trigger_context`, so `_safe_record_share_reply` is
+a no-op and the visitor WS (which keys on `share_session_id`) can't subscribe
+to it (2026-08-22). **Refused for a diagnostic run itself** (diagnose the original) and
 **409 for a purged run** (no input left). **No `user_id`** is passed, so
 per-user memory is neither recalled nor written -- the admin must not act as
 the customer; the banner says so. **Built from the current version** via

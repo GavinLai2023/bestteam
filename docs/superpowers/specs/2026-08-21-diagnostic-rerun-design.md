@@ -70,7 +70,7 @@ Bounds and boundaries:
 Guard: `get_current_admin` (org-less platform admin).
 
 1. `db.get(Run, run_id)`; 404 if absent.
-2. 400 if `trigger_context is not None` (autonomous email / shared-chat turns would reach the mailbox / the visitor's session); 400 if the run is itself a diagnostic run (no chains); 409 if `content_purged_at` is set (no input left to re-run).
+2. 400 if `trigger_context is not None` (autonomous email / shared-chat turns would reach the mailbox / the visitor's session); 400 if the run is itself a diagnostic run (no chains); 409 if `content_purged_at` is set (no input left to re-run). **Amended 2026-08-22:** only autonomous email runs (a `trigger_context` without a `share_session_id`) are refused; a shared-chat turn is allowed because step 5's "no `trigger_context`" already makes the share-reply path a no-op and the visitor WS keys on `share_session_id` (see `2026-08-22-share-chat-beta-patch-design.md` §3).
 3. `_resolve_pipeline_and_version(run_row.pipeline, db, org_id=run_row.org_id)` — existing cached builder, `owner_principal_id=None`.
 4. `registry.create(...)` + a `Run` row persisted up front with `diagnostic_of_run_id=run_id`, `pipeline_version_id=<current>`, `org_id=<original org>`, `username=<admin>`.
 5. `run_in_background(..., diagnostic=True)` — **no `user_id`** (no memory recall/record), no `trigger_context` (PM redaction and share-reply paths are no-ops by construction).
