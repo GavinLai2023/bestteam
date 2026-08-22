@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import LanguageSelect from '../components/LanguageSelect'
 import { shareChatApi } from '../lib/shareChatApi'
 import { FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
-import type { ShareMessage, TraceEvent } from '../lib/types'
+import type { ShareMessage, ShareTeamInfo, TraceEvent } from '../lib/types'
 import './ShareChatPage.css'
 
 const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
@@ -39,6 +39,11 @@ export default function ShareChatPage() {
   const [rateLimited, setRateLimited] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
+  // The reply as it is being written. Only ever a preview: `run_completed`
+  // discards it and appends the authoritative text instead, so nothing
+  // partial is ever kept or persisted (see the step-2 streaming spec).
+  const [streamedReply, setStreamedReply] = useState('')
+  const [team, setTeam] = useState<ShareTeamInfo | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // Set inside onmessage's own terminal-event branches; onclose checks it to
@@ -67,6 +72,21 @@ export default function ShareChatPage() {
         if (ignore || hasSentRef.current) return
         setUnavailableKey(e.status === 404 ? 'share.unavailable' : 'share.loadFailed')
       })
+    return () => {
+      ignore = true
+    }
+  }, [token])
+
+  useEffect(() => {
+    let ignore = false
+    shareChatApi
+      .getTeam(token)
+      .then((info) => {
+        if (!ignore) setTeam(info)
+      })
+      // A failure here costs the header and the step count, not the chat --
+      // the page falls back to the brand and an anonymous pulse.
+      .catch(() => {})
     return () => {
       ignore = true
     }
@@ -104,6 +124,7 @@ export default function ShareChatPage() {
     }
     setMessages((prev) => [...prev, optimisticUserMessage])
     setLiveEvents([])
+    setStreamedReply('')
     terminalSeenRef.current = false
 
     try {
@@ -112,6 +133,17 @@ export default function ShareChatPage() {
       wsRef.current = ws
       ws.onmessage = (msg: MessageEvent<string>) => {
         const traceEvent = JSON.parse(msg.data) as TraceEvent
+        if (traceEvent.type === 'reply_delta') {
+          // Not a trace event as far as the page is concerned: it never joins
+          // liveEvents, so the progress indicator keeps counting agents.
+          setStreamedReply((prev) => prev + String(traceEvent.data ?? ''))
+          return
+        }
+        if (traceEvent.type === 'reply_reset') {
+          // The text so far belonged to a tool call, not the reply.
+          setStreamedReply('')
+          return
+        }
         setLiveEvents((prev) => [...prev, traceEvent])
         if (traceEvent.type === 'run_completed') {
           terminalSeenRef.current = true
@@ -120,6 +152,7 @@ export default function ShareChatPage() {
             { role: 'assistant', content: String(traceEvent.data ?? ''), turn_number: prev.length + 1 },
           ])
           setSending(false)
+          setStreamedReply('')
         } else if (TERMINAL_TYPES.includes(traceEvent.type)) {
           // run_failed / run_cancelled: the backend has already persisted its
           // own friendly fallback reply for this turn, so show the same thing
@@ -133,6 +166,7 @@ export default function ShareChatPage() {
             { role: 'assistant', content: FALLBACK_REPLY, turn_number: prev.length + 1 },
           ])
           setSending(false)
+          setStreamedReply('')
         }
       }
       ws.onerror = () => setSending(false)
@@ -154,6 +188,7 @@ export default function ShareChatPage() {
           .catch(() => {})
           .finally(() => {
             setSending(false)
+            setStreamedReply('')
             setNotice({ key: 'share.recovered' })
           })
       }
@@ -227,7 +262,7 @@ export default function ShareChatPage() {
   // read must still be able to switch (Codex review).
   const header = (
     <header className="share-chat-header">
-      <span className="share-chat-brand">{t('nav.brand')}</span>
+      <span className="share-chat-brand">{team?.name ?? t('nav.brand')}</span>
       <LanguageSelect />
     </header>
   )
@@ -270,8 +305,15 @@ export default function ShareChatPage() {
         {/* A polite live region, so assistive technology hears the progress
             line and any notice change without the focus moving. */}
         <div role="status" aria-live="polite">
-          {sending && <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>}
+          {sending && streamedReply === '' && (
+            <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>
+          )}
         </div>
+        {sending && streamedReply !== '' && (
+          <div className="share-chat-assistant">
+            <div className="share-chat-bubble assistant share-chat-streaming">{streamedReply}</div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
       <div role="status" aria-live="polite">

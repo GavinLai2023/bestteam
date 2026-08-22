@@ -8,7 +8,9 @@ import { setLanguage } from '../lib/i18n'
 vi.mock('../lib/shareChatApi', () => ({
   shareChatApi: {
     getMessages: vi.fn(),
+    getTeam: vi.fn(),
     sendMessage: vi.fn(),
+    cancelRun: vi.fn(),
     streamUrl: vi.fn(() => 'ws://127.0.0.1:8000/api/share/tok/stream/run-1'),
   },
 }))
@@ -49,6 +51,10 @@ describe('ShareChatPage', () => {
     FakeWebSocket.instances = []
     window.WebSocket = FakeWebSocket as unknown as typeof WebSocket
     mockedApi.getMessages.mockResolvedValue({ messages: [] })
+    // Default: a team whose shape gives no honest step denominator, so the
+    // existing tests see the pulse rather than dots they never asserted on.
+    mockedApi.getTeam.mockResolvedValue({ name: 'Team', steps: null })
+    mockedApi.cancelRun.mockResolvedValue({ cancelled: true })
   })
 
   afterEach(() => {
@@ -402,5 +408,66 @@ describe('ShareChatPage', () => {
 
     expect(await screen.findByText(/please wait for the previous reply to finish/i)).toBeInTheDocument()
     expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
+  })
+
+  it('renders a reply as its deltas arrive, then replaces it with the final text', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalled())
+
+    const ws = FakeWebSocket.instances.at(-1)!
+    await act(async () => {
+      ws.emit({ type: 'reply_delta', agent: null, data: 'Hel', usage: [] })
+      ws.emit({ type: 'reply_delta', agent: null, data: 'lo', usage: [] })
+    })
+    expect(await screen.findByText('Hello')).toBeInTheDocument()
+
+    // The streamed text is only ever a preview -- run_completed carries the
+    // authoritative reply and replaces it outright.
+    await act(async () => {
+      ws.emit({ type: 'run_completed', agent: null, data: 'Hello, colleague.', usage: [] })
+    })
+    expect(await screen.findByText('Hello, colleague.')).toBeInTheDocument()
+    expect(screen.queryByText('Hello')).not.toBeInTheDocument()
+  })
+
+  it('clears a partial reply when the backend takes it back', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalled())
+
+    const ws = FakeWebSocket.instances.at(-1)!
+    await act(async () => {
+      ws.emit({ type: 'reply_delta', agent: null, data: 'Looking', usage: [] })
+    })
+    expect(await screen.findByText('Looking')).toBeInTheDocument()
+
+    await act(async () => {
+      ws.emit({ type: 'reply_reset', agent: null, data: null, usage: [] })
+    })
+    await waitFor(() => expect(screen.queryByText('Looking')).not.toBeInTheDocument())
+  })
+
+  it('names the team in the header', async () => {
+    mockedApi.getTeam.mockResolvedValue({ name: 'Support Team', steps: 2 })
+    renderPage()
+
+    expect(await screen.findByText('Support Team')).toBeInTheDocument()
+  })
+
+  it('falls back to the product name when the team lookup fails', async () => {
+    mockedApi.getTeam.mockRejectedValue(new Error('nope'))
+    renderPage()
+
+    await screen.findByPlaceholderText(/type a message/i)
+    expect(screen.getByText('bestteam')).toBeInTheDocument()
   })
 })
