@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { DISPATCH_FAILED_REPLY, FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from './shareTraceEvents'
+import {
+  DISPATCH_FAILED_REPLY,
+  FALLBACK_REPLY,
+  STOPPED_REPLY,
+  fallbackReplyKey,
+  friendlyStatusFor,
+} from './shareTraceEvents'
 import type { TraceEvent } from './types'
 
 describe('friendlyStatusFor', () => {
@@ -30,6 +36,7 @@ describe('fallbackReplyKey', () => {
   it('recognises the two replies the backend persists in English', () => {
     expect(fallbackReplyKey(FALLBACK_REPLY)).toBe('share.fallbackReply')
     expect(fallbackReplyKey(DISPATCH_FAILED_REPLY)).toBe('share.dispatchFailedReply')
+    expect(fallbackReplyKey(STOPPED_REPLY)).toBe('share.stoppedReply')
   })
 
   it('leaves a real reply alone', () => {

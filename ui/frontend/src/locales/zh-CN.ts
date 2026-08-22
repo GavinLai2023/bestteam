@@ -269,6 +269,10 @@ export const zhCN: Resources = {
     recovered: '出了点问题，请重新发送你的消息。',
     fallbackReply: '抱歉，生成回复时出了点问题。',
     dispatchFailedReply: '刚才没能开始回复，请重新发送你的消息。',
+    stoppedReply: '本次回复在完成前已被停止。',
+    stop: '停止',
+    stopping: '正在停止…',
+    stepProgress: '第 {{n}} 步，共 {{total}} 步',
     status: {
       sending: '正在发送…',
       starting: '正在开始…',
