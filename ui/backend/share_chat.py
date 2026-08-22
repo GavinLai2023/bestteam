@@ -439,6 +439,36 @@ def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
     return {"name": pipeline_record.name, "steps": steps}
 
 
+@router.post("/{token}/runs/{run_id}/cancel", status_code=202)
+def cancel_share_run(token: str, run_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """Let a visitor stop a turn they no longer want.
+
+    Authorised exactly like the stream WebSocket below: the signed session
+    cookie must resolve to a session on this link, and that session must own
+    the run. Any failure is the standard 404, preserving the single-message
+    convention that stops a prober telling "not your run" apart from
+    "revoked link".
+
+    The turn is NOT refunded against either daily cap: the tokens were spent,
+    and a free retry after a stop would hand an abusive visitor unlimited
+    work against the org's budget. `registry.request_cancel` already no-ops
+    for an unknown or already-terminal run, so a Stop racing the reply is
+    harmless.
+    """
+    link = _resolve_active_link(db, token)
+    session = _resolve_session_from_cookie(request, db, link)
+    run_row = db.get(Run, run_id)
+    owns_run = (
+        session is not None
+        and run_row is not None
+        and run_row.trigger_context is not None
+        and run_row.trigger_context.get("share_session_id") == session.id
+    )
+    if not owns_run:
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+    return {"cancelled": registry.request_cancel(run_id)}
+
+
 def _link_and_org_active(engine, link_id: int) -> bool:
     """Fresh re-check of link active/expiry/org-active state -- used both at
     WS connect and before delivering every event, so a revoke, expiry, or

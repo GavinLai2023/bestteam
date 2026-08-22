@@ -871,3 +871,57 @@ def test_the_team_endpoint_refuses_a_revoked_link_without_minting_a_session(clie
     assert resp.status_code == 404
     assert resp.json()["detail"] == "This share link is no longer available."
     assert "set-cookie" not in {key.lower() for key in resp.headers}
+
+
+def test_a_visitor_can_stop_their_own_run(client, monkeypatch):
+    token, _ = _make_link()
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        "ui.backend.share_chat.registry.request_cancel",
+        lambda run_id: bool(cancelled.append(run_id)) or True,
+    )
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+
+    resp = client.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    assert resp.status_code == 202
+    assert cancelled == [run_id]
+
+
+def test_another_session_cannot_stop_someone_elses_run(client):
+    token, _ = _make_link()
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+
+    # A second visitor: same link, no cookie of their own yet.
+    stranger = TestClient(backend_main.app)
+    resp = stranger.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
+def test_an_unknown_run_is_refused_with_the_same_message(client):
+    token, _ = _make_link()
+    client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+
+    resp = client.post(f"/api/share/{token}/runs/no-such-run/cancel")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
+def test_stopping_a_turn_does_not_refund_the_daily_cap(client, monkeypatch):
+    monkeypatch.setattr("ui.backend.share_chat.registry.request_cancel", lambda run_id: True)
+    token, link_id = _make_link()
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+    with open_test_db() as db:
+        from ui.backend.db.models import ShareLink
+
+        spent = db.get(ShareLink, link_id).turns_today
+
+    client.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    with open_test_db() as db:
+        from ui.backend.db.models import ShareLink
+
+        assert db.get(ShareLink, link_id).turns_today == spent
