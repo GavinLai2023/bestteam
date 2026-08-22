@@ -5,8 +5,17 @@ import type { TraceEvent } from './types'
 // page -- deliberately generic (never a raw tool/agent name), since a
 // colleague using a shared link shouldn't see the team's internal wiring.
 // Values are i18n keys under `share.status` (locales/en.ts); the page
-// translates them, so this module stays free of react-i18next.
-const FRIENDLY_STATUS: Record<string, string> = {
+// translates them, so this module stays free of react-i18next. Typed as a
+// literal union because `t()` is typed against the locale keys.
+export type ShareStatusKey =
+  | 'share.status.sending'
+  | 'share.status.starting'
+  | 'share.status.working'
+  | 'share.status.checking'
+  | 'share.status.composing'
+  | 'share.status.default'
+
+const FRIENDLY_STATUS: Record<string, ShareStatusKey> = {
   run_queued: 'share.status.sending',
   run_started: 'share.status.starting',
   agent_started: 'share.status.working',
@@ -20,10 +29,10 @@ const FRIENDLY_STATUS: Record<string, string> = {
   agent_completed: 'share.status.composing',
 }
 
-const DEFAULT_STATUS = 'share.status.default'
-const INITIAL_STATUS = 'share.status.sending'
+const DEFAULT_STATUS: ShareStatusKey = 'share.status.default'
+const INITIAL_STATUS: ShareStatusKey = 'share.status.sending'
 
-export function friendlyStatusFor(events: TraceEvent[]): string {
+export function friendlyStatusFor(events: TraceEvent[]): ShareStatusKey {
   if (events.length === 0) return INITIAL_STATUS
   const last = events[events.length - 1]
   return FRIENDLY_STATUS[last.type] ?? DEFAULT_STATUS
@@ -39,11 +48,13 @@ export function friendlyStatusFor(events: TraceEvent[]): string {
 export const FALLBACK_REPLY = 'Sorry, something went wrong producing a reply.'
 export const DISPATCH_FAILED_REPLY = "Couldn't start a reply just now. Please try sending your message again."
 
-const FALLBACK_REPLY_KEYS: Record<string, string> = {
+export type FallbackReplyKey = 'share.fallbackReply' | 'share.dispatchFailedReply'
+
+const FALLBACK_REPLY_KEYS: Record<string, FallbackReplyKey> = {
   [FALLBACK_REPLY]: 'share.fallbackReply',
   [DISPATCH_FAILED_REPLY]: 'share.dispatchFailedReply',
 }
 
-export function fallbackReplyKey(content: string): string | null {
+export function fallbackReplyKey(content: string): FallbackReplyKey | null {
   return FALLBACK_REPLY_KEYS[content] ?? null
 }
