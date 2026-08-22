@@ -19,9 +19,7 @@ export default function MarkdownText({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noopener noreferrer nofollow" />
-          ),
+          a: (props) => <a {...props} target="_blank" rel="noopener noreferrer nofollow" />,
         }}
       >
         {text}
