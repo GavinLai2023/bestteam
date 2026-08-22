@@ -421,11 +421,18 @@ def visitor_safe_event(event: dict) -> dict:
     `_PM_TRACE_REDACTED` redaction (final whole-branch review I4).
     """
     event_type = event.get("type")
+    # `reply_delta` (see runtime.py's `_TokenSink`) carries text by exactly the
+    # argument that already admits `run_completed.data`: it is the final
+    # agent's own reply, which the visitor is about to be given in full. Only
+    # one node in the graph is ever wired to stream (the `streams` flag in
+    # adapters/langgraph_adapter.py), so no other agent's text can reach this
+    # event. `reply_reset` carries nothing at all.
+    carries_text = event_type in ("run_completed", "reply_delta")
     return {
         "type": event_type,
         "pipeline": None,
         "agent": None,
-        "data": event.get("data") if event_type == "run_completed" else None,
+        "data": event.get("data") if carries_text else None,
         "usage": [],
     }
 

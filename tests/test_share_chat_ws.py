@@ -247,3 +247,40 @@ def test_stream_rejects_connect_to_an_already_expired_link(client):
         with client.websocket_connect(f"/api/share/{token}/stream/{run_id}") as ws:
             ws.receive_json()
     assert exc.value.code == 4404
+
+
+def test_a_reply_delta_keeps_its_text_and_nothing_else():
+    from ui.backend.share_chat import visitor_safe_event
+
+    safe = visitor_safe_event(
+        {
+            "type": "reply_delta",
+            "pipeline": "Secret Team",
+            "agent": "writer",
+            "data": "Hel",
+            "usage": [{"model": "gpt-x", "input_tokens": 10}],
+        }
+    )
+
+    assert safe == {"type": "reply_delta", "pipeline": None, "agent": None, "data": "Hel", "usage": []}
+
+
+def test_a_reply_reset_carries_nothing():
+    from ui.backend.share_chat import visitor_safe_event
+
+    safe = visitor_safe_event(
+        {"type": "reply_reset", "pipeline": "p", "agent": "a", "data": None, "usage": []}
+    )
+
+    assert safe["data"] is None
+    assert safe["agent"] is None
+
+
+def test_an_agent_completed_still_loses_its_text():
+    from ui.backend.share_chat import visitor_safe_event
+
+    safe = visitor_safe_event(
+        {"type": "agent_completed", "pipeline": "p", "agent": "writer", "data": "internal draft", "usage": []}
+    )
+
+    assert safe["data"] is None
