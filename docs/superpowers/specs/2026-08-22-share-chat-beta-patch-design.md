@@ -106,7 +106,9 @@ Decisions taken in brainstorming (2026-08-22):
 - Transient notices (recovered / pending turn / too long / send failed /
   copy failed) are stored as i18n keys and translated at render, so a
   language switch re-renders them; a 409's backend detail is never echoed on
-  this public page. The header with the language control also renders on the
+  this public page. `ShareLinksPanel`'s error banner does the same — its own
+  messages are keys, a message the API returned stays as text because it
+  cannot be translated. The header with the language control also renders on the
   "link unavailable" page. The composer has an accessible label and is
   described by the keyboard hint; status and notices live in polite live
   regions. (All four from the Codex review of the first cut.)
@@ -117,8 +119,11 @@ Decisions taken in brainstorming (2026-08-22):
 ### 1.3 `ShareLinksPanel` — cap/expiry + i18n; `SharedSessionsPanel` — i18n
 
 - Create form above the list: "Messages per day" `<input type="number"
-  min=1 max=1000>` (default 30, matching `ShareLinkCreate`) and "Expires on
-  (optional)" `<input type="date">`. `expires_at` is sent as the end of that
+  min=1 max=1000 step=1>` (default 30, matching `ShareLinkCreate`) and
+  "Expires on (optional)" `<input type="date">`. A real `<form onSubmit>`, so
+  the browser's constraint validation refuses 10.5 / 0 / 1001 before the
+  handler; the handler's own integer check catches the one case validation
+  lets through — an empty field, which is valid because it isn't `required`. `expires_at` is sent as the end of that
   *local* day via `toISOString()` (offset-aware `…Z`; the backend's
   `_to_naive_utc` normalises it and `share_chat._is_expired` compares naive
   UTC). No edit-in-place of an existing link — revoke and regenerate; `PATCH`

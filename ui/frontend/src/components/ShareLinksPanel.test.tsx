@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ShareLinksPanel from './ShareLinksPanel'
 import { api } from '../lib/api'
+import { setLanguage } from '../lib/i18n'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -17,6 +18,10 @@ describe('ShareLinksPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockedApi.listShareLinks.mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    setLanguage('en')
   })
 
   it('lists existing links and shows their status', async () => {
@@ -46,23 +51,44 @@ describe('ShareLinksPanel', () => {
     )
   })
 
-  it('refuses a non-integer or out-of-range daily cap instead of sending it', async () => {
-    // The form's own constraints (min/max/step) stop the submit in the
-    // browser -- jsdom enforces them too, so the submit handler never runs
-    // and the API is never called. The handler's own check is the fallback.
+  it('lets the input constraints refuse a non-integer or out-of-range cap', async () => {
+    // min/max/step stop the submit in the browser -- jsdom enforces them
+    // too, so the handler never runs and the API is never called.
     render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     const cap = await screen.findByLabelText(/messages per day/i)
-    fireEvent.change(cap, { target: { value: '10.5' } })
-    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
-    expect(cap).toBeInvalid()
-    fireEvent.change(cap, { target: { value: '0' } })
-    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
-    expect(cap).toBeInvalid()
-    fireEvent.change(cap, { target: { value: '1001' } })
-    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
-    expect(cap).toBeInvalid()
+    for (const value of ['10.5', '0', '1001']) {
+      fireEvent.change(cap, { target: { value } })
+      fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+      expect(cap).toBeInvalid()
+    }
     expect(mockedApi.createShareLink).not.toHaveBeenCalled()
+  })
+
+  it('refuses an empty daily cap, which constraint validation lets through', async () => {
+    // The field isn't `required`, so an empty value IS valid to the browser
+    // and reaches the submit handler, where Number('') is 0 -- this is the
+    // only path that reaches the handler's own check (Codex review).
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(await screen.findByText(/whole number from 1 to 1000/i)).toBeInTheDocument()
+    expect(mockedApi.createShareLink).not.toHaveBeenCalled()
+  })
+
+  it('re-renders a visible error banner when the language changes', async () => {
+    // Our own messages are held as keys, not translated text, so a switch
+    // while the banner shows doesn't strand it in the old language.
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(await screen.findByText(/whole number from 1 to 1000/i)).toBeInTheDocument()
+
+    setLanguage('zh-CN')
+
+    await waitFor(() => expect(screen.getByText(/必须是 1 到 1000 之间的整数/)).toBeInTheDocument())
   })
 
   it('creates a link with the default cap and no expiry when the form is left alone', async () => {
