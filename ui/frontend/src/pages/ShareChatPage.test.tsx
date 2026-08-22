@@ -217,7 +217,7 @@ describe('ShareChatPage', () => {
     expect(screen.getByPlaceholderText(/type a message/i)).not.toBeDisabled()
   })
 
-  it('shows a friendly reply bubble on run_cancelled too', async () => {
+  it('says a stopped turn was stopped, not that it failed', async () => {
     mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
     renderPage()
 
@@ -232,7 +232,9 @@ describe('ShareChatPage', () => {
       ws.emit({ type: 'run_cancelled', agent: null, data: null, usage: [] })
     })
 
-    expect(await screen.findByText(/something went wrong producing a reply/i)).toBeInTheDocument()
+    // The backend persists the "stopped" line for a cancellation, not the
+    // generic failure one -- a reload must not disagree with the live view.
+    expect(await screen.findByText(/stopped before a reply was ready/i)).toBeInTheDocument()
   })
 
   it('rolls the optimistic user bubble back when the send fails', async () => {
@@ -472,6 +474,27 @@ describe('ShareChatPage', () => {
       ws.emit({ type: 'agent_completed', agent: null, data: null, usage: [] })
     })
     expect(await screen.findByText('Step 2 of 2')).toBeInTheDocument()
+  })
+
+  it('lets the visitor stop a turn in flight', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    const stop = await screen.findByRole('button', { name: /^stop$/i })
+    fireEvent.click(stop)
+
+    await waitFor(() => expect(mockedApi.cancelRun).toHaveBeenCalledWith('tok', 'run-1'))
+  })
+
+  it('offers Stop only while a turn is actually in flight', async () => {
+    renderPage()
+    await screen.findByPlaceholderText(/type a message/i)
+    expect(screen.queryByRole('button', { name: /^stop$/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument()
   })
 
   it('names the team in the header', async () => {

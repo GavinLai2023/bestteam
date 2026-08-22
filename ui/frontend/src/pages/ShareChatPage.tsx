@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import LanguageSelect from '../components/LanguageSelect'
 import ShareProgress from '../components/ShareProgress'
 import { shareChatApi } from '../lib/shareChatApi'
-import { FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
+import { FALLBACK_REPLY, STOPPED_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
 import type { ShareMessage, ShareTeamInfo, TraceEvent } from '../lib/types'
 import './ShareChatPage.css'
 
@@ -45,6 +45,10 @@ export default function ShareChatPage() {
   // partial is ever kept or persisted (see the step-2 streaming spec).
   const [streamedReply, setStreamedReply] = useState('')
   const [team, setTeam] = useState<ShareTeamInfo | null>(null)
+  // The run this turn is streaming, so the visitor can stop it. Cleared on
+  // every terminal path, so Stop can never target the previous turn.
+  const [runId, setRunId] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // Set inside onmessage's own terminal-event branches; onclose checks it to
@@ -126,11 +130,14 @@ export default function ShareChatPage() {
     setMessages((prev) => [...prev, optimisticUserMessage])
     setLiveEvents([])
     setStreamedReply('')
+    setRunId(null)
+    setStopping(false)
     terminalSeenRef.current = false
 
     try {
-      const { run_id: runId } = await shareChatApi.sendMessage(token, content)
-      const ws = new WebSocket(shareChatApi.streamUrl(token, runId))
+      const { run_id: dispatchedRunId } = await shareChatApi.sendMessage(token, content)
+      setRunId(dispatchedRunId)
+      const ws = new WebSocket(shareChatApi.streamUrl(token, dispatchedRunId))
       wsRef.current = ws
       ws.onmessage = (msg: MessageEvent<string>) => {
         const traceEvent = JSON.parse(msg.data) as TraceEvent
@@ -154,20 +161,27 @@ export default function ShareChatPage() {
           ])
           setSending(false)
           setStreamedReply('')
+          setRunId(null)
+          setStopping(false)
         } else if (TERMINAL_TYPES.includes(traceEvent.type)) {
           // run_failed / run_cancelled: the backend has already persisted its
-          // own friendly fallback reply for this turn, so show the same thing
-          // now instead of leaving the visitor's message looking unanswered
-          // until they happen to reload the page. Stored as the backend's
-          // English literal (what a reload would return) and translated at
-          // render by fallbackReplyKey, the same way a reloaded one is.
+          // own friendly reply for this turn, so show the same thing now
+          // instead of leaving the visitor's message looking unanswered until
+          // they happen to reload the page. Stored as the backend's English
+          // literal (what a reload would return) and translated at render by
+          // fallbackReplyKey, the same way a reloaded one is -- and it is a
+          // DIFFERENT literal for a stop than for a failure, or a reload
+          // would contradict what the visitor just saw.
           terminalSeenRef.current = true
+          const persisted = traceEvent.type === 'run_cancelled' ? STOPPED_REPLY : FALLBACK_REPLY
           setMessages((prev) => [
             ...prev,
-            { role: 'assistant', content: FALLBACK_REPLY, turn_number: prev.length + 1 },
+            { role: 'assistant', content: persisted, turn_number: prev.length + 1 },
           ])
           setSending(false)
           setStreamedReply('')
+          setRunId(null)
+          setStopping(false)
         }
       }
       ws.onerror = () => setSending(false)
@@ -190,6 +204,8 @@ export default function ShareChatPage() {
           .finally(() => {
             setSending(false)
             setStreamedReply('')
+            setRunId(null)
+            setStopping(false)
             setNotice({ key: 'share.recovered' })
           })
       }
@@ -232,6 +248,18 @@ export default function ShareChatPage() {
         setNotice({ key: 'share.sendFailed' })
       }
       setDraft(content)
+    }
+  }
+
+  const handleStop = async () => {
+    if (!runId || stopping) return
+    setStopping(true)
+    try {
+      await shareChatApi.cancelRun(token, runId)
+    } catch {
+      // The run may have finished between the click and this call; the
+      // terminal event that follows resolves the button either way.
+      setStopping(false)
     }
   }
 
@@ -338,9 +366,15 @@ export default function ShareChatPage() {
           aria-describedby="share-chat-hint"
           disabled={sending || rateLimited}
         />
-        <button type="submit" disabled={sending || rateLimited || !draft.trim()}>
-          {t('share.send')}
-        </button>
+        {sending ? (
+          <button type="button" onClick={() => void handleStop()} disabled={!runId || stopping}>
+            {stopping ? t('share.stopping') : t('share.stop')}
+          </button>
+        ) : (
+          <button type="submit" disabled={rateLimited || !draft.trim()}>
+            {t('share.send')}
+          </button>
+        )}
       </form>
       <p id="share-chat-hint" className="hint share-chat-hint">
         {t('share.sendHint')}
