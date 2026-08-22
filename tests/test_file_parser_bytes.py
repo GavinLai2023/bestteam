@@ -155,6 +155,7 @@ def test_bytes_and_path_agree_for_docx(tmp_path):
 
     buffer = io.BytesIO()
     document = docx.Document()
+    document.add_heading("Invoice", 1)
     document.add_paragraph("Hello from Word.")
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "Name"
@@ -168,6 +169,9 @@ def test_bytes_and_path_agree_for_docx(tmp_path):
     result = parse_bytes(data, target.name)
     assert result.startswith("[Word: doc.docx]")
     assert "Hello from Word." in result
+    # An emailed attachment gets the same heading rendering a knowledge-base
+    # upload does -- one parser, one output contract, both entry points.
+    assert "# Invoice" in result.splitlines()
     assert result == parse_file(str(target))
 
 

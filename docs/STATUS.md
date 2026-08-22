@@ -1677,6 +1677,26 @@
 
 ## Known issues / tech debt
 
+- **Document parsing is lightweight-only; there is no triage router and no
+  heavy stack behind it.** Word documents now carry their heading structure and
+  keep their tables in body order (`_parse_docx_bytes` renders Word heading
+  styles as Markdown `#` lines and walks `iter_inner_content()`; python-docx is
+  floored at `>=1.1` for it), and `src/bestteam/tools/CLAUDE.md` now writes down
+  the parsed-text output contract a replacement parser would have to satisfy.
+  What is still **not** done, deliberately deferred past beta until real
+  customer documents say which of it matters: **PDF tables** (pypdf extracts a
+  table as reading-order text, so rows and columns interleave — `pdfplumber` or
+  a heavier stack is the fix), **OCR** (a scanned PDF is detected and reported
+  via `_NO_TEXT_MESSAGE`, never read), **multi-column PDF layouts** (columns
+  interleave the same way tables do), **`.pptx`** (not a supported suffix at
+  all), and the **triage router** itself — deciding per document whether the
+  lightweight parser is good enough and otherwise calling an out-of-process
+  heavy parser (docling), which would also need its own metering, since it is
+  per-page compute rather than a token bill. Excel keeps its existing gaps
+  (merged cells flattened, numbers/dates rendered as `str`, formulas read as
+  cached values), and XML keeps the ones from the XML evaluation (double parse,
+  slow Python renderer, unmitigated entity expansion).
+
 - **A diagnostic re-run diagnoses the *current* team, not the run's pinned
   version.** `POST /api/runs/{id}/diagnose` builds through the cached
   `_resolve_pipeline_and_version`; `version_changed` (on the response and on

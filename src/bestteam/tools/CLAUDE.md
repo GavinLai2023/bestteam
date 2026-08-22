@@ -388,6 +388,52 @@ builds `failed_tool_message_ids`) name the tool too, so a raised attachment
 read escalates its message to a human: a name in one and not the other is half
 a wire.
 
+## The parsed-text output contract
+
+`parse_bytes(data, filename) -> str` is the single seam every consumer goes
+through — knowledge-base ingestion (`ui/backend/ingestion.py`), folder-based
+knowledge bases (`core/knowledge_base.py`), and `email_read_attachment`. What it
+returns is not free-form text: `core/knowledge_base.py` reads structure back out
+of it, so the shape is a contract between the two modules.
+
+| Element | Form | Read by |
+|---|---|---|
+| Document header | one bracketed line, `[PDF: name — N page(s)]` / `[Word: name]` / `[Excel: name]` / `[XML: name]` | `_PARSER_HEADER_RE` (`_has_extractable_text`, and the heading reader, which must not let it shadow a section) |
+| Section heading | Markdown `# ` … `#### `, deeper levels clamped | `MARKDOWN_HEADING_RE` (defined here, imported there) → `_Chunk.heading` |
+| Table | `[Table N]` / `[Sheet: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `_TABLE_MARKER_RE`, `_chunk_table_block` (repeats marker + header row) |
+| PDF page break | `PAGE_BREAK` (`\f`) | `_chunk_document` → `_Chunk.page` |
+| XML element | `<tag attr="v"> text`, two spaces of indent per level | `_chunk_xml_document` (indentation *is* the tree) |
+
+**Once a shape is meaningful, the producer owes the consumer an unambiguous
+encoding of it.** Both halves of that were review findings on the Word work, and
+both are the parser's job because only the parser can still tell generated
+structure from a document's own text:
+
+- A cell's own line breaks collapse to spaces (`_one_line`), and a row with no
+  text in any cell is **dropped, not rendered**. A newline inside a cell would
+  become an extra, shorter row; and in a *one-column* table an empty row renders
+  as the empty string — the blank line that ends the block — so a spacer row
+  would drop every row after it out of the table and index it as prose with no
+  header and no citation.
+- A Normal-styled paragraph whose text begins `# ` … `#### ` is
+  **backslash-escaped** (`_escape_heading_shaped`), because rendering Word's
+  heading styles as `#` lines is exactly what makes that shape ambiguous —
+  unescaped, the chunker cites such a paragraph as the section its chunk opens
+  under and cuts a boundary at it. `MARKDOWN_HEADING_RE` is therefore defined
+  *here*, with the writer, and imported by `core/knowledge_base.py`: two copies
+  could drift, and this drift would be silent, surfacing only as a wrong
+  citation. Cells need no escaping — a table block is split on the default
+  separators and cited by its marker, so nothing reads a heading out of a row.
+
+And **a heavier parser can be swapped
+in behind this contract without the chunker changing**: docling's
+`export_to_markdown()` already produces `#` headings and in-order content, which
+is the shape chosen here. The intended next step is a *triage router* in front
+of `parse_bytes` — lightweight parsers for documents they handle well, an
+out-of-process heavy stack for the ones they don't (scanned PDFs, multi-column
+layouts, PDF tables). None of that exists yet; only the output contract it would
+have to satisfy does.
+
 ### Two notes on the bytes refactor
 
 - **`parse_file`'s "bytes and path agree" tests are now tautological.** Both

@@ -1259,6 +1259,65 @@ def test_docx_body_chunks_normally_and_table_chunks_repeat_the_header():
         assert chunk.text.startswith("[Table 1]\nname,role\n")
 
 
+def test_docx_prose_after_a_table_is_not_swallowed_into_the_table_block():
+    text = (
+        "[Word: report.docx]\n"
+        "Before the table.\n\n"
+        "[Table 1]\nname,role\nada,analyst\n\n"
+        "Between the tables.\n\n"
+        "[Table 2]\nregion,units\nnorth,12\n\n"
+        "After the tables."
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=1000, chunk_overlap=0, suffix=".docx")
+
+    prose = [chunk.text for chunk in chunks if chunk.heading is None]
+    assert any("Between the tables." in chunk for chunk in prose)
+    assert any("After the tables." in chunk for chunk in prose)
+    # Prose must not be filed under a table's citation.
+    for chunk in chunks:
+        if chunk.heading in ("Table 1", "Table 2"):
+            assert "Between the tables." not in chunk.text
+            assert "After the tables." not in chunk.text
+
+
+def test_docx_headings_cite_the_section_across_a_table():
+    text = (
+        "[Word: report.docx]\n"
+        "## Pricing\n"
+        "Prices held steady.\n\n"
+        "[Table 1]\nname,price\nwidget,9.99\n\n"
+        "Discounts apply from June."
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=1000, chunk_overlap=0, suffix=".docx")
+
+    by_text = {chunk.text: chunk.heading for chunk in chunks}
+    before = next(t for t in by_text if "Prices held steady." in t)
+    after = next(t for t in by_text if "Discounts apply from June." in t)
+    assert by_text[before] == "Pricing"
+    # The section is still in effect after the table interrupted the prose.
+    assert by_text[after] == "Pricing"
+    assert any(t.startswith("[Table 1]") for t in by_text)
+
+
+def test_docx_prose_shaped_like_a_heading_is_not_cited_as_a_section():
+    """`_parse_docx_bytes` escapes a Normal paragraph that starts with `# `, so
+    it stays prose under whatever section it actually sits in."""
+    text = (
+        "[Word: report.docx]\n"
+        "# Real Section\n"
+        "Body under the real section.\n"
+        "\\# Not a heading, just prose\n"
+        "Prose that follows it."
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=60, chunk_overlap=0, suffix=".docx")
+
+    assert {chunk.heading for chunk in chunks} == {"Real Section"}
+    assert any("Not a heading, just prose" in chunk.text for chunk in chunks)
+
+
 def test_header_row_longer_than_chunk_size_does_not_crash_and_still_sets_heading():
     header_row = ",".join(f"column-{i:03d}" for i in range(12))
     assert len(header_row) > 60

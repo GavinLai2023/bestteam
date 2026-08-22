@@ -559,6 +559,101 @@ def test_parse_file_reads_docx_tables(tmp_path):
     assert "9.99" in result
 
 
+def test_parse_file_docx_headings_become_markdown(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_heading("Quarterly Report", 0)
+    document.add_heading("Pricing", 1)
+    document.add_paragraph("Body text.")
+    document.add_heading("Tiers", 3)
+    document.add_heading("Footnote", 6)
+    document.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert "# Quarterly Report" in lines
+    assert "# Pricing" in lines
+    assert "Body text." in lines
+    assert "### Tiers" in lines
+    # Levels deeper than the chunker's separators clamp to the deepest one.
+    assert "#### Footnote" in lines
+
+
+def test_parse_file_docx_tables_in_document_order(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_paragraph("Before the table.")
+    first = document.add_table(rows=1, cols=2)
+    first.cell(0, 0).text = "Name"
+    first.cell(0, 1).text = "multi\nline"
+    document.add_paragraph("Between the tables.")
+    second = document.add_table(rows=1, cols=1)
+    second.cell(0, 0).text = "Second"
+    document.add_paragraph("After the tables.")
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    order = [
+        result.index("Before the table."),
+        result.index("[Table 1]"),
+        result.index("Between the tables."),
+        result.index("[Table 2]"),
+        result.index("After the tables."),
+    ]
+    assert order == sorted(order)
+    # A cell's own newlines must not break the one-line-per-row contract the
+    # tabular chunker reads.
+    assert "Name,multi line" in result.splitlines()
+    # A blank line terminates each table block.
+    assert "\n\n[Table 1]\nName,multi line\n\n" in result
+
+
+def test_parse_file_docx_empty_table_row_does_not_end_the_block(tmp_path):
+    """A one-column table's spacer row renders as an empty string, which would
+    read as the blank line that terminates the block -- dropping every row
+    after it out of the table."""
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    table = document.add_table(rows=4, cols=1)
+    table.cell(0, 0).text = "Category"
+    table.cell(1, 0).text = "Electronics"
+    table.cell(2, 0).text = ""
+    table.cell(3, 0).text = "Apparel"
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    block = result.split("[Table 1]\n", 1)[1]
+    assert "\n\n" not in block
+    assert block.splitlines() == ["Category", "Electronics", "Apparel"]
+
+
+def test_parse_file_docx_prose_shaped_like_a_heading_is_escaped(tmp_path):
+    """A Normal-styled paragraph that happens to start with `# ` must not be
+    readable as a generated heading -- the chunker would cite it as a section
+    and cut a chunk boundary at it."""
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_heading("Real Section", 1)
+    document.add_paragraph("# Not a heading, just prose")
+    document.add_paragraph("#### Also not one")
+    document.add_paragraph("#5 is safe, no space after the hash")
+    document.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert "# Real Section" in lines
+    assert "\\# Not a heading, just prose" in lines
+    assert "\\#### Also not one" in lines
+    # Only the shape the chunker actually reads as a heading gets escaped.
+    assert "#5 is safe, no space after the hash" in lines
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------
