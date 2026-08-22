@@ -136,3 +136,40 @@ def test_publish_tolerates_an_evicted_run(monkeypatch):
 
     # No exception; a no-op for the missing run.
     reg.publish(run1.id, {"type": "memory_recorded", "data": "episodic"})
+
+
+def test_publish_transient_reaches_a_subscriber_without_recording():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        queue = reg.subscribe(run.id)
+
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "hi"})
+
+        assert await asyncio.wait_for(queue.get(), timeout=1) == {"type": "reply_delta", "data": "hi"}
+        assert reg.get(run.id).events == [], "deltas must not enter the replay log"
+        assert reg.get(run.id).status == "running"
+
+    asyncio.run(_run())
+
+
+def test_a_transient_event_is_never_replayed_to_a_later_subscriber():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "hi"})
+
+        queue = reg.subscribe(run.id)
+        assert queue.empty()
+
+    asyncio.run(_run())
+
+
+def test_publish_transient_is_a_no_op_for_an_unknown_run():
+    RunRegistry().publish_transient("nope", {"type": "reply_delta", "data": "hi"})

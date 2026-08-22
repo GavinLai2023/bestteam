@@ -167,6 +167,28 @@ class RunRegistry:
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
+    def publish_transient(self, run_id: str, event: dict) -> None:
+        """Fan an event out to live subscribers without recording it.
+
+        Token deltas only (see
+        docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+        Unlike `publish`, this appends nothing to `run.events` and drives no
+        status change: a long reply would otherwise put thousands of entries
+        into a log that is replayed in full to every new subscriber and held
+        for up to `_MAX_RETAINED_RUNS` runs.
+
+        The consequence is deliberate -- a visitor who reconnects mid-run sees
+        no partial text, and then receives the complete reply on
+        `run_completed`, which IS replayed. The durable path stays the source
+        of truth.
+        """
+        with self._lock:
+            if run_id not in self._runs:
+                # Evicted, or never created -- same silent drop as `publish`.
+                return
+            for loop, subscriber_queue in self._subscribers[run_id]:
+                loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
+
     def subscribe(self, run_id: str) -> "asyncio.Queue[dict] | None":
         """Return a queue pre-loaded with events seen so far, then live
         updates -- or None if `run_id` is unknown.
