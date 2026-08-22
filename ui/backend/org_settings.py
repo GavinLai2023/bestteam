@@ -25,10 +25,9 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy.orm import Session
 
 from bestteam.exceptions import ConfigurationError
-from bestteam.tools._oauth import MicrosoftClientCredentialsToken
-from bestteam.tools.email_client import _ImapBackend
 from bestteam.tools.http_client import check_host_allowed
 
+from . import email_tools
 from .activity_overview import compute_overview
 from .auth_api import get_current_org
 from .db.email_budget_settings import (
@@ -53,7 +52,7 @@ from .db.notifications import get_notification_settings, set_notification_settin
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
 from .email_budget import day_key
-from .email_trigger import disable_trigger, disable_trigger_on_identity_change
+from .email_trigger import disable_trigger, on_mailbox_saved
 from .notifications import WebhookUrlError, validate_webhook_url
 from .retention import export_org_runs, purge_org_runs, purgeable_run_count
 from .secret_store import SecretsKeyError
@@ -183,10 +182,16 @@ _M365_ACCESS_HELP = (
 
 
 def _token_provider_for(req: "EmailConnectRequest"):
-    """The token provider for this request, or None for a password mailbox."""
-    if req.auth_type != AUTH_MICROSOFT_OAUTH:
-        return None
-    return MicrosoftClientCredentialsToken(
+    """The token provider for this request, or None for a password mailbox.
+
+    The auth-type decision itself lives in `email_tools`; this only supplies
+    the request's (trimmed) fields. Kept as its own step -- rather than folded
+    into `_backend_for` -- because `_mailbox_problem` fetches the token before
+    connecting on purpose, so a credential problem stays distinguishable from
+    a mailbox-access problem.
+    """
+    return email_tools.token_provider_for(
+        req.auth_type,
         tenant_id=(req.oauth_tenant_id or "").strip(),
         client_id=(req.oauth_client_id or "").strip(),
         client_secret=req.client_secret or "",
@@ -194,19 +199,16 @@ def _token_provider_for(req: "EmailConnectRequest"):
 
 
 def _backend_for(req: "EmailConnectRequest", token_provider):
-    """The same backend `email_tools.build_org_imap_backend` will build later.
+    """The same backend the stored credential will build at run time.
 
-    Deliberately kept in step with it: validating a differently-built backend
-    would let a mailbox pass the wizard and then fail on its first real run.
+    Shares `email_tools.build_imap_backend` rather than merely being "kept in
+    step with" it: this module validates an UNSAVED request, so it cannot call
+    the stored-credential factory, but a second construction is how the poller
+    silently drifted onto a password-only path (spec dated 2026-08-22).
     """
-    if token_provider is not None:
-        return _ImapBackend(
-            host=req.host, user=req.username, port=req.port, drafts=req.drafts,
-            restrict_to_public=True, token_provider=token_provider,
-        )
-    return _ImapBackend(
-        host=req.host, user=req.username, password=req.password or "", port=req.port,
-        drafts=req.drafts, restrict_to_public=True,
+    return email_tools.build_imap_backend(
+        host=req.host, username=req.username, port=req.port, drafts=req.drafts,
+        password=req.password or "", token_provider=token_provider,
     )
 
 
@@ -351,7 +353,7 @@ def set_email(
                 "Please try again, or contact your administrator if it continues."
             ),
         ) from exc
-    disable_trigger_on_identity_change(db, org.id, req.host, req.username, prior_identity)
+    on_mailbox_saved(db, org.id, req.host, req.username, prior_identity)
     return {"connected": True, "host": req.host, "username": req.username}
 
 

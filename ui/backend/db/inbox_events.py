@@ -109,8 +109,16 @@ def record_events(
     return result.rowcount or 0
 
 
-def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[InboxEvent]:
-    """Atomically claim up to `limit` of this org's oldest pending events.
+def claim_events(
+    db: Session,
+    *,
+    org_id: int,
+    run_id: str,
+    limit: int,
+    mailbox_identity: str,
+    mailbox_generation: str,
+) -> List[InboxEvent]:
+    """Atomically claim up to `limit` of this mailbox's oldest pending events.
 
     One UPDATE, so under SQLite's write lock two claimants cannot be handed the
     same message. (That removes one class of cross-process duplication; it does
@@ -118,13 +126,26 @@ def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[I
     reads the in-process RunRegistry, so `_dispatch_lock` stays. See the spec's
     scope boundary.)
 
+    `mailbox_identity`/`mailbox_generation` are **required**, not optional with
+    an org-wide default: the defect they close is that a caller could omit the
+    mailbox entirely, so the signature is what should refuse. An org that
+    replaces or rebuilds its mailbox keeps `pending` rows from the previous
+    one, and an IMAP UID means nothing outside the generation that issued it --
+    claiming such a row hands a run bound to the new mailbox a UID that, after
+    a rebuild, now names a completely different message.
+
     Deliberately does not touch `attempts`: see `mark_dispatched`.
     """
     if limit <= 0:
         return []
     oldest_pending = (
         select(InboxEvent.id)
-        .where(InboxEvent.org_id == org_id, InboxEvent.status == EVENT_PENDING)
+        .where(
+            InboxEvent.org_id == org_id,
+            InboxEvent.status == EVENT_PENDING,
+            InboxEvent.mailbox_identity == mailbox_identity,
+            InboxEvent.mailbox_generation == mailbox_generation,
+        )
         .order_by(InboxEvent.id)
         .limit(limit)
     )
@@ -143,8 +164,10 @@ def claim_events(db: Session, *, org_id: int, run_id: str, limit: int) -> List[I
     )
 
 
-def has_pending_events(db: Session, *, org_id: int) -> bool:
-    """Whether this org has anything `claim_events` could claim right now.
+def has_pending_events(
+    db: Session, *, org_id: int, mailbox_identity: str, mailbox_generation: str
+) -> bool:
+    """Whether this mailbox has anything `claim_events` could claim right now.
 
     A `pending` row can exist for reasons other than "mail just arrived": an
     admin released a filtered false positive, or a budget cap left a backlog
@@ -160,11 +183,75 @@ def has_pending_events(db: Session, *, org_id: int) -> bool:
     return (
         db.execute(
             select(InboxEvent.id)
-            .where(InboxEvent.org_id == org_id, InboxEvent.status == EVENT_PENDING)
+            .where(
+                InboxEvent.org_id == org_id,
+                InboxEvent.status == EVENT_PENDING,
+                InboxEvent.mailbox_identity == mailbox_identity,
+                InboxEvent.mailbox_generation == mailbox_generation,
+            )
             .limit(1)
         ).first()
         is not None
     )
+
+
+SUPERSEDED_MESSAGE = (
+    "The mailbox was replaced or rebuilt before this message was processed."
+)
+
+
+def abandon_superseded_events(
+    db: Session,
+    *,
+    org_id: int,
+    mailbox_identity: str,
+    mailbox_generation: Optional[str] = None,
+) -> int:
+    """Mark this org's waiting rows from any OTHER mailbox terminal.
+
+    `claim_events`'s scoping already makes such a row unclaimable; this is what
+    stops it sitting `pending` forever with nothing reporting it. Called at the
+    three moments the current mailbox or its generation can change: a mailbox
+    save (`email_trigger.on_mailbox_saved`, which passes no generation because
+    the new mailbox's UIDVALIDITY is not known yet), the enable that
+    (re-)baselines the trigger (`email_trigger_api`, which knows both), and the
+    UIDVALIDITY re-baseline in `poll_org`.
+
+    `filtered` rows are retired alongside `pending` ones. A filtered row is not
+    inert: it is listed for the admin and `release_filtered_event` flips it to
+    `pending` without re-checking the mailbox, so a superseded one left behind
+    can be released, answer `released: true`, and then never be claimable by
+    the scoped query -- the message would disappear silently, which is the
+    exact failure the release UI exists to prevent.
+
+    Expressed as "everything that is not the current mailbox" rather than
+    "everything that was the old one", so it needs no memory of the previous
+    identity and self-corrects if a change was ever missed.
+
+    `claimed` rows are deliberately untouched: one belongs to a run that will
+    complete, be released by the stale-run watchdog, or be released by
+    `runtime.fail_interrupted_runs` at startup, and racing that from here would
+    give one batch two owners.
+
+    Returns how many were abandoned. Does not commit.
+    """
+    mismatched = InboxEvent.mailbox_identity != mailbox_identity
+    if mailbox_generation is not None:
+        mismatched = mismatched | (InboxEvent.mailbox_generation != mailbox_generation)
+    return db.execute(
+        update(InboxEvent)
+        .where(
+            InboxEvent.org_id == org_id,
+            InboxEvent.status.in_((EVENT_PENDING, EVENT_FILTERED)),
+            mismatched,
+        )
+        .values(
+            status=EVENT_FAILED,
+            last_error=SUPERSEDED_MESSAGE,
+            completed_at=_utcnow(),
+        )
+        .execution_options(synchronize_session="fetch")
+    ).rowcount or 0
 
 
 def claimed_events(db: Session, run_id: str) -> List[InboxEvent]:

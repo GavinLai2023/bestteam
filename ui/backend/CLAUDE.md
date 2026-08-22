@@ -104,7 +104,7 @@ only after the pipeline builds and a durable `runs` row is written; a build
 failure consumes nothing. The advance is a compare-and-swap
 (`UPDATE ... WHERE enabled = 1`): if the customer/operator disabled the trigger
 or replaced the mailbox (a replacement disables via
-`disable_trigger_on_identity_change`) between the enabled-check and the commit,
+`on_mailbox_saved`) between the enabled-check and the commit,
 the update matches no row and the built run is discarded
 (`registry.discard`) rather than dispatched against a just-disconnected mailbox.
 Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
@@ -193,6 +193,53 @@ Two consequences worth knowing before editing: `last_uid` is **no longer
 written by the CAS** in `_start_triggered_run` (detection already advanced it,
 past a superset of the claimed batch), and "no message was consumed" is now an
 assertion about event status, not about the cursor.
+
+**A claim is scoped to the mailbox AND its generation.** `claim_events` and
+`has_pending_events` take `mailbox_identity` and `mailbox_generation` as
+*required* keyword arguments -- required, not defaulted, because the defect
+they close is that a caller could omit the mailbox entirely. Both columns were
+written on every row from the start and read by nothing, so an org that
+replaced or rebuilt its mailbox kept `pending` rows from the previous one, and
+the first quiet cycle after re-enabling automation claimed them and handed them
+to a run bound to the *new* mailbox. Against a genuinely different mailbox
+those UIDs usually do not resolve; against a rebuilt one, where UIDs were
+reissued, UID 7 exists and is a different message. (This was never
+cross-tenant: `org_id` still isolates and an org has at most one mailbox.)
+`db/inbox_events.py::abandon_superseded_events` then marks such rows `failed`
+rather than leaving them unclaimable-but-`pending` for ever. It is called at
+**all three** moments the current mailbox or generation can change, which is
+one more than the first cut had: `email_trigger.on_mailbox_saved` (no
+generation -- the new mailbox's UIDVALIDITY is not known yet), the enable in
+`email_trigger_api` (both known), and `poll_org`'s UIDVALIDITY re-baseline,
+which also names the count on `trigger.last_error` because a rebuild is not
+something the customer did. The other two only log: the customer did those
+themselves, and enable deliberately clears `last_error` two lines earlier.
+
+Why each of the three is load-bearing, since two of them look redundant: the
+save hook runs on **every** save, not only on an identity change, because a
+customer who disconnects and then connects a different mailbox arrives with
+`prior_identity=None` and would otherwise keep the old backlog for ever. The
+enable is the only site that knows the mailbox *and* its generation, so it is
+the only one that can retire rows left by a mailbox rebuilt while automation
+was off -- `poll_org`'s re-baseline cannot, because enable has already written
+the new UIDVALIDITY as the current one. `filtered` rows are retired alongside
+`pending` ones: a filtered row is listed for the admin and released with a
+flip to `pending` that never re-checks the mailbox, so a superseded one left
+behind can be released, answer `released: true`, and then be unclaimable for
+ever -- exactly the silent loss the release UI exists to prevent.
+
+**Every orphaned claim is released at startup.**
+`runtime.fail_interrupted_runs` resolves `running` rows to `failed` and
+releases their claims; `_release_orphaned_claims` then sweeps whatever is
+*still* `claimed`, which at startup is orphaned by definition (the executor is
+per-process). Two kinds reach it and neither is visible to a
+`Run.status == "running"` query: a claim committed by `_start_triggered_run`
+before the `runs` row was written (it commits the claim on its own so a build
+failure can release it penalty-free, then builds the pipeline, then inserts the
+row), and a claim outstanding on a run that already reached a terminal status
+(`complete_events` runs on the worker thread after that commit). Deliberately
+not a lease with a periodic scavenger: the process boundary *is* the lease
+here, and `_release_stale_run` already covers a run that is alive but hung.
 
 **This does not make the poller multi-worker safe.** The claim is atomic, which
 removes one class of cross-process duplication, but `RunRegistry` is still
@@ -506,15 +553,42 @@ partly-drafted batch costs the money already spent and delivers nothing for it.
 **Phase 2: Microsoft 365 mailboxes**
 
 Exchange Online no longer accepts basic auth, so an M365 org could not connect
-a mailbox at all. `org_email_credentials.auth_type` now selects how
-`email_tools.build_org_imap_backend` authenticates: a password login, or an
-app-only OAuth token (`bestteam.tools._oauth.MicrosoftClientCredentialsToken`)
-handed to `_ImapBackend` as `token_provider=`, which makes `_connect()` use
-SASL `XOAUTH2`. **Nothing in `email_trigger.py` or `runtime.py` changed** --
-after `AUTHENTICATE` the session is an ordinary IMAP session, so the UID
-cursor, the drafts resolution, Phase 0's source-key headers and the ledger
+a mailbox at all. `org_email_credentials.auth_type` selects how the mailbox authenticates: a
+password login, or an app-only OAuth token
+(`bestteam.tools._oauth.MicrosoftClientCredentialsToken`) handed to
+`_ImapBackend` as `token_provider=`, which makes `_connect()` use SASL
+`XOAUTH2`. After `AUTHENTICATE` the session is an ordinary IMAP session, so the
+UID cursor, the drafts resolution, Phase 0's source-key headers and the ledger
 above all work untouched. That is why this was built as an auth strategy rather
 than a Graph connector; see `docs/DECISIONS.md`.
+
+**There is exactly ONE credential->connector implementation, and that is
+load-bearing.** Phase 2 originally recorded "nothing in `email_trigger.py`
+changed", on the assumption that the poller went through
+`build_org_imap_backend`. It did not: it had its own `_make_backend` that
+ignored `auth_type` and always passed `password=`, which for an OAuth
+credential is the Entra *client secret*. An M365 org could therefore save
+credentials, pass the connection test and run the manual tools while every
+automatic poll and every automatic retry failed to authenticate. The seam now
+lives entirely in `email_tools.py`:
+
+- `token_provider_for(auth_type, ...)` -- the one place `microsoft_oauth` means
+  "app-only token, not a LOGIN";
+- `build_imap_backend(...)` -- the one construction of an `_ImapBackend`, and
+  therefore the one place `restrict_to_public=True` (the SSRF validate-and-pin
+  flag for a customer-supplied host) is set;
+- `build_backend_for_credential(cred, secret)` -- from a stored row plus its
+  already-decrypted secret, which is what `poll_org`/`retry_triggered_run`
+  hold; `build_org_imap_backend(db, org_id)` is the same thing from an org id.
+
+`org_settings.py` validates an **unsaved** request so it cannot call the
+stored-credential factory, but `_token_provider_for`/`_backend_for` now
+delegate to the two primitives rather than being "kept in step with" them by
+comment -- that comment is precisely the invariant that failed. Tests:
+`tests/test_email_mailbox_factory.py` exercises the real factory on every path
+(`tests/test_email_trigger.py`'s autouse fixture replaces it module-wide, which
+is why the OAuth blindness went unnoticed). Spec:
+`docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
 
 Two things in `org_settings.py` are load-bearing. The host for
 `microsoft_oauth` is set **server-side** to `outlook.office365.com` and any
@@ -533,7 +607,7 @@ resolves the IMAP backend once per cycle and threads it into
 independently -- closes a race where a mid-cycle mailbox swap could detect
 mail on one mailbox and build tools against another. `admin.py`'s
 `set-email`/`clear-email` now call the same `email_trigger.disable_trigger`/
-`disable_trigger_on_identity_change` helpers as `org_settings.py`, so the
+`on_mailbox_saved` helpers as `org_settings.py`, so the
 operator CLI path disables the trigger on mailbox change too (previously
 only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
 "workflow" | None` -- the `"workflow"` string value is unchanged by the

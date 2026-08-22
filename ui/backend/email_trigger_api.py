@@ -15,16 +15,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from bestteam.tools.email_client import _ImapBackend
-
 from . import email_filter, secret_store
 from .auth_api import get_current_org
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger, upsert_email_trigger
-from .db.inbox_events import list_filtered_events, release_filtered_event
+from .db.inbox_events import (
+    abandon_superseded_events,
+    list_filtered_events,
+    mailbox_identity,
+    release_filtered_event,
+)
 from .db.models import EmailTrigger, Organization, PipelineRecord, Run, iso_utc
 from .db_session import get_db
-from .email_tools import spec_uses_email
+from .email_tools import build_backend_for_credential, spec_uses_email
 from .email_trigger import daily_cap, mailbox_state, triggers_disabled, TRIGGER_USERNAME, _today
 
 logger = logging.getLogger(__name__)
@@ -117,10 +120,12 @@ def set_trigger(
             detail="Connect your mailbox before turning on automatic runs.",
         )
     try:
-        password = secret_store.decrypt(cred.password_encrypted)
-        backend = _ImapBackend(
-            host=cred.host, user=cred.username, password=password,
-            port=cred.port, drafts=cred.drafts_folder, restrict_to_public=True,
+        # The shared factory, not a local `_ImapBackend`: it is what honours
+        # `auth_type`, and building one here with `password=` offered an M365
+        # org's client secret as an IMAP password, so this baseline login
+        # always failed and automatic runs could never be turned on.
+        backend = build_backend_for_credential(
+            cred, secret_store.decrypt(cred.password_encrypted)
         )
         # Baseline = the mailbox's current max UID: the backlog never triggers.
         uidvalidity, max_uid = mailbox_state(backend)
@@ -142,6 +147,23 @@ def set_trigger(
     # failure keep reporting "error" until the next cycle clears it.
     trigger.last_error = None
     trigger.last_error_kind = None
+    # The baseline above is what makes a leftover row unclaimable, and this is
+    # the only site that knows BOTH the mailbox and its generation. A mailbox
+    # replaced or rebuilt while automation was off leaves rows the scoped claim
+    # query refuses; `poll_org`'s re-baseline branch cannot retire them either,
+    # because the UIDVALIDITY just written here is already the current one.
+    # Logged rather than reported: the customer performed this themselves, and
+    # the two lines above deliberately clear the field it would be reported on.
+    abandoned = abandon_superseded_events(
+        db, org_id=org.id,
+        mailbox_identity=mailbox_identity(cred.host, cred.username),
+        mailbox_generation=str(uidvalidity),
+    )
+    if abandoned:
+        logger.info(
+            "email trigger: enable for org %s abandoned %s waiting message(s) "
+            "from a previous mailbox or generation", org.id, abandoned,
+        )
     db.commit()
     return _payload(trigger)
 

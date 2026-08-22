@@ -345,23 +345,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # Build the same backend the tools use and attempt a login, so a
                 # bad credential is caught here rather than at first run.
                 from bestteam.exceptions import ConfigurationError
-                from bestteam.tools._oauth import MicrosoftClientCredentialsToken
-                from bestteam.tools.email_client import _ImapBackend
 
-                if oauth:
-                    backend = _ImapBackend(
-                        host=host, user=args.user, port=args.port, drafts=args.drafts,
-                        restrict_to_public=True,
-                        token_provider=MicrosoftClientCredentialsToken(
-                            tenant_id=args.tenant, client_id=args.client_id,
-                            client_secret=secret,
-                        ),
-                    )
-                else:
-                    backend = _ImapBackend(
-                        host=host, user=args.user, password=secret,
-                        port=args.port, drafts=args.drafts, restrict_to_public=True,
-                    )
+                from .email_tools import build_imap_backend, token_provider_for
+
+                auth_type = AUTH_MICROSOFT_OAUTH if oauth else AUTH_PASSWORD
+                backend = build_imap_backend(
+                    host=host, username=args.user, port=args.port, drafts=args.drafts,
+                    password=None if oauth else secret,
+                    token_provider=token_provider_for(
+                        auth_type, tenant_id=args.tenant, client_id=args.client_id,
+                        client_secret=secret,
+                    ),
+                )
                 try:
                     conn = backend._connect()
                     conn.logout()
@@ -381,7 +376,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             except Exception as exc:  # noqa: BLE001 -- surface a clear CLI error (e.g. missing key)
                 parser.error(str(exc))
-            email_trigger.disable_trigger_on_identity_change(
+            email_trigger.on_mailbox_saved(
                 db, org.id, host, args.user, prior_identity
             )
             print(f"Connected mailbox '{args.user}' for organization '{args.org}'.")

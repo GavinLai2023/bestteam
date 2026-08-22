@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from bestteam.core.loader import _build_pipeline
 from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
-from bestteam.tools.email_client import _ImapBackend, make_email_tools
+from bestteam.tools.email_client import make_email_tools
 
 from . import email_budget, email_filter, secret_store, trigger_health
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
@@ -43,6 +43,7 @@ from .db.email_filter_settings import get_filter_settings
 from .db.email_triggers import get_email_trigger
 from .db.notifications import create_notification, has_fingerprint
 from .db.inbox_events import (
+    abandon_superseded_events,
     claim_events,
     has_pending_events,
     mailbox_identity,
@@ -59,7 +60,7 @@ from .db.models import (
     SkillRecord,
     PipelineRecord,
 )
-from .email_tools import spec_uses_email
+from .email_tools import build_backend_for_credential, spec_uses_email
 from .knowledge_bases import (
     contain_pipeline_config_for_load,
     ensure_pipeline_cache_paths_for_source,
@@ -429,19 +430,48 @@ def disable_trigger(db: Session, org_id: int) -> None:
         db.commit()
 
 
-def disable_trigger_on_identity_change(
+def on_mailbox_saved(
     db: Session,
     org_id: int,
     new_host: str,
     new_username: str,
     prior_identity,
 ) -> None:
-    """disable_trigger(...) iff `prior_identity` (a prior (host, username)
-    tuple, or None if there was no prior mailbox) differs from the new one. A
+    """The one post-save hook for an org's mailbox, called on EVERY save.
+
+    disable_trigger(...) iff `prior_identity` (a prior (host, username) tuple,
+    or None if there was no prior mailbox) differs from the new one. A
     port-only or password-only change is a rotation, not a replacement, and
-    leaves the trigger enabled."""
+    leaves the trigger enabled.
+
+    Abandonment, however, runs unconditionally, because "the identity changed"
+    is not the same question as "is anything waiting that this mailbox cannot
+    claim". A customer who disconnects and then connects a different mailbox
+    arrives here with `prior_identity=None` -- the credential row is gone --
+    and their old backlog would survive a check on the identity alone. The
+    helper is expressed as "everything that is not the current mailbox", so
+    calling it always is a no-op for a rotation and self-correcting for a
+    change that was somehow missed. No generation is passed: the new mailbox's
+    UIDVALIDITY is not known until the enable or the first poll.
+
+    This site only logs; the customer performed the change themselves and the
+    trigger is switched off in the same breath when it was a replacement, so an
+    error banner on it would be noise (the UIDVALIDITY branch of `poll_org`,
+    which the customer did not cause, does report).
+    """
     if prior_identity is not None and prior_identity != (new_host, new_username):
         disable_trigger(db, org_id)
+    abandoned = abandon_superseded_events(
+        db, org_id=org_id,
+        mailbox_identity=mailbox_identity(new_host, new_username),
+    )
+    db.commit()  # unconditional: never leave the UPDATE's transaction open
+    if abandoned:
+        _logger.info(
+            "email trigger: mailbox saved for org %s; abandoned %s waiting message(s) "
+            "from a previous mailbox",
+            org_id, abandoned,
+        )
 
 
 def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, backend):
@@ -463,7 +493,7 @@ def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, ba
     if record is None:
         raise ValueError(f"No deployed team named '{name}' for org {org_id}")
     # A trigger stays enabled across redeploys -- only a mailbox identity
-    # change disables it (disable_trigger_on_identity_change). If the team
+    # change disables it (on_mailbox_saved). If the team
     # was redeployed to a version with no email tools/skills, dispatching
     # would consume this cycle's UIDs and daily cap launching an unrelated
     # team with an email-triage prompt, so refuse the same way a missing
@@ -588,22 +618,6 @@ def _friendly_poll_error(exc: Exception) -> str:
     return "Couldn't check the mailbox. We'll keep retrying automatically."
 
 
-def _make_backend(cred: OrgEmailCredential, password: str) -> _ImapBackend:
-    """The IMAP backend for one org's stored password credentials.
-
-    `restrict_to_public` stays on: the host is customer-supplied, so it must be
-    validated and pinned to a public IP on every connect.
-    """
-    return _ImapBackend(
-        host=cred.host,
-        user=cred.username,
-        password=password,
-        port=cred.port,
-        drafts=cred.drafts_folder,
-        restrict_to_public=True,  # customer-supplied host
-    )
-
-
 def _filter_decisions(backend, settings, uids) -> Dict[str, str]:
     """Which of `uids` the pre-LLM filter rejects, and why.
 
@@ -688,7 +702,7 @@ def poll_org(db: Session, trigger: EmailTrigger, get_pipeline: Callable) -> None
                     "No mailbox is connected -- reconnect it to resume automatic runs."
                 )
             password = secret_store.decrypt(cred.password_encrypted)
-            backend = _make_backend(cred, password)
+            backend = build_backend_for_credential(cred, password)
             uidvalidity, max_uid, new_uids = check_mailbox(backend, trigger.last_uid)
         except (InvalidToken, secret_store.SecretsKeyError) as exc:
             _logger.warning("email trigger: cannot decrypt credentials for org %s: %s",
@@ -728,6 +742,26 @@ def poll_org(db: Session, trigger: EmailTrigger, get_pipeline: Callable) -> None
         if trigger.uidvalidity is None or trigger.uidvalidity != uidvalidity:
             trigger.uidvalidity = uidvalidity
             trigger.last_uid = max_uid
+            # Anything still waiting was detected under the OLD generation, and
+            # a UID means nothing outside the generation that issued it. The
+            # claim query already refuses those rows; this is what stops them
+            # sitting `pending` for ever with nothing reporting them. The
+            # customer did not cause a mailbox rebuild, so dropped mail is
+            # named on the one field the UI surfaces -- unlike the mailbox
+            # *replacement* path, which the customer performed themselves.
+            abandoned = abandon_superseded_events(
+                db,
+                org_id=trigger.org_id,
+                mailbox_identity=mailbox_identity(cred.host, cred.username),
+                mailbox_generation=str(uidvalidity),
+            )
+            if abandoned:
+                trigger.last_error = (
+                    f"The mailbox was rebuilt, so {abandoned} message(s) that were "
+                    "waiting to be processed have been abandoned -- their message "
+                    "numbers no longer refer to the same emails."
+                )
+                trigger.last_error_kind = _ERROR_KIND_MAILBOX
             db.commit()
             return
 
@@ -755,7 +789,12 @@ def poll_org(db: Session, trigger: EmailTrigger, get_pipeline: Callable) -> None
             )
             trigger.last_uid = max(detected)
             db.commit()
-        elif has_pending_events(db, org_id=trigger.org_id):
+        elif has_pending_events(
+            db,
+            org_id=trigger.org_id,
+            mailbox_identity=mailbox_identity(cred.host, cred.username),
+            mailbox_generation=str(trigger.uidvalidity),
+        ):
             # No new mail, but this org already has claimable work in the
             # ledger. A `pending` row does not only come from mail arriving:
             # an admin releasing a filtered false positive makes one, and so
@@ -862,7 +901,18 @@ def _start_triggered_run(
     # The message cap truncates the claim rather than rejecting the cycle: the
     # messages it leaves behind stay `pending` and are claimed by a later cycle.
     limit = batch_size() if remaining is None else min(batch_size(), remaining)
-    claimed = claim_events(db, org_id=trigger.org_id, run_id=run.id, limit=limit)
+    claimed = claim_events(
+        db,
+        org_id=trigger.org_id,
+        run_id=run.id,
+        limit=limit,
+        # Scoped to the mailbox this cycle actually resolved, and to its
+        # current generation: a `pending` row left by a replaced or rebuilt
+        # mailbox names a UID that means nothing here, and after a rebuild
+        # reissues UIDs it names a completely different message.
+        mailbox_identity=mailbox_identity(cred.host, cred.username),
+        mailbox_generation=str(trigger.uidvalidity),
+    )
     if not claimed:
         registry.discard(run.id)
         db.commit()
@@ -911,7 +961,7 @@ def _start_triggered_run(
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
     # their own commit when the customer/operator disconnects or replaces the
-    # mailbox (a replacement disables via disable_trigger_on_identity_change),
+    # mailbox (a replacement disables via on_mailbox_saved),
     # separate from the credential write that may have landed while this
     # pipeline was being built. Guarding the advance and the enabled-check in
     # ONE statement closes the read-then-commit window a separate refresh would
@@ -1082,7 +1132,7 @@ def retry_triggered_run(db: Session, run_row: Run) -> str:
         )
     try:
         password = secret_store.decrypt(cred.password_encrypted)
-        backend = _make_backend(cred, password)
+        backend = build_backend_for_credential(cred, password)
         uidvalidity, _max_uid = mailbox_state(backend)
     except (InvalidToken, secret_store.SecretsKeyError) as exc:
         raise RetryError("The mailbox connection can't be read right now -- reconnect it and try again.") from exc

@@ -16,7 +16,11 @@ from helpers import create_user_and_login, open_test_db
 from ui.backend import email_trigger_api
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.email_credentials import set_email_credentials
+from ui.backend.db.email_credentials import (
+    AUTH_MICROSOFT_OAUTH,
+    MICROSOFT_IMAP_HOST,
+    set_email_credentials,
+)
 from ui.backend.db.email_triggers import get_email_trigger
 from ui.backend.db.inbox_events import mailbox_identity, record_events
 from ui.backend.db.models import InboxEvent, Run, PipelineRecord
@@ -104,6 +108,92 @@ def test_enable_happy_path_sets_baseline(client, monkeypatch):
     with open_test_db() as db:
         t = get_email_trigger(db, org_id)
         assert (t.last_uid, t.uidvalidity) == (99, 7)  # backlog never triggers
+
+
+def test_enable_uses_the_shared_factory_so_an_oauth_mailbox_can_be_turned_on(
+    client, monkeypatch
+):
+    """The enable path built its own `_ImapBackend` with `password=`, ignoring
+    `auth_type` -- the same defect the poller had. For an M365 org that column
+    holds the Entra client secret, so the baseline login failed and automatic
+    runs could never be turned on at all."""
+    from ui.backend import email_tools
+
+    org_id = _seed_team(_EMAIL_TEAM_CONFIG)
+    with open_test_db() as db:
+        set_email_credentials(
+            db, org_id, host=MICROSOFT_IMAP_HOST, username="u@acme.com",
+            password="client-secret", auth_type=AUTH_MICROSOFT_OAUTH,
+            oauth_tenant_id="tenant-1", oauth_client_id="client-1",
+        )
+    built = []
+    monkeypatch.setattr(email_tools, "_ImapBackend",
+                        lambda **kwargs: built.append(kwargs) or "backend")
+    _stub_mailbox(monkeypatch, uidvalidity=7, max_uid=99)
+
+    resp = client.put("/api/org/email-trigger",
+                      json={"pipeline_name": "triage", "enabled": True})
+
+    assert resp.status_code == 200 and resp.json()["enabled"] is True
+    assert built[0]["token_provider"] is not None
+    assert built[0].get("password") is None
+
+
+def test_enable_abandons_a_backlog_the_new_baseline_makes_unclaimable(
+    client, monkeypatch
+):
+    """Enable is where the baseline is (re)established, and the only site that
+    knows both the mailbox and its generation. Without this, a mailbox rebuilt
+    while it was disconnected leaves rows whose generation no longer matches:
+    the scoped claim query refuses them, the re-baseline branch never fires
+    (enable already wrote the new UIDVALIDITY), and nothing retires them."""
+    org_id = _seed_team(_EMAIL_TEAM_CONFIG)
+    _connect_mailbox(org_id)
+    with open_test_db() as db:
+        record_events(
+            db, org_id=org_id,
+            mailbox_identity=mailbox_identity("imap.acme.com", "u@acme.com"),
+            mailbox_generation="3", external_ids=["7"],
+            decisions={"8": "bulk:list-id"},
+        )
+        record_events(
+            db, org_id=org_id,
+            mailbox_identity=mailbox_identity("imap.acme.com", "u@acme.com"),
+            mailbox_generation="3", external_ids=["8"],
+            decisions={"8": "bulk:list-id"},
+        )
+        db.commit()
+    _stub_mailbox(monkeypatch, uidvalidity=7, max_uid=99)
+
+    client.put("/api/org/email-trigger",
+               json={"pipeline_name": "triage", "enabled": True})
+
+    with open_test_db() as db:
+        rows = {e.external_id: e.status for e in db.query(InboxEvent).all()}
+    assert rows == {"7": "failed", "8": "failed"}
+    # Customer-caused (they reconnected it themselves), and enable deliberately
+    # clears the error field -- so this is logged, not reported on the trigger.
+    with open_test_db() as db:
+        assert get_email_trigger(db, org_id).last_error is None
+
+
+def test_enable_leaves_the_current_generations_backlog_claimable(client, monkeypatch):
+    org_id = _seed_team(_EMAIL_TEAM_CONFIG)
+    _connect_mailbox(org_id)
+    with open_test_db() as db:
+        record_events(
+            db, org_id=org_id,
+            mailbox_identity=mailbox_identity("imap.acme.com", "u@acme.com"),
+            mailbox_generation="7", external_ids=["7"],
+        )
+        db.commit()
+    _stub_mailbox(monkeypatch, uidvalidity=7, max_uid=99)
+
+    client.put("/api/org/email-trigger",
+               json={"pipeline_name": "triage", "enabled": True})
+
+    with open_test_db() as db:
+        assert db.query(InboxEvent).one().status == "pending"
 
 
 def test_enable_rejects_undeployed_team(client, monkeypatch):

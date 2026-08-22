@@ -1050,6 +1050,53 @@
   those were dropped during design as not reachable** — see the sharpened
   Known-issues entry below. Spec:
   `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`.
+- **Email correctness review fixes — one mailbox factory, orphan claims,
+  mailbox-scoped claims (2026-08-22).** An external architecture review raised
+  three P0 correctness items; each was re-verified against the code first, and
+  one was materially overstated. (1) **The poller had its own OAuth-blind
+  backend factory.** `email_trigger._make_backend` ignored
+  `OrgEmailCredential.auth_type` and always passed `password=`, which for a
+  `microsoft_oauth` credential is the Entra *client secret* — so an M365 org
+  could save credentials, pass the connection test and run the manual tools
+  while every automatic poll and retry failed to authenticate. That factory is
+  deleted; `email_tools.token_provider_for` / `build_imap_backend` /
+  `build_backend_for_credential` are now the only implementation, and
+  `org_settings`'s pre-save check shares the same primitives instead of being
+  "kept in step with" them by comment. `restrict_to_public=True` (the SSRF
+  validate-and-pin flag) now has exactly one site. No test could catch it
+  because `tests/test_email_trigger.py`'s autouse fixture replaces the factory
+  module-wide — `tests/test_email_mailbox_factory.py` exercises the real one.
+  (2) **Claims orphaned before their `runs` row existed were unrecoverable.**
+  The review's claim that startup recovery ignores email runs was wrong
+  (`runtime.fail_interrupted_runs` already released a `running` run's claims),
+  but a real window remained: `_start_triggered_run` commits the claim on its
+  own, then builds the pipeline, then writes the `runs` row, so a kill inside
+  the build left `claimed` rows no `running` run pointed at — invisible to
+  `claim_events` and `has_pending_events` alike, for ever.
+  `_release_orphaned_claims` sweeps every still-`claimed` row at startup, which
+  is orphaned by definition in a per-process executor. Deliberately not a lease
+  plus scavenger: the process boundary is the lease, and `_release_stale_run`
+  already covers a run that is alive but hung. (3) **Claims were scoped to the
+  org, not the mailbox.** `claim_events`/`has_pending_events` now require
+  `mailbox_identity` and `mailbox_generation` (required, not defaulted — the
+  defect is that a caller could omit the mailbox), and
+  `abandon_superseded_events` marks a replaced/rebuilt mailbox's leftovers
+  `failed` at the two generation-change sites rather than leaving them
+  unclaimable-but-`pending`. Narrowed from the review's framing: this was never
+  cross-tenant (`org_id` still isolates, one mailbox per org); the damaging
+  case is a *rebuilt* mailbox, where reissued UIDs make a stale row name a
+  different message. **G7 still stands** — making the poller use the OAuth path
+  does not prove Exchange Online accepts it (`docs/email-smoke-test.md` §9).
+  The review's later phases (Postgres, persistent queue, leader election, KMS,
+  RBAC, a `Case`/SLA model) were **not** taken: two conflict with rulings
+  already recorded here and in `docs/DECISIONS.md`, and the rest are
+  multi-process concerns on a deliberately single-process poller. One inert
+  residual is recorded rather than fixed: a crash holding a claim, followed by
+  a mailbox replacement, followed by the restart, releases those rows to
+  `pending` under the old identity after the abandonment site has already run
+  — unclaimable and invisible, but never marked terminal. Closing it costs a
+  third write site for no behaviour change. Spec:
+  `docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
 - **Email automation Phase 2 — Microsoft 365 mailbox connections.** An org on
   Exchange Online could not connect a mailbox at all: `build_org_imap_backend`
   only ever built a basic-auth login, which Microsoft removed. Mailboxes now
