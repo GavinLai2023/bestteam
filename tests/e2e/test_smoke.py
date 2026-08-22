@@ -4,6 +4,7 @@ Ports docs/run_ui_tests.py's T1/T2/T3/T5 scenarios (T2-3 stays out of scope
 using the fake architect. Full wizard journey scenarios (T4) live in
 test_wizard_full.py, gated to slow/main-only."""
 import json
+import re
 import time
 
 import pytest
@@ -43,16 +44,28 @@ def goto_expecting_login_redirect(page, path, timeout=5000):
     reliably survives a navigation the app is deliberately cancelling, so the
     navigation error is tolerated outright.
 
-    That is not a weakened assertion. `wait_for_url` below is the assertion,
-    and it still fails if the redirect does not happen -- including if the page
-    failed to load for some unrelated reason, since then no /login URL ever
-    arrives either.
+    Tolerating it around `goto` alone is not enough, which is what made this
+    flaky rather than fixed: `page.wait_for_url()` is not a passive URL poll.
+    Playwright implements it with `expect_navigation`, which subscribes to
+    frame navigation events and re-raises any error it observes -- so when the
+    abort is delivered after `goto(wait_until="commit")` has already returned,
+    the guard above misses it and the *assertion* raises `net::ERR_ABORTED`
+    instead. Observed twice on `main`'s `e2e-full` (af85bae 2026-08-19,
+    6234caf 2026-08-22), both times as this same test, 1 failed / 7 passed.
+
+    So the assertion polls the URL instead of waiting on a navigation event.
+    `expect(page).to_have_url()` retries against the current URL and never
+    subscribes to navigations, so an aborted one has nothing to raise through.
+
+    That is not a weakened assertion: it still fails if the redirect does not
+    happen -- including if the page failed to load for some unrelated reason,
+    since then no /login URL ever arrives either.
     """
     try:
         page.goto(BASE_URL + path, wait_until="commit")
     except PlaywrightError:
         pass
-    page.wait_for_url("**/login", timeout=timeout)
+    pw_expect(page).to_have_url(re.compile(r"/login(\?.*)?$"), timeout=timeout)
 
 
 def logout(page):
