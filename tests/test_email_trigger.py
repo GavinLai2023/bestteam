@@ -2734,7 +2734,7 @@ def test_replacing_the_mailbox_abandons_the_old_ones_backlog(db):
     _pending_row(db, org, identity="imap.acme.com:u@acme.com",
                  generation="3", external_id="7")
 
-    email_trigger.disable_trigger_on_identity_change(
+    email_trigger.on_mailbox_saved(
         db, org.id, "imap.new.com", "new@acme.com",
         prior_identity=("imap.acme.com", "u@acme.com"),
     )
@@ -2745,6 +2745,29 @@ def test_replacing_the_mailbox_abandons_the_old_ones_backlog(db):
     assert trigger.enabled is False
 
 
+def test_connecting_a_mailbox_after_a_disconnect_abandons_the_old_backlog(db):
+    """Disconnect then connect a different mailbox: `prior_identity` is None,
+    because the credential row is gone, so the identity never "changed" and the
+    old rows survived. Re-enabling then baselines straight to the new mailbox's
+    UIDVALIDITY, so the re-baseline cleanup never fired either -- the rows sat
+    `pending` for ever, unclaimable by the scoped query and reported nowhere.
+    """
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    _pending_row(db, org, identity="imap.old.com:old@acme.com",
+                 generation="3", external_id="7")
+
+    email_trigger.on_mailbox_saved(
+        db, org.id, "imap.acme.com", "u@acme.com", prior_identity=None,
+    )
+
+    from ui.backend.db.models import InboxEvent
+
+    assert db.query(InboxEvent).filter_by(external_id="7").one().status == "failed"
+    # Nothing was replaced from the trigger's point of view, so it stays as it
+    # was -- only the orphaned backlog is retired.
+    assert trigger.enabled is True
+
+
 def test_rotating_a_password_leaves_the_backlog_claimable(db):
     """A port- or password-only change is a rotation, not a replacement -- the
     mail waiting in the ledger is still the same mailbox's."""
@@ -2752,7 +2775,7 @@ def test_rotating_a_password_leaves_the_backlog_claimable(db):
     _pending_row(db, org, identity="imap.acme.com:u@acme.com",
                  generation="3", external_id="7")
 
-    email_trigger.disable_trigger_on_identity_change(
+    email_trigger.on_mailbox_saved(
         db, org.id, "imap.acme.com", "u@acme.com",
         prior_identity=("imap.acme.com", "u@acme.com"),
     )

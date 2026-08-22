@@ -523,7 +523,7 @@ def test_abandoning_leaves_claimed_and_terminal_rows_alone(db):
     owners."""
     from ui.backend.db import inbox_events as store
 
-    for external_id, status in (("7", "claimed"), ("8", "done"), ("9", "filtered")):
+    for external_id, status in (("7", "claimed"), ("8", "done"), ("9", "failed")):
         db.add(InboxEvent(org_id=1, connector_type="imap",
                           mailbox_identity="imap.old:u@old", mailbox_generation="99",
                           external_id=external_id, status=status))
@@ -535,7 +535,46 @@ def test_abandoning_leaves_claimed_and_terminal_rows_alone(db):
     db.commit()
 
     rows = {e.external_id: e.status for e in db.query(InboxEvent).all()}
-    assert rows == {"7": "claimed", "8": "done", "9": "filtered"}
+    assert rows == {"7": "claimed", "8": "done", "9": "failed"}
+
+
+def test_abandoning_retires_a_superseded_mailboxs_filtered_rows(db):
+    """A `filtered` row is releasable, and release is a flip to `pending` that
+    does not re-check the mailbox. Left behind, it stays in the release list,
+    the admin releases it, the API answers `released: true` -- and the scoped
+    claim query can never take it, so the message silently disappears. It has
+    to be retired with the backlog it belongs to."""
+    from ui.backend.db import inbox_events as store
+
+    db.add(InboxEvent(org_id=1, connector_type="imap",
+                      mailbox_identity="imap.old:u@old", mailbox_generation="99",
+                      external_id="7", status="filtered", decision="not_allowlisted"))
+    db.commit()
+
+    assert store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new", mailbox_generation="1"
+    ) == 1
+    db.commit()
+
+    row = db.query(InboxEvent).filter_by(external_id="7").one()
+    assert row.status == "failed"
+    assert store.list_filtered_events(db, org_id=1, limit=10) == []
+
+
+def test_abandoning_leaves_the_current_mailboxs_filtered_rows_releasable(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(InboxEvent(org_id=1, connector_type="imap",
+                      mailbox_identity="imap.new:u@new", mailbox_generation="1",
+                      external_id="7", status="filtered", decision="not_allowlisted"))
+    db.commit()
+
+    assert store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new", mailbox_generation="1"
+    ) == 0
+    db.commit()
+
+    assert [e.external_id for e in store.list_filtered_events(db, org_id=1, limit=10)] == ["7"]
 
 
 def test_abandoning_is_scoped_to_one_org(db):

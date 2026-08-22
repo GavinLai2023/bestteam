@@ -104,7 +104,7 @@ only after the pipeline builds and a durable `runs` row is written; a build
 failure consumes nothing. The advance is a compare-and-swap
 (`UPDATE ... WHERE enabled = 1`): if the customer/operator disabled the trigger
 or replaced the mailbox (a replacement disables via
-`disable_trigger_on_identity_change`) between the enabled-check and the commit,
+`on_mailbox_saved`) between the enabled-check and the commit,
 the update matches no row and the built run is discarded
 (`registry.discard`) rather than dispatched against a just-disconnected mailbox.
 Batch size: `BESTTEAM_TRIGGER_BATCH_SIZE` (default 20).
@@ -206,11 +206,27 @@ those UIDs usually do not resolve; against a rebuilt one, where UIDs were
 reissued, UID 7 exists and is a different message. (This was never
 cross-tenant: `org_id` still isolates and an org has at most one mailbox.)
 `db/inbox_events.py::abandon_superseded_events` then marks such rows `failed`
-rather than leaving them unclaimable-but-`pending` for ever; it is called at
-the two moments a generation changes -- `disable_trigger_on_identity_change`
-(no generation: the new mailbox's UIDVALIDITY is not known yet) and
-`poll_org`'s UIDVALIDITY re-baseline, which also names the count on
-`trigger.last_error` because a rebuild is not something the customer did.
+rather than leaving them unclaimable-but-`pending` for ever. It is called at
+**all three** moments the current mailbox or generation can change, which is
+one more than the first cut had: `email_trigger.on_mailbox_saved` (no
+generation -- the new mailbox's UIDVALIDITY is not known yet), the enable in
+`email_trigger_api` (both known), and `poll_org`'s UIDVALIDITY re-baseline,
+which also names the count on `trigger.last_error` because a rebuild is not
+something the customer did. The other two only log: the customer did those
+themselves, and enable deliberately clears `last_error` two lines earlier.
+
+Why each of the three is load-bearing, since two of them look redundant: the
+save hook runs on **every** save, not only on an identity change, because a
+customer who disconnects and then connects a different mailbox arrives with
+`prior_identity=None` and would otherwise keep the old backlog for ever. The
+enable is the only site that knows the mailbox *and* its generation, so it is
+the only one that can retire rows left by a mailbox rebuilt while automation
+was off -- `poll_org`'s re-baseline cannot, because enable has already written
+the new UIDVALIDITY as the current one. `filtered` rows are retired alongside
+`pending` ones: a filtered row is listed for the admin and released with a
+flip to `pending` that never re-checks the mailbox, so a superseded one left
+behind can be released, answer `released: true`, and then be unclaimable for
+ever -- exactly the silent loss the release UI exists to prevent.
 
 **Every orphaned claim is released at startup.**
 `runtime.fail_interrupted_runs` resolves `running` rows to `failed` and
@@ -591,7 +607,7 @@ resolves the IMAP backend once per cycle and threads it into
 independently -- closes a race where a mid-cycle mailbox swap could detect
 mail on one mailbox and build tools against another. `admin.py`'s
 `set-email`/`clear-email` now call the same `email_trigger.disable_trigger`/
-`disable_trigger_on_identity_change` helpers as `org_settings.py`, so the
+`on_mailbox_saved` helpers as `org_settings.py`, so the
 operator CLI path disables the trigger on mailbox change too (previously
 only the wizard path did). `EmailTrigger.last_error_kind` (`"mailbox" |
 "workflow" | None` -- the `"workflow"` string value is unchanged by the

@@ -207,14 +207,22 @@ def abandon_superseded_events(
     mailbox_identity: str,
     mailbox_generation: Optional[str] = None,
 ) -> int:
-    """Mark this org's `pending` rows from any OTHER mailbox terminal.
+    """Mark this org's waiting rows from any OTHER mailbox terminal.
 
     `claim_events`'s scoping already makes such a row unclaimable; this is what
     stops it sitting `pending` forever with nothing reporting it. Called at the
-    two moments a generation changes: the mailbox identity changing
-    (`email_trigger.disable_trigger_on_identity_change`, which passes no
-    generation because the new mailbox's UIDVALIDITY is not known yet) and the
+    three moments the current mailbox or its generation can change: a mailbox
+    save (`email_trigger.on_mailbox_saved`, which passes no generation because
+    the new mailbox's UIDVALIDITY is not known yet), the enable that
+    (re-)baselines the trigger (`email_trigger_api`, which knows both), and the
     UIDVALIDITY re-baseline in `poll_org`.
+
+    `filtered` rows are retired alongside `pending` ones. A filtered row is not
+    inert: it is listed for the admin and `release_filtered_event` flips it to
+    `pending` without re-checking the mailbox, so a superseded one left behind
+    can be released, answer `released: true`, and then never be claimable by
+    the scoped query -- the message would disappear silently, which is the
+    exact failure the release UI exists to prevent.
 
     Expressed as "everything that is not the current mailbox" rather than
     "everything that was the old one", so it needs no memory of the previous
@@ -234,7 +242,7 @@ def abandon_superseded_events(
         update(InboxEvent)
         .where(
             InboxEvent.org_id == org_id,
-            InboxEvent.status == EVENT_PENDING,
+            InboxEvent.status.in_((EVENT_PENDING, EVENT_FILTERED)),
             mismatched,
         )
         .values(

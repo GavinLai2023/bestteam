@@ -138,6 +138,10 @@ dropped from one path while the others keep it.
 third copy of the same decision, and the second copy is what just broke. A
 factory that two of three callers use is not a factory.
 
+**Amended after review (see "Second round" below): there were five copies, not
+three.** `email_trigger_api`'s enable path and `admin.py`'s `--test` login also
+built their own, and the first of those carried the identical defect.
+
 ### D2. Startup releases every orphaned claim
 
 `fail_interrupted_runs` gains a second sweep, after its existing loop and
@@ -193,6 +197,9 @@ Two call sites, the two moments a generation changes:
   generation omitted, because the new mailbox's UIDVALIDITY is not known yet.
 - `poll_org`'s UIDVALIDITY re-baseline branch — both values known.
 
+(Both of these are amended below: two sites were not enough, and `pending` was
+not the only status that needed retiring.)
+
 `claimed` rows are deliberately left alone: they belong to a run that will
 either complete or be released by the watchdog or D2, and racing that from here
 would give one batch two owners.
@@ -230,3 +237,70 @@ banner on a switch they just flipped is noise.
   place that has to know the mailbox. Neither buys a behaviour change — only
   the tidiness of rows no query returns. Recorded here so it is not
   rediscovered as a bug.
+
+  **Superseded by the second round below**: the re-enable path turned out to be
+  needed for its own reasons, and it retires these rows as a side effect.
+
+## Second round (Codex review of this branch)
+
+Two findings, both about the same thing the design got wrong: it treated
+"the mailbox changed" as a single moment with two sites, when it is three
+moments, and it treated `pending` as the only status that can be waiting.
+
+### R1. Abandonment must run on every mailbox save, not only on a change
+
+`disable_trigger_on_identity_change` skipped abandonment when
+`prior_identity` was `None`. That is not only the first-ever connect: a
+customer who **disconnects** and later connects a different mailbox arrives
+with no prior credential row, so nothing "changed" and the old backlog
+survived. Re-enabling then baselines straight to the new mailbox's
+UIDVALIDITY, so `poll_org`'s re-baseline branch never fired either — the rows
+were unclaimable (D3 held) and permanently unreported, the exact state D4
+exists to prevent.
+
+Fixed by making abandonment unconditional and the *disable* the conditional
+part, and renaming the function to `on_mailbox_saved` — it is called after
+every save by both `org_settings` and `admin.py`, so the old name described
+half of it and implied a narrower contract than the callers rely on. Naming a
+contract you then have to remember to widen is how D1's defect happened; the
+same mistake in a function name is worth the two-call-site rename.
+
+### R2. A `filtered` row is not inert, so it must be retired too
+
+`abandon_superseded_events` matched `status == pending` only. A `filtered` row
+from a superseded mailbox stays in `list_filtered_events`, and
+`release_filtered_event` is a bare flip to `pending` that never re-checks the
+mailbox. So an admin could release one, get `released: true`, and watch it
+vanish: the scoped claim query can never take it. The predicate is now
+`status IN (pending, filtered)`.
+
+`release_filtered_event` is deliberately *not* also hardened to reject a
+mismatched row. With retirement at all three sites the only surviving window
+is same-mailbox/old-generation rows between a rebuild and the next poll, and a
+row released in that window becomes `pending` and is then retired by the
+re-baseline itself. Adding a mailbox check to the release path would couple it
+to credentials to defend a case that self-corrects within one poll interval.
+
+### R3 (found while verifying R1, not in the review). A fourth and fifth factory
+
+`email_trigger_api`'s enable path built `_ImapBackend(..., password=...)`
+directly — D1's defect, in a path the review's diff scope did not cover. For
+an M365 org the baseline login therefore failed and automatic runs could not
+be turned on **at all**, which means the poller fix alone would not have made
+M365 automation work. `admin.py`'s `--test` login was a fifth construction;
+correct, but the same decision written out again, and it is now routed through
+the two primitives.
+
+`tests/test_email_mailbox_factory.py` gains the durable version of
+`test_the_poller_has_no_factory_of_its_own`: a source scan asserting no module
+under `ui/backend/` other than `email_tools.py` mentions `_ImapBackend(`. A
+by-name assertion could only pin the copy we knew about.
+
+### The third abandonment site
+
+Enable is where the baseline is (re)established and the only site that knows
+both the mailbox and its generation, so it is the only one that can retire
+rows left by a mailbox **rebuilt while automation was off** — `poll_org`'s
+re-baseline cannot, because enable already wrote the new UIDVALIDITY as the
+current one. It logs rather than reporting: the customer performed the
+reconnect, and enable clears `last_error` two lines earlier by design.

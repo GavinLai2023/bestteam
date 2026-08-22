@@ -430,39 +430,48 @@ def disable_trigger(db: Session, org_id: int) -> None:
         db.commit()
 
 
-def disable_trigger_on_identity_change(
+def on_mailbox_saved(
     db: Session,
     org_id: int,
     new_host: str,
     new_username: str,
     prior_identity,
 ) -> None:
-    """disable_trigger(...) iff `prior_identity` (a prior (host, username)
-    tuple, or None if there was no prior mailbox) differs from the new one. A
+    """The one post-save hook for an org's mailbox, called on EVERY save.
+
+    disable_trigger(...) iff `prior_identity` (a prior (host, username) tuple,
+    or None if there was no prior mailbox) differs from the new one. A
     port-only or password-only change is a rotation, not a replacement, and
     leaves the trigger enabled.
 
-    A replacement also abandons whatever the previous mailbox left waiting: a
-    UID is only meaningful in the mailbox that issued it, so those rows can
-    never be claimed again and would otherwise sit `pending` for ever. No
-    generation is passed -- the new mailbox's UIDVALIDITY is not known until
-    the first poll. This site only logs; the customer performed the
-    replacement themselves and the trigger is being switched off in the same
-    breath, so an error banner on it would be noise (the UIDVALIDITY branch of
-    `poll_org`, which the customer did not cause, does report).
+    Abandonment, however, runs unconditionally, because "the identity changed"
+    is not the same question as "is anything waiting that this mailbox cannot
+    claim". A customer who disconnects and then connects a different mailbox
+    arrives here with `prior_identity=None` -- the credential row is gone --
+    and their old backlog would survive a check on the identity alone. The
+    helper is expressed as "everything that is not the current mailbox", so
+    calling it always is a no-op for a rotation and self-correcting for a
+    change that was somehow missed. No generation is passed: the new mailbox's
+    UIDVALIDITY is not known until the enable or the first poll.
+
+    This site only logs; the customer performed the change themselves and the
+    trigger is switched off in the same breath when it was a replacement, so an
+    error banner on it would be noise (the UIDVALIDITY branch of `poll_org`,
+    which the customer did not cause, does report).
     """
     if prior_identity is not None and prior_identity != (new_host, new_username):
         disable_trigger(db, org_id)
-        abandoned = abandon_superseded_events(
-            db, org_id=org_id,
-            mailbox_identity=mailbox_identity(new_host, new_username),
+    abandoned = abandon_superseded_events(
+        db, org_id=org_id,
+        mailbox_identity=mailbox_identity(new_host, new_username),
+    )
+    db.commit()  # unconditional: never leave the UPDATE's transaction open
+    if abandoned:
+        _logger.info(
+            "email trigger: mailbox saved for org %s; abandoned %s waiting message(s) "
+            "from a previous mailbox",
+            org_id, abandoned,
         )
-        db.commit()  # unconditional: never leave the UPDATE's transaction open
-        if abandoned:
-            _logger.info(
-                "email trigger: mailbox replaced for org %s; abandoned %s waiting message(s)",
-                org_id, abandoned,
-            )
 
 
 def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, backend):
@@ -484,7 +493,7 @@ def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, ba
     if record is None:
         raise ValueError(f"No deployed team named '{name}' for org {org_id}")
     # A trigger stays enabled across redeploys -- only a mailbox identity
-    # change disables it (disable_trigger_on_identity_change). If the team
+    # change disables it (on_mailbox_saved). If the team
     # was redeployed to a version with no email tools/skills, dispatching
     # would consume this cycle's UIDs and daily cap launching an unrelated
     # team with an email-triage prompt, so refuse the same way a missing
@@ -952,7 +961,7 @@ def _start_triggered_run(
     # Compare-and-swap: advance the batch/cap and record this run ONLY if the
     # trigger is still enabled. org_settings.py/admin.py disable the trigger in
     # their own commit when the customer/operator disconnects or replaces the
-    # mailbox (a replacement disables via disable_trigger_on_identity_change),
+    # mailbox (a replacement disables via on_mailbox_saved),
     # separate from the credential write that may have landed while this
     # pipeline was being built. Guarding the advance and the enabled-check in
     # ONE statement closes the read-then-commit window a separate refresh would

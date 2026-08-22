@@ -52,7 +52,7 @@ from .db.notifications import get_notification_settings, set_notification_settin
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
 from .email_budget import day_key
-from .email_trigger import disable_trigger, disable_trigger_on_identity_change
+from .email_trigger import disable_trigger, on_mailbox_saved
 from .notifications import WebhookUrlError, validate_webhook_url
 from .retention import export_org_runs, purge_org_runs, purgeable_run_count
 from .secret_store import SecretsKeyError
@@ -353,7 +353,7 @@ def set_email(
                 "Please try again, or contact your administrator if it continues."
             ),
         ) from exc
-    disable_trigger_on_identity_change(db, org.id, req.host, req.username, prior_identity)
+    on_mailbox_saved(db, org.id, req.host, req.username, prior_identity)
     return {"connected": True, "host": req.host, "username": req.username}
 
 

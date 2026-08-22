@@ -13,6 +13,8 @@ the real one.
 See docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md.
 """
 
+from pathlib import Path
+
 import pytest
 
 
@@ -164,6 +166,25 @@ def test_poll_org_still_uses_a_password_for_a_password_mailbox(
 def test_the_poller_has_no_factory_of_its_own():
     """A second factory is how this drifted; there must not be one again."""
     assert not hasattr(email_trigger, "_make_backend")
+
+
+def test_email_tools_is_the_only_backend_module_that_constructs_one():
+    """The durable version of the test above.
+
+    `_make_backend` was not the only copy: the trigger API built its own with
+    `password=` too, so an M365 org could not even turn automatic runs on. A
+    name-by-name assertion cannot catch the next one -- this scans the source.
+    `admin.py` is not exempt: it builds from CLI arguments rather than a stored
+    row, but it is still the same decision and still has to set
+    `restrict_to_public=True`.
+    """
+    backend_dir = Path(__file__).resolve().parents[1] / "ui" / "backend"
+    offenders = sorted(
+        path.relative_to(backend_dir).as_posix()
+        for path in backend_dir.rglob("*.py")
+        if path.name != "email_tools.py" and "_ImapBackend(" in path.read_text(encoding="utf-8")
+    )
+    assert offenders == []
 
 
 # --- the third copy: the pre-save connection check ----------------------

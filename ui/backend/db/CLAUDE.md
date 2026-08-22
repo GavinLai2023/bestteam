@@ -233,11 +233,15 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   quiet cycle happily claimed for the *new* mailbox — and after a rebuild
   reissues UIDs, UID 7 is a different message. Required rather than optional
   because the defect is that a caller could omit the mailbox. Such rows are
-  then marked terminal by `abandon_superseded_events` (every `pending` row of
-  the org that is **not** the current mailbox, and optionally not the current
-  generation — expressed that way so it needs no memory of the previous
-  identity), called from `email_trigger.disable_trigger_on_identity_change`
-  and from `poll_org`'s UIDVALIDITY re-baseline. `claimed` rows are left alone
+  then marked terminal by `abandon_superseded_events` (every `pending` **or
+  `filtered`** row of the org that is **not** the current mailbox, and
+  optionally not the current generation — expressed that way so it needs no
+  memory of the previous identity), called from
+  `email_trigger.on_mailbox_saved`, from the trigger enable in
+  `email_trigger_api`, and from `poll_org`'s UIDVALIDITY re-baseline.
+  `filtered` is in scope because release is a bare flip to `pending`: a
+  superseded row left `filtered` stays in the release list, reports
+  `released: true`, and is then unclaimable for ever. `claimed` rows are left alone
   there: one belongs to a run that will complete, be released by the stale-run
   watchdog, or be released by `runtime.fail_interrupted_runs` at startup —
   which now also sweeps claims orphaned *before* their `runs` row was ever
