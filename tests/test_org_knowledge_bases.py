@@ -1291,6 +1291,35 @@ def test_adding_a_document_that_is_already_there_replaces_that_one(client):
     assert "60 days" in chunks[0].text
 
 
+def test_adding_a_document_whose_name_differs_only_in_case_replaces_it(client):
+    # Windows and macOS filesystems are case-insensitive, so the carried
+    # `Policy.txt` and the newly uploaded `policy.txt` are one path there: the
+    # carry copied over the upload and the collection silently kept the old
+    # text. "The same name" has to mean what the filesystem means by it.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[("files", ("Policy.txt", io.BytesIO(b"Refunds take 30 days."), "text/plain"))],
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[("files", ("policy.txt", io.BytesIO(b"Refunds now take 60 days."), "text/plain"))],
+        data={"mode": "add"},
+    )
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        docs = {
+            d.filename: d
+            for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id)
+        }
+        assert set(docs) == {"policy.txt"}
+        chunks = db.query(KnowledgeChunk).filter_by(document_id=docs["policy.txt"].id).all()
+    assert "60 days" in chunks[0].text
+
+
 def test_adding_to_a_collection_that_does_not_exist_yet_just_creates_it(client):
     resp = client.post("/api/org/knowledge-bases/policies/upload",
                        files=_named_files("a.txt"), data={"mode": "add"})

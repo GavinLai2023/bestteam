@@ -1242,7 +1242,11 @@ schema was written, was never read by anything; it is what fixes both.
 default behaviour) or `"add"`. "Add" is implemented at the **staging** layer,
 not the retrieval one: `_stage_previous_generation` copies the live
 generation's files into the new version directory beside the newly uploaded
-ones, skipping any whose name this upload supersedes. The new job therefore
+ones, skipping any whose name this upload supersedes -- matched
+**case-insensitively**, because the filesystem underneath may be: on Windows
+and macOS a carried `Policy.txt` and an uploaded `policy.txt` are one path, so
+treating them as two names copied the old file over the new upload and left
+the collection serving the previous text under the new name. The new job therefore
 still owns a complete document set, so the atomic-swap invariant above,
 pruning, retention and `resolve_knowledge_base` are all untouched -- there is
 no notion anywhere of a collection spanning two jobs. `_MAX_DOCUMENTS_PER_KB`

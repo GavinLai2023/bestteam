@@ -521,7 +521,11 @@ same shape as before this toggle existed. See `.env.example`.
 `mode="replace"` (the whole collection becomes what this upload contains) or
 `mode="add"` (this upload joins what is already there; a file whose *name*
 matches one already in the collection is replaced by it, since two documents
-of the same name would be two answers to the same question). The self-service
+of the same name would be two answers to the same question). Names are matched
+**case-insensitively**, because the filesystem the staged copies land on may
+be: `Policy.txt` and `policy.txt` are one file on Windows and macOS, so
+treating them as two would carry the old one on top of the newly uploaded one
+and leave the collection holding the previous text under the new name. The self-service
 route treats the field as the confirmation too: sending no `mode` against a
 name that already exists is the `409` that asks the customer which they meant,
 and the wizard's dialog offers both.

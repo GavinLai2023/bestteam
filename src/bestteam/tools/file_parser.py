@@ -113,11 +113,15 @@ def _decode_text(data: bytes, name: str, *, lenient: bool = False) -> str:
     the reason the CJK check exists -- it is a very permissive codec, and any
     Western-encoded document whose high bytes happen to form valid pairs would
     otherwise stop failing loudly and start being indexed as Chinese nonsense.
-    A GB18030 result is therefore accepted only when it actually contains CJK
-    characters, which is the only reason we try that codec at all. The cost is
-    that a genuinely GB18030-encoded document containing no CJK is refused --
-    a loud refusal the customer fixes by re-saving as UTF-8, chosen over a
-    silent one nobody would ever notice.
+    A GB18030 result is therefore accepted only when it contains a *run* of
+    CJK characters, which is the only reason we try that codec at all. The run
+    is what makes the check mean anything: Latin-1 Spanish or Swedish spells
+    each accented letter with one high byte, which pairs with the ASCII byte
+    after it into a single lone Han character, so "contains CJK" is satisfied
+    by ordinary Western prose. Chinese text comes in runs; that accident does
+    not. The cost is that a genuinely GB18030-encoded document with no two
+    adjacent Chinese characters is refused -- a loud refusal the customer
+    fixes by re-saving as UTF-8, chosen over a silent one nobody would notice.
 
     `lenient` keeps the attachment path's contract: a sender can name anything
     `.txt`, and a decode error escaping into the poller would fail a whole run
@@ -139,9 +143,10 @@ def _decode_text(data: bytes, name: str, *, lenient: bool = False) -> str:
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
 
-# CJK Unified Ideographs, plus Extension A -- what a GB18030 document is for.
-# See `_decode_text` for why a decode that yields none of these is rejected.
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+# Two or more adjacent CJK Unified Ideographs (Extension A included) -- what
+# a GB18030 document is for. See `_decode_text` for why a decode that yields
+# no such run is rejected, and why a lone one is not evidence of anything.
+_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{2,}")
 
 
 def _decoded_or_none(data: bytes) -> Optional[str]:
@@ -154,10 +159,16 @@ def _decoded_or_none(data: bytes) -> Optional[str]:
     first line is -- a heading, or a spreadsheet's first column name.
 
     A BOM is a claim, not a guarantee, so a file that opens with one and then
-    fails to decode still falls through to the rest of the chain.
+    fails to decode still falls through to the rest of the chain. The order
+    the BOMs are tested in matters, though: one is a prefix of another.
     """
     if data.startswith(codecs.BOM_UTF8):
         candidates = ("utf-8-sig", "gb18030")
+    elif data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        # Ahead of UTF-16, because a UTF-32 LE BOM *begins with* a UTF-16 LE
+        # BOM -- and a UTF-32 file read as UTF-16 does not fail, it decodes
+        # into the same text with a NUL between every character.
+        candidates = ("utf-32", "utf-8", "gb18030")
     elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         candidates = ("utf-16", "utf-8", "gb18030")
     else:
@@ -167,7 +178,7 @@ def _decoded_or_none(data: bytes) -> Optional[str]:
             decoded = data.decode(encoding)
         except (UnicodeDecodeError, ValueError):
             continue
-        if encoding == "gb18030" and not _CJK_RE.search(decoded):
+        if encoding == "gb18030" and not _CJK_RUN_RE.search(decoded):
             continue
         return decoded
     return None
@@ -267,6 +278,32 @@ def _parse_docx_bytes(data: bytes, name: str) -> str:
 # as a wrong citation.
 MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
 
+# The bracketed line every tabular parser writes ahead of a block of CSV-style
+# rows -- one per Excel sheet, one per Word table, one for a whole CSV file.
+# Public and owned by the producer for the same reason as the two above: the
+# consumer splits on exactly this, and the writer has to escape exactly what
+# the reader matches.
+TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|CSV: [^\]\n]*|Table \d+)\]$", re.M)
+
+
+def _escape_marker_shaped(text: str) -> str:
+    """Backslash-escape any line that would be read back as a table marker.
+
+    The heading escape's twin, and the same defect underneath: rendering a
+    document's structure as a shape makes that shape meaningful, so a line the
+    document's own content happens to spell the same way is ambiguous. A Word
+    paragraph reading `[Table 2]`, or a one-column row reading `[CSV: x.csv]`,
+    opened a block that swallowed the prose or rows after it -- and cited them
+    as a table, or as a document the collection does not contain.
+
+    Word's table rows need none, and do not get any: `_docx_segments` runs a
+    block to the blank line after it and ignores a marker found inside one, so
+    a cell reading `[Table 2]` is already just a cell. A sheet or a CSV is
+    split marker to marker, which is why their rows do need it.
+    """
+    return TABLE_MARKER_RE.sub(lambda match: "\\" + match.group(0), text)
+
+
 # Word heading styles are named `Heading 1` … `Heading 9` (plus `Title` for the
 # document title). Only the first four map to a Markdown level the knowledge
 # base's separators know about (`_MARKDOWN_SEPARATORS` stops at `####`), so
@@ -288,9 +325,9 @@ def _docx_paragraph_line(paragraph) -> str:
 
     A style *named* like a heading is trusted, including a custom one: the name
     is what the author chose to call it. Ordinary prose keeps its text
-    unchanged apart from the escaping below -- only a heading is normalised to
-    one line, because a `#` line broken in two would leave the second half as
-    an orphan paragraph.
+    unchanged apart from the two escapes below -- only a heading is normalised
+    to one line, because a `#` line broken in two would leave the second half
+    as an orphan paragraph.
     """
     style = getattr(paragraph.style, "name", None) or ""
     if style == "Title":
@@ -298,7 +335,7 @@ def _docx_paragraph_line(paragraph) -> str:
     else:
         match = _DOCX_HEADING_RE.match(style)
         if not match:
-            return _escape_heading_shaped(paragraph.text)
+            return _escape_marker_shaped(_escape_heading_shaped(paragraph.text))
         level = min(max(int(match.group(1)), 1), _MAX_MARKDOWN_HEADING_LEVEL)
     return f"{'#' * level} {_one_line(paragraph.text)}"
 
@@ -409,6 +446,19 @@ def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
         stack.extend(reversed(items))
 
 
+# `csv.reader` refuses a field longer than 131,072 characters by default --
+# a guard against unbounded memory growth while streaming a file, not a limit
+# this application chose. Nothing here streams: the whole document is already
+# in memory as a string before the reader sees it, and the upload routes admit
+# a 30MB file (`ui/backend/knowledge_bases.py`), so the default rejected valid
+# documents -- a CSV with one long notes column -- as unreadable. Raised once,
+# at import, rather than set and restored around each parse: the setting is
+# process-global and `ui/backend/ingestion.py` parses on a thread pool, where
+# one document's restore would shrink the limit under another's parse.
+_CSV_FIELD_LIMIT = 32 * 1024 * 1024
+csv.field_size_limit(_CSV_FIELD_LIMIT)
+
+
 def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> str:
     """Render a CSV as one marker line and one row per line.
 
@@ -431,6 +481,9 @@ def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> s
 
     Not sniffed: a semicolon- or tab-delimited export reads as one field per
     row and is rendered back unchanged, which is exactly what it did before.
+
+    A row that renders as the marker's own shape is escaped, for the reason
+    `_escape_marker_shaped` gives.
     """
     text = _decode_text(data, name, lenient=lenient_text)
     out = io.StringIO()
@@ -439,16 +492,15 @@ def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> s
         for row in csv.reader(io.StringIO(text)):
             writer.writerow([_one_line(field) for field in row])
     except csv.Error as exc:
-        # Reachable from an ordinary malformed file, not just a hostile one:
-        # one unbalanced quote makes the reader swallow everything after it
-        # as a single field, and past its 128KB limit that is a bare
-        # `field larger than field limit (131072)`. `ui/backend/ingestion.py`
-        # shows a failed document's message to the customer who uploaded it.
-        raise ConfigurationError(
-            f"Could not read '{name}' as CSV: {exc}. "
-            "Check for an unclosed quotation mark."
-        ) from exc
-    return f"[CSV: {name}]\n" + out.getvalue().strip("\n")
+        # `ui/backend/ingestion.py` shows a failed document's message to the
+        # customer who uploaded it, so it names the file rather than a byte
+        # offset. It no longer guesses at a cause: an unbalanced quotation
+        # mark does not come through here, the reader swallows the rest of
+        # the file as one field, which is what it always did for a file under
+        # the old limit. What is left is input the reader cannot get past at
+        # all, an embedded NUL being the realistic one.
+        raise ConfigurationError(f"Could not read '{name}' as CSV: {exc}.") from exc
+    return f"[CSV: {name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n"))
 
 
 def _parse_excel_bytes(data: bytes, name: str) -> str:
@@ -467,6 +519,6 @@ def _parse_excel_bytes(data: bytes, name: str) -> str:
         rows = []
         for row in ws.iter_rows(values_only=True):
             rows.append(",".join("" if v is None else str(v) for v in row))
-        parts.append(f"[Sheet: {sheet_name}]\n" + "\n".join(rows))
+        parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped("\n".join(rows)))
     wb.close()
     return f"[Excel: {name}]\n\n" + "\n\n".join(parts)

@@ -175,6 +175,14 @@ def _stage_previous_generation(
     Nothing to carry (a name that has never completed a job, or a version
     directory an operator has removed) is not an error: "add" to a collection
     that isn't there yet is just a first upload.
+
+    `superseded` is matched case-insensitively because the filesystem the
+    copies land on may be: on Windows and macOS, carrying `Policy.txt` beside
+    a freshly uploaded `policy.txt` is one path, and the copy would land on
+    top of the upload -- leaving the collection holding the *old* text under
+    the new name, with nothing anywhere reporting it. Two documents whose
+    names differ only in case cannot coexist there anyway, so the upload wins,
+    which is what it does for an exact name match.
     """
     record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if record is None:
@@ -192,10 +200,12 @@ def _stage_previous_generation(
     if not previous_dir.is_dir():
         return
 
+    superseded_lower = {name.lower() for name in superseded}
     carried = [
         path
         for path in sorted(previous_dir.rglob("*"))
-        if path.is_file() and path.relative_to(previous_dir).as_posix() not in superseded
+        if path.is_file()
+        and path.relative_to(previous_dir).as_posix().lower() not in superseded_lower
     ]
     total = len(superseded) + len(carried)
     if total > max_documents:
@@ -275,10 +285,11 @@ def upload_knowledge_base(
     holds unchanged. `ingestion.py` then carries an unchanged file's chunks
     and embeddings forward by content hash, so restaging is cheap rather than
     a re-embed of the whole collection. A file whose name matches one in this
-    upload is not carried: the upload supersedes it, since two documents of
-    the same name in one collection would be two answers to the same
-    question. `max_documents` bounds the merged set -- without it "add" is
-    unbounded growth, per collection and so per org.
+    upload -- case-insensitively, as the filesystem itself may match -- is not
+    carried: the upload supersedes it, since two documents of the same name in
+    one collection would be two answers to the same question. `max_documents`
+    bounds the merged set -- without it "add" is unbounded growth, per
+    collection and so per org.
 
     This validates synchronously (name/size limits, `kb_type`, chunk params),
     writes the uploaded files to a fresh version directory, upserts the

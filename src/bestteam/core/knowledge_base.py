@@ -14,6 +14,7 @@ from ..tools.file_parser import (
     MARKDOWN_HEADING_RE as _MARKDOWN_HEADING_RE,
     PAGE_BREAK,
     SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES,
+    TABLE_MARKER_RE as _TABLE_MARKER_RE,
 )
 from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
@@ -442,11 +443,12 @@ def _headings_for(pieces: List[str], start: Optional[str] = None) -> List[Option
     return headings
 
 
-# The bracketed line every tabular parser puts ahead of a block of CSV-style
-# rows -- one per Excel sheet, one per Word table, one for a whole CSV file
-# (`tools/file_parser.py`). A `.csv` is a single block, so its own document
-# header line is that block's marker rather than a second line above one.
-_TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|CSV: [^\]\n]*|Table \d+)\]$", re.M)
+# `_TABLE_MARKER_RE` is imported from `tools/file_parser.py`, which writes the
+# bracketed line ahead of every block of CSV-style rows -- one per Excel sheet,
+# one per Word table, one for a whole CSV file -- and escapes any of a
+# document's own lines that would be read back as one. A `.csv` is a single
+# block, so its own document header line is that block's marker rather than a
+# second line above one.
 
 # Formats whose parsed text is, or contains, such blocks.
 _TABULAR_SUFFIXES = {".xlsx", ".xlsm", ".docx", ".csv"}
