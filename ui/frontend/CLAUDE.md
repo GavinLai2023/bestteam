@@ -349,16 +349,36 @@ backend: `ui/backend/CLAUDE.md`.
   those as different sites, so a mismatch with Vite's own `localhost:5173`
   silently breaks continuous chat entirely.
 - `lib/shareTraceEvents.ts`'s `friendlyStatusFor` maps a run's event stream
-  to one short non-technical line. It's cosmetic only — the backend already
-  strips everything but the event `type` (plus the final answer) before it
-  reaches this socket, so devtools show nothing more than the UI does.
+  to one short non-technical line — it returns an i18n key under
+  `share.status.*` (a literal union, because `t()` is typed against the
+  locale keys), and the page translates it. Cosmetic only — the backend
+  already strips everything but the event `type` (plus the final answer)
+  before it reaches this socket, so devtools show nothing more than the UI
+  does. The same module holds `FALLBACK_REPLY`/`DISPATCH_FAILED_REPLY` — the
+  two replies the backend persists in English — and `fallbackReplyKey`, so
+  the page renders them in the visitor's language by string equality (a
+  deliberate, brittle coupling; see docs/STATUS.md Known issues).
+- The page is bilingual via the `share.*` namespace and carries its own
+  `components/LanguageSelect.tsx` in a header bar — the same switcher
+  `Layout.tsx` renders, extracted because this route is outside `<Layout/>`.
+  Same `bestteam_lang` key, so a visitor's choice sticks. The composer is a
+  `<textarea>`: Enter sends, Shift+Enter is a newline, and Enter during IME
+  composition (`isComposing` / keyCode 229) is ignored so a Chinese visitor
+  never sends half a sentence. Each assistant bubble has a Copy control
+  (outside the bubble, so tests still match the bubble's text alone).
+  Colours come from tokens (`--accent`/`--accent-contrast`) and the page is
+  `100dvh` so a phone's collapsing address bar can't hide the composer.
+  Spec: `docs/superpowers/specs/2026-08-22-share-chat-beta-patch-design.md`.
 - Org side, both on **My teams**' team cards only (`pages/wizard/
   SessionsPage.tsx`, gated on `session.pipeline_id != null` — a YAML-only
   demo pipeline has no `PipelineRecord.id` to hang a share link off):
   `components/ShareLinksPanel.tsx` is the click-to-expand "Share" panel
-  (generate/copy/revoke links for that team), and
+  (generate/copy/revoke links for that team — a link's daily message cap and
+  optional expiry are set at creation, `shareLinks.*` strings; to change
+  them, revoke and regenerate), and
   `components/SharedSessionsPanel.tsx` is the read-only audit view beside it
-  (list the team's visitor sessions, read a session's transcript), behind its
+  (list the team's visitor sessions, read a session's transcript;
+  `sharedSessions.*` strings), behind its
   own "Shared sessions" toggle — `SessionsPage`'s own `openAudit` state, not
   `SharedSessionsPanel`'s concern, so a page listing many teams doesn't fire a
   `listShareLinks`/`listShareSessions` fetch per card on load (same reasoning

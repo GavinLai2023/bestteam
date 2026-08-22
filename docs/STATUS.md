@@ -1714,15 +1714,36 @@
   every path. The Trace page's run detail gets a "Diagnose this run" button,
   the new run streams into the same panel with a banner back to the original,
   and the customer's own Runs tab never lists a diagnostic run. Refused for
-  autonomous/shared-chat runs (they would reach the mailbox / the visitor),
-  for a diagnostic run itself and for a purged run; never engages per-user
+  autonomous email runs (they would reach the mailbox; shared-chat turns are
+  allowed since 2026-08-22 -- the re-run has no `trigger_context` and cannot
+  touch the visitor's session), for a diagnostic run itself and for a purged
+  run; never engages per-user
   memory. Spec: `docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md`.
+
+- **Share-link chat beta patch** (2026-08-22, spec
+  `docs/superpowers/specs/2026-08-22-share-chat-beta-patch-design.md`). The
+  visitor page is bilingual (`share.*`) with its own language control
+  (`components/LanguageSelect.tsx`, extracted from `Layout`), reads colour
+  tokens, is `100dvh` on phones, has a multi-line composer with an IME guard
+  and a per-reply Copy; the My-teams "Share" panel sets a link's daily cap
+  and expiry at creation and shows both per link, and the audit panel is
+  translated too. Backend: `_share_link_dict` emits offset-aware timestamps,
+  and an admin can now diagnose a shared-chat turn (`POST /api/runs/{id}/
+  diagnose` refuses only autonomous email runs — the diagnostic row has no
+  `trigger_context`, so it cannot touch the visitor's session).
 
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
+
+- **The two share-chat fallback replies are persisted in English.**
+  `share_transcript._FALLBACK_REPLY` and `share_chat._DISPATCH_FAILED_MESSAGE`
+  go into `share_messages` verbatim; `ShareChatPage` recognises them by
+  string equality (`lib/shareTraceEvents.ts::fallbackReplyKey`) and renders
+  the visitor's language. Change either literal in lockstep, or replace the
+  coupling with a stable code on `ShareMessage`.
 
 - **Document parsing is lightweight-only; there is no triage router and no
   heavy stack behind it.** Word documents now carry their heading structure and
@@ -2114,6 +2135,18 @@
 
 ## Next steps / roadmap
 
+- **Share-link chat, step 2** (decided 2026-08-22 with the beta patch;
+  needs its own spec): real token streaming for the *last* agent only —
+  `model.stream()` in `langgraph_adapter`, deltas published to the in-memory
+  `RunRegistry` and **never** written to `trace_events`, `stream_usage` so
+  metering stays whole, cancel checkpoints between deltas; anonymous
+  "step n of N" progress dots only alongside streaming (SEQUENTIAL shows a
+  denominator from a new public `GET /api/share/{token}/team` count,
+  PARALLEL shows n lit at once, HIERARCHICAL has no denominator and falls
+  back to a pulse — names never leave `visitor_safe_event`); a visitor Stop
+  button (new public cancel endpoint); the team name on the visitor page
+  (a disclosure decision); markdown rendering of replies shared with the
+  audit transcript (new dependency, decided against for the beta bundle).
 - **Finish the frontend UX pass** (audit 2026-08-20, F1–F15). F2–F15 are
   done; F1 (bilingual UI) has its structure and the customer-facing surfaces
   done, with the admin long tail outstanding -- see Known issues above, along
