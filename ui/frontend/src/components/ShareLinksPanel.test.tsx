@@ -28,14 +28,45 @@ describe('ShareLinksPanel', () => {
     await waitFor(() => expect(screen.getByText(/active/i)).toBeInTheDocument())
   })
 
-  it('creates a new link on click', async () => {
+  it('creates a new link with the chosen daily cap and expiry', async () => {
+    mockedApi.createShareLink.mockResolvedValue({
+      id: 2, pipeline_id: 5, token: 'newtoken', active: true, daily_cap: 10, expires_at: '2030-01-02T23:59:59+00:00', created_at: '2026-08-14T00:00:00+00:00',
+    })
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText(/expires on/i), { target: { value: '2030-01-02' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await waitFor(() =>
+      expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, {
+        daily_cap: 10,
+        // End of the chosen day in the browser's own time zone, sent with an offset.
+        expires_at: new Date(2030, 0, 2, 23, 59, 59).toISOString(),
+      }),
+    )
+  })
+
+  it('creates a link with the default cap and no expiry when the form is left alone', async () => {
     mockedApi.createShareLink.mockResolvedValue({
       id: 2, pipeline_id: 5, token: 'newtoken', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
     render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
-    await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
+    await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, { daily_cap: 30 }))
+  })
+
+  it("shows each link's daily cap and expiry", async () => {
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      { id: 2, pipeline_id: 5, token: 'def456token', active: true, daily_cap: 5, expires_at: '2030-01-02T23:59:59+00:00', created_at: '2026-08-14T00:00:00+00:00' },
+    ])
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    expect(await screen.findByText('30 messages per day')).toBeInTheDocument()
+    expect(screen.getByText('No expiry')).toBeInTheDocument()
+    expect(screen.getByText('5 messages per day')).toBeInTheDocument()
+    expect(screen.getByText(/^Expires .*2030/)).toBeInTheDocument()
   })
 
   it('revokes a link on click', async () => {

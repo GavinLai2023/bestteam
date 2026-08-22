@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import SharedSessionsPanel from './SharedSessionsPanel'
 import { api } from '../lib/api'
+import { setLanguage } from '../lib/i18n'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -22,6 +23,17 @@ describe('SharedSessionsPanel', () => {
     mockedApi.listShareSessions.mockResolvedValue([
       { id: 9, created_at: '2026-08-14T00:00:00+00:00', last_active_at: '2026-08-14T01:00:00+00:00', turns_today: 3 },
     ])
+  })
+
+  afterEach(() => {
+    setLanguage('en')
+  })
+
+  it('renders in the active language', async () => {
+    setLanguage('zh-CN')
+    render(<SharedSessionsPanel pipelineId={5} />)
+    expect(await screen.findByText('有效链接')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看对话记录' })).toBeInTheDocument()
   })
 
   it('lists sessions for a share link', async () => {

@@ -104,3 +104,26 @@
     gap: 4px;
   }
 }
+
+/* ShareLinksPanel's create form: cap + optional expiry beside the button. */
+.share-links-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.share-links-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+}
+
+.share-links-form input {
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-strong);
+}
