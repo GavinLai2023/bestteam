@@ -1301,6 +1301,23 @@ def test_docx_headings_cite_the_section_across_a_table():
     assert any(t.startswith("[Table 1]") for t in by_text)
 
 
+def test_docx_prose_shaped_like_a_heading_is_not_cited_as_a_section():
+    """`_parse_docx_bytes` escapes a Normal paragraph that starts with `# `, so
+    it stays prose under whatever section it actually sits in."""
+    text = (
+        "[Word: report.docx]\n"
+        "# Real Section\n"
+        "Body under the real section.\n"
+        "\\# Not a heading, just prose\n"
+        "Prose that follows it."
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=60, chunk_overlap=0, suffix=".docx")
+
+    assert {chunk.heading for chunk in chunks} == {"Real Section"}
+    assert any("Not a heading, just prose" in chunk.text for chunk in chunks)
+
+
 def test_header_row_longer_than_chunk_size_does_not_crash_and_still_sets_heading():
     header_row = ",".join(f"column-{i:03d}" for i in range(12))
     assert len(header_row) > 60

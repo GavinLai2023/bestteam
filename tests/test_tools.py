@@ -611,6 +611,49 @@ def test_parse_file_docx_tables_in_document_order(tmp_path):
     assert "\n\n[Table 1]\nName,multi line\n\n" in result
 
 
+def test_parse_file_docx_empty_table_row_does_not_end_the_block(tmp_path):
+    """A one-column table's spacer row renders as an empty string, which would
+    read as the blank line that terminates the block -- dropping every row
+    after it out of the table."""
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    table = document.add_table(rows=4, cols=1)
+    table.cell(0, 0).text = "Category"
+    table.cell(1, 0).text = "Electronics"
+    table.cell(2, 0).text = ""
+    table.cell(3, 0).text = "Apparel"
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    block = result.split("[Table 1]\n", 1)[1]
+    assert "\n\n" not in block
+    assert block.splitlines() == ["Category", "Electronics", "Apparel"]
+
+
+def test_parse_file_docx_prose_shaped_like_a_heading_is_escaped(tmp_path):
+    """A Normal-styled paragraph that happens to start with `# ` must not be
+    readable as a generated heading -- the chunker would cite it as a section
+    and cut a chunk boundary at it."""
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_heading("Real Section", 1)
+    document.add_paragraph("# Not a heading, just prose")
+    document.add_paragraph("#### Also not one")
+    document.add_paragraph("#5 is safe, no space after the hash")
+    document.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert "# Real Section" in lines
+    assert "\\# Not a heading, just prose" in lines
+    assert "\\#### Also not one" in lines
+    # Only the shape the chunker actually reads as a heading gets escaped.
+    assert "#5 is safe, no space after the hash" in lines
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------

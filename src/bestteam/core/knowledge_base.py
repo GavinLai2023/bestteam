@@ -10,7 +10,11 @@ from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
-from ..tools.file_parser import PAGE_BREAK, SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES
+from ..tools.file_parser import (
+    MARKDOWN_HEADING_RE as _MARKDOWN_HEADING_RE,
+    PAGE_BREAK,
+    SUPPORTED_SUFFIXES as _SUPPORTED_SUFFIXES,
+)
 from .fusion import expand_query, reciprocal_rank_fusion
 from .reranking import (
     _MAX_RERANK_CANDIDATE_K,
@@ -398,7 +402,10 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int, suffix: str = ""
     return _apply_overlap(_split_pieces(text, chunk_size, suffix), chunk_overlap, chunk_size)
 
 
-_MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
+# `_MARKDOWN_HEADING_RE` is imported from `tools/file_parser.py`, which now
+# *writes* this shape for a Word document's headings and has to escape any
+# prose that would collide with it -- one definition, so the writer and the
+# reader cannot disagree about what counts as a heading.
 
 # A heading is a citation label, not an excerpt -- a pathological one-line
 # "heading" shouldn't push the actual excerpt off the model's screen.

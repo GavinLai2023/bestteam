@@ -374,7 +374,11 @@ alternating prose / `[Table N]` segments, ending a table block at the blank line
 the parser puts after it. Running each marker to the next one -- what a workbook
 still does, since `read_only` openpyxl legitimately renders blank rows a
 blank-line terminator would cut a sheet at -- would file the paragraphs
-*between* two tables under the preceding table's citation. Prose segments split
+*between* two tables under the preceding table's citation. That terminator is
+unambiguous only because `_parse_docx_bytes` **drops a table row with no text in
+any cell**: in a one-column table such a row renders as the empty string, and a
+spacer row would otherwise end the block early and spill every row after it into
+prose. Prose segments split
 on the **Markdown** separators (`_MARKDOWN_SUFFIXES` = `{".md", ".docx"}`),
 because `_parse_docx_bytes` now renders Word's heading styles as `#` lines; a
 table block deliberately does not, so a cell beginning `# ` can't become a
@@ -384,7 +388,11 @@ so the section a table interrupted still labels the prose after it
 segment, which is not the last entry `_headings_for` returns), and it now
 ignores parser-generated header lines when deciding whether a piece opens with
 its own heading: `[Word: report.docx]` always precedes the first one, so without
-that a Word document's first section always lost its heading. A block
+that a Word document's first section always lost its heading.
+`_MARKDOWN_HEADING_RE` is **imported from `tools/file_parser.py`**, which now
+writes that shape and escapes any Word prose colliding with it -- one
+definition, so the writer and the reader cannot disagree about what a heading
+is. A block
 with no readable row under its marker -- a workbook's untouched trailing
 `Sheet2`, or a formatted-but-empty sheet whose rows are bare commas -- yields no
 chunk at all, so table awareness can't reintroduce the content-free chunk P0-6

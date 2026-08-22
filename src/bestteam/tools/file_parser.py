@@ -181,13 +181,31 @@ def _parse_docx_bytes(data: bytes, name: str) -> str:
                 ",".join(_one_line(cell.text) for cell in row.cells)
                 for row in item.rows
             ]
-            parts.append(f"[Table {table_number}]\n" + "\n".join(rows))
+            # A row with no text in any cell is dropped rather than rendered.
+            # It carries nothing a search could match, and in a ONE-column
+            # table it renders as the empty string -- which is the blank line
+            # `core/knowledge_base.py::_docx_segments` reads as the end of the
+            # block, so a spacer row would drop every row after it out of the
+            # table and index it as prose with no header and no citation.
+            # Dropping them is what makes that terminator unambiguous.
+            parts.append(
+                f"[Table {table_number}]\n"
+                + "\n".join(row for row in rows if row.replace(",", "").strip())
+            )
         elif item.text.strip():
             paragraph_run.append(_docx_paragraph_line(item))
 
     _flush_paragraphs()
     return f"[Word: {name}]\n" + "\n\n".join(parts)
 
+
+# The heading shape written here and read back out in
+# `core/knowledge_base.py` (`_MARKDOWN_HEADING_RE` is this object). Public and
+# owned by the producer for the same reason `PAGE_BREAK` is: the consumer has
+# to match exactly what was written, and a copy on each side could drift --
+# here the drift would be silent, because an unescaped collision only shows up
+# as a wrong citation.
+MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
 
 # Word heading styles are named `Heading 1` … `Heading 9` (plus `Title` for the
 # document title). Only the first four map to a Markdown level the knowledge
@@ -209,9 +227,10 @@ def _docx_paragraph_line(paragraph) -> str:
     `export_to_markdown`) would produce.
 
     A style *named* like a heading is trusted, including a custom one: the name
-    is what the author chose to call it. Ordinary prose is returned exactly as
-    it was before -- only a heading is normalised to one line, because a `#`
-    line broken in two would leave the second half as an orphan paragraph.
+    is what the author chose to call it. Ordinary prose keeps its text
+    unchanged apart from the escaping below -- only a heading is normalised to
+    one line, because a `#` line broken in two would leave the second half as
+    an orphan paragraph.
     """
     style = getattr(paragraph.style, "name", None) or ""
     if style == "Title":
@@ -219,9 +238,25 @@ def _docx_paragraph_line(paragraph) -> str:
     else:
         match = _DOCX_HEADING_RE.match(style)
         if not match:
-            return paragraph.text
+            return _escape_heading_shaped(paragraph.text)
         level = min(max(int(match.group(1)), 1), _MAX_MARKDOWN_HEADING_LEVEL)
     return f"{'#' * level} {_one_line(paragraph.text)}"
+
+
+def _escape_heading_shaped(text: str) -> str:
+    """Backslash-escape any line of ordinary prose that would be read back as a
+    generated heading.
+
+    Rendering Word's heading styles as `#` lines makes the shape meaningful, so
+    a Normal-styled paragraph that happens to begin `# ` becomes ambiguous:
+    `core/knowledge_base.py` would cite it as the section its chunk opens under
+    and cut a chunk boundary at it. The escape is Markdown's own, applied only
+    to the exact shape `MARKDOWN_HEADING_RE` matches -- `#5 no space` is not
+    that shape and is left alone. Table cells need none: a table block is split
+    on the default separators and cited by its marker, so nothing reads a
+    heading out of a row.
+    """
+    return MARKDOWN_HEADING_RE.sub(lambda match: "\\" + match.group(0), text)
 
 
 def _one_line(text: str) -> str:
