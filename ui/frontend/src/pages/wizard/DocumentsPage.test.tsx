@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import DocumentsPage from './DocumentsPage'
 import { api } from '../../lib/api'
 import type { BuilderSession } from '../../lib/types'
-import { answerConfirm, confirmDialogBody } from '../../test/confirmDialog'
+import { answerAlternate, answerConfirm, confirmDialogBody } from '../../test/confirmDialog'
 
 vi.mock('../../lib/api', () => ({
   api: {
@@ -109,7 +109,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file], false, false, undefined),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('product_policies', [file], '', false, undefined),
     )
     // The architect only sees the org's whole KB catalog otherwise, which can
     // leave a fresh upload unattached if the org already has other
@@ -211,7 +211,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, true, undefined),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], '', true, undefined),
     )
   })
 
@@ -232,7 +232,7 @@ describe('DocumentsPage', () => {
     fireEvent.click(screen.getByText('Continue'))
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], false, false, undefined),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('policies', [file], '', false, undefined),
     )
   })
 
@@ -363,20 +363,17 @@ describe('DocumentsPage', () => {
       expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith(
         'policies',
         [file],
-        false,
+        '',
         false,
         'Our refund and shipping policies',
       ),
     )
   })
 
-  it('the replace confirmation names the search quality that will be used', async () => {
-    // The 409 detail says what the existing collection is like today; the
-    // confirmation adds what it would become, so both halves of the change
-    // are in the one dialog the customer has to answer.
+  async function raiseTheNameConflict() {
     mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
     mockedApi.uploadOwnKnowledgeBaseFiles.mockRejectedValueOnce(
-      Object.assign(new Error("'policies' already exists and may be used by another team. It currently uses Standard search. Choose a different name, or confirm to replace its documents."), { status: 409 }),
+      Object.assign(new Error("'policies' already exists and may be used by another team. It currently uses Standard search. Choose a different name, add these documents to it, or replace what is in it."), { status: 409 }),
     )
     mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
@@ -389,9 +386,15 @@ describe('DocumentsPage', () => {
     fireEvent.change(fileInput, { target: { files: [file] } })
 
     fireEvent.click(screen.getByText('Continue'))
+    return file
+  }
 
-    // Both halves of the change must be in the one dialog the customer answers:
-    // what the collection is like today, and what it would become.
+  it('the name-conflict confirmation names the search quality that will be used', async () => {
+    // The 409 detail says what the existing collection is like today; the
+    // confirmation adds what it would become, so both halves of the change
+    // are in the one dialog the customer has to answer.
+    const file = await raiseTheNameConflict()
+
     const body = await confirmDialogBody()
     expect(body).toContain('It currently uses Standard search.')
     expect(body).toContain('re-indexed with Enhanced search.')
@@ -401,7 +404,33 @@ describe('DocumentsPage', () => {
     })
 
     await waitFor(() =>
-      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenLastCalledWith('policies', [file], true, true, undefined),
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenLastCalledWith('policies', [file], 'replace', true, undefined),
     )
+  })
+
+  it('offers adding to the existing collection, not only replacing it', async () => {
+    // Adding is the common case: before it existed, keeping the documents
+    // already in a collection meant finding and re-uploading all of them.
+    const file = await raiseTheNameConflict()
+    await screen.findByText('Add to it')
+
+    await act(async () => {
+      await answerAlternate()
+    })
+
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenLastCalledWith('policies', [file], 'add', true, undefined),
+    )
+  })
+
+  it('uploads nothing when the name conflict is cancelled', async () => {
+    await raiseTheNameConflict()
+    await screen.findByText('Add to it')
+
+    await act(async () => {
+      await answerConfirm(false)
+    })
+
+    expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledTimes(1)
   })
 })

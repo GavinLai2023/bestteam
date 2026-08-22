@@ -381,17 +381,19 @@ export const api = {
   // `description` is the customer's one sentence about what the documents
   // cover; it becomes the agent tool's own description. Left undefined, the
   // multipart helper omits the field entirely.
+  // `mode` is '' for an unconfirmed upload (the server 409s if the name is
+  // already taken, so the customer can choose), then 'add' or 'replace'.
   uploadOwnKnowledgeBaseFiles: (
     name: string,
     files: File[],
-    replace = false,
+    mode: '' | 'add' | 'replace' = '',
     smartSearch = false,
     description?: string,
   ) =>
     uploadFiles<{ name: string; job_id: number; status: string }>(
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/upload`,
       files,
-      { replace, smart_search: smartSearch, description },
+      { mode, smart_search: smartSearch, description },
     ),
   orgKnowledgeBaseCapabilities: () => request<KnowledgeBaseCapabilities>('/api/org/knowledge-bases/capabilities'),
   // Ingestion now runs in the background -- DocumentsPage polls this after

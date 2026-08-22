@@ -1944,7 +1944,18 @@
   rows, and documents reach a collection only by being uploaded to it. Query
   expansion and reranking are no longer part of this gap: both are opt-in on
   every type (`query_expansion_model`/`rerank_model`), as is hybrid BM25+vector
-  fusion. See `src/bestteam/core/CLAUDE.md`.
+  fusion. Nor is "an upload replaces the whole collection": `mode="add"` stages
+  the live generation's files beside the newly uploaded ones and
+  `ingestion._reusable_documents` carries an unchanged file's chunks and
+  embeddings forward by content hash, so a collection grows past one upload's
+  file limit and only genuinely new documents are embedded and billed. What
+  that leaves: **a collection is capped at 30 documents** for a self-service
+  org (200 for an admin), a bound on disk and on embedding spend rather than a
+  technical limit; **there is no way to remove one document** from a
+  collection short of replacing it with an upload of the ones to keep; and
+  **restaging copies the previous generation's files on disk**, so a
+  collection costs its own size once per retained generation. See
+  `src/bestteam/core/CLAUDE.md` and `ui/backend/CLAUDE.md`.
 - **Per-user memory recall *started* as single-stage BM25** — it is still BM25
   by default, but hybrid BM25+vector (RRF-fused, with type-aware recency
   decay), query expansion and reranking are each opt-in now

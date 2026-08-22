@@ -1335,6 +1335,33 @@ def test_docx_prose_shaped_like_a_heading_is_not_cited_as_a_section():
     assert any("Not a heading, just prose" in chunk.text for chunk in chunks)
 
 
+def test_docx_prose_shaped_like_a_table_marker_is_not_read_as_a_table():
+    """The heading escape's twin, from the reader's side: `_parse_docx_bytes`
+    escapes a Normal paragraph that reads `[Table 2]`, so the prose after it
+    stays prose instead of being indexed as that table's rows."""
+    text = (
+        "[Word: report.docx]\n"
+        "Intro paragraph about pricing.\n"
+        "\\[Table 2]\n"
+        "Ordinary prose that follows."
+    )
+
+    chunks = _chunk_document("report.docx", text, chunk_size=1000, chunk_overlap=0, suffix=".docx")
+
+    assert all(chunk.heading is None for chunk in chunks)
+    assert any("Ordinary prose that follows." in chunk.text for chunk in chunks)
+
+
+def test_csv_row_shaped_like_a_marker_is_not_read_as_a_second_block():
+    """Same, for a one-column CSV row: an unescaped `[CSV: other.csv]` split
+    the table and cited every row after it as another document."""
+    text = "[CSV: rows.csv]\nnote\n\\[CSV: other.csv]\nplain"
+
+    chunks = _chunk_document("rows.csv", text, chunk_size=1000, chunk_overlap=0, suffix=".csv")
+
+    assert [chunk.heading for chunk in chunks] == ["CSV: rows.csv"]
+
+
 def test_header_row_longer_than_chunk_size_does_not_crash_and_still_sets_heading():
     header_row = ",".join(f"column-{i:03d}" for i in range(12))
     assert len(header_row) > 60

@@ -400,7 +400,7 @@ of it, so the shape is a contract between the two modules.
 |---|---|---|
 | Document header | one bracketed line, `[PDF: name — N page(s)]` / `[Word: name]` / `[Excel: name]` / `[CSV: name]` / `[XML: name]` | `_PARSER_HEADER_RE` (`_has_extractable_text`, and the heading reader, which must not let it shadow a section) |
 | Section heading | Markdown `# ` … `#### `, deeper levels clamped | `MARKDOWN_HEADING_RE` (defined here, imported there) → `_Chunk.heading` |
-| Table | `[Table N]` / `[Sheet: name]` / `[CSV: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `_TABLE_MARKER_RE`, `_chunk_table_block` (repeats marker + header row) |
+| Table | `[Table N]` / `[Sheet: name]` / `[CSV: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `TABLE_MARKER_RE` (defined here, imported there), `_chunk_table_block` (repeats marker + header row) |
 | PDF page break | `PAGE_BREAK` (`\f`) | `_chunk_document` → `_Chunk.page` |
 | XML element | `<tag attr="v"> text`, two spaces of indent per level | `_chunk_xml_document` (indentation *is* the tree) |
 
@@ -424,6 +424,17 @@ structure from a document's own text:
   could drift, and this drift would be silent, surfacing only as a wrong
   citation. Cells need no escaping — a table block is split on the default
   separators and cited by its marker, so nothing reads a heading out of a row.
+- A line that reads like a **table marker** is backslash-escaped the same way
+  (`_escape_marker_shaped`), and `TABLE_MARKER_RE` moved here beside the
+  heading regex for the same reason. It is the identical defect one shape
+  over: a Word paragraph reading `[Table 2]` opened a block that swallowed
+  every paragraph after it as rows, and a one-column CSV or spreadsheet row
+  reading `[CSV: other.csv]` split the table and cited the rest of it as a
+  document the collection does not contain. Word's *table* rows are the
+  exception and get none: `_docx_segments` runs a block to the blank line
+  after it and ignores a marker inside one, so a cell reading `[Table 2]` is
+  already just a cell. A sheet and a CSV are split marker-to-marker, which is
+  why their rows do need it.
 
 - A `.csv` is rendered as a table block, not as prose. Its own document header
   line **is** the block's marker (`[CSV: name]`, matched by `_TABLE_MARKER_RE`)
@@ -441,6 +452,15 @@ structure from a document's own text:
   rendered back unchanged, exactly as before. Note the asymmetry this leaves:
   `_parse_excel_bytes` still joins cells with a bare `,`, so a *spreadsheet*
   cell containing a comma still splits into two apparent columns.
+  `csv.reader`'s default **131,072-character field limit is raised at import**
+  (`_CSV_FIELD_LIMIT`): it guards a streaming reader's memory, and nothing
+  here streams — the whole document is already a string before the reader sees
+  it — so it was rejecting valid documents (a long notes column) inside the
+  30MB upload cap. Raised once at import rather than set and restored around
+  each parse, because the setting is process-global and ingestion parses on a
+  thread pool. An unbalanced quotation mark therefore no longer raises at any
+  size: the reader swallows the rest of the file as one field, which is what
+  it always did for a file under the old limit.
 
 And **a heavier parser can be swapped
 in behind this contract without the chunker changing**: docling's
@@ -462,15 +482,27 @@ survive as the document's first character (and hence as part of its first
 heading or first column name). Each of those used to reach a self-service
 customer as a raw `UnicodeDecodeError` naming a byte offset.
 
+**The BOMs are tested longest-first, because one is a prefix of another.** A
+UTF-32 LE BOM begins with the two bytes of a UTF-16 LE BOM, and a UTF-32 file
+read as UTF-16 does not fail — it decodes into the same text with a NUL
+between every character, which is indexed without complaint.
+
 What did **not** change is what strictness was protecting: a document in none
 of those encodings is still reported rather than indexed as mojibake, now as a
 `ConfigurationError` naming the file and telling the customer to re-save it as
 UTF-8. GB18030 is why the chain needs a guard — it is permissive enough that a
 Western-encoded document whose high bytes happen to form valid pairs decodes
-into Chinese nonsense, so its result is accepted only when it actually contains
-CJK characters. That refuses the rare genuine GB18030 document containing no
-CJK at all; a loud refusal the customer can act on was preferred to a silent
-one nobody would notice. `lenient_text` (the attachment path) is unchanged in
+into Chinese nonsense, so its result is accepted only when it contains a **run
+of two or more adjacent** CJK characters. The run is the whole point of the
+check: Latin-1 Spanish, Portuguese, German and Swedish spell each accented
+letter with a single high byte, which pairs with the ASCII byte after it into
+one lone Han character — so "contains CJK" is satisfied by ordinary Western
+prose (`El señor Muñoz` → `El se馉r Mu馉z`), and a plain-text file in any of
+those languages was being indexed as Chinese mojibake. Chinese text comes in
+runs; that accident does not. It refuses the genuine GB18030 document with no
+two adjacent Chinese characters — one Han character in an English sentence —
+which is the same trade as before: a loud refusal the customer can act on was
+preferred to a silent one nobody would notice. `lenient_text` (the attachment path) is unchanged in
 contract — it still never raises — but it is now the last resort rather than
 the first, so a GBK attachment arrives as its own text instead of U+FFFDs.
 

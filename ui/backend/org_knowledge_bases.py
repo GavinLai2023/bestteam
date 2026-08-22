@@ -18,19 +18,21 @@ self-service counterpart to the admin `/api/config/knowledge_bases` routes,
 without an admin having to be involved.
 
 Unlike the admin route (a trusted operator, no caller-count limit), the
-upload is reachable by any org member, so it applies three extra guards the
+upload is reachable by any org member, so it applies four extra guards the
 admin path doesn't need (Codex review findings): a lower per-upload size
 ceiling, a per-org cap on how many distinct self-service knowledge bases can
 exist (20 -- an org can now free a slot itself with the delete route, but the
-cap still bounds how many one org holds at once), and a confirmation gate on
-reusing an existing name: the shared `upload_knowledge_base()` treats a same-name
-upload as a full in-place replace (by design, for the admin's own
-deliberate re-index workflow), but a customer typing a common label (e.g.
-"policies") in a later wizard session has no way to know that name is
-already live under a different, already-deployed team -- silently replacing
-its documents would change that team's answers with no warning. A first
-attempt at an existing name 409s with the file it would replace; the wizard
-then re-submits with `replace=true` once the customer confirms.
+cap still bounds how many one org holds at once), a lower cap on how many
+documents one collection may hold once an `add` upload is merged in, and a
+confirmation gate on reusing an existing name: a customer typing a common
+label (e.g. "policies") in a later wizard session has no way to know that
+name is already live under a different, already-deployed team -- silently
+changing its documents would change that team's answers with no warning. A
+first attempt at an existing name 409s naming what is there; the wizard then
+re-submits with `mode=add` or `mode=replace` once the customer has chosen.
+
+`mode` is one field rather than a boolean plus a mode because there are three
+states -- unconfirmed, add, replace -- and a boolean carries two.
 """
 
 from __future__ import annotations
@@ -99,6 +101,13 @@ _MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 # name (replacing its content) never counts against this -- only creating a
 # new name does.
 _MAX_SELF_SERVICE_KBS_PER_ORG = 20
+
+# How many documents one collection may hold once an `add` upload is merged
+# with the generation it extends. Tighter than the admin default for the
+# same reason every other limit here is: this route is reachable by any org
+# member. Three per-upload files at a time is fine; thirty documents in one
+# collection is past what a single collection should be answering from.
+_MAX_DOCUMENTS_PER_KB = 30
 
 # How much of a retrieved passage the "Try a search" panel gets back. Enough
 # to judge whether the right thing was retrieved; not a document reader, and
@@ -215,7 +224,11 @@ def get_knowledge_base_capabilities(org: Organization = Depends(get_current_org)
 def upload_own_knowledge_base(
     item_name: str,
     files: list[UploadFile] = File(...),
-    replace: bool = Form(False),
+    # "" is an unconfirmed upload -- the 409 below is what turns it into one
+    # of the other two. One field rather than a boolean plus a mode, because
+    # there are three states and a boolean can only carry two: `replace=true,
+    # mode=add` would be a contradiction the server had to pick a winner for.
+    mode: str = Form(""),
     smart_search: bool = Form(False),
     # Optional, and capped here rather than left to pydantic: it becomes the
     # agent tool's description, and a 422 naming the field beats a 500 from
@@ -250,7 +263,7 @@ def upload_own_knowledge_base(
                         "Ask an administrator to remove one before adding another."
                     ),
                 )
-        elif not replace:
+        elif not mode:
             # Name the shape that is live today: this refusal is the one
             # moment the wizard can tell the customer what they are about to
             # replace, and its own confirmation dialog adds what it would
@@ -262,11 +275,12 @@ def upload_own_knowledge_base(
                 detail=(
                     f"'{item_name}' already exists and may be used by another team. "
                     f"It currently uses {quality} search. "
-                    "Choose a different name, or confirm to replace its documents."
+                    "Choose a different name, add these documents to it, or "
+                    "replace what is in it."
                 ),
             )
         else:
-            # Refuse a `replace=true` upload while a previous one for this
+            # Refuse a confirmed upload while a previous one for this
             # same KB is still queued/running. Without this, a member can
             # repeatedly retry a large upload and pile up unbounded work on
             # ingestion.py's fixed-size executor -- each request already
@@ -317,6 +331,10 @@ def upload_own_knowledge_base(
             max_files=_MAX_FILES_PER_UPLOAD,
             max_file_size_bytes=_MAX_FILE_SIZE_BYTES,
             max_total_size_bytes=_MAX_TOTAL_SIZE_BYTES,
+            max_documents=_MAX_DOCUMENTS_PER_KB,
+            # An unconfirmed upload only ever reaches here for a name that
+            # does not exist yet, where the two modes do the same thing.
+            mode=mode or "replace",
             created_by=user.username,
         )
 

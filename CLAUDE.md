@@ -105,6 +105,10 @@ implemented** — don't assume they exist:
   ingestion job with a billable embedding spec (a non-`fake:` string) and a
   non-zero token estimate writes one `agent="kb:ingest"` row with a NULL
   `run_id` — a path-constructed KB embeds at load time and is not metered.
+  **Ingestion is incremental**: an upload can `add` to a collection instead of
+  replacing it, and a document whose content hash is unchanged keeps the
+  chunks and embeddings the previous job paid for, so only genuinely new
+  documents are embedded and billed.
   An ad-hoc "Try a search" from the "My documents" panel is the third source:
   one `agent="kb:search"` row with **both** foreign keys NULL, written on the
   failure path too. Embedding token counts are

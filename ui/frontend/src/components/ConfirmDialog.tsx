@@ -9,9 +9,15 @@ interface ConfirmDialogProps {
   body: string
   /** Label for the action being confirmed, e.g. "Delete". */
   confirmLabel: string
+  /**
+   * Label for a second, non-destructive action, e.g. "Add to it" beside
+   * "Replace". Omitted (the usual case) the dialog is Cancel + Confirm.
+   */
+  alternateLabel?: string
   /** Styles the confirm button as destructive. */
   destructive?: boolean
   onConfirm: () => void
+  onAlternate?: () => void
   onCancel: () => void
 }
 
@@ -28,8 +34,10 @@ export default function ConfirmDialog({
   title,
   body,
   confirmLabel,
+  alternateLabel,
   destructive = false,
   onConfirm,
+  onAlternate,
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useTranslation()
@@ -70,6 +78,11 @@ export default function ConfirmDialog({
         <button type="button" className="btn btn-secondary" onClick={onCancel}>
           {t('common.cancel')}
         </button>
+        {alternateLabel && onAlternate && (
+          <button type="button" className="btn btn-secondary" onClick={onAlternate}>
+            {alternateLabel}
+          </button>
+        )}
         <button
           type="button"
           className={destructive ? 'btn btn-danger' : 'btn btn-primary'}

@@ -441,14 +441,40 @@ def test_parse_file_csv_written_by_chinese_excel(tmp_path):
     assert parse_file(str(f)).splitlines() == ["[CSV: 订单.csv]", "编号,名称", "1,螺丝"]
 
 
-def test_parse_file_csv_reports_an_unreadable_row_readably(tmp_path):
-    # An unbalanced quote makes `csv.reader` swallow the rest of the file as
-    # one field, and past its 128KB field limit that surfaces as `_csv.Error`
-    # -- which ingestion.py would hand to a self-service customer verbatim.
+def test_parse_file_csv_keeps_a_field_larger_than_128kb(tmp_path):
+    # `csv.reader`'s default 131,072-character field limit is not a limit this
+    # application chose. A CSV with a long notes column is well inside the
+    # 30MB per-file upload cap and used to be refused as unreadable.
+    f = tmp_path / "notes.csv"
+    f.write_text('id,note\n1,"' + "x" * 200_000 + '"\n', encoding="utf-8")
+    assert parse_file(str(f)).splitlines()[-1] == "1," + "x" * 200_000
+
+
+def test_parse_file_csv_with_an_unbalanced_quote_swallows_the_rest(tmp_path):
+    # An unbalanced quote makes `csv.reader` read everything after it as one
+    # field. That was already what a *small* such file did; it additionally
+    # raised past the 128KB field limit, so one malformation failed loudly or
+    # quietly depending on the file's size, and the message blamed a quotation
+    # mark for every oversized field. Lifting the limit makes it uniform.
     f = tmp_path / "broken.csv"
     f.write_text('sku,name\nA1,"' + "x" * 200_000, encoding="utf-8")
-    with pytest.raises(ConfigurationError, match="broken.csv"):
-        parse_file(str(f))
+    lines = parse_file(str(f)).splitlines()
+    assert lines[:2] == ["[CSV: broken.csv]", "sku,name"]
+    assert len(lines) == 3
+
+
+def test_parse_file_csv_row_shaped_like_a_marker_is_escaped(tmp_path):
+    # `[CSV: name]` is the block marker the chunker splits on, so a row that
+    # reads like one would split the table and cite every row after it as
+    # coming from a different document.
+    f = tmp_path / "rows.csv"
+    f.write_text("note\n[CSV: other.csv]\nplain\n", encoding="utf-8")
+    assert parse_file(str(f)).splitlines() == [
+        "[CSV: rows.csv]",
+        "note",
+        "\\[CSV: other.csv]",
+        "plain",
+    ]
 
 
 def test_parse_file_rejects_unsupported_type(tmp_path):
@@ -472,6 +498,23 @@ def test_parse_file_excel_raises_without_package(tmp_path):
     with patch.dict("sys.modules", {"openpyxl": None}):
         with pytest.raises(ConfigurationError, match="openpyxl"):
             parse_file(str(f))
+
+
+def test_parse_file_excel_cell_shaped_like_a_marker_is_escaped(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+
+    f = tmp_path / "book.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Q1"
+    ws.append(["note"])
+    ws.append(["[Sheet: Q2]"])
+    ws.append(["plain"])
+    wb.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert lines.count("[Sheet: Q1]") == 1
+    assert "\\[Sheet: Q2]" in lines
 
 
 def test_parse_file_docx_raises_without_package(tmp_path):
@@ -699,6 +742,24 @@ def test_parse_file_docx_prose_shaped_like_a_heading_is_escaped(tmp_path):
     assert "\\#### Also not one" in lines
     # Only the shape the chunker actually reads as a heading gets escaped.
     assert "#5 is safe, no space after the hash" in lines
+
+
+def test_parse_file_docx_prose_shaped_like_a_table_marker_is_escaped(tmp_path):
+    """The heading escape's twin. A Normal-styled paragraph reading
+    `[Table 2]` was read back as a generated table marker, so every paragraph
+    after it was indexed as that table's rows and cited as `Table 2`."""
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_paragraph("Intro paragraph about pricing.")
+    document.add_paragraph("[Table 2]")
+    document.add_paragraph("Ordinary prose that follows.")
+    document.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert "\\[Table 2]" in lines
+    assert "Ordinary prose that follows." in lines
 
 
 # ---------------------------------------------------------------------------

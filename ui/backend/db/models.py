@@ -167,6 +167,14 @@ class IngestionJob(Base):
     # model.
     kb_type: Mapped[str] = mapped_column(default="local_folder")
     embedding_model: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Recorded for the same reason as the two above, and used for the same
+    # kind of decision: incremental ingestion carries an unchanged document's
+    # chunks forward from the previous completed job, which is only sound if
+    # this job would have cut them the same way. Nullable because a job
+    # written before the column existed cannot say -- and unknown is treated
+    # as "not reusable" (`ingestion._carryable`).
+    chunk_size: Mapped[Optional[int]] = mapped_column(nullable=True)
+    chunk_overlap: Mapped[Optional[int]] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(default="queued")
     file_count: Mapped[int] = mapped_column(default=0)
     documents_succeeded: Mapped[int] = mapped_column(default=0)

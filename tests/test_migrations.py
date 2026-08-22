@@ -1052,3 +1052,54 @@ def test_workflow_to_pipeline_rename_absorbs_a_create_all_race(tmp_path, monkeyp
         assert name == "wf"
     finally:
         engine.dispose()
+
+
+def test_the_ingestion_chunk_parameter_columns_upgrade_and_downgrade(tmp_path, monkeypatch):
+    """r5s6t7u8v9w0: what incremental ingestion reads to decide reuse.
+
+    A job written before the columns existed reads back NULL, and
+    `ingestion._carryable` treats NULL as "not reusable" -- so the round trip
+    has to leave an existing job intact and unreused, not backfilled with a
+    guess at what it was actually chunked with.
+    """
+    db_path = tmp_path / "chunk_params.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "q4r5s6t7u8v9")
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO organizations (name, display_name, active, created_at) "
+                "VALUES ('acme', 'Acme', 1, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO knowledge_bases (name, config, org_id, created_at, updated_at) "
+                "VALUES ('policies', '{}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO knowledge_ingestion_jobs "
+                "(kb_id, org_id, version, kb_type, status, file_count, "
+                " documents_succeeded, documents_failed, created_at) "
+                "VALUES (1, 1, 'v_old', 'local_folder', 'completed', 1, 1, 0, "
+                " CURRENT_TIMESTAMP)"
+            ))
+
+        command.upgrade(cfg, "r5s6t7u8v9w0")
+        with engine.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT chunk_size, chunk_overlap, version FROM knowledge_ingestion_jobs"
+            )).one()
+        assert row.version == "v_old"
+        assert (row.chunk_size, row.chunk_overlap) == (None, None)
+
+        command.downgrade(cfg, "q4r5s6t7u8v9")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("knowledge_ingestion_jobs")}
+            assert conn.execute(sa.text(
+                "SELECT count(*) FROM knowledge_ingestion_jobs"
+            )).scalar() == 1
+        assert "chunk_size" not in columns
+        assert "chunk_overlap" not in columns
+    finally:
+        engine.dispose()

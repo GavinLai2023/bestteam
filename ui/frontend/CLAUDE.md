@@ -60,6 +60,17 @@ There is no `window.confirm` in this app. `useConfirm()` returns
 tests answer it via `test/confirmDialog.ts`, which finds the dialog by its
 Cancel button because jsdom has no `showModal()`.
 
+An optional `alternateLabel` adds a **third** answer, rendered between Cancel
+and the confirm button, and the promise then resolves to `'alternate'` instead
+of a boolean (`ConfirmResult`). It exists because the documents upload has
+three answers to one question -- cancel, add to the existing collection,
+replace it -- and asking that as two dialogs in sequence makes the second one
+read like a trick. `'alternate'` is truthy and is unreachable without passing
+`alternateLabel`, so every existing `if (!ok)` call site keeps working
+untouched. `answerAlternate()` in `test/confirmDialog.ts` clicks it;
+`answerConfirm(true)` still clicks the last button, which is still the confirm
+one.
+
 ## Frontend — wizard UI (`ui/frontend/src/`)
 
 The Team Builder wizard is **five steps**

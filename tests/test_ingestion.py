@@ -2,6 +2,7 @@
 
 import functools
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -796,3 +797,207 @@ def test_metering_failure_never_flips_completed_job(db, engine, tmp_path, monkey
     chunk = db.query(KnowledgeChunk).filter_by(kb_id=kb.id).one()
     assert chunk.embedding_json is not None
     assert db.query(UsageRecord).count() == 0
+
+
+# --- Incremental ingestion -------------------------------------------------
+#
+# Every upload replaces a collection wholesale, so before this a customer who
+# changed one document in ten paid to re-embed the other nine. The new job
+# carries an unchanged document's chunks -- embeddings included -- forward from
+# the previous completed job, keyed on the content hash already being stored.
+
+
+def _run(db, engine, job, kb, version_dir, **kwargs):
+    options = {
+        "kb_type": "local_folder",
+        "chunk_size": 1000,
+        "chunk_overlap": 100,
+        "embedding_model": None,
+    }
+    options.update(kwargs)
+    ingestion.run_ingestion_job(
+        job.id, kb.id, kb.org_id, version_dir, engine=engine, **options
+    )
+    db.expire_all()
+    return db.get(IngestionJob, job.id)
+
+
+def _version(tmp_path, name, files):
+    version_dir = tmp_path / name
+    version_dir.mkdir()
+    for filename, text in files.items():
+        (version_dir / filename).write_text(text, encoding="utf-8")
+    return version_dir
+
+
+def test_an_unchanged_document_is_not_re_embedded(db, engine, tmp_path):
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days.", "b.txt": "Shipping is free."}
+
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+
+    calls = []
+    original = ingestion.embed_documents_in_batches
+
+    def counting(embeddings, texts):
+        calls.append(list(texts))
+        return original(embeddings, texts)
+
+    ingestion.embed_documents_in_batches = counting
+    try:
+        second = _make_job(db, kb, version="v_2")
+        changed = dict(files, b="")
+        changed = {"a.txt": files["a.txt"], "b.txt": "Shipping now costs money."}
+        job = _run(db, engine, second, kb, _version(tmp_path, "v_2", changed),
+                   kb_type="vector", embedding_model="fake:4")
+    finally:
+        ingestion.embed_documents_in_batches = original
+
+    assert job.status == "completed"
+    # Only the document that actually changed reached the provider.
+    assert calls == [["Shipping now costs money."]]
+
+    docs = {d.filename: d for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id)}
+    assert set(docs) == {"a.txt", "b.txt"}
+    carried = db.query(KnowledgeChunk).filter_by(document_id=docs["a.txt"].id).one()
+    assert carried.text == "Refunds within 30 days."
+    # The carried chunk keeps a usable vector -- a KB rebuilt from this job
+    # has to be servable, and nothing re-embedded it.
+    assert carried.embedding_json is not None
+    assert carried.embedding_model == "fake:4"
+
+
+def test_carrying_forward_meters_only_what_was_embedded(db, engine, tmp_path, monkeypatch):
+    # A `fake:` spec is $0 and writes no row at all, so this needs a billable
+    # one -- stubbed, like the existing kb:ingest metering test above.
+    from bestteam.core.embeddings import estimate_embedding_tokens
+    from ui.backend.db.models import UsageRecord
+
+    _stub_embeddings(monkeypatch)
+    model = "openai:text-embedding-3-small"
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days.", "b.txt": "Shipping is free."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model=model)
+
+    second = _make_job(db, kb, version="v_2")
+    job = _run(db, engine, second, kb,
+               _version(tmp_path, "v_2", dict(files, **{"b.txt": "Shipping now costs money."})),
+               kb_type="vector", embedding_model=model)
+
+    assert job.status == "completed"
+    rows = db.query(UsageRecord).filter_by(ingestion_job_id=job.id).all()
+    assert len(rows) == 1
+    first_rows = db.query(UsageRecord).filter_by(ingestion_job_id=first.id).all()
+    # The second upload billed for the one document that changed, the first
+    # for both.
+    assert rows[0].input_tokens == estimate_embedding_tokens("Shipping now costs money.")
+    assert rows[0].input_tokens < first_rows[0].input_tokens
+
+
+def test_a_changed_chunk_size_re_chunks_everything(db, engine, tmp_path):
+    # Carried chunks were cut by the previous job's parameters. Reusing them
+    # under new ones would leave a collection half-chunked one way and half
+    # the other, with nothing saying so.
+    kb = _make_kb(db)
+    files = {"a.txt": "Refunds within 30 days. " * 20}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files), chunk_size=1000)
+
+    second = _make_job(db, kb, version="v_2")
+    job = _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+               chunk_size=100, chunk_overlap=10)
+
+    assert job.status == "completed"
+    chunks = (
+        db.query(KnowledgeChunk)
+        .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .filter(KnowledgeDocument.ingestion_job_id == job.id)
+        .all()
+    )
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 100 for c in chunks)
+
+
+def test_a_changed_embedding_model_re_embeds_everything(db, engine, tmp_path):
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+
+    second = _make_job(db, kb, version="v_2")
+    job = _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+               kb_type="vector", embedding_model="fake:8")
+
+    chunk = (
+        db.query(KnowledgeChunk)
+        .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .filter(KnowledgeDocument.ingestion_job_id == job.id)
+        .one()
+    )
+    assert chunk.embedding_model == "fake:8"
+    assert len(json.loads(chunk.embedding_json)) == 8
+
+
+def test_a_job_records_the_parameters_it_chunked_with(db, engine, tmp_path):
+    # The reuse decision reads them back off the previous job; the
+    # KnowledgeBaseRecord's own config has already advanced to the new spec.
+    kb = _make_kb(db)
+    job = _make_job(db, kb)
+    job = _run(db, engine, job, kb, _version(tmp_path, "v_test", {"a.txt": "hello"}),
+               chunk_size=500, chunk_overlap=50)
+    assert (job.chunk_size, job.chunk_overlap) == (500, 50)
+
+
+def test_a_previous_job_with_unknown_parameters_is_not_reused(db, engine, tmp_path):
+    # Every job written before the columns existed reads back as NULL. The
+    # first upload after an upgrade re-embeds once; every one after that is
+    # incremental.
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+    first.chunk_size = None
+    first.chunk_overlap = None
+    db.commit()
+
+    calls = []
+    original = ingestion.embed_documents_in_batches
+    ingestion.embed_documents_in_batches = lambda e, t: (calls.append(list(t)), original(e, t))[1]
+    try:
+        second = _make_job(db, kb, version="v_2")
+        _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+             kb_type="vector", embedding_model="fake:4")
+    finally:
+        ingestion.embed_documents_in_batches = original
+
+    assert calls == [["Refunds within 30 days."]]
+
+
+def test_a_failed_job_is_never_carried_forward(db, engine, tmp_path):
+    # Only a completed job is a collection's live document set, and a failed
+    # one's rows are a diagnostic record.
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+    first.status = "failed"
+    db.commit()
+
+    calls = []
+    original = ingestion.embed_documents_in_batches
+    ingestion.embed_documents_in_batches = lambda e, t: (calls.append(list(t)), original(e, t))[1]
+    try:
+        second = _make_job(db, kb, version="v_2")
+        _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+             kb_type="vector", embedding_model="fake:4")
+    finally:
+        ingestion.embed_documents_in_batches = original
+
+    assert calls == [["Refunds within 30 days."]]

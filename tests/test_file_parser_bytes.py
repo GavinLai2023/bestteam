@@ -6,6 +6,7 @@ exactly what the path-based one does -- the refactor's whole job is to change
 nothing observable.
 """
 
+import codecs
 import io
 
 import pytest
@@ -278,6 +279,36 @@ def test_a_utf8_byte_order_mark_is_stripped():
 def test_utf16_text_is_decoded():
     # Excel's "Unicode text" export: UTF-16 with a BOM.
     assert parse_bytes("Hello\tworld".encode("utf-16"), "notes.txt") == "Hello\tworld"
+
+
+def test_utf32_text_is_decoded():
+    # A UTF-32 LE BOM opens with the two bytes of a UTF-16 LE BOM, so such a
+    # file reached the UTF-16 branch and decoded there *successfully* -- into
+    # the same text with a NUL between every character, which is precisely the
+    # silently-indexed mangling the chain exists to prevent.
+    for bom, encoding in (
+        (codecs.BOM_UTF32_LE, "utf-32-le"),
+        (codecs.BOM_UTF32_BE, "utf-32-be"),
+    ):
+        assert parse_bytes(bom + "Hello world".encode(encoding), "notes.txt") == "Hello world"
+
+
+def test_western_text_that_decodes_to_isolated_cjk_is_refused():
+    # Latin-1 Spanish. Each accented byte pairs with the ASCII byte after it
+    # into one Han character, so "the decode contains a CJK character" was
+    # satisfied and the file was indexed as Chinese mojibake. Genuine Chinese
+    # text comes in runs of characters; this kind of accident does not.
+    payload = "El se\u00f1or Mu\u00f1oz vive en Espa\u00f1a.".encode("latin-1")
+    assert "\u99c9" in payload.decode("gb18030")  # it really does decode, to Han
+    with pytest.raises(ConfigurationError):
+        parse_bytes(payload, "notes.txt")
+
+
+def test_a_chinese_name_inside_english_text_is_still_decoded():
+    # The other side of that rule: two adjacent Han characters are all it
+    # asks for, so a genuine GB18030 document that is mostly English reads.
+    text = "Contact \u674e\u660e for details."
+    assert parse_bytes(text.encode("gb18030"), "notes.txt") == text
 
 
 def test_a_gb18030_decode_without_cjk_is_refused():
