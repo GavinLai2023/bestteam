@@ -377,3 +377,60 @@ Append new entries at the bottom using this template:
 - **Consequences**: A customer with a genuine subject-access erasure obligation
   has age-based retention and per-run deletion, and must be told plainly that
   identifier-based erasure is not available. Recorded in `STATUS.md`.
+
+## Beta runs single-process on SQLite; Postgres is not planned before GA
+
+- **Status**: Accepted (2026-08-22). Supersedes nothing; it writes down a
+  ruling that had been made twice in review and re-proposed three times.
+- **Context**: Two architecture reviews (2026-08-17, 2026-08-19) and an
+  external email-architecture review (2026-08-22) each recommended migrating
+  to PostgreSQL, in the last case bundled with a persistent queue, leader
+  election and multi-host workers. The question was answered the same way
+  each time and kept coming back, so it is recorded here rather than in a
+  review thread.
+- **Decision**: The beta ships on **one uvicorn process against one SQLite
+  file**. No Postgres, no second process, no `--workers N`.
+- **Reasons**:
+  - **Postgres alone does not lift the ceiling it is proposed to lift.** The
+    things that actually confine this deployment to one process are in
+    memory, not in the database: `RunRegistry` (live run state and WebSocket
+    subscriptions), `email_trigger._dispatch_locks` (the per-org overlap
+    guard, one `threading.Lock` per org, `email_trigger.py:108`), the per-source-key draft-idempotency lock, the login throttle and
+    the WebSocket ticket store. Moving the rows to Postgres leaves every one
+    of them process-local, so the deployment would still be single-process
+    and would additionally need a database server.
+  - **The migration is not small and not started.** `make_engine` hardcodes
+    SQLite and takes a *file path*, not a URL
+    (`ui/backend/db/database.py:41`), and `pyproject.toml` carries no
+    Postgres driver.
+  - **"One member per org" is an authorisation gap, not a database one.** It
+    is the constraint customers will hit first, and RBAC fixes it on SQLite
+    exactly as well as on Postgres.
+  - **The beta's load is known and small**: a handful of orgs, a mailbox
+    polled every 120 s, at most four concurrent runs
+    (`runtime._executor`, `max_workers=4`). WAL is on, so readers do not
+    block behind the one writer.
+- **Consequences**:
+  - `uvicorn --workers N` and multi-host replicas stay **unsupported**, and
+    the horizontal scale-out of the email poller stays blocked — see
+    `docs/STATUS.md`. Message-level double-processing is already excluded
+    (`db/inbox_events.py:112`'s `claim_events` is a single UPDATE, so under
+    SQLite's write lock two claimants cannot be handed the same message), so
+    what multi-process would break is the overlap guard and cooperative
+    cancellation, not the correctness of the claim itself.
+  - **Stop arguing new features from process-local locks.** A correctness
+    argument that holds only because two threads share a process is a
+    liability the day this decision is revisited; prefer a
+    DB-authoritative guard where the cost is comparable.
+  - **Revisit when any of these is true** — they are the upgrade triggers,
+    and hitting one means writing the migration ADR, not re-opening this one:
+    - more than ~10 active organisations;
+    - concurrent runs routinely above 4 (the executor's width);
+    - a customer needing a second account in one org — **do RBAC first**, it
+      is the real blocker and is independent of the engine;
+    - any HA or uptime-SLA commitment, which single-process cannot meet.
+  - The next reachable step, if pressure arrives before a migration is
+    justified, is making the overlap guard DB-authoritative. That became
+    cheaper once the startup stale-run sweep landed
+    (`runtime.fail_interrupted_runs`), which removed the original objection
+    to it.
