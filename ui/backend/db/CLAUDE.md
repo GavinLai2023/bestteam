@@ -113,13 +113,23 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   the new spec at upload-dispatch time while the previous generation is still
   the live one (a re-upload that changes type would otherwise `json.loads`
   a NULL `embedding_json`, and one that changes only the embedding model would
-  silently query a mismatched vector space). `file_count`/
+  silently query a mismatched vector space). `chunk_size`/`chunk_overlap`
+  (migration `r5s6t7u8v9w0`, nullable) are on the row for the same reason and
+  are read for the same kind of decision: incremental ingestion carries an
+  unchanged document's chunks forward from the previous completed job, which
+  is only sound if this job would have cut them the same way, and `config`
+  cannot answer that either. NULL is every job written before the columns
+  existed and is treated as "not reusable" (`ingestion._carryable`), so an
+  upgrade re-embeds once rather than reusing chunks on a guess. `file_count`/
   `documents_succeeded`/`documents_failed` and a capped `error` summarize the
   outcome; indexed on `(kb_id, status, completed_at)` for the "most recent
   completed job" resolution query. See `ui/backend/CLAUDE.md`.
 - `knowledge_documents` (`KnowledgeDocument`) — one uploaded file's ingestion
   outcome within an `IngestionJob` (`kb_id`/`ingestion_job_id` FKs, `filename`,
-  `content_hash`, `size_bytes`, CHECK-constrained `status`
+  `content_hash` (**read**, not merely recorded: it is what
+  `ingestion._reusable_documents` matches on to carry an unchanged document's
+  chunks and embeddings forward instead of re-embedding them),
+  `size_bytes`, CHECK-constrained `status`
   `pending`/`parsing`/`chunked`/`failed`, capped `error`). Per-document status
   is the partial-failure unit: one bad file (parse error, or zero chunks
   produced) is recorded here as `failed` without aborting the rest of the

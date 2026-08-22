@@ -10,7 +10,7 @@ import shutil
 import threading
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -79,6 +79,14 @@ _KB_CURRENT_POINTER = "CURRENT"
 # points at a folder the user manages themselves).
 _KB_UPLOADS_DIR = Path(__file__).parent / "data" / "knowledge_base_uploads"
 _MAX_FILES_PER_UPLOAD = 30
+
+# How many documents one collection may hold once an "add" upload is merged
+# with the generation it extends. Without a ceiling, "add" is unbounded growth
+# per collection -- and the per-org collection cap that bounds an org's
+# footprint today only counts collections, not what is in them. The admin
+# default is generous; `org_knowledge_bases.py` passes a tighter one, as it
+# does for every other limit here.
+_MAX_DOCUMENTS_PER_KB = 200
 _MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30MB
 _MAX_TOTAL_SIZE_BYTES = 500 * 1024 * 1024  # ~500MB
 
@@ -145,6 +153,66 @@ def _invalidate_pipeline_cache() -> None:
         main._pipeline_cache_generation += 1
 
 
+def _stage_previous_generation(
+    db: Session,
+    org_id: Optional[int],
+    item_name: str,
+    kb_root: Path,
+    version_dir: Path,
+    *,
+    superseded: Set[str],
+    max_documents: int,
+) -> None:
+    """Copy the live generation's files into `version_dir` beside the new ones.
+
+    This is what makes "add" a mode of the existing pipeline rather than a
+    second one: the new job still stages, parses and owns a complete document
+    set, so nothing downstream has to learn that a collection can span two
+    jobs. `ingestion._reusable_documents` then makes the copies nearly free --
+    a file whose bytes are unchanged keeps the chunks and embeddings the
+    previous job already paid for.
+
+    Nothing to carry (a name that has never completed a job, or a version
+    directory an operator has removed) is not an error: "add" to a collection
+    that isn't there yet is just a first upload.
+    """
+    record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if record is None:
+        return
+    previous = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id, status="completed")
+        # `id`, not `completed_at` -- see `resolve_knowledge_base`.
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    if previous is None:
+        return
+    previous_dir = kb_root / previous.version
+    if not previous_dir.is_dir():
+        return
+
+    carried = [
+        path
+        for path in sorted(previous_dir.rglob("*"))
+        if path.is_file() and path.relative_to(previous_dir).as_posix() not in superseded
+    ]
+    total = len(superseded) + len(carried)
+    if total > max_documents:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"'{item_name}' would hold {total} documents; the limit is "
+                f"{max_documents}. Remove some documents by replacing the "
+                "collection, or start another one."
+            ),
+        )
+    for path in carried:
+        target = version_dir / path.relative_to(previous_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def upload_knowledge_base(
     db: Session,
     org_id: Optional[int],
@@ -162,6 +230,8 @@ def upload_knowledge_base(
     max_files: int = _MAX_FILES_PER_UPLOAD,
     max_file_size_bytes: int = _MAX_FILE_SIZE_BYTES,
     max_total_size_bytes: int = _MAX_TOTAL_SIZE_BYTES,
+    max_documents: int = _MAX_DOCUMENTS_PER_KB,
+    mode: str = "replace",
     created_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate uploaded documents and dispatch an async ingestion job.
@@ -196,6 +266,20 @@ def upload_knowledge_base(
     "not given" and re-uploading documents shouldn't blank a description the
     customer can see.
 
+    `mode` is `"replace"` (every upload's behaviour before this existed) or
+    `"add"`. A collection's live document set is one completed job's rows, so
+    "add" is implemented by *staging the previous generation's files
+    alongside the new ones* rather than by teaching retrieval to span two
+    jobs: the new job still owns a complete set, and every invariant built on
+    that -- the status flip being the atomic swap, pruning, retention --
+    holds unchanged. `ingestion.py` then carries an unchanged file's chunks
+    and embeddings forward by content hash, so restaging is cheap rather than
+    a re-embed of the whole collection. A file whose name matches one in this
+    upload is not carried: the upload supersedes it, since two documents of
+    the same name in one collection would be two answers to the same
+    question. `max_documents` bounds the merged set -- without it "add" is
+    unbounded growth, per collection and so per org.
+
     This validates synchronously (name/size limits, `kb_type`, chunk params),
     writes the uploaded files to a fresh version directory, upserts the
     `KnowledgeBaseRecord` with its final config, and creates a `queued`
@@ -212,6 +296,11 @@ def upload_knowledge_base(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _reject_builtin_kb_name(item_name)
 
+    if mode not in ("replace", "add"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown upload mode '{mode}'. Use 'replace' or 'add'.",
+        )
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) > max_files:
@@ -296,6 +385,11 @@ def upload_knowledge_base(
         try:
             for filename, data in contents.items():
                 (version_dir / filename).write_bytes(data)
+            if mode == "add":
+                _stage_previous_generation(
+                    db, org_id, item_name, kb_root, version_dir,
+                    superseded=set(contents), max_documents=max_documents,
+                )
 
             spec = KnowledgeBaseSpec(
                 name=item_name,
@@ -332,7 +426,11 @@ def upload_knowledge_base(
                 kb_type=kb_type,
                 embedding_model=spec.embedding_model,
                 status="queued",
-                file_count=len(contents),
+                # The whole staged set, not this request's files: in "add"
+                # mode the job really is going to process the carried
+                # generation too, and `documents_succeeded + documents_failed`
+                # is checked against this.
+                file_count=sum(1 for p in version_dir.rglob("*") if p.is_file()),
                 created_by=created_by,
             )
             db.add(job)

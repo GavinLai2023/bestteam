@@ -18,6 +18,20 @@ export async function answerConfirm(accept: boolean): Promise<void> {
   fireEvent.click(accept ? buttons[buttons.length - 1] : buttons[0])
 }
 
+/**
+ * Clicks the dialog's optional second action (`alternateLabel`), which sits
+ * between Cancel and the confirm button.
+ */
+export async function answerAlternate(): Promise<void> {
+  const cancel = await screen.findByText('Cancel')
+  const dialog = cancel.closest('.confirm-dialog')
+  if (!dialog) throw new Error('Cancel button found, but not inside a .confirm-dialog')
+  const buttons = dialog.querySelectorAll('button')
+  if (buttons.length < 3) throw new Error('this dialog has no alternate action')
+  // Rendered as [Cancel, <alternate>, <the action>].
+  fireEvent.click(buttons[1])
+}
+
 /** The dialog's explanatory body text, for asserting on what it told the user. */
 export async function confirmDialogBody(): Promise<string> {
   const cancel = await screen.findByText('Cancel')

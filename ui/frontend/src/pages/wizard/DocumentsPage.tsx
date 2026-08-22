@@ -115,28 +115,33 @@ export default function DocumentsPage() {
       setStage('uploading')
       let uploadResult: { job_id: number }
       try {
-        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, false, smartSearchEnabled, kbDescription)
+        uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, '', smartSearchEnabled, kbDescription)
       } catch (e) {
         const err = e as Error & { status?: number }
         if (err.status === 409) {
           // The 409 detail says what the existing collection is like today;
           // this says what it would become, so both halves of the change are
-          // in the one dialog the customer has to answer.
-          const ok = await confirm({
-            title: 'Replace these documents?',
-            body: `${err.message} They will be re-indexed with ${
+          // in the one dialog the customer has to answer. Three answers, not
+          // two: adding to a collection is the common case, and before it
+          // existed the only way to keep the documents already there was to
+          // find them and upload them all again.
+          const answer = await confirm({
+            title: 'This collection already exists',
+            body: `${err.message} Either way it will be re-indexed with ${
               smartSearchEnabled ? 'Enhanced' : 'Standard'
             } search.`,
-            confirmLabel: 'Replace',
+            confirmLabel: 'Replace everything',
+            alternateLabel: 'Add to it',
             destructive: true,
           })
-          if (!ok) {
+          if (!answer) {
             setBusy(false)
             setStage(null)
             return
           }
+          const mode = answer === 'alternate' ? 'add' : 'replace'
           try {
-            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, true, smartSearchEnabled, kbDescription)
+            uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, mode, smartSearchEnabled, kbDescription)
           } catch (e2) {
             setError((e2 as Error).message)
             setBusy(false)

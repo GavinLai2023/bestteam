@@ -23,7 +23,12 @@ from ui.backend import main as backend_main
 from ui.backend import org_knowledge_bases as backend_org_kb
 from ui.backend.builder import _all_knowledge_base_tools, _with_knowledge_base_catalog
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord
+from ui.backend.db.models import (
+    IngestionJob,
+    KnowledgeBaseRecord,
+    KnowledgeChunk,
+    KnowledgeDocument,
+)
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
 
@@ -180,7 +185,7 @@ def test_reupload_existing_name_requires_confirmation(client):
     # Confirmed replace succeeds.
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true"},
+        data={"mode": "replace"},
         files=_files(name="other.txt", content=b"Something else entirely."),
     )
     assert resp.status_code == 200
@@ -198,7 +203,7 @@ def test_self_service_kb_count_capped_per_org(client, monkeypatch):
     # Re-uploading the already-existing name is unaffected by the cap.
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true"},
+        data={"mode": "replace"},
         files=_files(),
     )
     assert resp.status_code == 200
@@ -226,7 +231,7 @@ def test_replace_upload_refused_while_a_previous_job_is_still_in_flight(client, 
 
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true"},
+        data={"mode": "replace"},
         files=_files(name="v2.txt", content=b"Second generation content."),
     )
     assert resp.status_code == 200
@@ -236,7 +241,7 @@ def test_replace_upload_refused_while_a_previous_job_is_still_in_flight(client, 
     # queue a third round of work on top of it.
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true"},
+        data={"mode": "replace"},
         files=_files(name="v3.txt", content=b"Third generation content."),
     )
     assert resp.status_code == 409
@@ -250,7 +255,7 @@ def test_replace_upload_refused_while_a_previous_job_is_still_in_flight(client, 
     # Once it's terminal, a new replace upload is allowed again.
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true"},
+        data={"mode": "replace"},
         files=_files(name="v3.txt", content=b"Third generation content."),
     )
     assert resp.status_code == 200
@@ -546,7 +551,7 @@ def test_replace_keeps_previous_generation_live_until_the_new_job_completes(clie
 
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true", "smart_search": "true"},
+        data={"mode": "replace", "smart_search": "true"},
         files=_files(name="v2.txt", content=b"The refund policy allows returns within 90 days."),
     )
     assert resp.status_code == 200
@@ -829,7 +834,7 @@ def test_summary_type_reports_the_live_generation_not_the_pending_config(client,
     # the new generation never becomes servable.
     resp = client.post(
         "/api/org/knowledge-bases/policies/upload",
-        data={"replace": "true", "smart_search": "true"},
+        data={"mode": "replace", "smart_search": "true"},
         files=_files(name="blank.txt", content=b"   \n  "),
     )
     assert resp.status_code == 200
@@ -1209,3 +1214,116 @@ def test_search_500s_not_409s_on_a_non_readiness_configuration_error(client, mon
     assert resp.status_code == 500
     # The generic handler's body, not the operator's own configuration detail.
     assert "rank-bm25" not in resp.text
+
+
+# --- Adding documents to a collection instead of replacing it --------------
+#
+# Every upload used to replace a collection wholesale, and a self-service
+# upload is capped at 10 files -- so a collection could never hold more than
+# ten documents, and adding one meant re-uploading (and paying to re-embed)
+# the other nine.
+
+
+def _named_files(*names, content=b"The refund policy allows returns within 30 days."):
+    return [("files", (name, io.BytesIO(content), "text/plain")) for name in names]
+
+
+def test_adding_documents_keeps_the_ones_already_there(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("b.txt"), data={"mode": "add"})
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        docs = {
+            d.filename
+            for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id)
+        }
+    assert docs == {"a.txt", "b.txt"}
+
+
+def test_replacing_still_drops_the_ones_already_there(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("b.txt"), data={"mode": "replace"})
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        docs = {
+            d.filename
+            for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id)
+        }
+    assert docs == {"b.txt"}
+
+
+def test_adding_a_document_that_is_already_there_replaces_that_one(client):
+    # Same name, new content: the upload wins for that filename, and nothing
+    # else in the collection is touched. Two documents of the same name in
+    # one collection would be two answers to the same question.
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt", "b.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[("files", ("a.txt", io.BytesIO(b"Refunds now take 60 days."), "text/plain"))],
+        data={"mode": "add"},
+    )
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    with open_test_db() as db:
+        docs = {
+            d.filename: d
+            for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id)
+        }
+        assert set(docs) == {"a.txt", "b.txt"}
+        chunks = db.query(KnowledgeChunk).filter_by(document_id=docs["a.txt"].id).all()
+    assert "60 days" in chunks[0].text
+
+
+def test_adding_to_a_collection_that_does_not_exist_yet_just_creates_it(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt"), data={"mode": "add"})
+    assert resp.status_code == 200
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+
+def test_an_unconfirmed_upload_to_an_existing_name_is_still_refused(client):
+    # The 409 exists so a customer typing a common label cannot silently
+    # change a collection another deployed team is already using. Adding to
+    # it is still a change to it, so it is still a decision they have to make.
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("b.txt"))
+    assert resp.status_code == 409
+
+
+def test_a_collection_cannot_grow_past_its_document_cap(client, monkeypatch):
+    monkeypatch.setattr(backend_org_kb, "_MAX_DOCUMENTS_PER_KB", 2)
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt", "b.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("c.txt"), data={"mode": "add"})
+    assert resp.status_code == 413
+    assert "2" in resp.json()["detail"]
+
+
+def test_an_unknown_mode_is_refused(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload",
+                       files=_named_files("a.txt"), data={"mode": "merge"})
+    assert resp.status_code == 400

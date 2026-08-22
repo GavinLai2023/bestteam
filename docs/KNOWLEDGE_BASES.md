@@ -517,6 +517,36 @@ smart search unavailable, or the env var unset despite a stale client sending
 `smart_search=true`) always falls back to plain `local_folder` — the exact
 same shape as before this toggle existed. See `.env.example`.
 
+**Adding documents, and what a second upload costs.** An upload is
+`mode="replace"` (the whole collection becomes what this upload contains) or
+`mode="add"` (this upload joins what is already there; a file whose *name*
+matches one already in the collection is replaced by it, since two documents
+of the same name would be two answers to the same question). The self-service
+route treats the field as the confirmation too: sending no `mode` against a
+name that already exists is the `409` that asks the customer which they meant,
+and the wizard's dialog offers both.
+
+"Add" is why a collection can hold more than one upload's worth of files: the
+per-upload file limits above still apply per request, and
+`_MAX_DOCUMENTS_PER_KB` (30 self-service, 200 admin) bounds the merged result.
+It is implemented by staging the live generation's files alongside the new
+ones, so the resulting ingestion job still owns a complete document set and
+nothing about the atomic swap, pruning or retention changes.
+
+Restaging is not a re-index. A document whose bytes are unchanged
+(`KnowledgeDocument.content_hash`) keeps the chunks — and the **embeddings** —
+the previous completed job already produced and paid for; only genuinely new
+or changed documents are parsed, embedded and metered. That reuse is refused,
+and everything re-embedded, whenever the previous job's `kb_type`,
+`embedding_model`, `chunk_size` or `chunk_overlap` differ from this one's, so
+switching the Standard/Enhanced toggle still re-indexes from scratch as
+described above. A job created before this feature existed records no chunk
+parameters and is never reused: the first upload after that upgrade re-embeds
+once.
+
+What this does **not** give you: a way to remove a single document. Dropping
+one still means a `replace` upload containing the documents to keep.
+
 **Org self-service listing and deletion** (`GET /api/org/knowledge-bases`,
 `GET`/`DELETE /api/org/knowledge-bases/{name}`) is the same org member's view
 of what they uploaded, without an admin having to be involved. Each entry
@@ -730,7 +760,7 @@ previous one keeps serving until it completes.
 
 Because of that, the customer-facing surfaces report the shape that is
 *serving*, not the one `config` holds: `_kb_summary`'s `type` and the
-self-service upload's replace `409` ("It currently uses Enhanced search.")
+self-service upload's name-conflict `409` ("It currently uses Enhanced search.")
 both come from `org_knowledge_bases.py::_live_kb_type()` — the latest
 completed job's own `kb_type`, falling back to `config` for a knowledge base
 that has never completed one. `job_status_payload`'s `config` is unchanged;
@@ -895,7 +925,8 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   tagged with its filename plus a page (PDF) or section heading (Markdown) —
   enough for a person to find the passage — but there is no chunk id in the
   tag, no click-through to the document, and no "which version of which page"
-  audit trail: a re-upload replaces a collection's chunks wholesale, so a
+  audit trail: an upload rewrites a collection's chunk rows (carrying
+  unchanged documents' forward, but under the new job), so a
   citation names a location in *today's* documents. Plain text still cites
   its filename alone, and the Markdown heading, the spreadsheet/table one and
   the XML ancestor one are all approximations — see "Chunk location

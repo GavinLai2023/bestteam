@@ -1223,13 +1223,56 @@ staged version directory: the rows are durable by then, so cleaning up the
 files on a submit failure would strand a permanently `queued` job pointing
 at a deleted directory — the job is resolved `failed` (and the caller gets a
 503) instead. Self-service uploads (`org_knowledge_bases.py`) additionally
-refuse a `replace=true` upload while a `queued`/`running` job already exists
+refuse a confirmed upload while a `queued`/`running` job already exists
 for that KB, inside the same per-KB lock as the existence/cap checks: without
 it, a member retrying a stalled or slow upload could pile up unbounded work
 on the 4-worker executor, each retry having already staged up to
 `_MAX_TOTAL_SIZE_BYTES` to disk and queued an embedding call before anything
 else would catch it (Codex review finding). The trusted admin upload path
 (`crud.py`) has no such per-caller-count limit and doesn't need this guard.
+
+**Incremental ingestion, and adding documents rather than replacing them.**
+Every upload replaces a collection wholesale -- which meant a self-service
+collection could never hold more than one upload's worth of files (10), and
+changing one document in ten cost a re-parse and a re-embed of the other nine.
+`content_hash`, computed and stored on every `KnowledgeDocument` since the
+schema was written, was never read by anything; it is what fixes both.
+
+`upload_knowledge_base(..., mode=)` takes `"replace"` (the previous and still
+default behaviour) or `"add"`. "Add" is implemented at the **staging** layer,
+not the retrieval one: `_stage_previous_generation` copies the live
+generation's files into the new version directory beside the newly uploaded
+ones, skipping any whose name this upload supersedes. The new job therefore
+still owns a complete document set, so the atomic-swap invariant above,
+pruning, retention and `resolve_knowledge_base` are all untouched -- there is
+no notion anywhere of a collection spanning two jobs. `_MAX_DOCUMENTS_PER_KB`
+bounds the merged set (200 admin, 30 self-service); without it "add" is
+unbounded growth per collection, and the existing per-org cap counts
+collections, not what is in them.
+
+Restaging is cheap because `ingestion._reusable_documents` then carries an
+unchanged file's chunks -- **embeddings included** -- forward from the previous
+completed job, matched on `(filename, content_hash)`. Only chunks that are
+genuinely new reach `embed_documents_in_batches`, and only their tokens are
+metered, so a nine-document collection gaining a tenth bills for one document.
+`_carryable` gates the whole lookup on the previous job's shape matching this
+one's: `kb_type`, `embedding_model`, and the two new
+`chunk_size`/`chunk_overlap` columns (migration `r5s6t7u8v9w0`), which exist
+for exactly the reason `kb_type`/`embedding_model` already sat on the job row
+-- the `KnowledgeBaseRecord`'s `config` has already advanced to the new
+upload's spec by the time the worker runs, so only the job can say what its
+chunks were actually cut with. A job predating the columns reads back NULL and
+is deliberately **not** reusable, so the first upload after an upgrade
+re-embeds once and every one after that is incremental. Only a `completed` job
+is ever a candidate -- a failed job's rows are a diagnostic record of
+something that was never served. `run_ingestion_job` writes all four values
+from its own arguments at the top of the run rather than trusting the row.
+
+The self-service route's confirmation gate carries the choice: `mode` is one
+form field with three states (`""` unconfirmed -> 409, then `"add"` or
+`"replace"`), replacing the old `replace` boolean, because a boolean cannot
+express three answers and `replace=true, mode=add` would be a contradiction
+the server had to pick a winner for.
 
 **Atomicity model: the `IngestionJob.status` flip is the swap, not a
 CURRENT-pointer file.** Unlike the legacy file-based upload path (which

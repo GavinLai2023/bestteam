@@ -4,7 +4,10 @@ KnowledgeDocument/KnowledgeChunk rows keyed to an IngestionJob.
 
 A KB's live document set is always its most recent `completed` job's rows
 -- the status="completed" flip is the atomic swap (no CURRENT-pointer file
-needed for this path). See ui/backend/knowledge_bases.py (dispatch site,
+needed for this path). A job's rows are its own complete set even when most
+of them were carried forward unchanged from the previous job
+(`_reusable_documents`), so that invariant is unaffected by incremental
+ingestion. See ui/backend/knowledge_bases.py (dispatch site,
 read path) and
 docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md.
 """
@@ -110,7 +113,17 @@ def run_ingestion_job(
         if job is None:
             return
         job.status = "running"
+        # The shape this job is actually being run with, recorded from the
+        # arguments rather than trusted from the row: the dispatcher writes
+        # the same four values, but the next job's reuse decision reads them
+        # back off here, and only the worker knows what it was really handed.
+        job.kb_type = kb_type
+        job.embedding_model = embedding_model
+        job.chunk_size = chunk_size
+        job.chunk_overlap = chunk_overlap
         db.commit()
+
+        reusable = _reusable_documents(db, kb_id, job)
 
         # (document, its chunks) pairs, none of them added to the session yet.
         # A chunk's `document_id` can't be set until its document has a real
@@ -118,6 +131,10 @@ def run_ingestion_job(
         # flush below assigns them.
         pending: List[Tuple[KnowledgeDocument, List[KnowledgeChunk]]] = []
         all_chunks: List[KnowledgeChunk] = []
+        # The subset of `all_chunks` that still needs a vector. A chunk
+        # carried forward from the previous job already has one, and paying to
+        # recompute it is the entire cost this avoids.
+        new_chunks: List[KnowledgeChunk] = []
         # Every staged file, not only the ones with a readable suffix: an
         # unsupported file filtered out here would leave no Document row at
         # all, so the customer's upload count and the job's
@@ -137,6 +154,31 @@ def run_ingestion_job(
             )
             doc_chunks: List[KnowledgeChunk] = []
             pending.append((doc, doc_chunks))
+
+            carried = reusable.get((doc.filename, doc.content_hash))
+            if carried:
+                # Byte-identical to a document the previous completed job
+                # already parsed, chunked and embedded under the same
+                # parameters -- so its chunks are exactly what this job would
+                # have produced. Copied rather than re-pointed: the previous
+                # job's rows are its own record and are pruned on their own
+                # schedule (`_prune_old_ingestion_versions`).
+                for chunk in carried:
+                    doc_chunks.append(
+                        KnowledgeChunk(
+                            kb_id=kb_id,
+                            chunk_index=chunk.chunk_index,
+                            text=chunk.text,
+                            page=chunk.page,
+                            heading=chunk.heading,
+                            embedding_json=chunk.embedding_json,
+                            embedding_model=chunk.embedding_model,
+                        )
+                    )
+                all_chunks.extend(doc_chunks)
+                doc.status = "chunked"
+                job.documents_succeeded += 1
+                continue
 
             try:
                 suffix = file_path.suffix.lower()
@@ -171,6 +213,7 @@ def run_ingestion_job(
                 )
                 doc_chunks.append(chunk)
                 all_chunks.append(chunk)
+                new_chunks.append(chunk)
             doc.status = "chunked"
             job.documents_succeeded += 1
 
@@ -179,12 +222,12 @@ def run_ingestion_job(
         # while the chunks are still plain in-memory objects: after the commit
         # every `chunk.text` would be an expired attribute and cost a SELECT.
         embedding_tokens = 0
-        if kb_type in ("vector", "hybrid") and all_chunks:
+        if kb_type in ("vector", "hybrid") and new_chunks:
             try:
                 embeddings = resolve_embedding_model(embedding_model)
                 # Batched, with a per-batch retry: a provider hiccup partway
                 # through a large upload costs one batch, not the whole job.
-                vectors = embed_documents_in_batches(embeddings, [c.text for c in all_chunks])
+                vectors = embed_documents_in_batches(embeddings, [c.text for c in new_chunks])
             except Exception as exc:  # noqa: BLE001 -- a vector/hybrid KB can't function unembedded
                 # Discard this run's buffered document/chunk objects (never
                 # added to the session) along with the job's own pending
@@ -200,10 +243,10 @@ def run_ingestion_job(
                     db.commit()
                 _safe_prune_failed_versions(db, kb_id, version_dir.parent, job_id)
                 return
-            for chunk, vector in zip(all_chunks, vectors):
+            for chunk, vector in zip(new_chunks, vectors):
                 chunk.embedding_json = json.dumps(vector)
                 chunk.embedding_model = embedding_model
-            embedding_tokens = sum(estimate_embedding_tokens(c.text) for c in all_chunks)
+            embedding_tokens = sum(estimate_embedding_tokens(c.text) for c in new_chunks)
 
         # The one write transaction: insert the documents, flush to get their
         # ids, point each buffered chunk at its document, and commit the whole
@@ -294,6 +337,85 @@ def run_ingestion_job(
             _logger.warning("Could not persist failed status for ingestion job %s", job_id)
     finally:
         db.close()
+
+
+def _reusable_documents(
+    db: Session, kb_id: int, job: IngestionJob
+) -> Dict[Tuple[str, str], List[KnowledgeChunk]]:
+    """`{(filename, content_hash): chunks}` this job may carry forward.
+
+    Every upload replaces a collection wholesale, so without this a customer
+    who changed one document in ten paid to re-parse and re-embed the other
+    nine -- and `content_hash`, computed and stored since the schema was
+    written, was never read. This is what reads it.
+
+    Only the most recent **completed** job is a candidate: that is the
+    collection's live document set by definition, and a failed job's rows are
+    a diagnostic record of something that was never served. Returns nothing
+    unless that job's shape matches this one's (`_carryable`).
+    """
+    previous = (
+        db.query(IngestionJob)
+        .filter(
+            IngestionJob.kb_id == kb_id,
+            IngestionJob.status == "completed",
+            IngestionJob.id != job.id,
+        )
+        # `id`, not `completed_at` -- the same ordering rule the pruning
+        # functions below spell out: completion order is not guaranteed to
+        # match submission order.
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    if previous is None or not _carryable(previous, job):
+        return {}
+    documents = (
+        db.query(KnowledgeDocument)
+        .filter_by(ingestion_job_id=previous.id, status="chunked")
+        .all()
+    )
+    if not documents:
+        return {}
+    # One query for every chunk of every candidate document, rather than a
+    # lazy load per document: a collection of thirty documents would
+    # otherwise be thirty round-trips on the worker thread before any of the
+    # work starts.
+    by_document: Dict[int, List[KnowledgeChunk]] = {}
+    chunks = (
+        db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.document_id.in_([doc.id for doc in documents]))
+        .order_by(KnowledgeChunk.chunk_index)
+        .all()
+    )
+    for chunk in chunks:
+        by_document.setdefault(chunk.document_id, []).append(chunk)
+    return {
+        (doc.filename, doc.content_hash): by_document[doc.id]
+        for doc in documents
+        if doc.id in by_document
+    }
+
+
+def _carryable(previous: IngestionJob, job: IngestionJob) -> bool:
+    """Whether `previous`' chunks are what `job` would have produced.
+
+    A chunk carries its own text, its cut boundaries and its vector, so all
+    four inputs to those have to match: reusing chunks cut at a different
+    `chunk_size` would leave a collection half-chunked one way and half the
+    other with nothing saying so, and reusing a vector from another embedding
+    model would put two incomparable spaces in one index.
+
+    `chunk_size is None` is every job written before the column existed, and
+    is deliberately not reusable -- the first upload after an upgrade
+    re-embeds once, and every one after that is incremental.
+    """
+    return (
+        previous.chunk_size is not None
+        and previous.kb_type == job.kb_type
+        and previous.embedding_model == job.embedding_model
+        and previous.chunk_size == job.chunk_size
+        and previous.chunk_overlap == job.chunk_overlap
+    )
 
 
 def _safe_record_ingestion_usage(
