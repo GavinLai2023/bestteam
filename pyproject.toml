@@ -1,6 +1,6 @@
 [project]
 name = "bestteam"
-version = "0.1.0"
+version = "0.1.0b1"
 description = "A business-friendly multi-agent framework wrapper built on LangGraph"
 requires-python = ">=3.10"
 dependencies = [

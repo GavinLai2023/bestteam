@@ -1,3 +1,5 @@
+import importlib.metadata as _metadata
+
 from .core.agent import Agent
 from .core.hybrid_knowledge_base import HybridKnowledgeBase
 from .core.knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase
@@ -32,7 +34,15 @@ from .tools import (
     web_search,
 )
 
-__version__ = "0.1.0"
+# Read from installed package metadata rather than restated here: this and
+# pyproject.toml's `version` are the same fact, and a second literal that has
+# to be edited in step is one that eventually is not -- `bestteam --version`
+# would then report a version no build ever had. The fallback covers a source
+# tree that was never installed (running straight from a checkout).
+try:
+    __version__ = _metadata.version("bestteam")
+except _metadata.PackageNotFoundError:  # pragma: no cover - source checkout
+    __version__ = "0.0.0.dev0"
 
 __all__ = [
     "Agent",
