@@ -516,3 +516,20 @@ A fourth round found three more, two of them about how far Stop reaches:
    identifier, where every other customer-facing surface shows
    `teams[0].display_name`. A visitor on a shared link is the most
    customer-facing audience there is.
+
+A fifth round found two, one accepted and one accepted only in part:
+
+10. **§1.6** — a stopped agent returned its partial text, which
+    `_agent_node` then reported as an ordinary `agent_completed` and
+    `runtime.py` persisted to `trace_events` — recording a stopped agent as
+    one that completed with a partial reply, and making live-only text
+    durable. Every cancellation path now returns `""`; `usage_sink` is
+    untouched, so calls already paid for are still metered.
+11. **§1.4, partially accepted** — `reply_reset` clears a retracted preamble
+    from the screen but cannot take back bytes already sent. The sink's first
+    flush of a reply now waits for the character threshold and ignores the
+    time one, so a short preamble never crosses the wire; a longer one still
+    can. Suppressing it entirely means refusing to stream any tool-capable
+    agent, i.e. the KB-backed teams this feature exists for. Recorded in
+    `docs/STATUS.md` Known issues with the one-line change that would
+    overrule the call.

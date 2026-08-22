@@ -1770,6 +1770,20 @@
   before a reply was ready." for a visitor-stopped turn
   (`share.stoppedReply`).
 
+- **A tool-capable streaming agent can flash a preamble the reply then
+  retracts.** If the final agent emits text *before* deciding to call a tool,
+  `STREAM_RESET`/`reply_reset` clears it from the visitor's screen — but it
+  cannot take back bytes already sent over the socket, and a preamble can hint
+  at org internals ("Let me check the pricing handbook"). The sink's first
+  flush of a reply therefore waits for the 40-character threshold and ignores
+  the time one, so a short preamble never crosses the wire at all; a longer
+  one still can. Eliminating it entirely means not streaming a tool-capable
+  agent at all, which is exactly the KB-backed team the feature is for —
+  judged the wrong trade. The proper fix is a signal from the model that a
+  turn is final, which no provider offers today. Decided 2026-08-23 against a
+  Codex P1; overrule it by gating `forward_text` on `not all_tools` in
+  `_run_agent`.
+
 - **A cancelled model call goes unmetered.** When a visitor stops a streaming
   turn, `_run_agent` breaks out of the chunk loop, so the provider's
   `usage_metadata` -- which arrives in a final chunk -- is never read and that

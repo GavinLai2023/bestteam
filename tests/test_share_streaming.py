@@ -134,3 +134,30 @@ def test_a_non_share_run_gets_no_sink(tmp_path, monkeypatch):
     run_in_background(run.id, pipeline, "in", engine=engine)
 
     assert transient == []
+
+
+def test_the_first_flush_of_a_reply_waits_for_the_character_threshold(published):
+    # A short preamble a tool call is about to retract must never cross the
+    # visitor's socket at all -- reply_reset cannot take bytes back.
+    sink = _TokenSink("run-1")
+    sink._last_flush -= 10  # well past the time threshold
+
+    sink("Let me check.")
+
+    assert published == [], "the time threshold must not fire before anything has been sent"
+
+    for _ in range(40):
+        sink("x")
+    assert published, "the character threshold still releases it"
+
+
+def test_the_time_threshold_applies_once_the_reply_has_started(published):
+    sink = _TokenSink("run-1")
+    for _ in range(40):
+        sink("x")
+    assert len(published) == 1
+
+    sink._last_flush -= 10
+    sink("more")
+
+    assert len(published) == 2, "later flushes keep the smooth per-token cadence"

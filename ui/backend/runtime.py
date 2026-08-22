@@ -82,19 +82,30 @@ class _TokenSink:
         self._buffer: List[str] = []
         self._pending = 0
         self._last_flush = time.monotonic()
+        # The FIRST flush of a reply waits for the character threshold, never
+        # the time one. A tool-capable agent can emit a short preamble ("Let
+        # me check the pricing handbook") and only then decide to call a tool;
+        # `STREAM_RESET` retracts that from the screen, but it cannot retract
+        # bytes already sent over the visitor's socket (Codex review finding).
+        # Holding the first flush to 40 characters means a short preamble --
+        # the common shape -- never crosses the wire at all. A longer one
+        # still can; see docs/STATUS.md, Known issues.
+        self._flushed_any = False
 
     def __call__(self, delta: str) -> None:
         if delta == STREAM_RESET:
             # The text so far belonged to what turned out to be a tool call.
             self._buffer.clear()
             self._pending = 0
+            # Back to "nothing sent yet": whatever follows is a fresh reply and
+            # gets the same first-flush protection.
+            self._flushed_any = False
             registry.publish_transient(self._run_id, {"type": "reply_reset", "data": None})
             return
         self._buffer.append(delta)
         self._pending += len(delta)
-        if (
-            self._pending >= _TOKEN_FLUSH_CHARS
-            or time.monotonic() - self._last_flush >= _TOKEN_FLUSH_SECONDS
+        if self._pending >= _TOKEN_FLUSH_CHARS or (
+            self._flushed_any and time.monotonic() - self._last_flush >= _TOKEN_FLUSH_SECONDS
         ):
             self.flush()
 
@@ -106,6 +117,7 @@ class _TokenSink:
         text = "".join(self._buffer)
         self._buffer.clear()
         self._pending = 0
+        self._flushed_any = True
         registry.publish_transient(self._run_id, {"type": "reply_delta", "data": text})
 
 INTERRUPTED_RUN_MESSAGE = (

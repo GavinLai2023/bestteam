@@ -66,7 +66,7 @@ def test_cancellation_between_deltas_stops_the_stream_early():
         should_cancel=lambda: bool(deltas),
     )
     assert deltas, "at least one delta must land before the check can trip"
-    assert len(text) < len(reply)
+    assert text == "", "a stopped agent reports no output, only the usage it spent"
 
 
 class _ChunkScriptedModel(FakeListChatModel):
@@ -215,7 +215,9 @@ def test_a_stop_mid_stream_does_not_execute_the_tools_that_call_asked_for():
     )
 
     assert calls == [], "no tool may run after the visitor stopped the turn"
-    assert text == "Working"
+    # Empty, not the partial text: returning it would persist a stopped agent
+    # as one that completed with a partial reply.
+    assert text == ""
 
 
 def test_a_stop_between_tool_calls_abandons_the_rest_of_the_batch():
@@ -370,3 +372,20 @@ def test_a_stop_reaches_a_delegated_subordinate():
 
     assert subordinate_calls, "the subordinate must actually have been delegated to"
     assert ran == [], "its tool must not run after the stop"
+
+
+def test_a_stopped_agent_records_no_partial_output():
+    """The streamed text is live-only. Returning it here would persist it as
+    this agent's `agent_completed` data -- recording a stopped agent as one
+    that completed with a partial reply (Codex review finding)."""
+    agent = Agent(name="a", role="R", goal="G", model="fake:A long reply nobody waits for")
+    pipeline = _pipeline(Team(name="t", agents=[agent]))
+    deltas: list[str] = []
+
+    events = list(
+        pipeline.stream("hi", on_token=deltas.append, should_cancel=lambda: bool(deltas))
+    )
+
+    assert deltas, "some text did reach the visitor live"
+    completed = [e for e in events if e.type == "agent_completed"]
+    assert completed and completed[0].data == ""

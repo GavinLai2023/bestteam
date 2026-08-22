@@ -635,9 +635,14 @@ def _run_agent(
             # the model call is not enough: a tool call has side effects, and
             # running one after the visitor pressed Stop -- then calling the
             # model again on its result -- is exactly what a stop must prevent
-            # (Codex review finding). Return whatever text streamed before the
-            # stop; the caller's own cancellation handling takes it from here.
-            return response.content if hasattr(response, "content") else ""
+            # (Codex review finding). The empty return is deliberate: the
+            # partial text has already been shown live, and returning it here
+            # would PERSIST it as this agent's `agent_completed` output --
+            # recording a stopped agent as one that completed with a partial
+            # reply, which the live-only contract for streamed text forbids.
+            # `usage_sink` is untouched, so calls already paid for are still
+            # metered.
+            return ""
         messages.append(response)
         for call in tool_calls:
             if should_cancel is not None and should_cancel():
@@ -645,8 +650,10 @@ def _run_agent(
                 # running must abandon the rest of it: each one is its own
                 # side effect (Codex review finding). Returning rather than
                 # breaking matters -- a break would fall through to another
-                # model call on a half-answered batch.
-                return response.content if hasattr(response, "content") else ""
+                # model call on a half-answered batch. Empty for the same
+                # reason as the guard above: a stopped agent must not be
+                # recorded as having completed with partial output.
+                return ""
             tool_fn = tools_by_name.get(call["name"])
             if tool_fn is None:
                 result = f"Error: unknown tool '{call['name']}'"
@@ -720,6 +727,14 @@ def _run_agent(
         if diagnostic:
             _emit("model_turn", _model_turn_data(i + 2, response))
 
+    if should_cancel is not None and should_cancel():
+        # A stop reached this turn, including one that only interrupted the
+        # chunk loop. Whatever streamed has already been shown live; returning
+        # it here would persist it as this agent's `agent_completed` output
+        # and record a stopped agent as one that completed with a partial
+        # reply (Codex review finding). `usage_sink` is untouched, so calls
+        # already paid for are still metered.
+        return ""
     if getattr(response, "tool_calls", None):
         # The loop ran out while the model was still asking for tools, so it
         # never produced a text answer -- `response.content` is empty here.
