@@ -1681,7 +1681,9 @@
   heavy stack behind it.** Word documents now carry their heading structure and
   keep their tables in body order (`_parse_docx_bytes` renders Word heading
   styles as Markdown `#` lines and walks `iter_inner_content()`; python-docx is
-  floored at `>=1.1` for it), and `src/bestteam/tools/CLAUDE.md` now writes down
+  floored at `>=1.1` for it), a `.csv` is now rendered and chunked as a table
+  block rather than as prose, plain text is decoded as UTF-8/BOM/GB18030 rather
+  than UTF-8 alone, and `src/bestteam/tools/CLAUDE.md` now writes down
   the parsed-text output contract a replacement parser would have to satisfy.
   What is still **not** done, deliberately deferred past beta until real
   customer documents say which of it matters: **PDF tables** (pypdf extracts a
@@ -1694,8 +1696,16 @@
   heavy parser (docling), which would also need its own metering, since it is
   per-page compute rather than a token bill. Excel keeps its existing gaps
   (merged cells flattened, numbers/dates rendered as `str`, formulas read as
-  cached values), and XML keeps the ones from the XML evaluation (double parse,
-  slow Python renderer, unmitigated entity expansion).
+  cached values, and cells joined with a bare `,` so a cell *containing* a
+  comma still splits into two apparent columns — the CSV path re-quotes, the
+  Excel one does not), and XML keeps the ones from the XML evaluation (double
+  parse, slow Python renderer, unmitigated entity expansion). CSV adds one of
+  its own: the delimiter is **not** sniffed, so a semicolon- or tab-delimited
+  export still reads as one field per row (rendered back unchanged — no
+  regression, no improvement). Text decoding adds one too: a genuinely
+  GB18030-encoded document containing no CJK characters at all is refused
+  rather than accepted, which is the price of not silently indexing a
+  Western-encoded file as Chinese mojibake.
 
 - **A diagnostic re-run diagnoses the *current* team, not the run's pinned
   version.** `POST /api/runs/{id}/diagnose` builds through the cached

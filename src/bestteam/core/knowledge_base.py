@@ -39,7 +39,7 @@ _logger = logging.getLogger(__name__)
 # had any text in it": a scanned PDF parses to `[PDF: scan.pdf -- 3 page(s)]`
 # and nothing else, which chunks into a content-free chunk that matches
 # nothing and tells nobody the pages were never read.
-_PARSER_HEADER_RE = re.compile(r"^\[(?:PDF|Word|Excel|XML|Sheet|Table)[: ][^\n]*\]\s*$", re.M)
+_PARSER_HEADER_RE = re.compile(r"^\[(?:PDF|Word|Excel|CSV|XML|Sheet|Table)[: ][^\n]*\]\s*$", re.M)
 
 _NO_TEXT_MESSAGE = (
     "No text could be extracted from this file. If it is a scanned PDF it "
@@ -443,11 +443,13 @@ def _headings_for(pieces: List[str], start: Optional[str] = None) -> List[Option
 
 
 # The bracketed line every tabular parser puts ahead of a block of CSV-style
-# rows -- one per Excel sheet, one per Word table (`tools/file_parser.py`).
-_TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|Table \d+)\]$", re.M)
+# rows -- one per Excel sheet, one per Word table, one for a whole CSV file
+# (`tools/file_parser.py`). A `.csv` is a single block, so its own document
+# header line is that block's marker rather than a second line above one.
+_TABLE_MARKER_RE = re.compile(r"^\[(Sheet: [^\]\n]*|CSV: [^\]\n]*|Table \d+)\]$", re.M)
 
 # Formats whose parsed text is, or contains, such blocks.
-_TABULAR_SUFFIXES = {".xlsx", ".xlsm", ".docx"}
+_TABULAR_SUFFIXES = {".xlsx", ".xlsm", ".docx", ".csv"}
 
 
 def _row_has_text(row: str) -> bool:
@@ -812,9 +814,10 @@ def _chunk_document(
     `p.N` is precise. The cost is that a paragraph running across a page
     boundary loses the overlap it would otherwise borrow -- accepted, because
     a citation an operator can check beats an extra hundred characters of
-    context. A `.xlsx`/`.xlsm`/`.docx` goes to `_chunk_tabular_document`,
-    which splits on the parser's own `[Sheet: …]`/`[Table N]` markers and
-    repeats the marker and header row in every chunk of an over-long block.
+    context. A `.xlsx`/`.xlsm`/`.docx`/`.csv` goes to `_chunk_tabular_document`,
+    which splits on the parser's own `[Sheet: …]`/`[Table N]`/`[CSV: …]`
+    markers and repeats the marker and header row in every chunk of an
+    over-long block.
     An `.xml` goes to `_chunk_xml_document`, which splits along the element
     tree and repeats the ancestor path at the top of every chunk. Every
     other format is chunked exactly as before; `.md` chunks additionally

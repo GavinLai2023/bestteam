@@ -304,7 +304,7 @@ supported set (`_unsupported_suffix_message`), so a `.png` dropped into a
 knowledge folder is something the operator hears about. It also warns on a
 document that parsed but contributed nothing: `_has_extractable_text` strips
 the parser-generated header lines (`_PARSER_HEADER_RE`, covering `[PDF: …]`,
-`[Word: …]`, `[Excel: …]`, `[Sheet: …]`, `[Table N]`, `[XML: …]`) and checks
+`[Word: …]`, `[Excel: …]`, `[CSV: …]`, `[Sheet: …]`, `[Table N]`, `[XML: …]`) and checks
 what remains, because a **scanned PDF** parses to its header line alone --
 non-empty, so it used to become a chunk that matched nothing and told nobody
 the pages were never read. Both helpers plus `_NO_TEXT_MESSAGE` are shared
@@ -318,8 +318,8 @@ entry point. A `.pdf` is split on `PAGE_BREAK` (the `\f` `_parse_pdf_bytes`
 now joins pages with -- the constant lives in `tools/file_parser.py`, with the
 producer that writes it, and is imported here) and each page chunked through
 `_chunk_text` on its own, so a chunk never straddles a page. An
-`.xlsx`/`.xlsm`/`.docx` goes through `_chunk_tabular_document`, which splits on
-the parser's own `[Sheet: ...]`/`[Table N]` marker lines and, for a block too
+`.xlsx`/`.xlsm`/`.docx`/`.csv` goes through `_chunk_tabular_document`, which splits on
+the parser's own `[Sheet: ...]`/`[Table N]`/`[CSV: ...]` marker lines and, for a block too
 long to fit one chunk, repeats the marker and the first body row with anything
 in it (**assumed** to be the column header) at the top of every chunk of that
 block -- otherwise the second chunk on has neither the sheet name nor the
@@ -367,6 +367,16 @@ and nothing here reconstructs them.
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
 for the body), so overlap shrinks and can reach zero; a prefix that would leave
 no room at all falls back to the ordinary path, still tagged with the heading.
+A `.csv` needs no branch at all: `tools/file_parser.py` renders it as a single
+table block whose marker **is** its document header line (`[CSV: name]`), so
+the generic path's "first marker to end of text" split produces exactly one
+block and `_chunk_table_block` repeats the marker and column header in every
+chunk of it. That is the whole point of the change -- the same table exported
+as `.csv` rather than `.xlsx` used to be chunked as prose, losing its column
+names after the first chunk and cutting rows in half at the character level.
+It is also why `.csv` is in `_TABULAR_SUFFIXES` but *not* in
+`_MARKDOWN_SUFFIXES`: a cell beginning `# ` must not open a section.
+
 A `.docx` takes its own branch inside `_chunk_tabular_document`
 (`_chunk_docx_document`), because its tables are interleaved with its prose
 rather than appended after it: `_docx_segments` cuts the parsed text into
