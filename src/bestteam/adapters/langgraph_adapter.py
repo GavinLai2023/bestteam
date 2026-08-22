@@ -10,7 +10,7 @@ from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
@@ -561,6 +561,13 @@ def _run_agent(
         what `invoke()` would have returned (tool calls merged, usage attached),
         so everything downstream of this function is unaware of the difference.
         """
+        if should_cancel is not None and should_cancel():
+            # Never open a NEW provider request after a stop. Without this the
+            # next call in the tool loop is dispatched -- billable, and Stop
+            # then waits on that provider's first chunk before it can take
+            # effect (Codex review finding). An empty response settles the
+            # loop: no tool calls, so the agent returns what it has.
+            return AIMessage(content="")
         if not stream_reply or on_token is None:
             return bound_model.invoke(msgs)
         full = None
@@ -625,6 +632,13 @@ def _run_agent(
             return response.content if hasattr(response, "content") else ""
         messages.append(response)
         for call in tool_calls:
+            if should_cancel is not None and should_cancel():
+                # A stop that lands while an earlier call in this batch is
+                # running must abandon the rest of it: each one is its own
+                # side effect (Codex review finding). Returning rather than
+                # breaking matters -- a break would fall through to another
+                # model call on a half-answered batch.
+                return response.content if hasattr(response, "content") else ""
             tool_fn = tools_by_name.get(call["name"])
             if tool_fn is None:
                 result = f"Error: unknown tool '{call['name']}'"

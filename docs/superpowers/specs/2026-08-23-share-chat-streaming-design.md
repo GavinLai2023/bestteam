@@ -191,8 +191,14 @@ stops iterating the stream and returns the text accumulated so far.
 model call is not sufficient on its own: if the cancelled response had
 already accumulated tool calls, `_run_agent`'s loop would execute them and
 call the model again, so a stop could still trigger a side effect. The loop
-therefore polls `should_cancel` once more before running any tool and returns
-the text streamed so far instead. Beyond that the node simply finishes early; the adapter yields its `agent_completed`; `runtime.py`'s
+therefore polls `should_cancel` again at three further points, each of which a
+review round found separately reachable: before running the batch of tool
+calls at all, before **each individual call** within it (a stop landing while
+an earlier one runs must abandon the rest — each is its own side effect), and
+before opening any new provider request (otherwise the next call is dispatched
+and billed, and Stop then waits on that provider's first chunk). All three
+return the text so far rather than breaking, since a break would fall through
+to another model call on a half-answered batch. Beyond that the node simply finishes early; the adapter yields its `agent_completed`; `runtime.py`'s
 existing between-events cancellation check (`runtime.py:885`) sees the flag
 and calls the existing `_mark_cancelled`, which already commits
 `status="cancelled"`, publishes `run_cancelled` and records the share reply
@@ -456,7 +462,11 @@ into the sections above rather than bolted on here:
 
 1. **§1.6** — a stop now short-circuits the tool loop, not just the model
    call. Without it a cancelled streaming response carrying tool calls still
-   executed them.
+   executed them. A second round found two more reachable boundaries: a batch
+   of several tool calls kept running after the first (the check was per
+   batch, not per call), and the next provider request was opened before the
+   flag was consulted. Each of the three guards has a test that fails without
+   it.
 2. **§2.1** — the registry keeps a live text prefix and seeds a late
    subscriber with it. The original "no replay, they get the full reply at
    the end" trade was wrong in one direction: what a late subscriber actually

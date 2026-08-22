@@ -216,3 +216,51 @@ def test_a_stop_mid_stream_does_not_execute_the_tools_that_call_asked_for():
 
     assert calls == [], "no tool may run after the visitor stopped the turn"
     assert text == "Working"
+
+
+def test_a_stop_between_tool_calls_abandons_the_rest_of_the_batch():
+    """Each call in a batch is its own side effect."""
+    ran: list[str] = []
+
+    def alpha() -> str:
+        """Alpha."""
+        ran.append("alpha")
+        return "a"
+
+    def beta() -> str:
+        """Beta."""
+        ran.append("beta")
+        return "b"
+
+    model = _ToolCallingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "alpha", "args": {}, "id": "1"},
+                    {"name": "beta", "args": {}, "id": "2"},
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+    agent = Agent(name="writer", role="Writer", goal="Write", model=model, tools=[alpha, beta])
+
+    _run_agent(agent, "hi", should_cancel=lambda: "alpha" in ran)
+
+    assert ran == ["alpha"], "the rest of the batch must not run after a stop"
+
+
+def test_no_new_model_request_is_started_after_a_stop():
+    deltas: list[str] = []
+
+    text = _run_agent(
+        _agent("Hello there"),
+        "hi",
+        streams=True,
+        on_token=deltas.append,
+        should_cancel=lambda: True,
+    )
+
+    assert text == "", "the provider must never be dialled at all"
+    assert deltas == []
