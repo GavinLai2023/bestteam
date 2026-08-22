@@ -123,7 +123,7 @@ it onto the calling agent's `agent_completed.usage` so a KB's query embedding
 and query-expansion calls are metered -- see "Metering a knowledge base's
 spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
-`heading` (a Markdown section, or a spreadsheet sheet / Word table, that a
+`heading` (a Markdown *or Word* section, or a spreadsheet sheet / Word table, that a
 chunk opens under — an 80-char approximation) — which `_citation()` renders as
 `[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
 two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
@@ -367,7 +367,24 @@ and nothing here reconstructs them.
 The repeated prefix comes out of the chunk's budget (`chunk_size - len(prefix)`
 for the body), so overlap shrinks and can reach zero; a prefix that would leave
 no room at all falls back to the ordinary path, still tagged with the heading.
-A `.docx`'s body paragraphs (before its first table) chunk normally, and a block
+A `.docx` takes its own branch inside `_chunk_tabular_document`
+(`_chunk_docx_document`), because its tables are interleaved with its prose
+rather than appended after it: `_docx_segments` cuts the parsed text into
+alternating prose / `[Table N]` segments, ending a table block at the blank line
+the parser puts after it. Running each marker to the next one -- what a workbook
+still does, since `read_only` openpyxl legitimately renders blank rows a
+blank-line terminator would cut a sheet at -- would file the paragraphs
+*between* two tables under the preceding table's citation. Prose segments split
+on the **Markdown** separators (`_MARKDOWN_SUFFIXES` = `{".md", ".docx"}`),
+because `_parse_docx_bytes` now renders Word's heading styles as `#` lines; a
+table block deliberately does not, so a cell beginning `# ` can't become a
+heading boundary inside a run of rows. `_headings_for` takes a `start` heading
+so the section a table interrupted still labels the prose after it
+(`_trailing_heading` computes what to hand on -- the heading in effect *after* a
+segment, which is not the last entry `_headings_for` returns), and it now
+ignores parser-generated header lines when deciding whether a piece opens with
+its own heading: `[Word: report.docx]` always precedes the first one, so without
+that a Word document's first section always lost its heading. A block
 with no readable row under its marker -- a workbook's untouched trailing
 `Sheet2`, or a formatted-but-empty sheet whose rows are bare commas -- yields no
 chunk at all, so table awareness can't reintroduce the content-free chunk P0-6

@@ -388,6 +388,33 @@ builds `failed_tool_message_ids`) name the tool too, so a raised attachment
 read escalates its message to a human: a name in one and not the other is half
 a wire.
 
+## The parsed-text output contract
+
+`parse_bytes(data, filename) -> str` is the single seam every consumer goes
+through — knowledge-base ingestion (`ui/backend/ingestion.py`), folder-based
+knowledge bases (`core/knowledge_base.py`), and `email_read_attachment`. What it
+returns is not free-form text: `core/knowledge_base.py` reads structure back out
+of it, so the shape is a contract between the two modules.
+
+| Element | Form | Read by |
+|---|---|---|
+| Document header | one bracketed line, `[PDF: name — N page(s)]` / `[Word: name]` / `[Excel: name]` / `[XML: name]` | `_PARSER_HEADER_RE` (`_has_extractable_text`, and the heading reader, which must not let it shadow a section) |
+| Section heading | Markdown `# ` … `#### `, deeper levels clamped | `_MARKDOWN_HEADING_RE` → `_Chunk.heading` |
+| Table | `[Table N]` / `[Sheet: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `_TABLE_MARKER_RE`, `_chunk_table_block` (repeats marker + header row) |
+| PDF page break | `PAGE_BREAK` (`\f`) | `_chunk_document` → `_Chunk.page` |
+| XML element | `<tag attr="v"> text`, two spaces of indent per level | `_chunk_xml_document` (indentation *is* the tree) |
+
+Two consequences worth stating outright. A cell's own line breaks are collapsed
+to spaces (`_one_line`) because a newline inside a cell would silently become an
+extra, shorter row on the chunker's side. And **a heavier parser can be swapped
+in behind this contract without the chunker changing**: docling's
+`export_to_markdown()` already produces `#` headings and in-order content, which
+is the shape chosen here. The intended next step is a *triage router* in front
+of `parse_bytes` — lightweight parsers for documents they handle well, an
+out-of-process heavy stack for the ones they don't (scanned PDFs, multi-column
+layouts, PDF tables). None of that exists yet; only the output contract it would
+have to satisfy does.
+
 ### Two notes on the bytes refactor
 
 - **`parse_file`'s "bytes and path agree" tests are now tautological.** Both

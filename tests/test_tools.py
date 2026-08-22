@@ -559,6 +559,58 @@ def test_parse_file_reads_docx_tables(tmp_path):
     assert "9.99" in result
 
 
+def test_parse_file_docx_headings_become_markdown(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_heading("Quarterly Report", 0)
+    document.add_heading("Pricing", 1)
+    document.add_paragraph("Body text.")
+    document.add_heading("Tiers", 3)
+    document.add_heading("Footnote", 6)
+    document.save(str(f))
+
+    lines = parse_file(str(f)).splitlines()
+    assert "# Quarterly Report" in lines
+    assert "# Pricing" in lines
+    assert "Body text." in lines
+    assert "### Tiers" in lines
+    # Levels deeper than the chunker's separators clamp to the deepest one.
+    assert "#### Footnote" in lines
+
+
+def test_parse_file_docx_tables_in_document_order(tmp_path):
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    document.add_paragraph("Before the table.")
+    first = document.add_table(rows=1, cols=2)
+    first.cell(0, 0).text = "Name"
+    first.cell(0, 1).text = "multi\nline"
+    document.add_paragraph("Between the tables.")
+    second = document.add_table(rows=1, cols=1)
+    second.cell(0, 0).text = "Second"
+    document.add_paragraph("After the tables.")
+    document.save(str(f))
+
+    result = parse_file(str(f))
+    order = [
+        result.index("Before the table."),
+        result.index("[Table 1]"),
+        result.index("Between the tables."),
+        result.index("[Table 2]"),
+        result.index("After the tables."),
+    ]
+    assert order == sorted(order)
+    # A cell's own newlines must not break the one-line-per-row contract the
+    # tabular chunker reads.
+    assert "Name,multi line" in result.splitlines()
+    # A blank line terminates each table block.
+    assert "\n\n[Table 1]\nName,multi line\n\n" in result
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------

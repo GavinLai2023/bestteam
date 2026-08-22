@@ -285,8 +285,17 @@ _MARKDOWN_SEPARATORS = ["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", "。
 _PREFIX_SEPARATORS = {"\n# ", "\n## ", "\n### ", "\n#### "}
 
 
+# `.docx` joins `.md` here because `_parse_docx_bytes` now renders Word's
+# heading styles as Markdown heading lines -- the same shape, so the same
+# separators and the same `_headings_for` reader apply. It is only ever passed
+# for a Word document's *prose*; a table block is split with the defaults, so a
+# cell that happens to begin with `# ` can't become a heading boundary inside a
+# run of rows.
+_MARKDOWN_SUFFIXES = {".md", ".docx"}
+
+
 def _separators_for_suffix(suffix: str) -> List[str]:
-    return _MARKDOWN_SEPARATORS if suffix == ".md" else _DEFAULT_SEPARATORS
+    return _MARKDOWN_SEPARATORS if suffix in _MARKDOWN_SUFFIXES else _DEFAULT_SEPARATORS
 
 
 def _pack_pieces(pieces: List[str], chunk_size: int, fallback_separators: List[str]) -> List[str]:
@@ -396,7 +405,7 @@ _MARKDOWN_HEADING_RE = re.compile(r"^#{1,4} +(.+?)\s*$", re.M)
 _MAX_HEADING_CHARS = 80
 
 
-def _headings_for(pieces: List[str]) -> List[Optional[str]]:
+def _headings_for(pieces: List[str], start: Optional[str] = None) -> List[Optional[str]]:
     """The Markdown heading in effect at the start of each piece.
 
     Approximate by design, and Markdown-only. A piece the splitter cut at a
@@ -404,12 +413,21 @@ def _headings_for(pieces: List[str]) -> List[Optional[str]]:
     inherits the last heading seen so far. Nothing here parses Markdown, so a
     `#` line inside a fenced code block reads as a heading, and a chunk that
     spans two sections is labelled with the one it starts in.
+
+    `start` is the heading already in effect before the first piece. A Markdown
+    document begins under none, but a Word document's prose is cut into
+    segments by the tables between them, and the section a table interrupted is
+    still the section the prose after it belongs to.
     """
     headings: List[Optional[str]] = []
-    current: Optional[str] = None
+    current: Optional[str] = start
     for piece in pieces:
         matches = list(_MARKDOWN_HEADING_RE.finditer(piece))
-        if matches and not piece[: matches[0].start()].strip():
+        # A parser-generated header line (`[Word: report.docx]`) is not content,
+        # so it must not shadow the section the chunk actually opens under --
+        # without this, a Word document's *first* section always lost its
+        # heading, because that line is always in front of it.
+        if matches and not _PARSER_HEADER_RE.sub("", piece[: matches[0].start()]).strip():
             current = matches[0].group(1)[:_MAX_HEADING_CHARS]
         headings.append(current)
         if matches:
@@ -486,6 +504,80 @@ def _chunk_table_block(
     return [_Chunk(source=source, text=text, heading=heading) for text in texts]
 
 
+def _trailing_heading(text: str, current: Optional[str]) -> Optional[str]:
+    """The Markdown heading in effect *after* `text` -- what the next segment
+    of a Word document's prose inherits across the table between them.
+
+    Distinct from the last entry `_headings_for` returns, which is the heading
+    in effect at the *start* of the final piece: a segment that opens under one
+    section and introduces another must hand the later one on.
+    """
+    matches = list(_MARKDOWN_HEADING_RE.finditer(text))
+    return matches[-1].group(1)[:_MAX_HEADING_CHARS] if matches else current
+
+
+def _docx_segments(text: str) -> List[Tuple[bool, str]]:
+    """Split parsed Word text into alternating prose and `[Table N]` blocks,
+    as `(is_table, segment)` pairs in document order.
+
+    A Word table block ends at the blank line `_parse_docx_bytes` puts after
+    it. A spreadsheet's sheet block cannot be found that way -- `read_only`
+    openpyxl renders an empty row as bare commas and a genuinely blank row as
+    nothing, so a sheet legitimately contains blank lines a terminator would
+    cut it at -- which is why only Word goes through here and a workbook still
+    runs each marker to the next one.
+
+    A marker line found *inside* a block already consumed is a table cell whose
+    text happens to read `[Table 2]`, not a new table; it stays a row.
+    """
+    segments: List[Tuple[bool, str]] = []
+    pos = 0
+    for match in _TABLE_MARKER_RE.finditer(text):
+        start = match.start()
+        if start < pos:
+            continue
+        if start > pos:
+            segments.append((False, text[pos:start]))
+        blank = text.find("\n\n", start)
+        pos = len(text) if blank == -1 else blank
+        segments.append((True, text[start:pos]))
+    if pos < len(text):
+        segments.append((False, text[pos:]))
+    return segments
+
+
+def _chunk_docx_document(
+    source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str
+) -> List[_Chunk]:
+    """Chunk a Word document, following its body order.
+
+    Its tables are interleaved with its prose rather than appended after it, so
+    the prose *between* two tables is real content that must chunk as prose --
+    running each marker to the next one (what a spreadsheet does) would file
+    those paragraphs under the preceding table's citation. Each prose segment
+    is chunked on the Markdown separators the parser's heading lines create,
+    carrying the section heading across the tables that interrupt it.
+    """
+    chunks: List[_Chunk] = []
+    heading: Optional[str] = None
+    for is_table, segment in _docx_segments(text):
+        if is_table:
+            # Deliberately not `suffix`: see `_MARKDOWN_SUFFIXES`.
+            chunks.extend(_chunk_table_block(source, segment, chunk_size, chunk_overlap, ""))
+            continue
+        if not _has_extractable_text(segment):
+            continue
+        pieces = _split_pieces(segment, chunk_size, suffix)
+        headings = _headings_for(pieces, heading)
+        heading = _trailing_heading(segment, heading)
+        texts = _apply_overlap(pieces, chunk_overlap, chunk_size)
+        chunks.extend(
+            _Chunk(source=source, text=piece, heading=piece_heading)
+            for piece, piece_heading in zip(texts, headings)
+        )
+    return chunks
+
+
 def _chunk_tabular_document(
     source: str, text: str, chunk_size: int, chunk_overlap: int, suffix: str
 ) -> List[_Chunk]:
@@ -497,6 +589,9 @@ def _chunk_tabular_document(
     cites the filename alone. Splitting on the parser's own marker lines fixes
     both -- every chunk is readable, searchable and citable on its own.
     """
+    if suffix == ".docx":
+        return _chunk_docx_document(source, text, chunk_size, chunk_overlap, suffix)
+
     starts = [match.start() for match in _TABLE_MARKER_RE.finditer(text)]
     chunks: List[_Chunk] = []
 
