@@ -2,6 +2,7 @@ import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import LanguageSelect from '../components/LanguageSelect'
+import MarkdownText from '../components/MarkdownText'
 import ShareProgress from '../components/ShareProgress'
 import { shareChatApi } from '../lib/shareChatApi'
 import { FALLBACK_REPLY, STOPPED_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
@@ -322,7 +323,9 @@ export default function ShareChatPage() {
           const key = fallbackReplyKey(m.content)
           return (
             <div key={i} className="share-chat-assistant">
-              <div className="share-chat-bubble assistant">{key ? t(key) : m.content}</div>
+              <div className="share-chat-bubble assistant">
+                {key ? t(key) : <MarkdownText text={m.content} />}
+              </div>
               {!key && (
                 <button type="button" className="btn-link share-chat-copy" onClick={() => void handleCopy(i, m.content)}>
                   {copiedIndex === i ? t('common.copied') : t('common.copy')}
@@ -340,7 +343,11 @@ export default function ShareChatPage() {
         </div>
         {sending && streamedReply !== '' && (
           <div className="share-chat-assistant">
-            <div className="share-chat-bubble assistant share-chat-streaming">{streamedReply}</div>
+            <div className="share-chat-bubble assistant share-chat-streaming">
+              {/* Half-written markdown renders as the text it currently is
+                  and settles as it completes. */}
+              <MarkdownText text={streamedReply} />
+            </div>
           </div>
         )}
         <div ref={messagesEndRef} />

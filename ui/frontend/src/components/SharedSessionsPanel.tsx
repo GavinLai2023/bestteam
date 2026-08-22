@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
 import type { ShareLink, ShareMessage, ShareSessionSummary } from '../lib/types'
+import MarkdownText from './MarkdownText'
 
 interface SharedSessionsPanelProps {
   pipelineId: number
@@ -72,7 +73,8 @@ export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelP
         <ul>
           {transcript.messages.map((m, i) => (
             <li key={i} className={`share-chat-bubble ${m.role}`}>
-              {m.content}
+              {/* Rendered exactly as the visitor saw it -- same component. */}
+              {m.role === 'assistant' ? <MarkdownText text={m.content} /> : m.content}
             </li>
           ))}
         </ul>
