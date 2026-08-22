@@ -21,6 +21,8 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from bestteam.core.team import CollaborationMode
+
 from .db.models import Organization, Run, ShareLink, ShareSession, PipelineRecord
 from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
@@ -390,6 +392,51 @@ def get_share_messages(token: str, request: Request, db: Session = Depends(get_d
             for m in list_messages(db, session.id)
         ]
     }
+
+
+@router.get("/{token}/team")
+def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
+    """The team's name, and how many steps a visitor will see it take.
+
+    Deliberately a pure read: a first-time visitor must be able to render the
+    page header before sending anything, so this neither requires nor creates
+    a session cookie.
+
+    `steps` is the number of `agent_completed` events the visitor will
+    observe. A HIERARCHICAL team emits exactly one however many subordinates
+    its manager delegates to (subordinates emit `subagent_completed`, which
+    `visitor_safe_event` renders indistinguishable), so no honest denominator
+    exists and this is None -- the page shows a pulse instead of a count.
+
+    What is NOT disclosed: agent names, roles, models, or the collaboration
+    mode itself -- only its consequence. The org member generating a link is
+    deliberately telling a colleague "talk to this team", so the team's name
+    is shared; everything else stays behind `visitor_safe_event`.
+    """
+    link = _resolve_active_link(db, token)
+    pipeline_record = (
+        db.query(PipelineRecord)
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
+        .one_or_none()
+    )
+    if pipeline_record is None:
+        # Same detail as every other failure here -- see send_share_message.
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+
+    from .main import _resolve_pipeline_and_version  # local import: main.py imports this router
+
+    pipeline, _version_id, _pipeline_id = _resolve_pipeline_and_version(
+        pipeline_record.name, db, link.org_id
+    )
+
+    steps: Optional[int] = 0
+    for team in pipeline.steps:
+        if team.mode == CollaborationMode.HIERARCHICAL:
+            steps = None
+            break
+        steps += len(team.agents)
+
+    return {"name": pipeline_record.name, "steps": steps}
 
 
 def _link_and_org_active(engine, link_id: int) -> bool:

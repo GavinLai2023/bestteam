@@ -800,3 +800,74 @@ def test_cors_allows_credentials():
         m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"
     )
     assert cors_middleware.kwargs.get("allow_credentials") is True
+
+
+_HIERARCHICAL_CONFIG = {
+    "name": "delegating",
+    "agents": [
+        {"name": "boss", "role": "Manager", "goal": "manage", "model": "fake:done"},
+        {"name": "worker", "role": "Doer", "goal": "do", "model": "fake:sub"},
+    ],
+    "teams": [{"name": "tm", "agents": ["worker"], "manager": "boss", "mode": "hierarchical"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+_TWO_STEP_CONFIG = {
+    "name": "pair",
+    "agents": [
+        {"name": "a", "role": "R", "goal": "g", "model": "fake:first"},
+        {"name": "b", "role": "R", "goal": "g", "model": "fake:second"},
+    ],
+    "teams": [{"name": "tm", "agents": ["a", "b"], "mode": "sequential"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def _make_link_with_config(config, **overrides):
+    with open_test_db() as db:
+        org_id = get_org_id()
+        user = create_user(db, f"owner-{config['name']}", "pw", org_id=org_id)
+        team = PipelineRecord(name=config["name"], org_id=org_id, config=config, status="deployed")
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=user.id, **overrides)
+        return link.token
+
+
+def test_the_team_endpoint_names_the_team_and_counts_its_steps(client):
+    token, _ = _make_link()
+
+    resp = client.get(f"/api/share/{token}/team")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"name": "greeter", "steps": 1}
+
+
+def test_the_step_count_covers_every_agent_the_visitor_will_see(client):
+    token = _make_link_with_config(_TWO_STEP_CONFIG)
+
+    assert client.get(f"/api/share/{token}/team").json()["steps"] == 2
+
+
+def test_a_hierarchical_team_has_no_honest_denominator(client):
+    token = _make_link_with_config(_HIERARCHICAL_CONFIG)
+
+    body = client.get(f"/api/share/{token}/team").json()
+
+    assert body["steps"] is None
+    assert body["name"] == "delegating"
+
+
+def test_the_team_endpoint_refuses_a_revoked_link_without_minting_a_session(client):
+    token, _ = _make_link()
+    with open_test_db() as db:
+        from ui.backend.db.share_links import get_share_link_by_token
+
+        patch_share_link(db, get_share_link_by_token(db, token), active=False)
+
+    resp = client.get(f"/api/share/{token}/team")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+    assert "set-cookie" not in {key.lower() for key in resp.headers}
