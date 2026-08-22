@@ -21,8 +21,6 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from bestteam.core.team import CollaborationMode
-
 from .db.models import Organization, Run, ShareLink, ShareSession, PipelineRecord
 from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
@@ -423,20 +421,43 @@ def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
         # Same detail as every other failure here -- see send_share_message.
         raise HTTPException(status_code=404, detail=_UNAVAILABLE)
 
-    from .main import _resolve_pipeline_and_version  # local import: main.py imports this router
+    return {"name": pipeline_record.name, "steps": _visible_step_count(pipeline_record.config)}
 
-    pipeline, _version_id, _pipeline_id = _resolve_pipeline_and_version(
-        pipeline_record.name, db, link.org_id
-    )
 
-    steps: Optional[int] = 0
-    for team in pipeline.steps:
-        if team.mode == CollaborationMode.HIERARCHICAL:
-            steps = None
-            break
-        steps += len(team.agents)
+def _visible_step_count(config: Optional[dict]) -> Optional[int]:
+    """How many `agent_completed` events a visitor will see, from the stored
+    spec alone.
 
-    return {"name": pipeline_record.name, "steps": steps}
+    Deliberately reads `PipelineRecord.config` rather than building the
+    pipeline: `_resolve_pipeline_and_version`'s cache-miss path loads every
+    skill, knowledge base and email tool, and a path-constructed vector
+    knowledge base embeds at load time -- so building here would let an
+    anonymous, uncapped GET incur build latency and real embedding spend
+    before the visitor has sent a single capped message (Codex review
+    finding).
+
+    Counts the teams the pipeline actually steps through, in order, not every
+    team defined in the spec -- a team can be declared and never used. None
+    when any of them is HIERARCHICAL: that manager emits one completion
+    however many subordinates it delegates to, so no honest denominator
+    exists and the page shows a pulse instead. None too for a spec this
+    cannot read, for the same reason -- a wrong count is worse than none.
+    """
+    if not isinstance(config, dict):
+        return None
+    teams_by_name = {
+        team.get("name"): team for team in config.get("teams") or [] if isinstance(team, dict)
+    }
+    step_names = (config.get("pipeline") or {}).get("steps") or []
+    total = 0
+    for name in step_names:
+        team = teams_by_name.get(name)
+        if team is None:
+            return None
+        if str(team.get("mode") or "sequential").lower() == "hierarchical":
+            return None
+        total += len(team.get("agents") or [])
+    return total or None
 
 
 @router.post("/{token}/runs/{run_id}/cancel", status_code=202)

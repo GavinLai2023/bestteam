@@ -925,3 +925,39 @@ def test_stopping_a_turn_does_not_refund_the_daily_cap(client, monkeypatch):
         from ui.backend.db.models import ShareLink
 
         assert db.get(ShareLink, link_id).turns_today == spent
+
+
+def test_the_team_endpoint_never_builds_the_pipeline(client, monkeypatch):
+    # Building it would load every skill, knowledge base and email tool, and a
+    # path-constructed vector KB embeds at load time -- real spend, on an
+    # anonymous uncapped GET (Codex review finding).
+    def _explode(*args, **kwargs):
+        raise AssertionError("the team endpoint must not build the pipeline")
+
+    monkeypatch.setattr("ui.backend.main._resolve_pipeline_and_version", _explode)
+    token, _ = _make_link()
+
+    assert client.get(f"/api/share/{token}/team").json() == {"name": "greeter", "steps": 1}
+
+
+def test_a_step_count_that_cannot_be_read_is_reported_as_unknown():
+    from ui.backend.share_chat import _visible_step_count
+
+    # A wrong denominator is worse than none.
+    assert _visible_step_count(None) is None
+    assert _visible_step_count({}) is None
+    assert _visible_step_count({"teams": [], "pipeline": {"steps": ["missing"]}}) is None
+
+
+def test_only_the_teams_the_pipeline_steps_through_are_counted():
+    from ui.backend.share_chat import _visible_step_count
+
+    config = {
+        "teams": [
+            {"name": "used", "agents": ["a", "b"], "mode": "sequential"},
+            {"name": "declared_but_unused", "agents": ["c"], "mode": "sequential"},
+        ],
+        "pipeline": {"steps": ["used"]},
+    }
+
+    assert _visible_step_count(config) == 2

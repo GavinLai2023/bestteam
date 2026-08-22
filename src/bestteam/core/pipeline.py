@@ -190,13 +190,23 @@ class Pipeline:
 
         last_output = ""
         try:
+            # Passed only when actually in use. The two arguments are part of
+            # the `EngineAdapter` ABC, but sending them unconditionally would
+            # raise TypeError on an adapter written against the older
+            # signature -- and this is a documented extension seam, so an
+            # ordinary non-streaming run must keep working through one
+            # (Codex review finding).
+            streaming_kwargs = {}
+            if on_token is not None:
+                streaming_kwargs["on_token"] = on_token
+            if should_cancel is not None:
+                streaming_kwargs["should_cancel"] = should_cancel
             for event in self._adapter.stream(
                 self._compiled,
                 input,
                 memory_preamble=recall_result.preamble,
                 diagnostic=diagnostic,
-                on_token=on_token,
-                should_cancel=should_cancel,
+                **streaming_kwargs,
             ):
                 event = dataclasses.replace(event, pipeline=self.name)
                 if event.type == "agent_completed":

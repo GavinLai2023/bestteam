@@ -264,3 +264,31 @@ def test_no_new_model_request_is_started_after_a_stop():
 
     assert text == "", "the provider must never be dialled at all"
     assert deltas == []
+
+
+def test_an_adapter_predating_the_streaming_seam_still_works():
+    """The engine seam is a documented extension point: an adapter written
+    against the older `stream()` signature must keep working for an ordinary
+    non-streaming run (Codex review finding)."""
+    from bestteam.core.trace import TraceEvent
+
+    class _LegacyAdapter:
+        def compile(self, pipeline):
+            return object()
+
+        def execute(self, compiled, input, memory_preamble="", diagnostic=False):
+            raise NotImplementedError
+
+        def to_mermaid(self, compiled):
+            return ""
+
+        def stream(self, compiled, input, memory_preamble="", diagnostic=False):
+            yield TraceEvent(type="agent_completed", pipeline="", agent="a", data="LEGACY")
+
+    agent = Agent(name="a", role="R", goal="G", model="fake:unused")
+    pipeline = Pipeline(name="p", steps=[Team(name="t", agents=[agent])], adapter=_LegacyAdapter())
+
+    events = list(pipeline.stream("hi"))
+
+    assert [e.type for e in events][-1] == "run_completed"
+    assert events[-1].data == "LEGACY"

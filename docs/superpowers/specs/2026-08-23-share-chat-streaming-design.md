@@ -306,9 +306,16 @@ DB like every other route there.
 { "name": "Contract Review Team", "steps": 3 }
 ```
 
-`steps` is the number of `agent_completed` events the visitor will observe:
-the sum over teams of `len(team.agents)` for SEQUENTIAL and PARALLEL teams,
-and **`null` if any team is HIERARCHICAL** — a manager node emits one
+`steps` is the number of `agent_completed` events the visitor will observe,
+read **from the stored `PipelineRecord.config` and never by building the
+pipeline** — `_resolve_pipeline_and_version`'s cache-miss path loads every
+skill, knowledge base and email tool, and a path-constructed vector knowledge
+base embeds at load time, so building here would let an anonymous, uncapped
+GET incur real spend before the visitor sent a single capped message. It sums
+`len(team.agents)` over the teams the pipeline actually steps through (a team
+can be declared and never used), and is **`null` if any of them is
+HIERARCHICAL**, or if the spec cannot be read at all — a wrong denominator is
+worse than none — a manager node emits one
 `agent_completed` however many subordinates it delegates to
 (subordinates emit `subagent_completed`, which `visitor_safe_event` renders
 indistinguishable), so no honest denominator exists. `null` means "show a
@@ -478,3 +485,15 @@ into the sections above rather than bolted on here:
 4. **§4.4** — markdown images render as an inert label rather than an
    `<img>`, so a reply cannot make any viewer's browser fetch a
    visitor-chosen URL.
+
+A third round found two more, neither about cancellation:
+
+5. **§3.1** — `GET /{token}/team` derived its step count by *building* the
+   pipeline. On a cache miss that loads every skill, knowledge base and email
+   tool, and a path-constructed vector knowledge base embeds at load time —
+   real latency and real spend, on an anonymous endpoint with no cap in front
+   of it. It reads the stored spec instead.
+6. **§1.2** — `Pipeline.stream` passed `on_token=`/`should_cancel=` to the
+   adapter unconditionally, which raises `TypeError` on an adapter written
+   against the older signature. The engine seam is a documented extension
+   point, so the two arguments are now passed only when actually in use.

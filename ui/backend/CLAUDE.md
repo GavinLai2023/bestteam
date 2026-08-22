@@ -1054,9 +1054,13 @@ like every other route in `share_chat.py`:
 
 - **`GET /{token}/team`** -> `{"name", "steps"}`. A pure read that neither
   requires nor creates a session cookie, so a first-time visitor can render
-  the header before sending anything. `steps` is how many `agent_completed`
-  events the visitor will see (the sum of `len(team.agents)` over
-  SEQUENTIAL/PARALLEL teams) and is **null if any team is HIERARCHICAL** --
+  the header before sending anything -- and it reads `PipelineRecord.config`
+  rather than calling `_resolve_pipeline_and_version`, because that cache-miss
+  path loads every skill/KB/email tool and a path-constructed vector KB embeds
+  at load time: real spend on an anonymous endpoint with no cap in front of it
+  (Codex review finding). `steps` is how many `agent_completed` events the
+  visitor will see (the sum of `len(team.agents)` over the SEQUENTIAL/PARALLEL
+  teams the pipeline actually steps through) and is **null if any team is HIERARCHICAL** --
   that manager emits one completion however many subordinates it delegates to,
   and subordinates emit `subagent_completed`, which the boundary renders
   indistinguishable; the page then shows a pulse rather than a dishonest
