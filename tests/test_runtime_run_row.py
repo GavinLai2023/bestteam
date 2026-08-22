@@ -291,7 +291,8 @@ def _claimed_events(session, org_id, run_id, uids):
     store.record_events(session, org_id=org_id, mailbox_identity="m",
                         mailbox_generation="3", external_ids=uids)
     session.commit()
-    store.claim_events(session, org_id=org_id, run_id=run_id, limit=len(uids))
+    store.claim_events(session, org_id=org_id, run_id=run_id, limit=len(uids),
+                       mailbox_identity="m", mailbox_generation="3")
     session.commit()
 
 

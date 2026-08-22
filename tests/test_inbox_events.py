@@ -30,6 +30,12 @@ def db():
     session.close()
 
 
+# The mailbox most of this module records under; `claim_events` and
+# `has_pending_events` are scoped to a mailbox and generation, so a claim
+# has to name the one the rows were recorded for.
+_MAILBOX = dict(mailbox_identity="m", mailbox_generation="99")
+
+
 def _event(**over):
     base = dict(
         org_id=1,
@@ -107,7 +113,7 @@ def test_claim_takes_the_oldest_pending_rows_up_to_the_limit(db):
     store.record_events(db, external_ids=["1", "2", "3", "4", "5"], **kw)
     db.commit()
 
-    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=3)
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=3, **_MAILBOX)
     db.commit()
     assert [e.external_id for e in claimed] == ["1", "2", "3"]
     assert all(e.status == "claimed" and e.run_id == "run-a" for e in claimed)
@@ -123,9 +129,9 @@ def test_a_second_claim_never_overlaps_the_first(db):
     store.record_events(db, external_ids=["1", "2", "3", "4", "5"], **kw)
     db.commit()
 
-    first = store.claim_events(db, org_id=1, run_id="run-a", limit=3)
+    first = store.claim_events(db, org_id=1, run_id="run-a", limit=3, **_MAILBOX)
     db.commit()
-    second = store.claim_events(db, org_id=1, run_id="run-b", limit=3)
+    second = store.claim_events(db, org_id=1, run_id="run-b", limit=3, **_MAILBOX)
     db.commit()
     assert [e.external_id for e in second] == ["4", "5"]
     assert not ({e.id for e in first} & {e.id for e in second})
@@ -134,7 +140,7 @@ def test_a_second_claim_never_overlaps_the_first(db):
 def test_claiming_an_empty_queue_returns_nothing(db):
     from ui.backend.db import inbox_events as store
 
-    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3) == []
+    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3, **_MAILBOX) == []
 
 
 def test_claim_is_scoped_to_one_org(db):
@@ -145,7 +151,7 @@ def test_claim_is_scoped_to_one_org(db):
     store.record_events(db, org_id=2, mailbox_identity="m2", mailbox_generation="1",
                         external_ids=["9"])
     db.commit()
-    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3) == []
+    assert store.claim_events(db, org_id=1, run_id="run-a", limit=3, **_MAILBOX) == []
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +165,8 @@ def _claimed(db, ids, run_id="run-a"):
     store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="99",
                         external_ids=ids)
     db.commit()
-    claimed = store.claim_events(db, org_id=1, run_id=run_id, limit=len(ids))
+    claimed = store.claim_events(db, org_id=1, run_id=run_id, limit=len(ids),
+                                 mailbox_identity="m", mailbox_generation="99")
     db.commit()
     return claimed
 
@@ -320,7 +327,8 @@ def test_a_filtered_row_is_never_claimed(db):
     store.record_events(db, org_id=1, mailbox_identity="m", mailbox_generation="1",
                         external_ids=["10", "11"], decisions={"10": "not_allowlisted"})
     db.commit()
-    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10,
+                                 mailbox_identity="m", mailbox_generation="1")
     assert [e.external_id for e in claimed] == ["11"]
 
 
@@ -338,7 +346,8 @@ def test_releasing_a_filtered_row_makes_it_claimable(db):
     db.refresh(row)
     assert row.status == "pending"
     assert row.decision is None
-    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10)
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10,
+                                 mailbox_identity="m", mailbox_generation="1")
     assert [e.external_id for e in claimed] == ["10"]
 
 
@@ -409,3 +418,136 @@ def test_recording_with_no_decisions_is_unchanged(db):
     db.commit()
     assert {r.status for r in db.query(InboxEvent).all()} == {"pending"}
     assert all(r.decision is None for r in db.query(InboxEvent).all())
+
+
+# --- mailbox scoping (spec 2026-08-22, D3/D4) ---------------------------
+
+def test_a_claim_never_reaches_another_mailbox_generation(db):
+    """An IMAP UID is only meaningful within one UIDVALIDITY.
+
+    A mailbox rebuild reissues UIDs, so a `pending` row from generation 99 is
+    a *different message* under generation 100. Claiming it and handing it to
+    a run bound to the new generation makes that run read, and possibly reply
+    to, an unrelated email.
+    """
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m",
+                        mailbox_generation="99", external_ids=["7"])
+    db.commit()
+
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10,
+                                 mailbox_identity="m", mailbox_generation="100")
+    assert claimed == []
+    assert store.has_pending_events(db, org_id=1, mailbox_identity="m",
+                                    mailbox_generation="100") is False
+
+
+def test_a_claim_never_reaches_another_mailbox(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="imap.old:u@old",
+                        mailbox_generation="99", external_ids=["7"])
+    db.commit()
+
+    assert store.claim_events(db, org_id=1, run_id="run-a", limit=10,
+                              mailbox_identity="imap.new:u@new",
+                              mailbox_generation="99") == []
+    assert store.has_pending_events(db, org_id=1,
+                                    mailbox_identity="imap.new:u@new",
+                                    mailbox_generation="99") is False
+
+
+def test_the_current_mailbox_and_generation_still_claim_normally(db):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="m",
+                        mailbox_generation="99", external_ids=["7", "8"])
+    db.commit()
+
+    assert store.has_pending_events(db, org_id=1, mailbox_identity="m",
+                                    mailbox_generation="99") is True
+    claimed = store.claim_events(db, org_id=1, run_id="run-a", limit=10,
+                                 mailbox_identity="m", mailbox_generation="99")
+    assert [e.external_id for e in claimed] == ["7", "8"]
+
+
+def test_abandoning_supersedes_every_pending_row_from_another_mailbox(db):
+    """Scoping alone leaves the old rows `pending` forever with nothing
+    reporting them, so the two generation-change sites mark them terminal."""
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="imap.old:u@old",
+                        mailbox_generation="99", external_ids=["7"])
+    store.record_events(db, org_id=1, mailbox_identity="imap.new:u@new",
+                        mailbox_generation="1", external_ids=["1"])
+    db.commit()
+
+    abandoned = store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new", mailbox_generation="1"
+    )
+    db.commit()
+
+    assert abandoned == 1
+    rows = {e.mailbox_identity: e for e in db.query(InboxEvent).all()}
+    old = rows["imap.old:u@old"]
+    assert old.status == "failed"
+    assert old.last_error and "mailbox" in old.last_error.lower()
+    assert old.completed_at is not None
+    assert rows["imap.new:u@new"].status == "pending"  # the live mailbox is untouched
+
+
+def test_abandoning_without_a_generation_matches_on_the_mailbox_alone(db):
+    """The identity-change site does not yet know the new mailbox's
+    UIDVALIDITY, so it must be able to supersede on identity alone."""
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=1, mailbox_identity="imap.old:u@old",
+                        mailbox_generation="99", external_ids=["7"])
+    store.record_events(db, org_id=1, mailbox_identity="imap.new:u@new",
+                        mailbox_generation="42", external_ids=["1"])
+    db.commit()
+
+    assert store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new"
+    ) == 1
+    db.commit()
+
+    rows = {e.mailbox_identity: e.status for e in db.query(InboxEvent).all()}
+    assert rows == {"imap.old:u@old": "failed", "imap.new:u@new": "pending"}
+
+
+def test_abandoning_leaves_claimed_and_terminal_rows_alone(db):
+    """A `claimed` row belongs to a run that will complete, be released by the
+    watchdog, or be released at startup -- racing that gives one batch two
+    owners."""
+    from ui.backend.db import inbox_events as store
+
+    for external_id, status in (("7", "claimed"), ("8", "done"), ("9", "filtered")):
+        db.add(InboxEvent(org_id=1, connector_type="imap",
+                          mailbox_identity="imap.old:u@old", mailbox_generation="99",
+                          external_id=external_id, status=status))
+    db.commit()
+
+    assert store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new", mailbox_generation="1"
+    ) == 0
+    db.commit()
+
+    rows = {e.external_id: e.status for e in db.query(InboxEvent).all()}
+    assert rows == {"7": "claimed", "8": "done", "9": "filtered"}
+
+
+def test_abandoning_is_scoped_to_one_org(db):
+    from ui.backend.db import inbox_events as store
+
+    db.add(Organization(id=2, name="other"))
+    db.commit()
+    store.record_events(db, org_id=2, mailbox_identity="imap.other:u@other",
+                        mailbox_generation="1", external_ids=["9"])
+    db.commit()
+
+    assert store.abandon_superseded_events(
+        db, org_id=1, mailbox_identity="imap.new:u@new", mailbox_generation="1"
+    ) == 0
+    assert db.query(InboxEvent).filter_by(org_id=2).one().status == "pending"

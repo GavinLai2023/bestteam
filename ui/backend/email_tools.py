@@ -149,6 +149,65 @@ def _fixed_message_tools(message: str) -> Dict[str, Any]:
     }
 
 
+def token_provider_for(auth_type, *, tenant_id, client_id, client_secret):
+    """The token provider for this auth type -- None for a password mailbox.
+
+    One place decides that `microsoft_oauth` means an app-only token rather
+    than a LOGIN, because that decision was previously made in three modules
+    and one of them (the poller) got it wrong: it always passed the stored
+    secret as a password, which for an OAuth credential is the Entra *client
+    secret*. See the spec dated 2026-08-22.
+    """
+    if auth_type != AUTH_MICROSOFT_OAUTH:
+        return None
+    return MicrosoftClientCredentialsToken(
+        tenant_id=tenant_id or "",
+        client_id=client_id or "",
+        client_secret=client_secret or "",
+    )
+
+
+def build_imap_backend(*, host, username, port, drafts, password=None,
+                       token_provider=None):
+    """The one construction of an `_ImapBackend` from customer-supplied fields.
+
+    `restrict_to_public=True` is set HERE and nowhere else: the host comes from
+    the customer, so it must be validated and pinned to a public IP on every
+    connect, and a second construction site is a second chance to drop it.
+    """
+    if token_provider is not None:
+        return _ImapBackend(
+            host=host, user=username, port=port, drafts=drafts,
+            restrict_to_public=True, token_provider=token_provider,
+        )
+    return _ImapBackend(
+        host=host, user=username, password=password, port=port, drafts=drafts,
+        restrict_to_public=True,
+    )
+
+
+def build_backend_for_credential(cred, secret: str):
+    """The IMAP backend for one stored credential row and its decrypted secret.
+
+    Takes the already-decrypted secret rather than a `Session` because the
+    poller has both in hand by the time it needs a backend; `build_org_imap_
+    backend` is the same thing starting from an org id.
+    """
+    return build_imap_backend(
+        host=cred.host,
+        username=cred.username,
+        port=cred.port,
+        drafts=cred.drafts_folder,
+        password=None if cred.auth_type == AUTH_MICROSOFT_OAUTH else secret,
+        token_provider=token_provider_for(
+            cred.auth_type,
+            tenant_id=cred.oauth_tenant_id,
+            client_id=cred.oauth_client_id,
+            client_secret=secret,
+        ),
+    )
+
+
 def build_org_imap_backend(db: Session, org_id: int):
     """The org's IMAP backend from stored credentials, or None if unconnected.
 
@@ -160,28 +219,7 @@ def build_org_imap_backend(db: Session, org_id: int):
     cred = get_email_credentials(db, org_id)
     if cred is None:
         return None
-    secret = secret_store.decrypt(cred.password_encrypted)
-    if cred.auth_type == AUTH_MICROSOFT_OAUTH:
-        return _ImapBackend(
-            host=cred.host,
-            user=cred.username,
-            port=cred.port,
-            drafts=cred.drafts_folder,
-            restrict_to_public=True,
-            token_provider=MicrosoftClientCredentialsToken(
-                tenant_id=cred.oauth_tenant_id or "",
-                client_id=cred.oauth_client_id or "",
-                client_secret=secret,
-            ),
-        )
-    return _ImapBackend(
-        host=cred.host,
-        user=cred.username,
-        password=secret,
-        port=cred.port,
-        drafts=cred.drafts_folder,
-        restrict_to_public=True,  # customer-supplied host: validate + pin on connect
-    )
+    return build_backend_for_credential(cred, secret_store.decrypt(cred.password_encrypted))
 
 
 def load_email_tools(db: Session, org_id: int) -> Dict[str, Any]:

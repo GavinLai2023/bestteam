@@ -226,7 +226,24 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   next to `claim_events`: a scoped `LIMIT 1` existence check that lets
   `poll_org` go on to dispatch on an otherwise-empty cycle instead of returning
   early and leaving a released message (or a capped backlog) sitting until
-  unrelated mail happens to land. CRUD in
+  unrelated mail happens to land. **Both of those take `mailbox_identity` and
+  `mailbox_generation` as required arguments** and filter on them: the two
+  columns were written on every row from the beginning and read by nothing, so
+  a mailbox replaced or rebuilt mid-backlog left `pending` rows that the next
+  quiet cycle happily claimed for the *new* mailbox — and after a rebuild
+  reissues UIDs, UID 7 is a different message. Required rather than optional
+  because the defect is that a caller could omit the mailbox. Such rows are
+  then marked terminal by `abandon_superseded_events` (every `pending` row of
+  the org that is **not** the current mailbox, and optionally not the current
+  generation — expressed that way so it needs no memory of the previous
+  identity), called from `email_trigger.disable_trigger_on_identity_change`
+  and from `poll_org`'s UIDVALIDITY re-baseline. `claimed` rows are left alone
+  there: one belongs to a run that will complete, be released by the stale-run
+  watchdog, or be released by `runtime.fail_interrupted_runs` at startup —
+  which now also sweeps claims orphaned *before* their `runs` row was ever
+  written, the one case a `Run.status == "running"` query cannot see. See
+  `docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
+  CRUD in
   `db/inbox_events.py` (nothing there commits — callers own the transaction
   boundary, since the durability guarantee is the single commit).
   See `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`

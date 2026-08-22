@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from bestteam import MemoryManager, Pipeline, SqliteBM25Memory
@@ -29,8 +29,13 @@ from .automation_results import (
     already_drafted_uids,
     normalize_run_result,
 )
-from .db.inbox_events import complete_events, release_events
-from .db.models import Run, TraceEventRecord
+from .db.inbox_events import (
+    EVENT_CLAIMED,
+    claimed_events,
+    complete_events,
+    release_events,
+)
+from .db.models import InboxEvent, Run, TraceEventRecord
 from .db.usage import record_usage
 from .registry import RunRegistry
 from .share_transcript import record_share_reply
@@ -81,10 +86,51 @@ def fail_interrupted_runs(engine: Engine, *, max_event_attempts: int) -> int:
                     "attempts and were dead-lettered", run_row.id, dead_lettered,
                 )
             swept += 1
+        _release_orphaned_claims(db, max_event_attempts=max_event_attempts)
         db.commit()
         for run_row in dead:
             normalize_run_result(db, run_row)  # never raises; no-op unless a declared batch
     return swept
+
+
+def _release_orphaned_claims(db: Session, *, max_event_attempts: int) -> None:
+    """Hand back every claim no live worker can possibly own.
+
+    Runs after the loop above, and every `claimed` row that survives it is
+    orphaned **by definition**: the run executor is per-process, so nothing
+    in this fresh process owns one, and each `running` run's claims were just
+    released. Two kinds reach here, and neither is visible to a
+    `Run.status == "running"` query:
+
+    - a claim committed by `_start_triggered_run` before the `runs` row was
+      written (it commits the claim on its own so a build failure can release
+      it penalty-free, then builds the pipeline, then inserts the row), so
+      `run_id` names a row that does not exist;
+    - a claim outstanding on a run that already reached a terminal status,
+      because `complete_events` runs on the worker thread after that commit.
+
+    Left alone, either stays `claimed` forever -- invisible to `claim_events`
+    and to `has_pending_events` alike, so the mail is never processed and
+    nothing anywhere reports it.
+
+    Deliberately not a lease with a periodic scavenger: the process boundary
+    IS the lease here, and `email_trigger._release_stale_run` already covers
+    the other case, a run that is alive but hung.
+    """
+    orphaned = db.execute(
+        select(InboxEvent.run_id)
+        .where(InboxEvent.status == EVENT_CLAIMED, InboxEvent.run_id.isnot(None))
+        .distinct()
+    ).scalars().all()
+    for run_id in orphaned:
+        outstanding = len(claimed_events(db, run_id))
+        dead_lettered = release_events(
+            db, run_id, max_attempts=max_event_attempts, error=INTERRUPTED_RUN_MESSAGE
+        )
+        _logger.warning(
+            "Released %s orphaned inbox claim(s) left by run %s; %s were dead-lettered",
+            outstanding, run_id, dead_lettered,
+        )
 
 # A property-maintenance-batch run's agent output is derived from customer
 # email content (the envelope's free-text `extracted`/`missing_information`/

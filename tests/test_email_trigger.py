@@ -134,17 +134,17 @@ class _OfflineBackend:
         return []
 
 
-# Bound before the autouse fixture below can replace it: that fixture makes the
-# patched `_make_backend` the only one any test would otherwise see, which would
-# leave `restrict_to_public=True` -- the flag enabling SSRF validation against a
-# customer-supplied hostname -- guarded by nothing but its docstring.
-_REAL_MAKE_BACKEND = email_trigger._make_backend
-
-
 @pytest.fixture(autouse=True)
 def offline_backend(monkeypatch):
-    monkeypatch.setattr(email_trigger, "_make_backend",
-                        lambda cred, password: _OfflineBackend())
+    """No test in this module opens a socket.
+
+    This replaces the shared credential->connector factory for the WHOLE
+    module, which is why the factory's own behaviour (auth type, SSRF pinning)
+    is pinned in `tests/test_email_mailbox_factory.py` instead -- a module-wide
+    patch here is what let the poller's OAuth blindness go unnoticed.
+    """
+    monkeypatch.setattr(email_trigger, "build_backend_for_credential",
+                        lambda cred, secret: _OfflineBackend())
 
 
 def _org_with_trigger(db, *, last_uid=45, uidvalidity=3, enabled=True):
@@ -1698,7 +1698,8 @@ def test_a_failing_mailbox_scan_never_blocks_a_legitimate_retry(db, monkeypatch)
             raise OSError("SEARCH not supported")
 
     monkeypatch.setattr(email_trigger, "mailbox_state", lambda backend: (3, 45))
-    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: _ScanFails())
+    monkeypatch.setattr(email_trigger, "build_backend_for_credential",
+                        lambda cred, secret: _ScanFails())
     calls = []
     monkeypatch.setattr(email_trigger, "build_trigger_pipeline", _fake_pipeline_getter(calls))
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
@@ -1766,7 +1767,8 @@ def test_a_stale_running_run_stops_blocking_the_trigger(db, monkeypatch):
         email_trigger.registry, "request_cancel", lambda rid: cancelled.append(rid)
     )
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda backend, last_uid: (3, 45, [42]))
-    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: object())
+    monkeypatch.setattr(email_trigger, "build_backend_for_credential",
+                        lambda cred, secret: object())
     calls = []
     recorder = _SubmitRecorder()
     monkeypatch.setattr(email_trigger, "_executor", recorder)
@@ -1958,7 +1960,8 @@ def _hung_run(db, org, trigger, *, uids, age_seconds=4000):
     store.record_events(db, org_id=org.id, mailbox_identity="m",
                         mailbox_generation="3", external_ids=uids)
     db.commit()
-    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids))
+    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids),
+                       mailbox_identity="m", mailbox_generation="3")
     store.mark_dispatched(db, run_id)
     trigger.last_run_id = run_id
     db.commit()
@@ -1980,7 +1983,8 @@ def _hung_run_named(db, org, trigger, *, uids, run_id, age_seconds=4000):
     store.record_events(db, org_id=org.id, mailbox_identity="m",
                         mailbox_generation="3", external_ids=uids)
     db.commit()
-    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids))
+    store.claim_events(db, org_id=org.id, run_id=run_id, limit=len(uids),
+                       mailbox_identity="m", mailbox_generation="3")
     store.mark_dispatched(db, run_id)
     trigger.last_run_id = run_id
     db.commit()
@@ -2019,7 +2023,8 @@ def test_retry_hands_the_original_runs_failed_events_to_the_new_run(db, monkeypa
     store.record_events(db, org_id=org.id, mailbox_identity="m",
                         mailbox_generation="3", external_ids=["42", "43"])
     db.commit()
-    store.claim_events(db, org_id=org.id, run_id=run_row.id, limit=2)
+    store.claim_events(db, org_id=org.id, run_id=run_row.id, limit=2,
+                       mailbox_identity="m", mailbox_generation="3")
     # The original run drafted for 42 before failing on 43.
     store.complete_events(db, run_row.id, done_external_ids={"42"}, error="boom")
     db.commit()
@@ -2273,7 +2278,8 @@ def _filtering_org(db, monkeypatch, backend, *, new_uids=(42, 43)):
         email_trigger, "check_mailbox",
         lambda b, u: (3, max(new_uids), list(new_uids)),
     )
-    monkeypatch.setattr(email_trigger, "_make_backend", lambda cred, password: backend)
+    monkeypatch.setattr(email_trigger, "build_backend_for_credential",
+                        lambda cred, secret: backend)
     monkeypatch.setattr(email_trigger, "_executor", _SubmitRecorder())
     return org, trigger
 
@@ -2382,34 +2388,6 @@ def test_a_backend_without_summaries_for_at_all_fails_open(db, monkeypatch):
     assert set(rows) == {"42", "43"}
     assert {e.status for e in rows.values()} <= {"pending", "claimed"}
     assert all(e.decision is None for e in rows.values())
-
-
-def test_make_backend_keeps_ssrf_validation_on(db, monkeypatch):
-    # The autouse `offline_backend` fixture replaces `_make_backend` everywhere,
-    # so without this nothing could catch `restrict_to_public` being dropped --
-    # and that flag is what validates and pins a customer-supplied hostname.
-    # `_REAL_MAKE_BACKEND` is the unpatched function, captured at import.
-    built = []
-    monkeypatch.setattr(email_trigger, "_ImapBackend",
-                        lambda **kw: built.append(kw))  # never opens a socket
-
-    org, _trigger = _org_with_trigger(db)
-    from ui.backend.db.email_credentials import get_email_credentials
-    cred = get_email_credentials(db, org.id)
-
-    _REAL_MAKE_BACKEND(cred, "pw")
-
-    assert built == [{
-        "host": cred.host,
-        "user": cred.username,
-        "password": "pw",
-        "port": cred.port,
-        "drafts": cred.drafts_folder,
-        "restrict_to_public": True,
-    }]
-
-
-# --- Phase 4a: the poller enforces both budgets ------------------------------
 
 
 def _budget_org(db, monkeypatch, *, new_uids):
@@ -2685,3 +2663,101 @@ def test_a_quiet_cycle_with_nothing_pending_still_dispatches_nothing(db, monkeyp
     assert db.query(Run).count() == 0
     assert trigger.last_run_id is None
     assert trigger.last_checked_at is not None  # the health write is unchanged
+
+
+# --- mailbox-scoped claims in the poller (spec 2026-08-22, D3/D4) --------
+
+def _pending_row(db, org, *, identity, generation, external_id):
+    from ui.backend.db import inbox_events as store
+
+    store.record_events(db, org_id=org.id, mailbox_identity=identity,
+                        mailbox_generation=generation, external_ids=[external_id])
+    db.commit()
+
+
+def test_a_quiet_cycle_never_claims_a_previous_mailboxs_backlog(db, monkeypatch):
+    """The reachable sequence: an org replaces or rebuilds its mailbox while
+    `pending` rows from the old one remain, then re-enables automation. The
+    first quiet cycle reaches `has_pending_events`, and before this it claimed
+    those rows and handed them to a run bound to the NEW mailbox -- after a
+    rebuild reissues UIDs, that is a different message entirely.
+    """
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    _pending_row(db, org, identity="imap.old.com:old@acme.com",
+                 generation="99", external_id="7")
+    recorder = _SubmitRecorder()
+    monkeypatch.setattr(email_trigger, "_executor", recorder)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+
+    poll_org(db, trigger, _no_pipeline)  # _no_pipeline raises if it is reached
+
+    from ui.backend.db.models import InboxEvent
+
+    assert recorder.calls == []
+    row = db.query(InboxEvent).filter_by(external_id="7").one()
+    assert row.status == "pending"  # still not this mailbox's to claim
+    assert row.run_id is None
+
+
+def test_a_uidvalidity_change_abandons_the_old_generations_backlog(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    _pending_row(db, org, identity="imap.acme.com:u@acme.com",
+                 generation="3", external_id="7")
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (9, 200, []))
+
+    poll_org(db, trigger, _no_pipeline)
+
+    from ui.backend.db.models import InboxEvent
+
+    assert trigger.uidvalidity == 9
+    row = db.query(InboxEvent).filter_by(external_id="7").one()
+    assert row.status == "failed"
+    assert row.completed_at is not None
+    # Dropped mail must not be silent: a rebuild is not something the customer
+    # did, so the count reaches the one field the UI surfaces.
+    assert trigger.last_error is not None
+    assert "1" in trigger.last_error
+
+
+def test_a_uidvalidity_change_with_no_backlog_reports_nothing(db, monkeypatch):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (9, 200, []))
+
+    poll_org(db, trigger, _no_pipeline)
+
+    assert trigger.uidvalidity == 9
+    assert trigger.last_error is None  # nothing was lost, so nothing is claimed
+
+
+def test_replacing_the_mailbox_abandons_the_old_ones_backlog(db):
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    _pending_row(db, org, identity="imap.acme.com:u@acme.com",
+                 generation="3", external_id="7")
+
+    email_trigger.disable_trigger_on_identity_change(
+        db, org.id, "imap.new.com", "new@acme.com",
+        prior_identity=("imap.acme.com", "u@acme.com"),
+    )
+
+    from ui.backend.db.models import InboxEvent
+
+    assert db.query(InboxEvent).filter_by(external_id="7").one().status == "failed"
+    assert trigger.enabled is False
+
+
+def test_rotating_a_password_leaves_the_backlog_claimable(db):
+    """A port- or password-only change is a rotation, not a replacement -- the
+    mail waiting in the ledger is still the same mailbox's."""
+    org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
+    _pending_row(db, org, identity="imap.acme.com:u@acme.com",
+                 generation="3", external_id="7")
+
+    email_trigger.disable_trigger_on_identity_change(
+        db, org.id, "imap.acme.com", "u@acme.com",
+        prior_identity=("imap.acme.com", "u@acme.com"),
+    )
+
+    from ui.backend.db.models import InboxEvent
+
+    assert db.query(InboxEvent).filter_by(external_id="7").one().status == "pending"
+    assert trigger.enabled is True

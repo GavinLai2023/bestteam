@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from bestteam.exceptions import ConfigurationError
 from helpers import create_user_and_login, open_test_db
+from ui.backend import email_tools
 from ui.backend import main as backend_main
 from ui.backend import org_settings
 from ui.backend.db import init_db, make_engine, session_factory
@@ -74,7 +75,10 @@ def client(monkeypatch, tmp_path):
     # PUT /api/org/email validates the mailbox before storing it, so the
     # default for this module is a mailbox that works; individual tests flip
     # `_FakeBackend.ok`/`drafts_ok` or substitute their own double.
-    monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
+    # Patched on `email_tools`, which is now the single place an _ImapBackend
+    # is constructed -- `org_settings` builds its pre-save backend through the
+    # same primitive the stored credential will use at run time.
+    monkeypatch.setattr(email_tools, "_ImapBackend", _FakeBackend)
 
     engine = make_engine(":memory:")
     init_db(engine)
@@ -169,7 +173,10 @@ def test_set_email_resolve_failure_does_not_leak_raw_os_error(client, monkeypatc
 
 def test_test_connection_success_does_not_save(client, monkeypatch):
     _bypass_ssrf(monkeypatch)
-    monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
+    # Patched on `email_tools`, which is now the single place an _ImapBackend
+    # is constructed -- `org_settings` builds its pre-save backend through the
+    # same primitive the stored credential will use at run time.
+    monkeypatch.setattr(email_tools, "_ImapBackend", _FakeBackend)
     resp = client.post("/api/org/email/test", json={
         "host": "imap.acme.com", "username": "u", "password": "p",
     })
@@ -179,7 +186,10 @@ def test_test_connection_success_does_not_save(client, monkeypatch):
 
 def test_test_connection_reports_failure(client, monkeypatch):
     _bypass_ssrf(monkeypatch)
-    monkeypatch.setattr(org_settings, "_ImapBackend", _FakeBackend)
+    # Patched on `email_tools`, which is now the single place an _ImapBackend
+    # is constructed -- `org_settings` builds its pre-save backend through the
+    # same primitive the stored credential will use at run time.
+    monkeypatch.setattr(email_tools, "_ImapBackend", _FakeBackend)
     _FakeBackend.ok = False
     body = client.post("/api/org/email/test", json={
         "host": "imap.acme.com", "username": "u", "password": "wrong",
@@ -378,7 +388,7 @@ def test_test_connection_returns_friendly_timeout(client, monkeypatch):
     # End-to-end: a connect timeout via /test surfaces the friendly message,
     # not the raw OS string.
     _bypass_ssrf(monkeypatch)
-    monkeypatch.setattr(org_settings, "_ImapBackend", _TimeoutBackend)
+    monkeypatch.setattr(email_tools, "_ImapBackend", _TimeoutBackend)
     body = client.post("/api/org/email/test", json={
         "host": "imap.gmail.com", "username": "u", "password": "p", "port": 994,
     }).json()
@@ -539,7 +549,7 @@ _OAUTH_BODY = {
 def _working_token(monkeypatch):
     """Patch the token provider so it issues a token without any network."""
     provider = type("_P", (), {"token": lambda self: "tok-1"})()
-    monkeypatch.setattr(org_settings, "MicrosoftClientCredentialsToken", lambda **kw: provider)
+    monkeypatch.setattr(email_tools, "MicrosoftClientCredentialsToken", lambda **kw: provider)
     return provider
 
 
@@ -553,7 +563,7 @@ def _failing_token(monkeypatch, message):
 
         return _P()
 
-    monkeypatch.setattr(org_settings, "MicrosoftClientCredentialsToken", _make)
+    monkeypatch.setattr(email_tools, "MicrosoftClientCredentialsToken", _make)
 
 
 def test_connecting_a_microsoft_mailbox_stores_the_oauth_identifiers(client, monkeypatch):
