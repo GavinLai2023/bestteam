@@ -456,6 +456,24 @@ describe('ShareChatPage', () => {
     await waitFor(() => expect(screen.queryByText('Looking')).not.toBeInTheDocument())
   })
 
+  it('shows step progress while a turn is in flight', async () => {
+    mockedApi.getTeam.mockResolvedValue({ name: 'Support Team', steps: 2 })
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText('Step 1 of 2')).toBeInTheDocument()
+
+    const ws = FakeWebSocket.instances.at(-1)!
+    await act(async () => {
+      ws.emit({ type: 'agent_completed', agent: null, data: null, usage: [] })
+    })
+    expect(await screen.findByText('Step 2 of 2')).toBeInTheDocument()
+  })
+
   it('names the team in the header', async () => {
     mockedApi.getTeam.mockResolvedValue({ name: 'Support Team', steps: 2 })
     renderPage()

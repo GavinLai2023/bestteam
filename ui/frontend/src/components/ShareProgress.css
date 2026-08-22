@@ -1,0 +1,48 @@
+.share-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.share-progress-dots {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.share-progress-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.share-progress-dot.on {
+  background: var(--accent);
+}
+
+.share-progress-pulse {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: share-progress-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes share-progress-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-progress-pulse {
+    animation: none;
+  }
+}

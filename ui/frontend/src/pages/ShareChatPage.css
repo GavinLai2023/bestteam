@@ -124,3 +124,7 @@
     animation: none;
   }
 }
+
+.share-chat-progress {
+  padding: 0.25rem 0;
+}

@@ -2,6 +2,7 @@ import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import LanguageSelect from '../components/LanguageSelect'
+import ShareProgress from '../components/ShareProgress'
 import { shareChatApi } from '../lib/shareChatApi'
 import { FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
 import type { ShareMessage, ShareTeamInfo, TraceEvent } from '../lib/types'
@@ -316,6 +317,11 @@ export default function ShareChatPage() {
         )}
         <div ref={messagesEndRef} />
       </div>
+      {sending && (
+        <div className="share-chat-progress">
+          <ShareProgress events={liveEvents} steps={team?.steps ?? null} />
+        </div>
+      )}
       <div role="status" aria-live="polite">
         {rateLimited && <p className="share-chat-bubble status">{t('share.rateLimited')}</p>}
         {notice && <p className="share-chat-bubble status">{t(notice.key, notice.values)}</p>}
