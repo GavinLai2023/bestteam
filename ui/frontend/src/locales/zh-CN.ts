@@ -33,6 +33,7 @@ export const zhCN: Resources = {
     continue: '继续',
     working: '处理中…',
     startOver: '重新开始',
+    image: '图片',
   },
   runStatus: {
     running: '进行中',

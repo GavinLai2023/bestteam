@@ -38,6 +38,9 @@ export const en = {
     continue: 'Continue',
     working: 'Working…',
     startOver: 'Start over',
+    // Stands in for an image in a team's reply, which is never fetched --
+    // see components/MarkdownText.tsx.
+    image: 'image',
   },
   runStatus: {
     running: 'Running',

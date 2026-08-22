@@ -1,8 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import MarkdownText from './MarkdownText'
+import { setLanguage } from '../lib/i18n'
 
 describe('MarkdownText', () => {
+  afterEach(() => {
+    setLanguage('en')
+  })
+
   it('renders a list', () => {
     render(<MarkdownText text={'- one\n- two'} />)
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
@@ -40,6 +45,15 @@ describe('MarkdownText', () => {
   it('labels an image with no alt text', () => {
     render(<MarkdownText text="![](https://attacker.example/pixel.gif)" />)
     expect(screen.getByText('image')).toBeInTheDocument()
+  })
+
+  it("labels an alt-less image in the reader's language", () => {
+    // Both surfaces that render a reply are bilingual, so the substitute this
+    // component puts in place of an <img> has to be translated too (Codex
+    // review) -- otherwise a Chinese conversation carries an English word.
+    setLanguage('zh-CN')
+    render(<MarkdownText text="![](https://attacker.example/pixel.gif)" />)
+    expect(screen.getByText('图片')).toBeInTheDocument()
   })
 
   it('renders plain text unchanged', () => {

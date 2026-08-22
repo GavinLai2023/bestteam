@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './MarkdownText.css'
@@ -21,13 +22,14 @@ import './MarkdownText.css'
 // A visitor's own message is NOT rendered through this: their typing is not
 // markup, and `white-space: pre-wrap` already preserves its line breaks.
 export default function MarkdownText({ text }: { text: string }) {
+  const { t } = useTranslation()
   return (
     <div className="markdown-text">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: (props) => <a {...props} target="_blank" rel="noopener noreferrer nofollow" />,
-          img: (props) => <em className="markdown-image">{props.alt || 'image'}</em>,
+          img: (props) => <em className="markdown-image">{props.alt || t('common.image')}</em>,
         }}
       >
         {text}
