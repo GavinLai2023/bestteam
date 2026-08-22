@@ -2,7 +2,7 @@
 
 *One page for beta customers and the operator running their instance. Every
 item here is a known, deliberate limit of the beta build — not a bug to
-report — and each links to where it is decided. Last revised 2026-08-19.*
+report — and each links to where it is decided. Last revised 2026-08-22.*
 
 ## Your account and organisation
 
@@ -39,15 +39,39 @@ report — and each links to where it is decided. Last revised 2026-08-19.*
 
 ## Your documents ("My documents" / knowledge bases)
 
-- Upload PDF, Word, Excel, XML or plain-text files; tens to a few hundred
-  documents per collection is the tested range. Chinese and English work;
-  Japanese and Korean text is indexed too. Scanned images are not read (no OCR).
+- **Formats**: `.pdf`, `.docx`, `.xlsx`/`.xlsm`, `.csv`, `.xml`, `.txt`,
+  `.md`, `.json`, `.yaml`/`.yml`, `.log`. Chinese and English work; Japanese
+  and Korean text is indexed too. Plain-text files are read as UTF-8 or
+  GB18030, so a document saved from Chinese Notepad or Excel is fine.
+- **Limits**: 10 files per upload, 10 MB per file, and **30 documents per
+  collection**. Ask your operator if you need more — the caps bound indexing
+  cost, they are not a technical limit.
+- **Uploading again adds or replaces — you choose.** Re-using a collection
+  name asks whether to add to what is there or replace it. Documents whose
+  contents have not changed are not re-indexed, so adding one file to a
+  collection of twenty costs one file's work. The old version keeps serving
+  until the new one is ready.
+- **There is no way to remove a single document** from a collection. To drop
+  one, upload the ones you want to keep and choose "replace everything".
 - Indexing is asynchronous: a collection shows *processing* and then either
   *ready* or a list of files that failed with a reason. "Try a search" shows
   you exactly what an agent would retrieve before you hand the collection to a
   team.
-- Uploading again with the same collection name **replaces** its contents; the
-  old version keeps serving until the new one is ready.
+- **Scanned images are not read** (there is no OCR), a **PDF's tables** come
+  out as reading-order text rather than rows and columns, and **`.pptx` is not
+  supported at all**. If your answers live in any of those, say so — it
+  changes what we can promise.
+
+## The interface
+
+- **English and Chinese**, switchable from the top bar at any time; the choice
+  sticks in that browser. English is the default. The whole customer-facing
+  app is translated, including the team-building wizard.
+- **Light and dark** follow your operating system's setting. There is no
+  in-app toggle in the beta.
+- The Chinese and dark-mode layouts were walked page by page before this build
+  was named, but far less has run over them than over the English light-mode
+  ones. A layout that looks wrong is worth reporting, not working around.
 
 ## Cost, usage and limits you control
 
@@ -78,6 +102,13 @@ report — and each links to where it is decided. Last revised 2026-08-19.*
   unhandled errors and failed runs — identifiers and names only, never your
   documents, prompts or mail bodies. There is no analytics or telemetry beyond
   that.
+- **If you report a bad answer, your operator can re-run it.** A diagnostic
+  re-run repeats one of your runs with the same input and records what the
+  team was actually asked and what it replied at each step, which is what
+  makes a vague "it got this wrong" fixable. It is a **new** run — your
+  original is left untouched — it costs the usual model spend, and it is not
+  offered for automatic email runs, which would risk a second draft in your
+  mailbox. Only your operator can start one.
 
 ## Reporting a problem
 
