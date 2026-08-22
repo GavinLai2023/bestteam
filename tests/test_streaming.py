@@ -179,3 +179,40 @@ def test_streaming_is_off_by_default():
     events = list(pipeline.stream("hi"))
     assert [e.type for e in events][-1] == "run_completed"
     assert events[-1].data == "OK"
+
+
+def test_a_stop_mid_stream_does_not_execute_the_tools_that_call_asked_for():
+    """Stopping the model call is not enough: a tool call has side effects."""
+    calls: list[str] = []
+
+    def note(text: str) -> str:
+        """Record something."""
+        calls.append(text)
+        return "ok"
+
+    model = _ChunkScriptedModel(
+        responses=["unused"],
+        chunks=[
+            AIMessageChunk(content="Working"),
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[{"name": "note", "args": '{"text": "x"}', "id": "1", "index": 0}],
+            ),
+        ],
+    )
+    agent = Agent(name="writer", role="Writer", goal="Write", model=model, tools=[note])
+    deltas: list[str] = []
+    polls = {"n": 0}
+
+    def should_cancel() -> bool:
+        # False for the first chunk, True by the second -- so the accumulated
+        # response DOES carry the tool call by the time the stream stops.
+        polls["n"] += 1
+        return polls["n"] >= 2
+
+    text = _run_agent(
+        agent, "hi", streams=True, on_token=deltas.append, should_cancel=should_cancel
+    )
+
+    assert calls == [], "no tool may run after the visitor stopped the turn"
+    assert text == "Working"

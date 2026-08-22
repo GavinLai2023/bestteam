@@ -49,8 +49,19 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
 
 # Token deltas are coalesced before they become WebSocket frames: one frame
 # per token is wasteful on a public surface and jitters badly on a phone.
-# Flush on whichever comes first -- enough characters to be worth a frame, or
-# enough time that a slow model would otherwise look stalled.
+#
+# Both thresholds are evaluated when a delta ARRIVES, never on a timer -- so
+# the honest statement is "a delta flushes the buffer once either 40
+# characters have accumulated or 80 ms have passed since the last flush",
+# not "the buffer is flushed within 80 ms". In practice the time threshold is
+# the one that fires: at a typical 30 tokens/second, ~3 tokens cross 80 ms
+# well before 10 of them cross 40 characters, which is what keeps a real
+# stream smooth rather than arriving in 40-character steps. What the absence
+# of a timer costs is the tail: if the provider stalls mid-reply, up to 39
+# characters sit unshown until the next delta. A timer thread was considered
+# and rejected for that -- a second thread per run, publishing across a
+# lock, to reveal a sub-word tail during a pause when the run's own
+# `run_completed`/event flush already bounds it (Codex review finding).
 _TOKEN_FLUSH_CHARS = 40
 _TOKEN_FLUSH_SECONDS = 0.08
 

@@ -615,6 +615,14 @@ def _run_agent(
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
             break
+        if should_cancel is not None and should_cancel():
+            # Cancellation observed while THIS response was streaming. Stopping
+            # the model call is not enough: a tool call has side effects, and
+            # running one after the visitor pressed Stop -- then calling the
+            # model again on its result -- is exactly what a stop must prevent
+            # (Codex review finding). Return whatever text streamed before the
+            # stop; the caller's own cancellation handling takes it from here.
+            return response.content if hasattr(response, "content") else ""
         messages.append(response)
         for call in tool_calls:
             tool_fn = tools_by_name.get(call["name"])

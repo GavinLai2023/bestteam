@@ -187,8 +187,12 @@ falls back to the status line it has today.
 `should_cancel()` is polled once per delta. When it returns True, `_run_agent`
 stops iterating the stream and returns the text accumulated so far.
 
-**Ruling — no new exception type and no new terminal path.** The node simply
-finishes early; the adapter yields its `agent_completed`; `runtime.py`'s
+**Ruling — no new exception type and no new terminal path.** Stopping the
+model call is not sufficient on its own: if the cancelled response had
+already accumulated tool calls, `_run_agent`'s loop would execute them and
+call the model again, so a stop could still trigger a side effect. The loop
+therefore polls `should_cancel` once more before running any tool and returns
+the text streamed so far instead. Beyond that the node simply finishes early; the adapter yields its `agent_completed`; `runtime.py`'s
 existing between-events cancellation check (`runtime.py:885`) sees the flag
 and calls the existing `_mark_cancelled`, which already commits
 `status="cancelled"`, publishes `run_cancelled` and records the share reply
@@ -227,9 +231,15 @@ def publish_transient(self, run_id: str, event: dict) -> None:
 Same lock, same `loop.call_soon_threadsafe` fan-out, no `run.events.append`,
 no status branch, silent no-op for an unknown/evicted run.
 
-A visitor who reconnects mid-run therefore sees no partial text — and then
-receives the complete reply on `run_completed`, which is replayed. That is
-the correct trade: the durable path stays the source of truth.
+The individual delta *events* are therefore gone for anyone who subscribes
+later — but the registry keeps one thing from this channel while the run is
+live: `_live_text`, the reply streamed so far, seeded to a new subscriber as
+a single synthetic `reply_delta` and dropped at the terminal event. Without
+it a subscriber arriving a moment late (the worker starts before the POST
+response lets the client open its WebSocket) would build its preview from a
+misleading *suffix* of the reply, which is worse than showing none. The
+durable path is still the source of truth: `run_completed` replaces whatever
+preview was on screen.
 
 ### 2.2 The sink, and coalescing
 
@@ -250,9 +260,13 @@ later.
 
 **Ruling — coalesce in the backend sink, not the SDK.** Per-token WebSocket
 frames are wasteful on a public surface and jitter badly on a phone. The
-sink buffers and flushes when either **40 characters** or **80 ms** has
-accumulated, whichever comes first, and always flushes what remains when
-the agent finishes. The SDK stays a plain per-delta callback; the transport
+sink buffers, and an arriving delta flushes it once either **40 characters**
+have accumulated or **80 ms** have passed since the last flush. Both are
+evaluated on arrival, not on a timer: at a typical 30 tokens/second the time
+threshold is the one that fires (~3 tokens), which is what keeps a real
+stream smooth; the cost is that a provider stall leaves up to 39 characters
+unshown until the next delta. The runtime also flushes before every event it
+yields, so the tail is bounded by the agent finishing. The SDK stays a plain per-delta callback; the transport
 decision belongs to the transport.
 
 The flush publishes `{"type": "reply_delta", "data": <text>}` via
@@ -382,7 +396,11 @@ One component, `components/MarkdownText.tsx`, used by **both**
 org-member audit transcript must render a reply exactly as the visitor saw
 it. User messages stay plain text (`white-space: pre-wrap`): a visitor's own
 typing is not markup. Links render with `rel="noopener noreferrer nofollow"`
-and `target="_blank"`.
+and `target="_blank"`. **Images render as an inert label, never as an
+`<img>`**: a reply is derived from text a visitor typed, so an image URL is
+attacker-chosen, and fetching it would report the viewer's IP and access time
+to that host — including the org admin opening the audit transcript, which is
+the more valuable target of the two.
 
 The streaming partial renders through the same component; half-written
 markdown renders as the text it currently is and settles as it completes.
@@ -430,3 +448,23 @@ All tiers use `fake:` models — which stream, and are free, which is why
 - Metering a cancelled call's partial usage (§1.6).
 - A CrewAI adapter implementation of `on_token` — the ABC gains the
   parameter; there is still exactly one adapter.
+
+## Amendments (external review, 2026-08-23)
+
+Four changes after the Codex review of the implementation branch, all folded
+into the sections above rather than bolted on here:
+
+1. **§1.6** — a stop now short-circuits the tool loop, not just the model
+   call. Without it a cancelled streaming response carrying tool calls still
+   executed them.
+2. **§2.1** — the registry keeps a live text prefix and seeds a late
+   subscriber with it. The original "no replay, they get the full reply at
+   the end" trade was wrong in one direction: what a late subscriber actually
+   saw was a misleading suffix, not nothing.
+3. **§2.2** — the flush thresholds are evaluated when a delta arrives, never
+   on a timer. The original wording ("whichever comes first") overstated it.
+   A timer thread was considered and rejected: a second thread per run to
+   reveal a sub-word tail during a provider stall.
+4. **§4.4** — markdown images render as an inert label rather than an
+   `<img>`, so a reply cannot make any viewer's browser fetch a
+   visitor-chosen URL.

@@ -156,7 +156,11 @@ def test_publish_transient_reaches_a_subscriber_without_recording():
     asyncio.run(_run())
 
 
-def test_a_transient_event_is_never_replayed_to_a_later_subscriber():
+def test_transient_events_are_not_replayed_one_by_one():
+    # The individual delta events are gone -- a late subscriber gets ONE
+    # synthetic delta carrying the accumulated text instead (see
+    # test_a_late_subscriber_is_seeded_with_the_reply_so_far), never the
+    # original event stream, and never anything in `run.events`.
     import asyncio
 
     reg = RunRegistry()
@@ -164,12 +168,73 @@ def test_a_transient_event_is_never_replayed_to_a_later_subscriber():
     async def _run():
         run = reg.create("wf", "input")
         reg.publish_transient(run.id, {"type": "reply_delta", "data": "hi"})
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": " there"})
 
         queue = reg.subscribe(run.id)
-        assert queue.empty()
+
+        assert queue.qsize() == 1
+        assert queue.get_nowait() == {"type": "reply_delta", "data": "hi there"}
+        assert reg.get(run.id).events == []
 
     asyncio.run(_run())
 
 
 def test_publish_transient_is_a_no_op_for_an_unknown_run():
     RunRegistry().publish_transient("nope", {"type": "reply_delta", "data": "hi"})
+
+
+def test_a_late_subscriber_is_seeded_with_the_reply_so_far():
+    # The worker starts before the POST response lets the client open its
+    # WebSocket, so deltas published before subscription would otherwise be
+    # dropped and the visitor would watch a misleading SUFFIX of the reply
+    # (Codex review finding).
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "Hello, "})
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "colleague."})
+
+        queue = reg.subscribe(run.id)
+
+        assert queue.get_nowait() == {"type": "reply_delta", "data": "Hello, colleague."}
+        assert queue.empty()
+
+    asyncio.run(_run())
+
+
+def test_a_reset_clears_the_seed_for_a_later_subscriber():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "Looking"})
+        reg.publish_transient(run.id, {"type": "reply_reset", "data": None})
+
+        assert reg.subscribe(run.id).empty()
+
+    asyncio.run(_run())
+
+
+def test_the_seed_is_dropped_once_the_run_is_terminal():
+    # run_completed carries the authoritative reply, so keeping the preview
+    # would show it twice.
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, {"type": "reply_delta", "data": "Hello"})
+        reg.publish(run.id, {"type": "run_completed", "data": "Hello, colleague."})
+
+        queue = reg.subscribe(run.id)
+
+        assert queue.get_nowait() == {"type": "run_completed", "data": "Hello, colleague."}
+        assert queue.empty()
+
+    asyncio.run(_run())

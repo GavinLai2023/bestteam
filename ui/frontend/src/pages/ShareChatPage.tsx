@@ -99,8 +99,12 @@ export default function ShareChatPage() {
   }, [token])
 
   useEffect(() => {
+    // `streamedReply` belongs here as much as the other two: a long final
+    // answer grows without any intervening agent event, so without it the
+    // visitor is left behind the tokens until the turn completes (Codex
+    // review finding).
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, liveEvents])
+  }, [messages, liveEvents, streamedReply])
 
   useEffect(() => {
     return () => {

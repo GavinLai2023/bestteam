@@ -28,6 +28,20 @@ describe('MarkdownText', () => {
     expect(screen.getByText(/onerror/)).toBeInTheDocument()
   })
 
+  it('never fetches a remote image a reply asks for', () => {
+    // A reply is derived from text the visitor typed, so an image URL is
+    // attacker-chosen: rendering an <img> would leak the viewer's IP and
+    // access time to that host -- including the admin reading the transcript.
+    const { container } = render(<MarkdownText text="![tracker](https://attacker.example/pixel.gif)" />)
+    expect(container.querySelector('img')).toBeNull()
+    expect(screen.getByText('tracker')).toBeInTheDocument()
+  })
+
+  it('labels an image with no alt text', () => {
+    render(<MarkdownText text="![](https://attacker.example/pixel.gif)" />)
+    expect(screen.getByText('image')).toBeInTheDocument()
+  })
+
   it('renders plain text unchanged', () => {
     render(<MarkdownText text="Just a sentence." />)
     expect(screen.getByText('Just a sentence.')).toBeInTheDocument()

@@ -44,6 +44,14 @@ class RunRegistry:
         # can't be force-killed mid-`pipeline.stream()`, so this is checked
         # between yielded events instead (see runtime.py::run_in_background).
         self._cancel_flags: Dict[str, threading.Event] = {}
+        # The reply text streamed so far, per run -- the ONLY thing kept from
+        # the transient delta channel, and only while the run is live. The
+        # worker starts before the POST response lets the client open its
+        # WebSocket, so without it a subscriber that arrives a moment late
+        # watches a misleading suffix of the reply instead of the whole thing
+        # (Codex review finding). Dropped at the terminal event, since
+        # `run_completed` then carries the authoritative text.
+        self._live_text: Dict[str, str] = {}
         # One lock serialises the event append, the replay snapshot, and
         # subscriber insertion so a publish landing between subscribe()'s
         # replay and its registration can't be lost to that subscriber
@@ -64,6 +72,7 @@ class RunRegistry:
             self._runs[run.id] = run
             self._subscribers[run.id] = []
             self._cancel_flags[run.id] = threading.Event()
+            self._live_text[run.id] = ""
             self._evict_if_over_bound()
         return run
 
@@ -80,6 +89,7 @@ class RunRegistry:
             self._runs.pop(run_id, None)
             self._subscribers.pop(run_id, None)
             self._cancel_flags.pop(run_id, None)
+            self._live_text.pop(run_id, None)
 
     def _evict_if_over_bound(self) -> None:
         """Evict the oldest terminal, subscriber-free runs until back within
@@ -104,6 +114,7 @@ class RunRegistry:
             del self._runs[run_id]
             del self._subscribers[run_id]
             self._cancel_flags.pop(run_id, None)
+            self._live_text.pop(run_id, None)
 
     def get(self, run_id: str) -> "Run | None":
         return self._runs.get(run_id)
@@ -126,6 +137,7 @@ class RunRegistry:
                 return False
             run.input = ""
             run.events = []
+            self._live_text.pop(run_id, None)
             return True
 
     def request_cancel(self, run_id: str) -> bool:
@@ -164,6 +176,10 @@ class RunRegistry:
                 run.status = "failed"
             elif event["type"] == "run_cancelled":
                 run.status = "cancelled"
+            if event["type"] in ("run_completed", "run_failed", "run_cancelled"):
+                # The terminal event carries the authoritative reply, so a
+                # retained preview would only show it twice.
+                self._live_text.pop(run_id, None)
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
@@ -186,6 +202,10 @@ class RunRegistry:
             if run_id not in self._runs:
                 # Evicted, or never created -- same silent drop as `publish`.
                 return
+            if event.get("type") == "reply_delta":
+                self._live_text[run_id] = self._live_text.get(run_id, "") + str(event.get("data") or "")
+            elif event.get("type") == "reply_reset":
+                self._live_text[run_id] = ""
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
@@ -204,6 +224,12 @@ class RunRegistry:
                 return None
             for event in self._runs[run_id].events:
                 subscriber_queue.put_nowait(event)
+            streamed_so_far = self._live_text.get(run_id) or ""
+            if streamed_so_far:
+                # One synthetic delta carrying everything streamed before this
+                # subscriber arrived, so the preview it builds is the whole
+                # reply rather than whatever suffix it happened to catch.
+                subscriber_queue.put_nowait({"type": "reply_delta", "data": streamed_so_far})
             self._subscribers[run_id].append((asyncio.get_running_loop(), subscriber_queue))
         return subscriber_queue
 

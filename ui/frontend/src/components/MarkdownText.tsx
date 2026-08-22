@@ -11,6 +11,13 @@ import './MarkdownText.css'
 // it raw HTML stays inert text. That property is the reason this is a library
 // rather than a hand-rolled renderer.
 //
+// Images are rendered as an inert label, never as an `<img>`. A reply is
+// derived from text a visitor typed, so `![](https://attacker.example/pixel)`
+// would otherwise fire a request to a host of their choosing from every
+// viewer's browser -- including the org admin opening the audit transcript,
+// which is the real target (Codex review finding). Links stay clickable but
+// carry `noopener noreferrer nofollow` and open in a new tab.
+//
 // A visitor's own message is NOT rendered through this: their typing is not
 // markup, and `white-space: pre-wrap` already preserves its line breaks.
 export default function MarkdownText({ text }: { text: string }) {
@@ -20,6 +27,7 @@ export default function MarkdownText({ text }: { text: string }) {
         remarkPlugins={[remarkGfm]}
         components={{
           a: (props) => <a {...props} target="_blank" rel="noopener noreferrer nofollow" />,
+          img: (props) => <em className="markdown-image">{props.alt || 'image'}</em>,
         }}
       >
         {text}

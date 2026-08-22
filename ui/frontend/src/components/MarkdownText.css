@@ -63,3 +63,9 @@
   border-left: 3px solid var(--border-strong);
   color: var(--text-muted);
 }
+
+/* An image is rendered as an inert label rather than fetched -- see
+   MarkdownText.tsx. */
+.markdown-image {
+  color: var(--text-muted);
+}

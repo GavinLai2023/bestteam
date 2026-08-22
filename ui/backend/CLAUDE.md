@@ -1029,9 +1029,12 @@ agent's reply streams to the visitor as it is written. Three pieces:
   no partial text, then gets the complete reply on `run_completed`, which IS
   replayed.
 - **`runtime._TokenSink`** turns the SDK's per-delta callback into
-  WebSocket-sized `reply_delta` events: flush at 40 characters or 80 ms,
-  whichever comes first, plus one flush before **every** event the runtime
-  yields -- that last one is what guarantees a buffered delta reaches the
+  WebSocket-sized `reply_delta` events: an arriving delta flushes the buffer
+  once either 40 characters have accumulated or 80 ms have passed since the
+  last flush -- evaluated on arrival, never on a timer, so a provider stall
+  leaves up to 39 characters unshown until the next delta (deliberate; see
+  the constant's own comment). Plus one flush before **every** event the
+  runtime yields -- that last one is what guarantees a buffered delta reaches the
   visitor ahead of the `agent_completed`/`run_completed` that supersedes it.
   The SDK's `STREAM_RESET` sentinel becomes a `reply_reset` event and drops
   the buffer. `run_in_background` builds the sink **only for share-chat runs**
