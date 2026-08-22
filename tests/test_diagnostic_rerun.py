@@ -22,7 +22,10 @@ from fastapi.testclient import TestClient
 from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import Run
+from ui.backend.db.models import PipelineRecord, Run, ShareMessage, User
+from ui.backend.db.share_links import create_share_link
+from ui.backend.db.share_messages import append_message, list_messages
+from ui.backend.db.share_sessions import create_share_session
 from ui.backend.db_session import get_db
 
 _PIPELINE_CONFIG = {
@@ -154,7 +157,7 @@ def test_unknown_run_is_404(rig):
     assert client.post("/api/runs/nope/diagnose", headers=headers["op"]).status_code == 404
 
 
-def test_autonomous_or_shared_chat_runs_are_refused(rig):
+def test_autonomous_email_runs_are_refused(rig):
     client, headers = rig
     org_id = get_org_id("org_a")
     with open_test_db() as db:
@@ -166,6 +169,65 @@ def test_autonomous_or_shared_chat_runs_are_refused(rig):
 
     assert resp.status_code == 400
     assert "mailbox" in resp.json()["detail"].lower()
+
+
+def test_a_shared_chat_turn_can_be_diagnosed_without_touching_the_visitor_session(rig):
+    """A share-link turn is a regular run stamped with
+    trigger_context["share_session_id"]. Its diagnostic re-run is a NEW row
+    with no trigger_context, so share_transcript.record_share_reply is a
+    no-op and nothing reaches the visitor's transcript -- the blanket
+    refusal was protecting nothing (spec 2026-08-22)."""
+    client, headers = rig
+    _deploy(client, headers)
+    org_id = get_org_id("org_a")
+    # A real link, session and transcript -- so "untouched" is checked against
+    # an existing visitor conversation, not an empty table (Codex review).
+    with open_test_db() as db:
+        alice = db.query(User).filter_by(username="alice").one()
+        team = PipelineRecord(name="wf-share", org_id=org_id, config=_PIPELINE_CONFIG, status="deployed")
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=alice.id)
+        session = create_share_session(db, link.id)
+        append_message(db, session.id, turn_number=1, role="user", content="hi")
+        append_message(db, session.id, turn_number=2, role="assistant", content="hello!", run_id=None)
+        db.add(Run(id="share-1", pipeline="wf", input="<user>hi</user>", status="completed", org_id=org_id,
+                   username="share-link",
+                   trigger_context={"share_link_id": link.id, "share_session_id": session.id, "turn_number": 1}))
+        db.commit()
+        session_id = session.id
+        before = [(m.turn_number, m.role, m.content) for m in list_messages(db, session_id)]
+
+    resp = client.post("/api/runs/share-1/diagnose", headers=headers["op"])
+
+    assert resp.status_code == 200, resp.text
+    new_id = resp.json()["run_id"]
+    assert _wait_finished(client, headers, new_id)["status"] == "completed"
+    with open_test_db() as db:
+        new_row = db.get(Run, new_id)
+        assert new_row.diagnostic_of_run_id == "share-1"
+        assert new_row.trigger_context is None
+        after = [(m.turn_number, m.role, m.content) for m in list_messages(db, session_id)]
+        assert after == before
+        assert db.query(ShareMessage).filter(ShareMessage.run_id == new_id).count() == 0
+
+
+def test_a_malformed_share_context_is_refused_like_any_other_trigger(rig):
+    """The guard must classify a share turn the way the share code does -- a
+    real session id -- not by key presence, or a context the share paths
+    would ignore is admitted on a false premise (Codex review)."""
+    client, headers = rig
+    org_id = get_org_id("org_a")
+    with open_test_db() as db:
+        db.add(Run(id="bad-1", pipeline="wf", input="in", status="completed", org_id=org_id,
+                   username="share-link", trigger_context={"share_session_id": None}))
+        db.add(Run(id="bad-2", pipeline="wf", input="in", status="completed", org_id=org_id,
+                   username="share-link", trigger_context={"share_session_id": "1"}))
+        db.commit()
+
+    assert client.post("/api/runs/bad-1/diagnose", headers=headers["op"]).status_code == 400
+    assert client.post("/api/runs/bad-2/diagnose", headers=headers["op"]).status_code == 400
 
 
 def test_a_diagnostic_run_cannot_itself_be_diagnosed(rig):

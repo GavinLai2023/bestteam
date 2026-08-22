@@ -93,10 +93,11 @@ to find *which step* went wrong — not run a batch quality evaluation
    - the run is itself a diagnostic re-run (diagnose the *original* instead
      — the banner on a diagnostic run's own detail panel has an "Open
      original run" button back to it);
-   - the run carries a `trigger_context` — an autonomous email run or a
-     shared-chat turn — because a re-run would actually reach the org's
-     live mailbox or the visitor's session (400, with an explanatory
-     message);
+   - the run is an autonomous email run (it carries a `trigger_context`
+     without a `share_session_id`) — a re-run would actually reach the
+     org's live mailbox (400, with an explanatory message). A shared-chat
+     turn *can* be diagnosed: the re-run is a fresh run with no
+     `trigger_context`, so it never touches the visitor's session;
    - the run's content was purged by the org's retention policy (409 — no
      input left to re-run);
    - the run is still `running`.

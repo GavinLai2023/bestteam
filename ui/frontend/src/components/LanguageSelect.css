@@ -1,0 +1,18 @@
+/* Pill-shaped so it matches the nav links it sits beside (Layout.css) rather
+   than looking like a form control that wandered in; the share page reuses
+   the same look in its header. */
+.language-select {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-soft);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.language-select:hover {
+  background: var(--hover);
+}

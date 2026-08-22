@@ -1,10 +1,19 @@
-import { useEffect, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { endOfLocalDay, formatDateTime } from '../lib/dateFormat'
 import type { ShareLink } from '../lib/types'
 
 interface ShareLinksPanelProps {
   pipelineId: number
 }
+
+const DEFAULT_DAILY_CAP = 30 // mirrors share_links_api.ShareLinkCreate's default and 1..1000 range
+
+// Either one of our own messages -- held as an i18n key so a language switch
+// re-renders it, the same reason ShareChatPage holds notices as keys (Codex
+// review) -- or a sentence the API returned, which we cannot translate.
+type PanelError = { key: 'shareLinks.invalidCap' | 'shareLinks.copyFailed' } | { text: string }
 
 function shareUrlFor(token: string): string {
   return `${window.location.origin}/share/${token}`
@@ -16,18 +25,22 @@ function shareUrlFor(token: string): string {
 // each deployed team's card in "My teams" (SessionsPage.tsx). Collapsed by
 // default -- SessionsPage can list many teams, and this keeps the page from
 // firing a share-links fetch per card on every load; the list only loads
-// once the user opts in by clicking "Share".
+// once the user opts in by clicking "Share". A link's daily cap and expiry
+// are set at creation only: to change them, revoke and generate another.
 export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
+  const { t } = useTranslation()
   const [links, setLinks] = useState<ShareLink[]>([])
   const [open, setOpen] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<PanelError | null>(null)
   const [copiedId, setCopiedId] = useState<number | null>(null)
+  const [dailyCap, setDailyCap] = useState(String(DEFAULT_DAILY_CAP))
+  const [expiresOn, setExpiresOn] = useState('')
 
   const refresh = () => {
     api
       .listShareLinks(pipelineId)
       .then(setLinks)
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => setError({ text: e.message }))
   }
 
   useEffect(() => {
@@ -35,12 +48,25 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  const handleCreate = async () => {
+  const handleCreate = async (event: FormEvent) => {
+    event.preventDefault()
+    // The input's own min/max/step stop a submit for 10.5, 0 or 1001, but an
+    // EMPTY field passes constraint validation (it isn't required) and
+    // Number('') is 0 -- so this check is what catches it, and a 422 from the
+    // API is not a sentence a customer can act on (Codex review).
+    const cap = Number(dailyCap)
+    if (!Number.isInteger(cap) || cap < 1 || cap > 1000) {
+      setError({ key: 'shareLinks.invalidCap' })
+      return
+    }
+    const payload: { daily_cap: number; expires_at?: string } = { daily_cap: cap }
+    if (expiresOn) payload.expires_at = endOfLocalDay(expiresOn).toISOString()
+    setError(null)
     try {
-      await api.createShareLink(pipelineId, {})
+      await api.createShareLink(pipelineId, payload)
       refresh()
     } catch (e) {
-      setError((e as Error).message)
+      setError({ text: (e as Error).message })
     }
   }
 
@@ -49,7 +75,7 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
       await api.patchShareLink(linkId, { active: false })
       refresh()
     } catch (e) {
-      setError((e as Error).message)
+      setError({ text: (e as Error).message })
     }
   }
 
@@ -62,35 +88,58 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
       setCopiedId(link.id)
       setTimeout(() => setCopiedId(null), 2000)
     } catch {
-      setError("Couldn't copy the link automatically. Select and copy it by hand.")
+      setError({ key: 'shareLinks.copyFailed' })
     }
   }
 
   if (!open) {
     return (
       <button type="button" className="btn btn-secondary" onClick={() => setOpen(true)}>
-        Share
+        {t('shareLinks.toggle')}
       </button>
     )
   }
 
   return (
     <div className="share-links-panel" onClick={(e) => e.stopPropagation()}>
-      {error && <p className="banner banner-error">{error}</p>}
-      <button type="button" className="btn btn-primary" onClick={handleCreate}>
-        Generate a new link
-      </button>
+      {error && <p className="banner banner-error">{'key' in error ? t(error.key) : error.text}</p>}
+      <form className="share-links-form" onSubmit={(e) => void handleCreate(e)}>
+        <label>
+          {t('shareLinks.messagesPerDay')}
+          <input
+            type="number"
+            min={1}
+            max={1000}
+            step={1}
+            value={dailyCap}
+            onChange={(e) => setDailyCap(e.target.value)}
+          />
+        </label>
+        <label>
+          {t('shareLinks.expiresOn')}
+          <input type="date" value={expiresOn} onChange={(e) => setExpiresOn(e.target.value)} />
+        </label>
+        <button type="submit" className="btn btn-primary">
+          {t('shareLinks.generate')}
+        </button>
+      </form>
       <ul>
         {links.map((link) => (
           <li key={link.id}>
-            <span>{link.active ? 'Active' : 'Revoked'}</span>
+            <span>{link.active ? t('shareLinks.active') : t('shareLinks.revoked')}</span>
+            <span>{t('shareLinks.perDay', { n: link.daily_cap })}</span>
+            <span>
+              {link.expires_at
+                ? t('shareLinks.expires', { when: formatDateTime(link.expires_at) })
+                : t('shareLinks.noExpiry')}
+            </span>
             {link.active && (
               <>
                 <button type="button" className="btn btn-secondary" onClick={() => handleCopy(link)}>
-                  {copiedId === link.id ? 'Copied!' : 'Copy link'}
+                  {copiedId === link.id ? t('shareLinks.copied') : t('shareLinks.copyLink')}
                 </button>
                 <button type="button" className="btn btn-danger-outline" onClick={() => handleRevoke(link.id)}>
-                  Revoke
+                  {t('shareLinks.revoke')}
                 </button>
               </>
             )}
@@ -98,7 +147,7 @@ export default function ShareLinksPanel({ pipelineId }: ShareLinksPanelProps) {
         ))}
       </ul>
       <button type="button" className="btn-link" onClick={() => setOpen(false)}>
-        Close
+        {t('shareLinks.close')}
       </button>
     </div>
   )

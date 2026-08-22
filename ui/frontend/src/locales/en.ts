@@ -307,6 +307,67 @@ export const en = {
     deleteTitle: 'Delete "{{name}}"?',
     deleteBody: "This can't be undone.",
   },
+  // The public share-link chat (pages/ShareChatPage.tsx). The English values
+  // are verbatim what the page showed before it was translated -- tests find
+  // the composer and the fallback replies by these phrases.
+  share: {
+    placeholder: 'Type a message…',
+    composerLabel: 'Your message',
+    send: 'Send',
+    sendHint: 'Enter to send · Shift+Enter for a new line',
+    unavailable: 'This share link is no longer available.',
+    loadFailed: "Couldn't load this conversation.",
+    rateLimited: "Today's message limit has been reached — try again tomorrow.",
+    tooLong: 'That message is too long. Please keep it under {{max}} characters.',
+    pendingTurn: 'Please wait for the previous reply to finish.',
+    sendFailed: 'Something went wrong sending your message. Please try again.',
+    recovered: 'Something went wrong. Please try sending your message again.',
+    // The backend persists these two replies in English (share_transcript.py
+    // `_FALLBACK_REPLY`, share_chat.py `_DISPATCH_FAILED_MESSAGE`); the page
+    // recognises them by value and renders these instead (lib/shareTraceEvents.ts).
+    fallbackReply: 'Sorry, something went wrong producing a reply.',
+    dispatchFailedReply: "Couldn't start a reply just now. Please try sending your message again.",
+    // Deliberately generic -- never a tool or agent name (lib/shareTraceEvents.ts).
+    status: {
+      sending: 'Sending your message…',
+      starting: 'Getting started…',
+      working: 'Working on your question…',
+      checking: 'Checking with the team…',
+      composing: 'Putting together a reply…',
+      default: 'Working on it…',
+    },
+  },
+  // The org-side "Share" panel on each deployed team card (components/ShareLinksPanel.tsx).
+  shareLinks: {
+    toggle: 'Share',
+    generate: 'Generate a new link',
+    messagesPerDay: 'Messages per day',
+    invalidCap: 'Messages per day must be a whole number from 1 to 1000.',
+    expiresOn: 'Expires on (optional)',
+    active: 'Active',
+    revoked: 'Revoked',
+    // `{{n}}`, not `{{count}}`: i18next treats `count` as a plural selector
+    // and would go looking for `_one`/`_other` keys. Phrased "label: value"
+    // so the English needs no plural form either ("Daily limit: 1").
+    perDay: 'Daily limit: {{n}}',
+    expires: 'Expires {{when}}',
+    noExpiry: 'No expiry',
+    copyLink: 'Copy link',
+    copied: 'Copied!',
+    revoke: 'Revoke',
+    close: 'Close',
+    copyFailed: "Couldn't copy the link automatically. Select and copy it by hand.",
+  },
+  // The read-only audit view beside it (components/SharedSessionsPanel.tsx).
+  sharedSessions: {
+    back: 'Back',
+    none: 'No share links for this team yet.',
+    activeLink: 'Active link',
+    revokedLink: 'Revoked link',
+    lastActive: 'Last active {{when}}',
+    turnsToday: 'Turns today: {{n}}',
+    viewTranscript: 'View transcript',
+  },
   modelCatalog: {
     // Shared by every wizard stage that needs a real model to generate with.
     loadFailed: "Couldn't load the available AI models. Check your connection and try again.",

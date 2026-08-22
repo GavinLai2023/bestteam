@@ -797,25 +797,33 @@ def diagnose_run(
     args/results a normal trace leaves out (see `core/trace.py`). Always a
     NEW run (`diagnostic_of_run_id` points back); the original is untouched.
 
-    Refused for a run with a `trigger_context` -- an autonomous email run
-    would reach the org's live mailbox with unscoped tools, and a shared-chat
-    turn would append a reply to the visitor's session -- for a run that is
-    itself a diagnostic run (diagnose the original instead), and for a purged
-    run (no input left to re-run). No `user_id` is passed, so per-user memory
-    is neither recalled nor written: the admin must not act as the customer.
-    Spend is metered to the run's org like any other run of that team.
-    Design: docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md.
+    Refused for an autonomous email run (a `trigger_context` without a
+    `share_session_id`): it would reach the org's live mailbox with unscoped
+    tools. A shared-chat turn IS allowed: the new row below carries no
+    `trigger_context`, so `runtime`'s share-reply path is a no-op, the
+    visitor's WebSocket (which keys on `share_session_id`) can't subscribe
+    to it, and `runs.input` is the formatted transcript the turn actually
+    saw. Also refused for a run that is itself a diagnostic run (diagnose
+    the original instead) and for a purged run (no input left to re-run).
+    No `user_id` is passed, so per-user memory is neither recalled nor
+    written: the admin must not act as the customer. Spend is metered to the
+    run's org like any other run of that team.
+    Design: docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md,
+    amended by 2026-08-22-share-chat-beta-patch-design.md §3.
     """
     run_row = db.get(Run, run_id)
     if run_row is None:
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
-    if run_row.trigger_context is not None:
+    # A share turn is recognised the way the share code itself recognises one
+    # -- a real session id (share_chat.py stamps an int; record_share_reply
+    # and stream_share_run `.get()` it), not mere key presence, so a malformed
+    # context is refused rather than admitted (Codex review).
+    share_session_id = (run_row.trigger_context or {}).get("share_session_id")
+    is_share_turn = isinstance(share_session_id, int) and not isinstance(share_session_id, bool) and share_session_id > 0
+    if run_row.trigger_context is not None and not is_share_turn:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Autonomous email runs and shared-chat turns can't be diagnosed: a re-run "
-                "would reach the org's mailbox or the visitor's session."
-            ),
+            detail="Autonomous email runs can't be diagnosed: a re-run would reach the org's mailbox.",
         )
     if run_row.diagnostic_of_run_id is not None:
         raise HTTPException(

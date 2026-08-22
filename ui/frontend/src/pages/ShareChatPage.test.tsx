@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import ShareChatPage from './ShareChatPage'
 import { shareChatApi } from '../lib/shareChatApi'
+import { setLanguage } from '../lib/i18n'
 
 vi.mock('../lib/shareChatApi', () => ({
   shareChatApi: {
@@ -52,6 +53,113 @@ describe('ShareChatPage', () => {
 
   afterEach(() => {
     window.WebSocket = realWebSocket
+    setLanguage('en')
+  })
+
+  it('switches the page to Chinese from its own language control', async () => {
+    renderPage()
+    await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(screen.getByPlaceholderText('输入消息…')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument()
+  })
+
+  it("renders the backend-persisted fallback reply in the visitor's language", async () => {
+    // The backend stores its fallback reply in English; a Chinese visitor
+    // must not see an English sentence in the middle of their conversation.
+    mockedApi.getMessages.mockResolvedValue({
+      messages: [
+        { role: 'user', content: 'hi', turn_number: 1 },
+        { role: 'assistant', content: 'Sorry, something went wrong producing a reply.', turn_number: 2 },
+      ],
+    })
+    setLanguage('zh-CN')
+    renderPage()
+    expect(await screen.findByText('抱歉，生成回复时出了点问题。')).toBeInTheDocument()
+  })
+
+  it('shows the live status line in the visitor language', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    setLanguage('zh-CN')
+    renderPage()
+    const input = await screen.findByPlaceholderText('输入消息…')
+    fireEvent.change(input, { target: { value: '你好' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(await screen.findByText('正在发送…')).toBeInTheDocument()
+  })
+
+  it('re-renders a visible notice when the language changes', async () => {
+    // Notices are stored as keys, not translated text, so a switch mid-notice
+    // doesn't leave one sentence in the old language (Codex review).
+    mockedApi.sendMessage.mockRejectedValue(Object.assign(new Error('[]'), { status: 422 }))
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'way too long' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText(/^that message is too long/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(screen.getByText(/消息太长了/)).toBeInTheDocument())
+  })
+
+  it('does not echo the backend detail of a 409 on this public page', async () => {
+    mockedApi.sendMessage.mockRejectedValue(
+      Object.assign(new Error('internal: lock held by worker bestteam-run_7'), { status: 409 }),
+    )
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'hi there' } })
+    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText(/please wait for the previous reply to finish/i)).toBeInTheDocument()
+    expect(screen.queryByText(/lock held/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the language control on the unavailable page', async () => {
+    mockedApi.getMessages.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+    renderPage()
+    expect(await screen.findByText(/no longer available/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(screen.getByText('这个分享链接已失效。')).toBeInTheDocument())
+  })
+
+  it('sends on Enter and keeps Shift+Enter for a new line', async () => {
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: 'line one' } })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(mockedApi.sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalledWith('tok', 'line one'))
+  })
+
+  it('does not send on the Enter that confirms an IME candidate', async () => {
+    // A Chinese/Japanese IME uses Enter to commit the composed text; that
+    // keydown must not fire a send, or the visitor sends half a sentence.
+    mockedApi.sendMessage.mockResolvedValue({ run_id: 'run-1', turn_number: 1 })
+    renderPage()
+    const input = await screen.findByPlaceholderText(/type a message/i)
+    fireEvent.change(input, { target: { value: '你好' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })
+    expect(mockedApi.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('offers to copy an assistant reply, but not a user message', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    mockedApi.getMessages.mockResolvedValue({
+      messages: [
+        { role: 'user', content: 'hi', turn_number: 1 },
+        { role: 'assistant', content: 'hello!', turn_number: 2 },
+      ],
+    })
+    renderPage()
+    await screen.findByText('hello!')
+    const copyButtons = screen.getAllByRole('button', { name: /^copy$/i })
+    expect(copyButtons).toHaveLength(1)
+    fireEvent.click(copyButtons[0])
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('hello!'))
+    expect(await screen.findByRole('button', { name: /copied/i })).toBeInTheDocument()
   })
 
   it('loads existing history on mount', async () => {
@@ -151,7 +259,9 @@ describe('ShareChatPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /send/i }))
 
     await waitFor(() => expect(mockedApi.sendMessage).toHaveBeenCalled())
-    expect(await screen.findByText(/too long/i)).toBeInTheDocument()
+    // Anchored: the composer is a <textarea>, whose restored draft ("way too
+    // long") is itself text content a looser /too long/ would also match.
+    expect(await screen.findByText(/^that message is too long/i)).toBeInTheDocument()
   })
 
   it('caps the input length in the browser itself', async () => {

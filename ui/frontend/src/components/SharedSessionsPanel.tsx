@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
 import type { ShareLink, ShareMessage, ShareSessionSummary } from '../lib/types'
@@ -11,6 +12,7 @@ interface SharedSessionsPanelProps {
 // link for one team, with a drill-in transcript. See docs/superpowers/specs/
 // 2026-08-14-team-sharing-continuous-chat-design.md ("Frontend").
 export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelProps) {
+  const { t } = useTranslation()
   const [links, setLinks] = useState<ShareLink[]>([])
   const [sessionsByLink, setSessionsByLink] = useState<Record<number, ShareSessionSummary[]>>({})
   const [transcript, setTranscript] = useState<{ linkId: number; sessionId: number; messages: ShareMessage[] } | null>(
@@ -65,7 +67,7 @@ export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelP
     return (
       <div className="shared-sessions-transcript">
         <button type="button" className="btn-link" onClick={() => setTranscript(null)}>
-          Back
+          {t('sharedSessions.back')}
         </button>
         <ul>
           {transcript.messages.map((m, i) => (
@@ -81,17 +83,17 @@ export default function SharedSessionsPanel({ pipelineId }: SharedSessionsPanelP
   return (
     <div className="shared-sessions-panel">
       {error && <p className="banner banner-error">{error}</p>}
-      {links.length === 0 && <p className="hint">No share links for this team yet.</p>}
+      {links.length === 0 && <p className="hint">{t('sharedSessions.none')}</p>}
       {links.map((link) => (
         <div key={link.id}>
-          <h4>{link.active ? 'Active link' : 'Revoked link'}</h4>
+          <h4>{link.active ? t('sharedSessions.activeLink') : t('sharedSessions.revokedLink')}</h4>
           <ul>
             {(sessionsByLink[link.id] ?? []).map((session) => (
               <li key={session.id}>
-                <span>Last active {formatDateTime(session.last_active_at)}</span>
-                <span>{session.turns_today} turns today</span>
+                <span>{t('sharedSessions.lastActive', { when: formatDateTime(session.last_active_at) })}</span>
+                <span>{t('sharedSessions.turnsToday', { n: session.turns_today })}</span>
                 <button type="button" className="btn btn-secondary" onClick={() => openTranscript(link.id, session.id)}>
-                  View transcript
+                  {t('sharedSessions.viewTranscript')}
                 </button>
               </li>
             ))}

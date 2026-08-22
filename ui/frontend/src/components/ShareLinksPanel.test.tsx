@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ShareLinksPanel from './ShareLinksPanel'
 import { api } from '../lib/api'
+import { setLanguage } from '../lib/i18n'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -19,6 +20,10 @@ describe('ShareLinksPanel', () => {
     mockedApi.listShareLinks.mockResolvedValue([])
   })
 
+  afterEach(() => {
+    setLanguage('en')
+  })
+
   it('lists existing links and shows their status', async () => {
     mockedApi.listShareLinks.mockResolvedValue([
       { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
@@ -28,14 +33,85 @@ describe('ShareLinksPanel', () => {
     await waitFor(() => expect(screen.getByText(/active/i)).toBeInTheDocument())
   })
 
-  it('creates a new link on click', async () => {
+  it('creates a new link with the chosen daily cap and expiry', async () => {
+    mockedApi.createShareLink.mockResolvedValue({
+      id: 2, pipeline_id: 5, token: 'newtoken', active: true, daily_cap: 10, expires_at: '2030-01-02T23:59:59+00:00', created_at: '2026-08-14T00:00:00+00:00',
+    })
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText(/expires on/i), { target: { value: '2030-01-02' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await waitFor(() =>
+      expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, {
+        daily_cap: 10,
+        // The last instant of the chosen day in the browser's own time zone, sent with an offset.
+        expires_at: new Date(new Date(2030, 0, 3).getTime() - 1).toISOString(),
+      }),
+    )
+  })
+
+  it('lets the input constraints refuse a non-integer or out-of-range cap', async () => {
+    // min/max/step stop the submit in the browser -- jsdom enforces them
+    // too, so the handler never runs and the API is never called.
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    const cap = await screen.findByLabelText(/messages per day/i)
+    for (const value of ['10.5', '0', '1001']) {
+      fireEvent.change(cap, { target: { value } })
+      fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+      expect(cap).toBeInvalid()
+    }
+    expect(mockedApi.createShareLink).not.toHaveBeenCalled()
+  })
+
+  it('refuses an empty daily cap, which constraint validation lets through', async () => {
+    // The field isn't `required`, so an empty value IS valid to the browser
+    // and reaches the submit handler, where Number('') is 0 -- this is the
+    // only path that reaches the handler's own check (Codex review).
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(await screen.findByText(/whole number from 1 to 1000/i)).toBeInTheDocument()
+    expect(mockedApi.createShareLink).not.toHaveBeenCalled()
+  })
+
+  it('re-renders a visible error banner when the language changes', async () => {
+    // Our own messages are held as keys, not translated text, so a switch
+    // while the banner shows doesn't strand it in the old language.
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    fireEvent.change(await screen.findByLabelText(/messages per day/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+    expect(await screen.findByText(/whole number from 1 to 1000/i)).toBeInTheDocument()
+
+    setLanguage('zh-CN')
+
+    await waitFor(() => expect(screen.getByText(/必须是 1 到 1000 之间的整数/)).toBeInTheDocument())
+  })
+
+  it('creates a link with the default cap and no expiry when the form is left alone', async () => {
     mockedApi.createShareLink.mockResolvedValue({
       id: 2, pipeline_id: 5, token: 'newtoken', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00',
     })
     render(<ShareLinksPanel pipelineId={5} />)
     fireEvent.click(screen.getByRole('button', { name: /share/i }))
     fireEvent.click(await screen.findByRole('button', { name: /generate/i }))
-    await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, expect.any(Object)))
+    await waitFor(() => expect(mockedApi.createShareLink).toHaveBeenCalledWith(5, { daily_cap: 30 }))
+  })
+
+  it("shows each link's daily cap and expiry", async () => {
+    mockedApi.listShareLinks.mockResolvedValue([
+      { id: 1, pipeline_id: 5, token: 'abc123token', active: true, daily_cap: 30, expires_at: null, created_at: '2026-08-14T00:00:00+00:00' },
+      { id: 2, pipeline_id: 5, token: 'def456token', active: true, daily_cap: 5, expires_at: '2030-01-02T23:59:59+00:00', created_at: '2026-08-14T00:00:00+00:00' },
+    ])
+    render(<ShareLinksPanel pipelineId={5} />)
+    fireEvent.click(screen.getByRole('button', { name: /share/i }))
+    expect(await screen.findByText('Daily limit: 30')).toBeInTheDocument()
+    expect(screen.getByText('No expiry')).toBeInTheDocument()
+    expect(screen.getByText('Daily limit: 5')).toBeInTheDocument()
+    expect(screen.getByText(/^Expires .*2030/)).toBeInTheDocument()
   })
 
   it('revokes a link on click', async () => {

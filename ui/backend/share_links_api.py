@@ -66,8 +66,11 @@ def _share_link_dict(link: ShareLink) -> dict:
         "token": link.token,
         "active": link.active,
         "daily_cap": link.daily_cap,
-        "expires_at": link.expires_at.isoformat() if link.expires_at else None,
-        "created_at": link.created_at.isoformat(),
+        # iso_utc, not .isoformat(): SQLite round-trips these naive and the
+        # frontend's `new Date(...)` would read an offset-less string as
+        # browser-local time (same fix `_share_session_dict` already has).
+        "expires_at": iso_utc(link.expires_at) if link.expires_at else None,
+        "created_at": iso_utc(link.created_at),
     }
 
 

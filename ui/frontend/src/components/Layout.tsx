@@ -2,14 +2,14 @@ import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMe } from '../lib/useMe'
-import { SUPPORTED_LANGUAGES, setLanguage, type LanguageCode } from '../lib/i18n'
+import LanguageSelect from './LanguageSelect'
 import './Layout.css'
 
 export default function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { isAdmin } = useMe()
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
 
   // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
   // scroll position the previous page was at, landing the new page mid-way
@@ -68,18 +68,7 @@ export default function Layout() {
               </NavLink>
             </>
           )}
-          <select
-            className="language-select"
-            aria-label={t('nav.language')}
-            value={i18n.resolvedLanguage}
-            onChange={(e) => setLanguage(e.target.value as LanguageCode)}
-          >
-            {SUPPORTED_LANGUAGES.map((lang) => (
-              <option key={lang.code} value={lang.code}>
-                {lang.label}
-              </option>
-            ))}
-          </select>
+          <LanguageSelect />
           <button type="button" className="logout-button" onClick={logOut}>
             {t('nav.logOut')}
           </button>

@@ -455,7 +455,7 @@ describe('SessionsPage sharing audit', () => {
 
     // Real fetched data, not just the panel's own empty-state hint, which
     // would render synchronously regardless of whether the fetch fired.
-    expect(await screen.findByText(/3 turns today/)).toBeInTheDocument()
+    expect(await screen.findByText(/Turns today: 3/)).toBeInTheDocument()
     expect(mockedApi.listShareLinks).toHaveBeenCalledWith(5)
   })
 })

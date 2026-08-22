@@ -190,3 +190,21 @@ def test_offset_aware_expires_at_is_normalized_on_patch(client):
         stored = db.get(ShareLink, link["id"]).expires_at
     assert stored.tzinfo is None
     assert stored == datetime(2030, 3, 4, 6, 0, 0)
+
+
+def test_share_link_timestamps_carry_a_utc_offset(client):
+    """SQLite hands `expires_at`/`created_at` back tzinfo-naive; plain
+    `.isoformat()` then omits the offset and `ShareLinksPanel` would show
+    the expiry in browser-local time. `_share_session_dict` already uses
+    `iso_utc` for exactly this reason; the link dict must too."""
+    pipeline_id = _deploy_team()
+    created = client.post(
+        f"/api/pipelines/{pipeline_id}/share-links", json={"expires_at": "2030-01-02T23:59:59Z"}
+    )
+    assert created.status_code == 201, created.text
+
+    # A fresh request = a fresh session, so the row is read back from SQLite.
+    listed = client.get(f"/api/pipelines/{pipeline_id}/share-links").json()
+    link = next(item for item in listed if item["id"] == created.json()["id"])
+    assert link["expires_at"].endswith("+00:00"), link["expires_at"]
+    assert link["created_at"].endswith("+00:00"), link["created_at"]

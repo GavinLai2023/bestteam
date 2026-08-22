@@ -1,34 +1,44 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import LanguageSelect from '../components/LanguageSelect'
 import { shareChatApi } from '../lib/shareChatApi'
-import { friendlyStatusFor } from '../lib/shareTraceEvents'
+import { FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
 import type { ShareMessage, TraceEvent } from '../lib/types'
 import './ShareChatPage.css'
 
 const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
 
-// Mirrors share_transcript.py's `_FALLBACK_REPLY`, which the backend has
-// already persisted for a failed/cancelled run by the time that terminal
-// event arrives. Showing the same string keeps the screen consistent with
-// what a page reload would render, without an extra round-trip.
-const FALLBACK_REPLY = 'Sorry, something went wrong producing a reply.'
-
 const MAX_MESSAGE_LENGTH = 4000 // matches share_chat.py's own cap
+
+// A transient notice under the conversation. Stored as a key (plus
+// interpolation values) and translated at render, so a language switch while
+// it is showing re-renders it like everything else (Codex review). A 409's
+// backend detail is deliberately NOT shown: this is a public surface and the
+// key says the same thing in the visitor's language.
+interface Notice {
+  key: 'share.recovered' | 'share.pendingTurn' | 'share.tooLong' | 'share.sendFailed' | 'common.copyFailed'
+  values?: { max: number }
+}
 
 // The public, anonymous, multi-turn counterpart to MonitorPage's one-shot
 // "Run a team" -- a colleague reaches this page via a link an org member
 // generated (ShareLinksPanel), never logs in, and gets a real back-and-forth
 // conversation. See docs/superpowers/specs/
-// 2026-08-14-team-sharing-continuous-chat-design.md.
+// 2026-08-14-team-sharing-continuous-chat-design.md and, for this page's
+// bilingual/mobile pass, 2026-08-22-share-chat-beta-patch-design.md.
 export default function ShareChatPage() {
+  const { t } = useTranslation()
   const { token = '' } = useParams<{ token: string }>()
   const [messages, setMessages] = useState<ShareMessage[]>([])
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [liveEvents, setLiveEvents] = useState<TraceEvent[]>([])
-  const [unavailable, setUnavailable] = useState<string | null>(null)
+  // An i18n key, translated at render so a language switch re-renders it.
+  const [unavailableKey, setUnavailableKey] = useState<'share.unavailable' | 'share.loadFailed' | null>(null)
   const [rateLimited, setRateLimited] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // Set inside onmessage's own terminal-event branches; onclose checks it to
@@ -55,11 +65,7 @@ export default function ShareChatPage() {
       })
       .catch((e: Error & { status?: number }) => {
         if (ignore || hasSentRef.current) return
-        setUnavailable(
-          e.status === 404
-            ? 'This share link is no longer available.'
-            : "Couldn't load this conversation.",
-        )
+        setUnavailableKey(e.status === 404 ? 'share.unavailable' : 'share.loadFailed')
       })
     return () => {
       ignore = true
@@ -76,7 +82,9 @@ export default function ShareChatPage() {
     }
   }, [])
 
-  const handleSend = async (event: FormEvent) => {
+  // Shared by the form's submit and the composer's Enter key, hence the
+  // structural parameter type rather than a FormEvent.
+  const handleSend = async (event: { preventDefault(): void }) => {
     event.preventDefault()
     const content = draft.trim()
     if (!content || sending) return
@@ -116,7 +124,9 @@ export default function ShareChatPage() {
           // run_failed / run_cancelled: the backend has already persisted its
           // own friendly fallback reply for this turn, so show the same thing
           // now instead of leaving the visitor's message looking unanswered
-          // until they happen to reload the page.
+          // until they happen to reload the page. Stored as the backend's
+          // English literal (what a reload would return) and translated at
+          // render by fallbackReplyKey, the same way a reloaded one is.
           terminalSeenRef.current = true
           setMessages((prev) => [
             ...prev,
@@ -144,7 +154,7 @@ export default function ShareChatPage() {
           .catch(() => {})
           .finally(() => {
             setSending(false)
-            setNotice('Something went wrong. Please try sending your message again.')
+            setNotice({ key: 'share.recovered' })
           })
       }
     } catch (e) {
@@ -172,58 +182,121 @@ export default function ShareChatPage() {
       if (status === 429) {
         setRateLimited(true)
       } else if (status === 404) {
-        setUnavailable('This share link is no longer available.')
+        setUnavailableKey('share.unavailable')
       } else if (status === 409) {
-        // The message was never persisted/no run was created for it -- the
-        // backend's own detail text already says what to do.
-        setNotice((e as Error).message || 'Please wait for the previous reply to finish.')
+        // The message was never persisted/no run was created for it (the
+        // previous reply is still in flight) -- say so in the visitor's
+        // language rather than echoing the backend's English detail.
+        setNotice({ key: 'share.pendingTurn' })
       } else if (status === 422) {
         // The backend's length cap (Pydantic validation) -- its own detail is
         // a validation-error structure, not a sentence a visitor can read.
-        setNotice(`That message is too long. Please keep it under ${MAX_MESSAGE_LENGTH} characters.`)
+        setNotice({ key: 'share.tooLong', values: { max: MAX_MESSAGE_LENGTH } })
       } else {
-        setNotice('Something went wrong sending your message. Please try again.')
+        setNotice({ key: 'share.sendFailed' })
       }
       setDraft(content)
     }
   }
 
-  if (unavailable) {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    // An IME (Chinese, Japanese...) uses Enter to commit the candidate text;
+    // that keydown arrives with isComposing set (keyCode 229 in older
+    // browsers) and must not send a half-composed message.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    e.preventDefault()
+    void handleSend(e)
+  }
+
+  const handleCopy = async (index: number, content: string) => {
+    // `navigator.clipboard` rejects (or is undefined) in a non-secure
+    // context -- any HTTP origin that isn't localhost -- so this can't be
+    // left unguarded (same as ShareLinksPanel).
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedIndex(index)
+      setTimeout(() => setCopiedIndex(null), 2000)
+    } catch {
+      setNotice({ key: 'common.copyFailed' })
+    }
+  }
+
+  // The header (brand + language control) renders on the unavailable page
+  // too: a visitor who lands on an expired link in a language they can't
+  // read must still be able to switch (Codex review).
+  const header = (
+    <header className="share-chat-header">
+      <span className="share-chat-brand">{t('nav.brand')}</span>
+      <LanguageSelect />
+    </header>
+  )
+
+  if (unavailableKey) {
     return (
       <div className="share-chat">
-        <p className="share-chat-unavailable">{unavailable}</p>
+        {header}
+        <p className="share-chat-unavailable">{t(unavailableKey)}</p>
       </div>
     )
   }
 
   return (
     <div className="share-chat">
+      {header}
       <div className="share-chat-messages">
-        {messages.map((m, i) => (
-          <div key={i} className={`share-chat-bubble ${m.role}`}>
-            {m.content}
-          </div>
-        ))}
-        {sending && <div className="share-chat-bubble status">{friendlyStatusFor(liveEvents)}</div>}
+        {messages.map((m, i) => {
+          if (m.role === 'user') {
+            return (
+              <div key={i} className="share-chat-bubble user">
+                {m.content}
+              </div>
+            )
+          }
+          // A wrapper so the copy control sits under the bubble, not inside
+          // it -- the bubble keeps its text alone.
+          const key = fallbackReplyKey(m.content)
+          return (
+            <div key={i} className="share-chat-assistant">
+              <div className="share-chat-bubble assistant">{key ? t(key) : m.content}</div>
+              {!key && (
+                <button type="button" className="btn-link share-chat-copy" onClick={() => void handleCopy(i, m.content)}>
+                  {copiedIndex === i ? t('common.copied') : t('common.copy')}
+                </button>
+              )}
+            </div>
+          )
+        })}
+        {/* A polite live region, so assistive technology hears the progress
+            line and any notice change without the focus moving. */}
+        <div role="status" aria-live="polite">
+          {sending && <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>}
+        </div>
         <div ref={messagesEndRef} />
       </div>
-      {rateLimited && (
-        <p className="share-chat-bubble status">Today's message limit has been reached — try again tomorrow.</p>
-      )}
-      {notice && <p className="share-chat-bubble status">{notice}</p>}
+      <div role="status" aria-live="polite">
+        {rateLimited && <p className="share-chat-bubble status">{t('share.rateLimited')}</p>}
+        {notice && <p className="share-chat-bubble status">{t(notice.key, notice.values)}</p>}
+      </div>
       <form className="share-chat-form" onSubmit={handleSend}>
-        <input
-          type="text"
+        <textarea
+          rows={2}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
           maxLength={MAX_MESSAGE_LENGTH}
-          placeholder="Type a message…"
+          placeholder={t('share.placeholder')}
+          aria-label={t('share.composerLabel')}
+          aria-describedby="share-chat-hint"
           disabled={sending || rateLimited}
         />
         <button type="submit" disabled={sending || rateLimited || !draft.trim()}>
-          Send
+          {t('share.send')}
         </button>
       </form>
+      <p id="share-chat-hint" className="hint share-chat-hint">
+        {t('share.sendHint')}
+      </p>
     </div>
   )
 }
