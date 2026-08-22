@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { Fragment } from 'react'
 import EmployeeCard from './EmployeeCard'
 import type { Specification, TeamMode } from '../lib/types'
@@ -6,17 +7,30 @@ interface TeamFlowProps {
   specification?: Specification | null
 }
 
-const MODE_LABELS: Record<TeamMode, string> = {
-  sequential: 'Step by step',
-  parallel: 'All at once',
-  hierarchical: 'Led by a manager',
-}
+
 
 // Renders a customer-friendly "how your team works together" diagram from a
 // Specification: one block per team (in pipeline-step order), showing the
 // manager (for hierarchical teams) and the agents who do the work, with no
 // technical jargon -- just job titles and one-line descriptions.
 export default function TeamFlow({ specification }: TeamFlowProps) {
+  const { t } = useTranslation()
+
+  // An unrecognised mode renders as-is rather than vanishing, matching
+  // lib/runStatus.ts's rule for an unknown run status.
+  const modeLabel = (mode: TeamMode) => {
+    switch (mode) {
+      case 'sequential':
+        return t('wizard.teamMode.sequential')
+      case 'parallel':
+        return t('wizard.teamMode.parallel')
+      case 'hierarchical':
+        return t('wizard.teamMode.hierarchical')
+      default:
+        return mode
+    }
+  }
+
   if (!specification) return null
 
   const agentsByName = Object.fromEntries((specification.agents ?? []).map((agent) => [agent.name, agent]))
@@ -37,7 +51,7 @@ export default function TeamFlow({ specification }: TeamFlowProps) {
             <div className="team-block">
               <div className="team-block-header">
                 <h3>{team.display_name || team.name}</h3>
-                <span className="team-mode-badge">{MODE_LABELS[team.mode] ?? team.mode}</span>
+                <span className="team-mode-badge">{modeLabel(team.mode)}</span>
               </div>
               {team.friendly_description && <p className="team-block-description">{team.friendly_description}</p>}
 

@@ -159,6 +159,19 @@ body {
   border-radius: 4px;
 }
 
+/* Form controls inherit the browser's white-on-black defaults unless a rule
+   says otherwise, and the per-component rules elsewhere each set `border` from
+   a token but never `background`/`color` -- so every textarea and select
+   rendered white with black text in dark mode while its own border was
+   correctly themed. Element selectors have the lowest specificity, so this
+   fills that gap without overriding any component rule that does set them. */
+input,
+select,
+textarea {
+  background: var(--surface);
+  color: var(--text);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

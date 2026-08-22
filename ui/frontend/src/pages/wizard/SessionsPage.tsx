@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/dateFormat'
@@ -21,27 +22,8 @@ const RESUMABLE_STATUSES = new Set(['spec', 'solution', 'testing', 'deployed'])
 // than three technical-sounding statuses.
 const STATUS_ORDER = ['deployed', 'in_progress']
 
-const STATUS_LABELS: Record<string, string> = {
-  deployed: 'Live',
-  in_progress: 'In Progress',
-}
-
-const STATUS_EXPLANATIONS: Record<string, string> = {
-  deployed: 'Live — this team is deployed and ready for your organisation to use.',
-  in_progress: "Still being built — you're designing, reviewing, or trying out this team before making it live.",
-}
-
 function bucketFor(status: string) {
   return status === 'deployed' ? 'deployed' : 'in_progress'
-}
-
-// Short forms of EmailTriggerActivity's STATUS_LABELS, for a one-line card
-// tag rather than a full status block (see the Activity page for the full view).
-const AUTOMATION_STATUS_LABELS: Record<string, string> = {
-  active: 'Automation on — watching for new email',
-  paused_cap: 'Automation paused — daily limit reached',
-  error: 'Automation problem — checking mailbox',
-  disabled: 'Automation paused',
 }
 
 function resumePathFor(session: BuilderSession) {
@@ -64,6 +46,7 @@ function descriptionFor(session: BuilderSession) {
 }
 
 export default function SessionsPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [confirmNode, confirm] = useConfirm()
   const [sessions, setSessions] = useState<BuilderSession[]>([])
@@ -88,6 +71,30 @@ export default function SessionsPage() {
     api.getEmailTrigger().then(setTrigger).catch(() => {})
   }, [])
 
+  const statusLabel = (bucket: string) =>
+    bucket === 'deployed' ? t('myTeams.statusLive') : t('myTeams.statusInProgress')
+
+  const statusExplanation = (bucket: string) =>
+    bucket === 'deployed' ? t('myTeams.explainLive') : t('myTeams.explainInProgress')
+
+  // Short forms of EmailTriggerActivity's own status labels, for a one-line
+  // card tag rather than the full status block the Activity page shows. An
+  // unrecognised status renders as-is rather than vanishing.
+  const automationLabel = (status: string) => {
+    switch (status) {
+      case 'active':
+        return t('myTeams.automationActive')
+      case 'paused_cap':
+        return t('myTeams.automationPausedCap')
+      case 'error':
+        return t('myTeams.automationError')
+      case 'disabled':
+        return t('myTeams.automationDisabled')
+      default:
+        return status
+    }
+  }
+
   const statusGroups = STATUS_ORDER.map((bucket) => ({
     status: bucket,
     sessions: sessions.filter((s) => bucketFor(s.status) === bucket),
@@ -96,9 +103,9 @@ export default function SessionsPage() {
   const handleDelete = async (session: BuilderSession) => {
     const label = session.specification_json?.name ?? session.intent_text
     const ok = await confirm({
-      title: `Delete "${label}"?`,
-      body: "This can't be undone.",
-      confirmLabel: 'Delete',
+      title: t('myTeams.deleteTitle', { name: label }),
+      body: t('myTeams.deleteBody'),
+      confirmLabel: t('common.delete'),
       destructive: true,
     })
     if (!ok) return
@@ -113,34 +120,34 @@ export default function SessionsPage() {
   return (
     <div className="wizard">
       <header className="wizard-header">
-        <h1>My teams</h1>
-        <p>Pick up where you left off, or make adjustments to a team you've already built.</p>
+        <h1>{t('nav.myTeams')}</h1>
+        <p>{t('myTeams.subtitle')}</p>
       </header>
 
       {error && <p className="banner banner-error">{error}</p>}
 
       {loading ? (
-        <p className="hint">Loading…</p>
+        <p className="hint">{t('common.loading')}</p>
       ) : sessions.length === 0 ? (
-        <p className="hint">No teams yet — build one to see it here.</p>
+        <p className="hint">{t('myTeams.empty')}</p>
       ) : (
         statusGroups.map((group) => (
           <section key={group.status} className="session-status-group">
             <div className="session-status-header">
               <h2>
-                {STATUS_LABELS[group.status]} ({group.sessions.length})
+                {statusLabel(group.status)} ({group.sessions.length})
               </h2>
               <button
                 type="button"
                 className="status-help-button"
-                aria-label={`What does ${STATUS_LABELS[group.status]} mean?`}
+                aria-label={t('myTeams.statusHelp', { status: statusLabel(group.status) })}
                 onClick={() => setOpenStatus((s) => (s === group.status ? null : group.status))}
               >
                 ?
               </button>
             </div>
             {openStatus === group.status && (
-              <p className="hint status-help-text">{STATUS_EXPLANATIONS[group.status]}</p>
+              <p className="hint status-help-text">{statusExplanation(group.status)}</p>
             )}
             <ul className="session-list">
               {group.sessions.map((session) => {
@@ -154,11 +161,13 @@ export default function SessionsPage() {
                       <p className="subtitle">{descriptionFor(session)}</p>
                       {isAutomated && (
                         <p className="hint automation-tag">
-                          {AUTOMATION_STATUS_LABELS[trigger.status] ?? trigger.status}
+                          {automationLabel(trigger.status)}
                         </p>
                       )}
                       <div className="session-card-footer">
-                        <span className="session-updated">Updated {formatDateTime(session.updated_at)}</span>
+                        <span className="session-updated">
+                          {t('myTeams.updated', { when: formatDateTime(session.updated_at) })}
+                        </span>
                       </div>
                     </button>
                     {session.status === 'deployed' && session.pipeline_id != null && (
@@ -171,7 +180,7 @@ export default function SessionsPage() {
                             setOpenAudit((id) => (id === session.pipeline_id ? null : session.pipeline_id!))
                           }
                         >
-                          Shared sessions
+                          {t('myTeams.sharedSessions')}
                         </button>
                         {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
                       </>
@@ -180,8 +189,8 @@ export default function SessionsPage() {
                       <button
                         type="button"
                         className="session-delete-button"
-                        aria-label="Delete"
-                        title="Delete"
+                        aria-label={t('common.delete')}
+                        title={t('common.delete')}
                         onClick={() => handleDelete(session)}
                       >
                         <svg

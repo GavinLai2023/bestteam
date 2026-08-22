@@ -1769,23 +1769,42 @@
   `run_analytics.py` (they are real spend). A model's non-determinism means a
   re-run may simply not reproduce the original answer -- the mechanism shows
   what the team does with that input now, with full visibility.
-- **The Chinese UI has never been looked at in a browser.** The frontend is
-  bilingual as of the 2026-08-20 UX pass, but **English is the default**, so
-  no automated test renders a single Chinese string: Vitest runs in `en` and
-  the Playwright E2E selectors are all English `has-text()`. Chinese is
-  typographically wider per glyph than the English it replaces, and several
-  layouts still carry fixed widths (`WizardProgress.css`'s
-  `min-width: 110px`, the wizard's `min-width: 150px` employee cards). The
-  new dark mode and the responsive breakpoints added in the same pass are
-  likewise unverified by any test. **Someone has to switch the language and
-  walk each page at desktop, tablet and phone widths before this ships.**
+- **The Chinese UI and dark mode were walked in a browser on 2026-08-22; two
+  findings, one of them not the one this entry predicted.** Still true that no
+  automated test renders a single Chinese string or a single dark-mode pixel:
+  Vitest runs in `en`, the Playwright E2E selectors are all English
+  `has-text()`, and jsdom computes no stylesheet cascade at all -- so this
+  remains a manual check that has to be repeated by hand after a layout or
+  palette change.
+  What the walk found: (1) **every `<textarea>` and `<select>` in the app
+  rendered white-on-black in dark mode** -- four per-component rule sets each
+  set `border` from a token but never `background`/`color`, so the browser
+  default survived; fixed with one base rule in `index.css`. (2) **The wizard
+  was not translated at all** (see the F1 entry above).
+  What it did *not* find, contrary to this entry's earlier prediction: the
+  fixed widths are not a problem. `WizardProgress.css`'s `min-width: 110px`,
+  the `min-width: 150px` employee cards and `AccountsPage.css`'s `8rem`/`7rem`
+  all sit under `flex-wrap: wrap` with media queries that reset them to `0` at
+  narrow widths, and the step labels carry `text-overflow: ellipsis`. Measured
+  with Chinese labels at 1440 px and 375 px: no overflow anywhere, on any of
+  the eight routes. The 2026-08-20 UX pass had already handled it.
+  Dark-mode contrast is clean apart from the wizard's step-number circles
+  (4.32:1 against AA's 4.5), which are decorative digits beside a
+  correctly-contrasted label.
 - **The frontend UX audit's F1 is only structurally complete.** The i18n
   layer, the shared copy modules and every string on the customer's daily
-  surfaces (nav, Run a team, Dashboard, the wizard) are extracted and
-  translated, but the long tail on the admin pages -- much of `TracePage`,
-  `AccountsPage`, `MemoryPage` and several settings panels -- is still
-  English-only literals. Adding them is mechanical: put the key in
-  `locales/en.ts` and `tsc` will refuse to build until `zh-CN.ts` has it too.
+  surfaces (nav, Run a team, Dashboard, and -- as of 2026-08-22 -- the whole
+  five-stage wizard and My teams) are extracted and translated, but the long
+  tail on the admin pages -- much of `TracePage`, `AccountsPage`, `MemoryPage`
+  and several settings panels -- is still English-only literals. Adding them is
+  mechanical: put the key in `locales/en.ts` and `tsc` will refuse to build
+  until `zh-CN.ts` has it too.
+  **This entry previously claimed the wizard was already done; it was not.**
+  `zh-CN.ts` had no `wizard` namespace at all and only `ConfirmPage` imported
+  `useTranslation`, so switching to Chinese gave a Chinese nav above an
+  entirely English wizard. Found by actually opening the app in a browser in
+  Chinese -- which is the point of the entry below, and the reason a claim
+  about rendered output should not be trusted until something has rendered it.
 - **Microsoft 365 mailbox support has never touched a live tenant.** Every test
   for it runs against fakes: they pin the SASL byte string, the token
   lifecycle, the storage round-trip and the four error mappings, but nothing in
