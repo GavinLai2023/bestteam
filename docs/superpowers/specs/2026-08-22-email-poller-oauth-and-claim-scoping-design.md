@@ -216,3 +216,17 @@ banner on a switch they just flipped is noise.
   the reason it buffers and commits once.
 - **Multi-worker is still unsupported** (`RunRegistry`, `_dispatch_lock`), and
   nothing here changes that.
+- **One ordering leaves inert rows behind.** D4 runs at the moment a mailbox
+  changes, and it deliberately skips `claimed` rows (they have an owner). So if
+  a process dies holding a claim, the mailbox is *then* replaced, and only then
+  does the process restart, D2 releases those rows to `pending` under the old
+  identity — after the abandonment site has already run. They are unclaimable
+  (D3 is what matters, and it holds) and invisible, but nothing will ever mark
+  them terminal.
+
+  Left as-is on purpose. Closing it costs a new write site: either an
+  `abandon_superseded_events` call on every poll cycle, to tidy rows that are
+  normally absent, or one on the trigger's re-enable path, which is a third
+  place that has to know the mailbox. Neither buys a behaviour change — only
+  the tidiness of rows no query returns. Recorded here so it is not
+  rediscovered as a bug.

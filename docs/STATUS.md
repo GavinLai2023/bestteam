@@ -1090,7 +1090,12 @@
   The review's later phases (Postgres, persistent queue, leader election, KMS,
   RBAC, a `Case`/SLA model) were **not** taken: two conflict with rulings
   already recorded here and in `docs/DECISIONS.md`, and the rest are
-  multi-process concerns on a deliberately single-process poller. Spec:
+  multi-process concerns on a deliberately single-process poller. One inert
+  residual is recorded rather than fixed: a crash holding a claim, followed by
+  a mailbox replacement, followed by the restart, releases those rows to
+  `pending` under the old identity after the abandonment site has already run
+  — unclaimable and invisible, but never marked terminal. Closing it costs a
+  third write site for no behaviour change. Spec:
   `docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
 - **Email automation Phase 2 — Microsoft 365 mailbox connections.** An org on
   Exchange Online could not connect a mailbox at all: `build_org_imap_backend`
