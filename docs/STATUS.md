@@ -6,6 +6,28 @@
 
 ## Done
 
+- **Share-link chat, step 2 — token streaming, progress, Stop, markdown**
+  (2026-08-23, branch `feat/share-chat-streaming`; spec
+  `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`, plan
+  `docs/superpowers/plans/2026-08-23-share-chat-streaming.md`). The five items
+  the 2026-08-22 beta patch deferred. `Pipeline.stream()` /
+  `EngineAdapter.stream()` take optional `on_token`/`should_cancel`; exactly
+  one agent per pipeline streams (last SEQUENTIAL agent, HIERARCHICAL manager,
+  none for a PARALLEL final team), decided at wiring time, with the callables
+  carried in `_TeamState` because `compile()` is cached. `_should_stream`
+  refuses to stream a billable model that would not report usage while
+  streaming. `RunRegistry.publish_transient` fans deltas out to live
+  subscribers without recording them; `runtime._TokenSink` coalesces at 40
+  characters / 80 ms and flushes before every yielded event;
+  `visitor_safe_event` admits `reply_delta`/`reply_reset`. Two new public
+  routes: `GET /api/share/{token}/team` (name plus an honest step count, null
+  for a hierarchical team) and `POST /api/share/{token}/runs/{run_id}/cancel`
+  (no cap refund). Frontend: a streamed bubble replaced by the authoritative
+  reply, anonymous `ShareProgress` dots, a Stop button, the team name in the
+  header, and `MarkdownText` (`react-markdown` + `remark-gfm`, no
+  `rehype-raw`) shared with the audit transcript. Also fixes a live/persisted
+  mismatch: a stopped turn said "something went wrong" live while the backend
+  had stored "stopped before a reply was ready".
 - SDK core: `Agent`/`Team`/`Workflow`, `EngineAdapter` ABC, `LangGraphAdapter`,
   SEQUENTIAL/PARALLEL/HIERARCHICAL collaboration modes.
 - CLI: `init` / `run` / `graph`.
@@ -1743,7 +1765,19 @@
   go into `share_messages` verbatim; `ShareChatPage` recognises them by
   string equality (`lib/shareTraceEvents.ts::fallbackReplyKey`) and renders
   the visitor's language. Change either literal in lockstep, or replace the
-  coupling with a stable code on `ShareMessage`.
+  coupling with a stable code on `ShareMessage`. **There are three now**:
+  step 2 (2026-08-23) added `runtime.py`'s "This conversation was stopped
+  before a reply was ready." for a visitor-stopped turn
+  (`share.stoppedReply`).
+
+- **A cancelled model call goes unmetered.** When a visitor stops a streaming
+  turn, `_run_agent` breaks out of the chunk loop, so the provider's
+  `usage_metadata` -- which arrives in a final chunk -- is never read and that
+  one call is missing from `usage_records`. Bounded to a single call per
+  visitor-initiated stop. Draining the stream to collect the number would
+  spend exactly the tokens the stop exists to save; the alternative worth
+  considering later is an estimate on the cancellation path, the way KB
+  ingestion already estimates embedding tokens.
 
 - **Document parsing is lightweight-only; there is no triage router and no
   heavy stack behind it.** Word documents now carry their heading structure and
@@ -2135,18 +2169,16 @@
 
 ## Next steps / roadmap
 
-- **Share-link chat, step 2** (decided 2026-08-22 with the beta patch;
-  needs its own spec): real token streaming for the *last* agent only —
-  `model.stream()` in `langgraph_adapter`, deltas published to the in-memory
-  `RunRegistry` and **never** written to `trace_events`, `stream_usage` so
-  metering stays whole, cancel checkpoints between deltas; anonymous
-  "step n of N" progress dots only alongside streaming (SEQUENTIAL shows a
-  denominator from a new public `GET /api/share/{token}/team` count,
-  PARALLEL shows n lit at once, HIERARCHICAL has no denominator and falls
-  back to a pulse — names never leave `visitor_safe_event`); a visitor Stop
-  button (new public cancel endpoint); the team name on the visitor page
-  (a disclosure decision); markdown rendering of replies shared with the
-  audit transcript (new dependency, decided against for the beta bundle).
+- **Share-link chat, what step 2 deliberately left out** (2026-08-23; each is
+  scoped in the streaming spec's own "Out of scope" section): streaming on the
+  authenticated monitor page -- the SDK capability is generic and the runtime
+  wiring is one condition, but the monitor frontend has no UI for deltas;
+  streaming a PARALLEL team's agents into separate regions (a different
+  feature with a different UI, and the aggregate join would still rearrange
+  the text at the end); per-step labels or any named progress, which the
+  disclosure boundary bars outright; replaying deltas to a visitor who
+  reconnects mid-run (they get the complete reply on `run_completed`
+  instead); and metering a cancelled call's partial usage (see Known issues).
 - **Finish the frontend UX pass** (audit 2026-08-20, F1–F15). F2–F15 are
   done; F1 (bilingual UI) has its structure and the customer-facing surfaces
   done, with the admin long tail outstanding -- see Known issues above, along

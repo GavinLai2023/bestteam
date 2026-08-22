@@ -374,6 +374,32 @@ backend: `ui/backend/CLAUDE.md`.
   locale-aware (keyed on `i18n.resolvedLanguage`; Chinese dates in Chinese)
   for every panel that shows a date, and `endOfLocalDay` lives there too.
   Spec: `docs/superpowers/specs/2026-08-22-share-chat-beta-patch-design.md`.
+- **The reply streams** (step 2, 2026-08-23; spec:
+  `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`).
+  `reply_delta` events append to a `streamedReply` string that renders in an
+  assistant bubble with a caret, replacing the status line while it fills;
+  `reply_reset` clears it. It is only ever a **preview** -- `run_completed`
+  discards it and appends the authoritative text, so nothing partial is ever
+  kept. Deltas deliberately never join `liveEvents`, so the progress
+  indicator keeps counting agents rather than tokens.
+  `components/ShareProgress.tsx` renders "Step n of N" from the count of
+  `agent_completed` events (which reach this page type-only) against the
+  `steps` the team endpoint supplies, clamped, or an anonymous pulse when
+  `steps` is null -- a position, never a name, a role or a model. The header
+  shows the team's name, falling back to the brand if that fetch fails: a
+  failure there costs the header and the count, never the chat. While a turn
+  is in flight the Send button becomes **Stop**, gated on the run id having
+  actually arrived (the same rule `MonitorPage`'s Stop follows).
+- `components/MarkdownText.tsx` renders an assistant reply as markdown
+  (`react-markdown` + `remark-gfm`, **no `rehype-raw`** -- model output is not
+  trusted markup, so raw HTML stays inert text, which is the reason this is a
+  library rather than hand-rolled). It is shared with
+  `SharedSessionsPanel`'s transcript so an admin sees exactly what the visitor
+  saw. A visitor's own message stays plain text: their typing is not markup.
+- `lib/shareTraceEvents.ts` now carries a **third** backend-persisted English
+  literal, `STOPPED_REPLY`, for a stopped turn. The live view used to render
+  the generic failure line for `run_cancelled` while the backend stored the
+  "stopped" one, so a reload contradicted what the visitor had just seen.
 - Org side, both on **My teams**' team cards only (`pages/wizard/
   SessionsPage.tsx`, gated on `session.pipeline_id != null` — a YAML-only
   demo pipeline has no `PipelineRecord.id` to hang a share link off):

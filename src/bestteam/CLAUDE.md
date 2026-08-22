@@ -39,6 +39,40 @@ sequential and parallel collaboration modes.
   `except BestTeamError: raise` *before* a broad `except Exception` in
   adapter code, otherwise `ConfigurationError`/etc. get masked as a generic
   `EngineError` and the real cause is lost.
+- **Token streaming is a side channel, not an event type.**
+  `Pipeline.stream()` / `EngineAdapter.stream()` take optional
+  `on_token: Callable[[str], None]` and `should_cancel: Callable[[], bool]`.
+  They have to be a side channel because `LangGraphAdapter.stream()` is built
+  on `stream_mode="updates"` and therefore only yields at *node* boundaries --
+  nothing on that path can reach a subscriber while the reply is still being
+  written. Deltas are not TraceEvents and must never be persisted; the
+  authoritative answer is still `run_completed`'s data. Both default to None,
+  which is byte-for-byte today's behaviour. Spec:
+  `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`.
+  Four rules in that design are load-bearing:
+  - **Exactly one agent per pipeline streams** -- the one whose text IS the
+    run's output. `compile()` decides it at wiring time (`streams_final` →
+    `_agent_node(..., streams=)`): the last agent of the last SEQUENTIAL team,
+    a HIERARCHICAL manager, and **none at all** for a PARALLEL final team,
+    whose output is `_aggregate_node`'s join of several contributions,
+    produced with no model call. A HIERARCHICAL manager's *subordinates* never
+    stream: a delegate's answer is working material, not the reply.
+  - **The callables travel in `_TeamState`, not in a node closure**, because
+    `compile()`'s result is cached and reused across runs -- a per-run sink
+    baked into a closure would leak into the next run. Plain fields, no
+    reducer, same lifecycle as `memory_preamble`.
+  - **`_should_stream` refuses to stream a model whose usage would be lost.**
+    A model class declaring a `stream_usage` field (ChatOpenAI and family) is
+    bound with it so the aggregated chunk still carries `usage_metadata`; a
+    langchain fake reports no usage on any path, so it streams freely (which
+    is what makes this testable at $0); anything else falls back to plain
+    `invoke()`. An unstreamed reply is better than an unmetered one.
+  - **Cancellation adds no terminal path.** `should_cancel` is polled between
+    deltas; when it trips, `_run_agent` stops iterating and returns what it
+    has, the node finishes early, and the caller's existing between-events
+    cancellation handling does the rest. The cost, accepted and documented:
+    the provider's usage arrives in a final chunk a cancelled stream never
+    reads, so that one call goes unmetered.
 
 ## Known limitation: CrewAI adapter, DEBATE mode, deployment templates
 
