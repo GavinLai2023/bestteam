@@ -6,7 +6,10 @@ import time
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.language_models.fake_chat_models import (
+    FakeListChatModel,
+    FakeMessagesListChatModel,
+)
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
@@ -70,6 +73,14 @@ class _TeamState(TypedDict):
     # `memory_preamble` -- read by nodes, set once by `_initial_state`, so the
     # cached compiled graph needs no recompile to switch it on.
     diagnostic: bool
+    # Optional per-run side channel for token streaming (see
+    # docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md). Plain
+    # fields, no reducer: set once by `_initial_state`, only ever read by
+    # nodes. They hold callables rather than data because `compile()`'s result
+    # is cached and reused across runs, so a per-run sink baked into a node
+    # closure would leak into the next run.
+    on_token: Optional[Callable[[str], None]]
+    should_cancel: Optional[Callable[[], bool]]
 
 
 def _fake_architect_specification() -> "Specification":
@@ -225,7 +236,9 @@ def _should_stream(model: BaseChatModel) -> bool:
     reports no usage on any path, so streaming it loses nothing; that is also
     what makes this feature testable at zero cost.
     """
-    return _supports_stream_usage(model) or isinstance(model, FakeListChatModel)
+    return _supports_stream_usage(model) or isinstance(
+        model, (FakeListChatModel, FakeMessagesListChatModel)
+    )
 
 
 def _chunk_text(chunk: Any) -> str:
@@ -768,13 +781,17 @@ def _make_delegate_tool(
     return delegate
 
 
-def _agent_node(agent: Agent, *, propagate_context: bool):
+def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False):
     """Build a LangGraph node function that runs a single agent.
 
     `propagate_context` controls whether this agent's output becomes the
     shared context/output for whatever runs next. Sequential agents propagate
     (each hands off to the next); parallel agents don't (they all see the same
     incoming context and only contribute to the final aggregation).
+
+    `streams` marks the one agent per pipeline whose text IS the run's output,
+    so its model calls are streamed token by token when the run supplies a
+    sink (see `_run_agent` and `LangGraphAdapter.compile`).
     """
     if agent.model is None:
         raise ConfigurationError(f"Agent '{agent.name}' has no model configured")
@@ -789,6 +806,9 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
             usage_sink=usage_sink,
             on_event=sub_events.append,
             diagnostic=state.get("diagnostic", False),
+            streams=streams,
+            on_token=state.get("on_token"),
+            should_cancel=state.get("should_cancel"),
         )
 
         update: Dict[str, Any] = {
@@ -804,7 +824,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
     return node
 
 
-def _hierarchical_node(team: Team):
+def _hierarchical_node(team: Team, *, streams: bool = False):
     """Build a LangGraph node function for a HIERARCHICAL team's manager.
 
     The manager is run with one extra `delegate_to_<name>` tool per
@@ -873,6 +893,12 @@ def _hierarchical_node(team: Team):
             usage_sink=usage_sink,
             on_event=sub_events.append,
             diagnostic=diagnostic,
+            # The manager's final text is the run's output, so it is the one
+            # that streams. The delegate tools above deliberately get no sink:
+            # a subordinate's answer is working material, not the reply.
+            streams=streams,
+            on_token=state.get("on_token"),
+            should_cancel=state.get("should_cancel"),
         )
         return {
             "contributions": {manager.name: text},
@@ -885,7 +911,13 @@ def _hierarchical_node(team: Team):
     return node
 
 
-def _initial_state(input: str, memory_preamble: str = "", diagnostic: bool = False) -> _TeamState:
+def _initial_state(
+    input: str,
+    memory_preamble: str = "",
+    diagnostic: bool = False,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> _TeamState:
     return {
         "input": input,
         "context": "",
@@ -895,6 +927,8 @@ def _initial_state(input: str, memory_preamble: str = "", diagnostic: bool = Fal
         "output": "",
         "memory_preamble": memory_preamble,
         "diagnostic": diagnostic,
+        "on_token": on_token,
+        "should_cancel": should_cancel,
     }
 
 
@@ -937,32 +971,45 @@ class LangGraphAdapter(EngineAdapter):
         graph = StateGraph(_TeamState)
         previous_exit = START
 
-        for team in pipeline.steps:
-            entry, exit_ = self._wire_team(graph, team)
+        # Exactly one agent per pipeline streams: the one whose text IS the
+        # run's output. Decided here, at wiring time, so no node has to work
+        # out at runtime whether it happens to be last.
+        teams = list(pipeline.steps)
+        for index, team in enumerate(teams):
+            entry, exit_ = self._wire_team(graph, team, streams_final=index == len(teams) - 1)
             graph.add_edge(previous_exit, entry)
             previous_exit = exit_
 
         graph.add_edge(previous_exit, END)
         return graph.compile()
 
-    def _wire_team(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_team(self, graph: StateGraph, team: Team, streams_final: bool = False) -> Tuple[str, str]:
         if team.mode == CollaborationMode.SEQUENTIAL:
-            return self._wire_sequential(graph, team)
+            return self._wire_sequential(graph, team, streams_final)
         if team.mode == CollaborationMode.PARALLEL:
-            return self._wire_parallel(graph, team)
+            return self._wire_parallel(graph, team, streams_final)
         if team.mode == CollaborationMode.HIERARCHICAL:
-            return self._wire_hierarchical(graph, team)
+            return self._wire_hierarchical(graph, team, streams_final)
         raise NotImplementedError(
             f"Collaboration mode '{team.mode.value}' is not implemented yet "
             f"(team '{team.name}'). SEQUENTIAL, PARALLEL, and HIERARCHICAL are "
             "available; DEBATE is on the roadmap."
         )
 
-    def _wire_sequential(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_sequential(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
         node_names = []
-        for agent in team.agents:
+        for position, agent in enumerate(team.agents):
             node_name = f"{team.name}.{agent.name}"
-            graph.add_node(node_name, _agent_node(agent, propagate_context=True))
+            graph.add_node(
+                node_name,
+                _agent_node(
+                    agent,
+                    propagate_context=True,
+                    streams=streams_final and position == len(team.agents) - 1,
+                ),
+            )
             node_names.append(node_name)
 
         for current, nxt in zip(node_names, node_names[1:]):
@@ -970,7 +1017,12 @@ class LangGraphAdapter(EngineAdapter):
 
         return node_names[0], node_names[-1]
 
-    def _wire_parallel(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_parallel(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
+        # `streams_final` is deliberately unused: a parallel team's output is
+        # `_aggregate_node`'s join of several contributions, produced with no
+        # model call at all, so there is no single reply to stream.
         entry_name = f"{team.name}.__fan_out__"
         exit_name = f"{team.name}.__aggregate__"
 
@@ -985,14 +1037,16 @@ class LangGraphAdapter(EngineAdapter):
 
         return entry_name, exit_name
 
-    def _wire_hierarchical(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_hierarchical(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
         manager = team.manager
         if manager is None:
             raise ConfigurationError(
                 f"Team '{team.name}' uses hierarchical mode and requires a 'manager' agent"
             )
         node_name = f"{team.name}.{manager.name}"
-        graph.add_node(node_name, _hierarchical_node(team))
+        graph.add_node(node_name, _hierarchical_node(team, streams=streams_final))
         return node_name, node_name
 
     def execute(
@@ -1022,17 +1076,32 @@ class LangGraphAdapter(EngineAdapter):
         return compiled.get_graph().draw_mermaid()
 
     def stream(
-        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+        self,
+        compiled: Any,
+        input: str,
+        memory_preamble: str = "",
+        diagnostic: bool = False,
+        *,
+        on_token: Optional[Callable[[str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Iterator[TraceEvent]:
         """Yield an `agent_completed` TraceEvent each time a node finishes.
 
         Built on LangGraph's `stream_mode="updates"`, which yields exactly the
         partial state each node returned — so `contributions` always holds
         just that node's own entry, never a merged view of the whole run.
+
+        `on_token`, if given, receives the final agent's text deltas as they
+        are produced. That is a side channel out of the node on purpose: this
+        generator only yields at node boundaries, so nothing on this path can
+        reach a subscriber while the reply is still being written. Deltas are
+        NOT TraceEvents and are never persisted. `should_cancel` is polled
+        between deltas so a long reply can be stopped mid-generation.
         """
         try:
             for update in compiled.stream(
-                _initial_state(input, memory_preamble, diagnostic), stream_mode="updates"
+                _initial_state(input, memory_preamble, diagnostic, on_token, should_cancel),
+                stream_mode="updates",
             ):
                 for partial in update.values():
                     if not isinstance(partial, dict):

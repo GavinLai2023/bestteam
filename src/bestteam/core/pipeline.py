@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, List, Optional, Sequence
 
 from ..exceptions import BestTeamError, ConfigurationError
 from .team import Team
@@ -129,9 +129,19 @@ class Pipeline:
         user_id: Optional[str] = None,
         memory: Optional["MemoryManager"] = None,
         diagnostic: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Iterator[TraceEvent]:
         """Run the pipeline while yielding live TraceEvents — what the
         monitoring UI subscribes to.
+
+        `on_token`, if given, receives the text deltas of the one agent whose
+        output is the run's answer, as the model produces them. Deltas are not
+        TraceEvents: they are a live-only side channel and must never be
+        persisted -- the authoritative answer is `run_completed`'s data.
+        `should_cancel` is polled between deltas so a long reply can be
+        stopped mid-generation rather than merely ignored. Both default to
+        None → no streaming, current behavior unchanged.
 
         `diagnostic=True` (an admin's diagnostic re-run) makes the adapter also
         emit the prompts, model turns and tool args/results a normal trace
@@ -181,7 +191,12 @@ class Pipeline:
         last_output = ""
         try:
             for event in self._adapter.stream(
-                self._compiled, input, memory_preamble=recall_result.preamble, diagnostic=diagnostic
+                self._compiled,
+                input,
+                memory_preamble=recall_result.preamble,
+                diagnostic=diagnostic,
+                on_token=on_token,
+                should_cancel=should_cancel,
             ):
                 event = dataclasses.replace(event, pipeline=self.name)
                 if event.type == "agent_completed":

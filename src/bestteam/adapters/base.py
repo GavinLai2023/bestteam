@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
 
 if TYPE_CHECKING:
     from ..core.trace import TraceEvent
@@ -38,9 +38,26 @@ class EngineAdapter(ABC):
 
     @abstractmethod
     def stream(
-        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+        self,
+        compiled: Any,
+        input: str,
+        memory_preamble: str = "",
+        diagnostic: bool = False,
+        *,
+        on_token: Optional[Callable[[str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Iterator["TraceEvent"]:
         """Yield TraceEvents live as the pipeline executes, for monitoring/observability.
 
         `memory_preamble` and `diagnostic` behave as in `execute`.
+
+        `on_token`, if given, receives the text deltas of the one agent whose
+        output is the run's answer, as they are produced -- a side channel for
+        engines that can stream, since this iterator itself may only yield at
+        coarse boundaries. Deltas are not TraceEvents and must never be
+        persisted. `should_cancel`, if given, is polled between deltas so a
+        long reply can be stopped mid-generation.
+
+        An adapter whose engine cannot stream may ignore both: the caller
+        falls back to the progress events this iterator already yields.
         """
