@@ -292,3 +292,81 @@ def test_an_adapter_predating_the_streaming_seam_still_works():
 
     assert [e.type for e in events][-1] == "run_completed"
     assert events[-1].data == "LEGACY"
+
+
+def test_an_earlier_agent_is_interruptible_even_though_it_never_streams_text():
+    """`invoke()` blocks until the whole paid generation finishes, so Stop
+    would sit unresponsive through an earlier agent's entire turn."""
+    polled = {"n": 0}
+
+    def should_cancel() -> bool:
+        polled["n"] += 1
+        return False
+
+    deltas: list[str] = []
+    _run_agent(
+        _agent("A reply nobody sees"),
+        "hi",
+        streams=False,
+        on_token=deltas.append,
+        should_cancel=should_cancel,
+    )
+
+    assert polled["n"] > 1, "the call must be consumed in chunks, not invoked in one blocking go"
+    assert deltas == [], "a non-final agent's text must still never reach the visitor"
+
+
+def test_a_stop_reaches_a_delegated_subordinate():
+    """A subordinate's answer is working material, but it can call
+    side-effecting tools and burn model turns, so a stop landing WHILE it runs
+    has to reach it. The guards further up already stop a manager delegating
+    after a stop, so this has to trip during the subordinate's own turn."""
+    ran: list[str] = []
+    subordinate_calls: list[int] = []
+
+    def side_effect() -> str:
+        """Do something."""
+        ran.append("called")
+        return "done"
+
+    class _RecordingModel(_ToolCallingModel):
+        def _generate(self, messages, **kwargs):
+            subordinate_calls.append(1)
+            return super()._generate(messages, **kwargs)
+
+    worker = Agent(
+        name="worker",
+        role="R",
+        goal="G",
+        model=_RecordingModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "side_effect", "args": {}, "id": "1"}]),
+                AIMessage(content="sub done"),
+            ]
+        ),
+        tools=[side_effect],
+    )
+    manager = Agent(
+        name="boss",
+        role="R",
+        goal="G",
+        model=_ToolCallingModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "delegate_to_worker", "args": {"task": "go"}, "id": "m1"}],
+                ),
+                AIMessage(content="MANAGER"),
+            ]
+        ),
+    )
+    pipeline = _pipeline(
+        Team(name="t", agents=[worker], manager=manager, mode=CollaborationMode.HIERARCHICAL)
+    )
+
+    # False until the subordinate's own model has answered once -- so the
+    # manager delegates normally and the stop lands mid-delegation.
+    list(pipeline.stream("hi", should_cancel=lambda: bool(subordinate_calls)))
+
+    assert subordinate_calls, "the subordinate must actually have been delegated to"
+    assert ran == [], "its tool must not run after the stop"

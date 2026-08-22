@@ -546,8 +546,16 @@ def _run_agent(
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
 
-    stream_reply = streams and on_token is not None and _should_stream(raw_model)
-    if stream_reply and _supports_stream_usage(raw_model):
+    # Two separate questions. `forward_text` is "may this agent's text reach
+    # the visitor" -- true only for the one agent wired to stream.
+    # `stream_call` is "must this call be interruptible", which is true for
+    # every agent in a run that supplied a cancel check: `invoke()` blocks
+    # until the whole paid generation finishes, so Stop would sit unresponsive
+    # through an earlier agent's entire turn (Codex review finding). A
+    # non-forwarding agent still consumes its chunks; it just drops the text.
+    forward_text = streams and on_token is not None
+    stream_call = (forward_text or should_cancel is not None) and _should_stream(raw_model)
+    if stream_call and _supports_stream_usage(raw_model):
         # Bound after bind_tools: `.bind()` on a RunnableBinding merges kwargs,
         # so both bindings survive. Without this the aggregated chunk carries
         # no `usage_metadata` and the run's largest call goes unmetered.
@@ -568,7 +576,7 @@ def _run_agent(
             # effect (Codex review finding). An empty response settles the
             # loop: no tool calls, so the agent returns what it has.
             return AIMessage(content="")
-        if not stream_reply or on_token is None:
+        if not stream_call:
             return bound_model.invoke(msgs)
         full = None
         emitted = False
@@ -577,13 +585,13 @@ def _run_agent(
             full = chunk if full is None else full + chunk
             if getattr(chunk, "tool_call_chunks", None) and not tool_call_seen:
                 tool_call_seen = True
-                if emitted:
+                if emitted and on_token is not None:
                     # Text already went out for what turns out to be a tool
                     # call -- tell the consumer to discard it. Providers
                     # normally emit tool calls from the first chunk, so this is
                     # insurance rather than a common path.
                     on_token(STREAM_RESET)
-            if not tool_call_seen:
+            if forward_text and on_token is not None and not tool_call_seen:
                 text = _chunk_text(chunk)
                 if text:
                     on_token(text)
@@ -727,6 +735,7 @@ def _make_delegate_tool(
     on_event: Optional[Callable[[TraceEvent], None]] = None,
     manager_name: str = "",
     diagnostic: bool = False,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
@@ -775,6 +784,11 @@ def _make_delegate_tool(
             usage_sink=usage_sink,
             on_event=on_event,
             diagnostic=diagnostic,
+            # Cancellation follows the delegation; the token sink deliberately
+            # does not. A subordinate's answer is working material, not the
+            # reply -- but it can call side-effecting tools and burn model
+            # turns, so a stop has to reach it (Codex review finding).
+            should_cancel=should_cancel,
         )
         if on_event is not None:
             on_event(
@@ -902,6 +916,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
                 on_event=sub_events.append,
                 manager_name=manager.name,
                 diagnostic=diagnostic,
+                should_cancel=state.get("should_cancel"),
             )
             for agent in team.agents
         ]

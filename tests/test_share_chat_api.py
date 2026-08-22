@@ -961,3 +961,25 @@ def test_only_the_teams_the_pipeline_steps_through_are_counted():
     }
 
     assert _visible_step_count(config) == 2
+
+
+_NAMED_CONFIG = {
+    "name": "contract_review_v2",
+    "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+    "teams": [
+        {"name": "tm", "display_name": "Contract Review Team", "agents": ["a"], "mode": "sequential"}
+    ],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def test_the_visitor_sees_the_friendly_team_name_not_the_identifier(client):
+    token = _make_link_with_config(_NAMED_CONFIG)
+
+    assert client.get(f"/api/share/{token}/team").json()["name"] == "Contract Review Team"
+
+
+def test_the_technical_name_is_the_fallback_when_there_is_no_display_name(client):
+    token, _ = _make_link()
+
+    assert client.get(f"/api/share/{token}/team").json()["name"] == "greeter"

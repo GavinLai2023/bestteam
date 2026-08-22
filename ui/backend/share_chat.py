@@ -421,7 +421,32 @@ def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
         # Same detail as every other failure here -- see send_share_message.
         raise HTTPException(status_code=404, detail=_UNAVAILABLE)
 
-    return {"name": pipeline_record.name, "steps": _visible_step_count(pipeline_record.config)}
+    return {
+        "name": _display_name(pipeline_record),
+        "steps": _visible_step_count(pipeline_record.config),
+    }
+
+
+def _display_name(pipeline_record: PipelineRecord) -> str:
+    """The team's customer-facing name.
+
+    `PipelineRecord.name` is the technical identifier the YAML, the API and
+    the admin surfaces use (`contract_review_v2`); a builder-created team also
+    carries a friendly `teams[0].display_name`, which is what every other
+    customer-facing surface shows (`main.py::_team_display_name`). A visitor
+    on a shared link is the most customer-facing audience there is, so it must
+    not be the one place an internal identifier leaks out (Codex review
+    finding). Falls back to the technical name when there is no display name,
+    exactly as those surfaces do.
+    """
+    config = pipeline_record.config
+    if isinstance(config, dict):
+        teams = config.get("teams") or []
+        if teams and isinstance(teams[0], dict):
+            display_name = teams[0].get("display_name")
+            if display_name:
+                return str(display_name)
+    return pipeline_record.name
 
 
 def _visible_step_count(config: Optional[dict]) -> Optional[int]:

@@ -497,3 +497,22 @@ A third round found two more, neither about cancellation:
    adapter unconditionally, which raises `TypeError` on an adapter written
    against the older signature. The engine seam is a documented extension
    point, so the two arguments are now passed only when actually in use.
+
+A fourth round found three more, two of them about how far Stop reaches:
+
+7. **§1.3/§1.6** — "which agent streams" and "which agent is interruptible"
+   turned out to be different questions. Streaming was gated on `streams`, so
+   an *earlier* agent still blocked in `invoke()` and Stop sat unresponsive
+   for that agent's entire paid turn. `_run_agent` now separates
+   `forward_text` (only the one wired agent's text may reach the visitor)
+   from `stream_call` (any agent in a run that supplied a cancel check
+   consumes its call in chunks, discarding the text).
+8. **§1.6** — cancellation did not follow a HIERARCHICAL delegation:
+   `_make_delegate_tool` ran the subordinate's `_run_agent` without the cancel
+   check, so it kept generating and could still run its own side-effecting
+   tools after a stop. The check now travels with the delegation; the token
+   sink deliberately still does not.
+9. **§3.1** — the endpoint returned `PipelineRecord.name`, the technical
+   identifier, where every other customer-facing surface shows
+   `teams[0].display_name`. A visitor on a shared link is the most
+   customer-facing audience there is.

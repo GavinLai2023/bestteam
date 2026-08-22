@@ -67,8 +67,16 @@ sequential and parallel collaboration modes.
     langchain fake reports no usage on any path, so it streams freely (which
     is what makes this testable at $0); anything else falls back to plain
     `invoke()`. An unstreamed reply is better than an unmetered one.
+  - **Streaming an agent and being able to stop it are different questions.**
+    `forward_text` (only the wired agent's text may reach the consumer) is
+    separate from `stream_call` (any agent in a run that supplied a cancel
+    check consumes its call in chunks and discards the text) -- otherwise an
+    earlier agent blocks in `invoke()` and Stop is unresponsive for its whole
+    paid turn. Cancellation also travels into a HIERARCHICAL delegation; the
+    token sink deliberately does not.
   - **Cancellation adds no terminal path.** `should_cancel` is polled between
-    deltas; when it trips, `_run_agent` stops iterating and returns what it
+    deltas, and again before a tool batch, before each individual call in it,
+    and before any new provider request; when it trips, `_run_agent` stops iterating and returns what it
     has, the node finishes early, and the caller's existing between-events
     cancellation handling does the rest. The cost, accepted and documented:
     the provider's usage arrives in a final chunk a cancelled stream never
