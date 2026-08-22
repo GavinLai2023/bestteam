@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailConnect from '../../components/EmailConnect'
 import TeamFlow from '../../components/TeamFlow'
@@ -8,6 +9,7 @@ import type { TraceEvent, WizardOutletContext } from '../../lib/types'
 type Status = 'idle' | 'running' | 'completed' | 'failed'
 
 export default function PreviewPage() {
+  const { t } = useTranslation()
   const { session, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
 
@@ -19,17 +21,17 @@ export default function PreviewPage() {
 
   useEffect(() => () => wsRef.current?.close(), [])
 
-  if (loading) return <p className="hint">Loading…</p>
+  if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
 
   if (!session.specification_json) {
     return (
       <div className="wizard-card">
-        <h2>Meet your team</h2>
-        <p className="subtitle">We need a bit more information first.</p>
+        <h2>{t('wizard.preview.title')}</h2>
+        <p className="subtitle">{t('wizard.needMore')}</p>
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate('/wizard')}>
-            Start over
+            {t('common.startOver')}
           </button>
         </div>
       </div>
@@ -47,13 +49,13 @@ export default function PreviewPage() {
   const titleFor = (event: TraceEvent) => {
     switch (event.type) {
       case 'run_started':
-        return 'Your team got started'
+        return t('traceEvents.started')
       case 'agent_completed':
-        return `${friendlyName(event.agent ?? '')} finished their part`
+        return t('traceEvents.agentDone', { agent: friendlyName(event.agent ?? '') })
       case 'run_completed':
-        return 'All done!'
+        return t('traceEvents.completed')
       case 'run_failed':
-        return 'Something went wrong'
+        return t('traceEvents.failed')
       default:
         return event.type
     }
@@ -80,12 +82,12 @@ export default function PreviewPage() {
       }
       ws.onerror = () => {
         setStatus('failed')
-        setError('Lost connection to the backend while your team was working. Please try again.')
+        setError(t('wizard.preview.lostConnection'))
       }
       ws.onclose = () => {
         setStatus((current) => {
           if (current === 'running') {
-            setError('Lost connection to the backend while your team was working. Please try again.')
+            setError(t('wizard.preview.lostConnection'))
             return 'failed'
           }
           return current
@@ -99,10 +101,8 @@ export default function PreviewPage() {
 
   return (
     <div className="wizard-card">
-      <h2>Meet your team</h2>
-      <p className="subtitle">
-        Here's the team we've put together for "{spec.name}". Try giving them a real task below.
-      </p>
+      <h2>{t('wizard.preview.title')}</h2>
+      <p className="subtitle">{t('wizard.preview.subtitle', { name: spec.name })}</p>
 
       {error && <p className="banner banner-error">{error}</p>}
 
@@ -112,30 +112,27 @@ export default function PreviewPage() {
         <>
           <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
           <EmailConnect />
-          <p className="hint" style={{ marginTop: 8 }}>
-            Connect your mailbox to try the team against your real inbox below — or skip for now and
-            connect before you go live.
-          </p>
+          <p className="hint" style={{ marginTop: 8 }}>{t('wizard.preview.mailboxHint')}</p>
         </>
       )}
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 
-      <h3>Try them out</h3>
+      <h3>{t('wizard.preview.tryThemOut')}</h3>
       <div className="field">
-        <label htmlFor="test-input">A real task or message for your team</label>
+        <label htmlFor="test-input">{t('wizard.preview.taskLabel')}</label>
         <textarea
           id="test-input"
           rows={3}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g. A customer is asking how to reset their password and is getting frustrated."
+          placeholder={t('wizard.preview.taskPlaceholder')}
         />
       </div>
 
       <div className="wizard-actions">
         <button className="btn btn-primary" onClick={run} disabled={!input.trim() || status === 'running'}>
-          {status === 'running' ? 'Working…' : 'Run this through your team'}
+          {status === 'running' ? t('common.working') : t('wizard.preview.run')}
         </button>
       </div>
 
@@ -165,7 +162,7 @@ export default function PreviewPage() {
           onClick={() => navigate(`/wizard/${sessionId}/confirm`)}
           disabled={status === 'running'}
         >
-          Continue
+          {t('common.continue')}
         </button>
       </div>
     </div>

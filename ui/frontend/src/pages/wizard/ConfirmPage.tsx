@@ -55,17 +55,17 @@ export default function ConfirmPage() {
     }
   }, [session?.requirements_json])
 
-  if (loading) return <p className="hint">Loading…</p>
+  if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
 
   if (!session.specification_json) {
     return (
       <div className="wizard-card">
-        <h2>Confirm your team</h2>
-        <p className="subtitle">We need a bit more information first.</p>
+        <h2>{t('wizard.confirm.title')}</h2>
+        <p className="subtitle">{t('wizard.needMore')}</p>
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate('/wizard')}>
-            Start over
+            {t('common.startOver')}
           </button>
         </div>
       </div>
@@ -143,11 +143,8 @@ export default function ConfirmPage() {
 
   return (
     <div className="wizard-card">
-      <h2>Anything to adjust?</h2>
-      <p className="subtitle">
-        Here's your team again. If something's off, describe the change and we'll redesign it — you can always go
-        back to try it out again.
-      </p>
+      <h2>{t('wizard.confirm.adjustTitle')}</h2>
+      <p className="subtitle">{t('wizard.confirm.adjustSubtitle')}</p>
 
       {catalogUnavailable && (
         <div className="banner banner-error">
@@ -166,7 +163,7 @@ export default function ConfirmPage() {
 
       {history.length > 0 && (
         <div className="banner banner-info" style={{ marginTop: 16 }}>
-          <strong>Adjustments so far:</strong>
+          <strong>{t('wizard.confirm.historyHeading')}</strong>
           <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
             {history.map((entry, i) => (
               <li key={i}>{entry.note}</li>
@@ -177,14 +174,14 @@ export default function ConfirmPage() {
 
       <div className="field" style={{ marginTop: 16 }}>
         <label htmlFor="solution-feedback">
-          What should change? <span className="hint">(optional)</span>
+          {t('wizard.confirm.changeLabel')} <span className="hint">{t('wizard.optional')}</span>
         </label>
         <textarea
           id="solution-feedback"
           rows={3}
           value={feedback}
           onChange={(e) => setFeedback(e.target.value)}
-          placeholder="e.g. Have the team check our FAQ document before replying."
+          placeholder={t('wizard.confirm.changePlaceholder')}
         />
         <button
           type="button"
@@ -192,26 +189,28 @@ export default function ConfirmPage() {
           style={{ marginTop: 4 }}
           onClick={() => navigate(`/wizard/${sessionId}/documents`)}
         >
-          Need to add or update a document? Upload it here
+          {t('wizard.confirm.uploadLink')}
         </button>
       </div>
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
-          {busy ? 'Updating…' : 'Apply this change'}
+          {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
         </button>
       </div>
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 
       <button type="button" className="btn-link" onClick={() => setShowRequirements((v) => !v)}>
-        {showRequirements ? 'Hide' : 'Show'} what we understood about your business
+        {showRequirements
+          ? t('wizard.confirm.hideUnderstanding')
+          : t('wizard.confirm.showUnderstanding')}
       </button>
 
       {showRequirements && (
         <div style={{ marginTop: 16 }}>
           {!session.requirements_json ? (
             <div>
-              <p className="hint">No summary was generated for this session.</p>
+              <p className="hint">{t('wizard.confirm.noSummary')}</p>
               {reqError && <p className="banner banner-error">{reqError}</p>}
               <div className="wizard-actions">
                 <button
@@ -219,7 +218,7 @@ export default function ConfirmPage() {
                   onClick={generateRequirements}
                   disabled={catalogNotReady || reqBusy}
                 >
-                  {reqBusy ? 'Generating…' : 'Generate summary'}
+                  {reqBusy ? t('wizard.confirm.generating') : t('wizard.confirm.generate')}
                 </button>
               </div>
             </div>
@@ -229,7 +228,7 @@ export default function ConfirmPage() {
 
               {reqDraft.clarifying_questions.length > 0 && (
                 <div className="banner banner-info">
-                  <strong>A couple of quick questions:</strong>
+                  <strong>{t('wizard.confirm.clarifyHeading')}</strong>
                   <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
                     {reqDraft.clarifying_questions.map((q, i) => (
                       <li key={i}>{q}</li>
@@ -239,7 +238,7 @@ export default function ConfirmPage() {
               )}
 
               <div className="field">
-                <label htmlFor="summary">Summary</label>
+                <label htmlFor="summary">{t('wizard.confirm.summaryLabel')}</label>
                 <textarea
                   id="summary"
                   rows={3}
@@ -249,57 +248,58 @@ export default function ConfirmPage() {
               </div>
 
               <div className="field">
-                <label>Pain points</label>
+                <label>{t('wizard.confirm.painPoints')}</label>
                 <BulletEditor
                   items={reqDraft.pain_points}
                   onChange={(items) => setReqDraft({ ...reqDraft, pain_points: items })}
-                  placeholder="e.g. replies take too long"
+                  placeholder={t('wizard.confirm.painPointsPlaceholder')}
                 />
               </div>
 
               <div className="field">
-                <label>Goals</label>
+                <label>{t('wizard.confirm.goals')}</label>
                 <BulletEditor
                   items={reqDraft.goals}
                   onChange={(items) => setReqDraft({ ...reqDraft, goals: items })}
-                  placeholder="e.g. reply within an hour"
+                  placeholder={t('wizard.confirm.goalsPlaceholder')}
                 />
               </div>
 
               <div className="field">
-                <label>What does success look like?</label>
+                <label>{t('wizard.confirm.successCriteria')}</label>
                 <BulletEditor
                   items={reqDraft.success_criteria}
                   onChange={(items) => setReqDraft({ ...reqDraft, success_criteria: items })}
-                  placeholder="e.g. fewer escalations"
+                  placeholder={t('wizard.confirm.successPlaceholder')}
                 />
               </div>
 
               <div className="field">
-                <label>Constraints</label>
+                <label>{t('wizard.confirm.constraints')}</label>
                 <BulletEditor
                   items={reqDraft.constraints}
                   onChange={(items) => setReqDraft({ ...reqDraft, constraints: items })}
-                  placeholder="e.g. must stay in English"
+                  placeholder={t('wizard.confirm.constraintsPlaceholder')}
                 />
               </div>
 
               <div className="wizard-actions">
                 <button className="btn btn-secondary" onClick={saveRequirements} disabled={reqBusy}>
-                  {reqBusy ? 'Saving…' : 'Save changes'}
+                  {reqBusy ? t('wizard.confirm.saving') : t('wizard.confirm.save')}
                 </button>
               </div>
 
               <div className="field" style={{ marginTop: 12 }}>
                 <label htmlFor="req-feedback">
-                  Not quite right? Tell us what to change <span className="hint">(optional)</span>
+                  {t('wizard.confirm.reqFeedbackLabel')}{' '}
+                  <span className="hint">{t('wizard.optional')}</span>
                 </label>
                 <textarea
                   id="req-feedback"
                   rows={2}
                   value={reqFeedback}
                   onChange={(e) => setReqFeedback(e.target.value)}
-                  placeholder="e.g. We also use Zendesk for tickets, and replies must stay under 150 words."
+                  placeholder={t('wizard.confirm.reqFeedbackPlaceholder')}
                 />
               </div>
               <div className="wizard-actions">
@@ -308,7 +308,7 @@ export default function ConfirmPage() {
                   onClick={regenerateRequirements}
                   disabled={catalogNotReady || !reqFeedback.trim() || reqBusy}
                 >
-                  {reqBusy ? 'Thinking…' : 'Regenerate summary'}
+                  {reqBusy ? t('wizard.confirm.thinking') : t('wizard.confirm.regenerate')}
                 </button>
               </div>
             </>
@@ -320,10 +320,10 @@ export default function ConfirmPage() {
 
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/preview`)}>
-          Back to preview
+          {t('wizard.confirm.backToPreview')}
         </button>
         <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/deploy`)}>
-          Continue to deploy
+          {t('wizard.confirm.continueToDeploy')}
         </button>
       </div>
     </div>

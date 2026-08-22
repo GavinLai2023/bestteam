@@ -29,11 +29,15 @@ export const en = {
     cancel: 'Cancel',
     delete: 'Delete',
     remove: 'Remove',
+    addItem: '+ add',
     confirmTitle: 'Are you sure?',
     loading: 'Loading…',
     copy: 'Copy',
     copied: 'Copied!',
     copyFailed: "Couldn't copy",
+    continue: 'Continue',
+    working: 'Working…',
+    startOver: 'Start over',
   },
   runStatus: {
     running: 'Running',
@@ -130,6 +134,178 @@ export const en = {
     // The JSON editor's only feedback was "Not valid JSON", which does not say
     // where to look in an 18-row document (audit finding F15).
     invalidJson: 'Not valid JSON — {{detail}}',
+  },
+  // The five-stage Build-a-team wizard. Its stage pages kept English literals
+  // long after the rest of the app was extracted, so a Chinese customer met a
+  // Chinese nav sitting above an entirely English wizard -- the one surface
+  // where that matters most, since it is the product's front door.
+  //
+  // Where a literal duplicated a string this file already had (the trace-event
+  // titles PreviewPage re-implemented, the model-catalog errors IntentPage and
+  // DocumentsPage each hardcoded), the page now reads the existing key rather
+  // than getting a second copy here.
+  wizard: {
+    title: 'Intent in, your best AI team out',
+    subtitle: "Answer a few questions and we'll design, test, and launch a custom AI team for you.",
+    sessionLoadFailed: "Couldn't load this session: {{detail}}",
+    optional: '(optional)',
+    needMore: 'We need a bit more information first.',
+    teamMode: {
+      sequential: 'Step by step',
+      parallel: 'All at once',
+      hierarchical: 'Led by a manager',
+    },
+    confirm: {
+      title: 'Confirm your team',
+      adjustTitle: 'Anything to adjust?',
+      adjustSubtitle:
+        "Here's your team again. If something's off, describe the change and we'll redesign it — you can always go back to try it out again.",
+      historyHeading: 'Adjustments so far:',
+      changeLabel: 'What should change?',
+      changePlaceholder: 'e.g. Have the team check our FAQ document before replying.',
+      uploadLink: 'Need to add or update a document? Upload it here',
+      apply: 'Apply this change',
+      updating: 'Updating…',
+      // Two whole sentences, not a 'Show'/'Hide' word swapped into one: a
+      // translated fragment assembled at runtime only reads correctly in the
+      // language whose grammar the split was chosen for.
+      showUnderstanding: 'Show what we understood about your business',
+      hideUnderstanding: 'Hide what we understood about your business',
+      noSummary: 'No summary was generated for this session.',
+      generate: 'Generate summary',
+      generating: 'Generating…',
+      clarifyHeading: 'A couple of quick questions:',
+      summaryLabel: 'Summary',
+      painPoints: 'Pain points',
+      painPointsPlaceholder: 'e.g. replies take too long',
+      goals: 'Goals',
+      goalsPlaceholder: 'e.g. reply within an hour',
+      successCriteria: 'What does success look like?',
+      successPlaceholder: 'e.g. fewer escalations',
+      constraints: 'Constraints',
+      constraintsPlaceholder: 'e.g. must stay in English',
+      save: 'Save changes',
+      saving: 'Saving…',
+      reqFeedbackLabel: 'Not quite right? Tell us what to change',
+      reqFeedbackPlaceholder:
+        'e.g. We also use Zendesk for tickets, and replies must stay under 150 words.',
+      regenerate: 'Regenerate summary',
+      thinking: 'Thinking…',
+      backToPreview: 'Back to preview',
+      continueToDeploy: 'Continue to deploy',
+    },
+    steps: {
+      intent: 'Your challenge',
+      documents: 'Your documents',
+      preview: 'Meet your team',
+      confirm: 'Confirm',
+      deploy: 'Go live',
+    },
+    intent: {
+      title: 'Tell us about your challenge',
+      subtitle:
+        "Describe what you're hoping an AI team could take off your plate. No technical detail needed — plain language is perfect.",
+      uploadRecording: 'Upload interview recording',
+      replaceRecording: 'Replace recording',
+      transcribing: 'Transcribing interview…',
+      extracting: 'Extracting key points…',
+      seeTranscript: 'See full transcript',
+      orDescribe: 'or describe it below',
+      intentLabel: 'What do you want help with?',
+      intentPlaceholder:
+        "e.g. We get dozens of customer support emails a day and can't keep up with replies.",
+      asIsLabel: 'How do you handle this today?',
+      asIsPlaceholder:
+        'e.g. One person reads every email and replies manually using a few canned templates.',
+      start: 'Start building my team',
+      starting: 'Starting…',
+      creating: 'Setting things up…',
+      requirements: 'Getting to know your business…',
+      loadingModels: 'Loading available models…',
+    },
+    documents: {
+      title: 'Add your documents',
+      subtitle:
+        'If your AI team should be able to answer questions from your own files — policies, FAQs, manuals — upload them here. Optional: you can always skip this and add documents later.',
+      nameLabel: 'What should we call these documents?',
+      nameHint: "(required if you're uploading)",
+      namePlaceholder: 'e.g. Product policies',
+      nameRequired: 'Give your documents a short name first (e.g. "Product policies").',
+      descriptionLabel: "What's in these documents? (one sentence)",
+      descriptionPlaceholder: 'e.g. Refund, delivery and warranty policies for our online shop',
+      descriptionHint: 'This helps your AI team know when to look here for an answer.',
+      searchQuality: 'Search quality',
+      standard: 'Standard',
+      enhanced: 'Enhanced',
+      searchQualityHint:
+        'Enhanced finds more relevant answers in your documents. Takes a little longer to index.',
+      chooseFiles: 'Choose files…',
+      removeFile: 'Remove {{name}}',
+      skip: 'Skip for now',
+      uploading: 'Uploading your documents…',
+      ingesting: 'Processing your documents…',
+      generating: 'Putting your team together…',
+      // The re-upload dialog. `detail` is the backend's own 409 message,
+      // describing the collection as it stands today; the sentence after it
+      // says what this upload would make of it, so the one dialog the customer
+      // has to answer carries both halves of the change.
+      existsTitle: 'This collection already exists',
+      existsBody: '{{detail}} Either way it will be re-indexed with {{quality}} search.',
+      existsReplace: 'Replace everything',
+      existsAdd: 'Add to it',
+      stillProcessing:
+        'Your documents are still being processed — this is taking longer than expected. They’re safely uploaded; come back in a moment and continue from here.',
+      processingFailedDetail: 'Processing failed: {{detail}}',
+      processingFailed: 'Processing your documents failed.',
+    },
+    preview: {
+      title: 'Meet your team',
+      subtitle: 'Here’s the team we’ve put together for "{{name}}". Try giving them a real task below.',
+      mailboxHint:
+        'Connect your mailbox to try the team against your real inbox below — or skip for now and connect before you go live.',
+      tryThemOut: 'Try them out',
+      taskLabel: 'A real task or message for your team',
+      taskPlaceholder:
+        'e.g. A customer is asking how to reset their password and is getting frustrated.',
+      run: 'Run this through your team',
+      lostConnection:
+        'Lost connection to the backend while your team was working. Please try again.',
+    },
+    deploy: {
+      title: 'Go live',
+      designFirst: 'Design your team first, then come back here to launch it.',
+      readyTitle: 'Ready to go live?',
+      readySubtitle:
+        'Once you launch, "{{name}}" will be available to handle real requests. You can always come back and adjust it later.',
+      launch: 'Launch my team',
+      launching: 'Launching…',
+      connectMailboxFirst: 'Connect your mailbox above before you can launch this team.',
+      liveTitle: 'Your team is live 🎉',
+      liveBody: '"{{name}}" is up and running and ready to take on real requests.',
+      adjust: 'Make more adjustments',
+    },
+  },
+  // The "My teams" page. It lives under pages/wizard/ but is its own route
+  // rather than a wizard stage, so its strings sit outside `wizard`.
+  myTeams: {
+    subtitle: "Pick up where you left off, or make adjustments to a team you've already built.",
+    empty: 'No teams yet — build one to see it here.',
+    statusLive: 'Live',
+    statusInProgress: 'In Progress',
+    statusHelp: 'What does {{status}} mean?',
+    explainLive: 'Live — this team is deployed and ready for your organisation to use.',
+    explainInProgress:
+      "Still being built — you're designing, reviewing, or trying out this team before making it live.",
+    // Short forms of the Activity page's automation statuses, for a one-line
+    // card tag rather than the full status block that page shows.
+    automationActive: 'Automation on — watching for new email',
+    automationPausedCap: 'Automation paused — daily limit reached',
+    automationError: 'Automation problem — checking mailbox',
+    automationDisabled: 'Automation paused',
+    updated: 'Updated {{when}}',
+    sharedSessions: 'Shared sessions',
+    deleteTitle: 'Delete "{{name}}"?',
+    deleteBody: "This can't be undone.",
   },
   modelCatalog: {
     // Shared by every wizard stage that needs a real model to generate with.

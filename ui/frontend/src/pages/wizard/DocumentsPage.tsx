@@ -1,16 +1,11 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { useConfirm } from '../../lib/useConfirm'
 import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
 import type { WizardOutletContext } from '../../lib/types'
-
-const STAGE_LABELS: Record<string, string> = {
-  uploading: 'Uploading your documents…',
-  ingesting: 'Processing your documents…',
-  generating: 'Putting your team together…',
-}
 
 type Stage = null | 'uploading' | 'ingesting' | 'generating'
 
@@ -50,6 +45,7 @@ function slugify(label: string): string {
 }
 
 export default function DocumentsPage() {
+  const { t } = useTranslation()
   const [confirmNode, confirm] = useConfirm()
   const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
@@ -81,7 +77,7 @@ export default function DocumentsPage() {
       .catch(() => setSmartSearchAvailable(false))
   }, [])
 
-  if (loading) return <p className="hint">Loading…</p>
+  if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
 
   const addFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -89,6 +85,13 @@ export default function DocumentsPage() {
     e.target.value = '' // reset so the same file can be re-selected
     if (picked.length === 0) return
     setFiles((prev) => [...prev, ...picked])
+  }
+
+  const stageLabel = () => {
+    if (stage === 'uploading') return t('wizard.documents.uploading')
+    if (stage === 'ingesting') return t('wizard.documents.ingesting')
+    if (stage === 'generating') return t('wizard.documents.generating')
+    return t('common.working')
   }
 
   const removeFile = (index: number) => {
@@ -100,7 +103,7 @@ export default function DocumentsPage() {
     const useFiles = !skip && files.length > 0
     const slug = slugify(label)
     if (useFiles && !slug) {
-      setError('Give your documents a short name first (e.g. "Product policies").')
+      setError(t('wizard.documents.nameRequired'))
       return
     }
 
@@ -126,12 +129,15 @@ export default function DocumentsPage() {
           // existed the only way to keep the documents already there was to
           // find them and upload them all again.
           const answer = await confirm({
-            title: 'This collection already exists',
-            body: `${err.message} Either way it will be re-indexed with ${
-              smartSearchEnabled ? 'Enhanced' : 'Standard'
-            } search.`,
-            confirmLabel: 'Replace everything',
-            alternateLabel: 'Add to it',
+            title: t('wizard.documents.existsTitle'),
+            body: t('wizard.documents.existsBody', {
+              detail: err.message,
+              quality: smartSearchEnabled
+                ? t('wizard.documents.enhanced')
+                : t('wizard.documents.standard'),
+            }),
+            confirmLabel: t('wizard.documents.existsReplace'),
+            alternateLabel: t('wizard.documents.existsAdd'),
             destructive: true,
           })
           if (!answer) {
@@ -163,17 +169,18 @@ export default function DocumentsPage() {
           // Distinct from success and from failure: the documents are still
           // being processed, so don't generate a spec against a knowledge
           // base that isn't queryable yet -- and don't claim it failed either.
-          setNotice(
-            'Your documents are still being processed — this is taking longer than expected. ' +
-              'They’re safely uploaded; come back in a moment and continue from here.',
-          )
+          setNotice(t('wizard.documents.stillProcessing'))
           setBusy(false)
           setStage(null)
           return
         }
         if (job.status === 'failed') {
           const detail = job.errors[0]?.error
-          setError(detail ? `Processing failed: ${detail}` : 'Processing your documents failed.')
+          setError(
+            detail
+              ? t('wizard.documents.processingFailedDetail', { detail })
+              : t('wizard.documents.processingFailed'),
+          )
           setBusy(false)
           setStage(null)
           return
@@ -213,20 +220,15 @@ export default function DocumentsPage() {
 
   return (
     <div className="wizard-card">
-      <h2>Add your documents</h2>
-      <p className="subtitle">
-        If your AI team should be able to answer questions from your own files — policies, FAQs, manuals — upload
-        them here. Optional: you can always skip this and add documents later.
-      </p>
+      <h2>{t('wizard.documents.title')}</h2>
+      <p className="subtitle">{t('wizard.documents.subtitle')}</p>
 
       {catalogUnavailable && (
         <div className="banner banner-error">
-          {catalogFailed
-            ? "Couldn't load the available AI models. Check your connection and try again."
-            : 'No AI models are available yet. Contact your administrator, or try again.'}
+          {catalogFailed ? t('modelCatalog.loadFailed') : t('modelCatalog.empty')}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
             <button className="btn btn-secondary" onClick={retryCatalog}>
-              Try again
+              {t('common.tryAgain')}
             </button>
           </div>
         </div>
@@ -239,7 +241,7 @@ export default function DocumentsPage() {
           {error}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
             <button className="btn btn-secondary" onClick={() => proceed(false)} disabled={busy}>
-              Try again
+              {t('common.tryAgain')}
             </button>
           </div>
         </div>
@@ -247,37 +249,38 @@ export default function DocumentsPage() {
 
       <div className="field">
         <label htmlFor="doc-label">
-          What should we call these documents? <span className="hint">(required if you're uploading)</span>
+          {t('wizard.documents.nameLabel')}{' '}
+          <span className="hint">{t('wizard.documents.nameHint')}</span>
         </label>
         <input
           id="doc-label"
           type="text"
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          placeholder="e.g. Product policies"
+          placeholder={t('wizard.documents.namePlaceholder')}
           disabled={busy}
         />
       </div>
 
       <div className="field">
         <label htmlFor="doc-description">
-          What's in these documents? (one sentence) <span className="hint">(optional)</span>
+          {t('wizard.documents.descriptionLabel')} <span className="hint">{t('wizard.optional')}</span>
         </label>
         <input
           id="doc-description"
           type="text"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="e.g. Refund, delivery and warranty policies for our online shop"
+          placeholder={t('wizard.documents.descriptionPlaceholder')}
           maxLength={500}
           disabled={busy}
         />
-        <p className="hint">This helps your AI team know when to look here for an answer.</p>
+        <p className="hint">{t('wizard.documents.descriptionHint')}</p>
       </div>
 
       {smartSearchAvailable && (
         <div className="field">
-          <label>Search quality</label>
+          <label>{t('wizard.documents.searchQuality')}</label>
           <div className="wizard-actions" style={{ justifyContent: 'flex-start', gap: 8, marginBottom: 4 }}>
             <button
               type="button"
@@ -285,7 +288,7 @@ export default function DocumentsPage() {
               onClick={() => setSmartSearch(false)}
               disabled={busy}
             >
-              Standard
+              {t('wizard.documents.standard')}
             </button>
             <button
               type="button"
@@ -293,18 +296,16 @@ export default function DocumentsPage() {
               onClick={() => setSmartSearch(true)}
               disabled={busy}
             >
-              Enhanced
+              {t('wizard.documents.enhanced')}
             </button>
           </div>
-          <p className="hint">
-            Enhanced finds more relevant answers in your documents. Takes a little longer to index.
-          </p>
+          <p className="hint">{t('wizard.documents.searchQualityHint')}</p>
         </div>
       )}
 
       <div className="upload-section">
         <label className="btn btn-secondary" style={{ display: 'inline-block' }}>
-          Choose files…
+          {t('wizard.documents.chooseFiles')}
           <input
             type="file"
             multiple
@@ -325,7 +326,7 @@ export default function DocumentsPage() {
                 type="button"
                 onClick={() => removeFile(i)}
                 disabled={busy}
-                aria-label={`Remove ${f.name}`}
+                aria-label={t('wizard.documents.removeFile', { name: f.name })}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
               >
                 ×
@@ -337,14 +338,14 @@ export default function DocumentsPage() {
 
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={() => proceed(true)} disabled={busy || catalogLoading || catalogUnavailable}>
-          Skip for now
+          {t('wizard.documents.skip')}
         </button>
         <button
           className="btn btn-primary"
           onClick={() => proceed(false)}
           disabled={busy || catalogLoading || catalogUnavailable || (files.length > 0 && !slugify(label))}
         >
-          {busy ? STAGE_LABELS[stage ?? ''] ?? 'Working…' : 'Continue'}
+          {busy ? stageLabel() : t('common.continue')}
         </button>
       </div>
       {confirmNode}

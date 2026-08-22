@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailBudgetSettings from '../../components/EmailBudgetSettings'
 import EmailConnect from '../../components/EmailConnect'
@@ -8,6 +9,7 @@ import { api } from '../../lib/api'
 import type { WizardOutletContext } from '../../lib/types'
 
 export default function DeployPage() {
+  const { t } = useTranslation()
   const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
 
@@ -15,17 +17,17 @@ export default function DeployPage() {
   const [error, setError] = useState<string | null>(null)
   const [emailConnected, setEmailConnected] = useState(false)
 
-  if (loading) return <p className="hint">Loading…</p>
+  if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
 
   if (!session.specification_json) {
     return (
       <div className="wizard-card">
-        <h2>Go live</h2>
-        <p className="subtitle">Design your team first, then come back here to launch it.</p>
+        <h2>{t('wizard.deploy.title')}</h2>
+        <p className="subtitle">{t('wizard.deploy.designFirst')}</p>
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate('/wizard')}>
-            Start over
+            {t('common.startOver')}
           </button>
         </div>
       </div>
@@ -51,8 +53,8 @@ export default function DeployPage() {
   if (session.status === 'deployed') {
     return (
       <div className="wizard-card">
-        <h2>Your team is live 🎉</h2>
-        <p className="banner banner-success">"{spec.name}" is up and running and ready to take on real requests.</p>
+        <h2>{t('wizard.deploy.liveTitle')}</h2>
+        <p className="banner banner-success">{t('wizard.deploy.liveBody', { name: spec.name })}</p>
         {session.uses_email && <EmailConnect />}
         {session.uses_email && <EmailTriggerToggle pipelineName={spec.name} />}
         {/* This team's mail-handling settings live here, not on the Activity
@@ -62,10 +64,10 @@ export default function DeployPage() {
         {session.uses_email && <EmailBudgetSettings />}
         <div className="wizard-actions">
           <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
-            Make more adjustments
+            {t('wizard.deploy.adjust')}
           </button>
           <button className="btn btn-secondary" onClick={() => navigate(`/run?pipeline=${encodeURIComponent(spec.name)}`)}>
-            Run a team
+            {t('nav.runTeam')}
           </button>
         </div>
       </div>
@@ -74,11 +76,8 @@ export default function DeployPage() {
 
   return (
     <div className="wizard-card">
-      <h2>Ready to go live?</h2>
-      <p className="subtitle">
-        Once you launch, "{spec.name}" will be available to handle real requests. You can always come back and adjust
-        it later.
-      </p>
+      <h2>{t('wizard.deploy.readyTitle')}</h2>
+      <p className="subtitle">{t('wizard.deploy.readySubtitle', { name: spec.name })}</p>
 
       {session.uses_email && (
         <EmailConnect onChange={() => setError(null)} onStatusChange={setEmailConnected} />
@@ -88,11 +87,11 @@ export default function DeployPage() {
 
       <div className="wizard-actions">
         <button className="btn btn-primary" onClick={deploy} disabled={busy || (session.uses_email && !emailConnected)}>
-          {busy ? 'Launching…' : 'Launch my team'}
+          {busy ? t('wizard.deploy.launching') : t('wizard.deploy.launch')}
         </button>
       </div>
       {session.uses_email && !emailConnected && (
-        <p className="hint">Connect your mailbox above before you can launch this team.</p>
+        <p className="hint">{t('wizard.deploy.connectMailboxFirst')}</p>
       )}
     </div>
   )

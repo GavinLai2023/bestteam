@@ -1,18 +1,9 @@
 import { useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
-
-const STAGE_LABELS: Record<string, string> = {
-  creating: 'Setting things up…',
-  requirements: 'Getting to know your business…',
-}
-
-const UPLOAD_LABELS: Record<string, string> = {
-  transcribing: 'Transcribing interview…',
-  extracting: 'Extracting key points…',
-}
 
 const ACCEPTED_AUDIO = '.mp3,.mp4,.m4a,.wav,.webm,.mpeg,.mpga'
 
@@ -20,6 +11,7 @@ type Stage = null | 'creating' | 'requirements'
 type UploadStage = null | 'transcribing' | 'extracting' | 'done'
 
 export default function IntentPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const { entries, loading: catalogLoading, failed: catalogFailed, retry: retryCatalog } = useModelCatalog()
   // A fetch failure and a successfully-loaded-but-empty catalog (no real
@@ -112,22 +104,30 @@ export default function IntentPage() {
 
   const isUploading = uploadStage === 'transcribing' || uploadStage === 'extracting'
 
+  const submitLabel = () => {
+    if (stage === 'creating') return t('wizard.intent.creating')
+    if (stage === 'requirements') return t('wizard.intent.requirements')
+    return t('wizard.intent.starting')
+  }
+
+  const uploadLabel = () => {
+    if (uploadStage === 'transcribing') return t('wizard.intent.transcribing')
+    if (uploadStage === 'extracting') return t('wizard.intent.extracting')
+    if (uploadStage === 'done') return t('wizard.intent.replaceRecording')
+    return t('wizard.intent.uploadRecording')
+  }
+
   return (
     <div className="wizard-card">
-      <h2>Tell us about your challenge</h2>
-      <p className="subtitle">
-        Describe what you're hoping an AI team could take off your plate. No technical detail needed — plain
-        language is perfect.
-      </p>
+      <h2>{t('wizard.intent.title')}</h2>
+      <p className="subtitle">{t('wizard.intent.subtitle')}</p>
 
       {catalogUnavailable && (
         <div className="banner banner-error">
-          {catalogFailed
-            ? "Couldn't load the available AI models. Check your connection and try again."
-            : 'No AI models are available yet. Contact your administrator, or try again.'}
+          {catalogFailed ? t('modelCatalog.loadFailed') : t('modelCatalog.empty')}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
             <button className="btn btn-secondary" onClick={retryCatalog}>
-              Try again
+              {t('common.tryAgain')}
             </button>
           </div>
         </div>
@@ -138,7 +138,7 @@ export default function IntentPage() {
           {error}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
             <button className="btn btn-secondary" onClick={retry} disabled={submitting}>
-              Try again
+              {t('common.tryAgain')}
             </button>
           </div>
         </div>
@@ -151,7 +151,7 @@ export default function IntentPage() {
           onClick={() => fileInputRef.current?.click()}
           disabled={submitting || isUploading || catalogLoading || catalogUnavailable}
         >
-          {UPLOAD_LABELS[uploadStage ?? ''] ?? (uploadStage === 'done' ? 'Replace recording' : 'Upload interview recording')}
+          {uploadLabel()}
         </button>
         <input
           ref={fileInputRef}
@@ -170,37 +170,37 @@ export default function IntentPage() {
 
       {transcript && (
         <details className="transcript-section">
-          <summary>See full transcript</summary>
+          <summary>{t('wizard.intent.seeTranscript')}</summary>
           <pre className="transcript-text">{transcript}</pre>
         </details>
       )}
 
       <div className="or-divider">
-        <span>or describe it below</span>
+        <span>{t('wizard.intent.orDescribe')}</span>
       </div>
 
       <div className="field">
-        <label htmlFor="intent">What do you want help with?</label>
+        <label htmlFor="intent">{t('wizard.intent.intentLabel')}</label>
         <textarea
           id="intent"
           rows={5}
           value={intentText}
           onChange={(e) => setIntentText(e.target.value)}
-          placeholder="e.g. We get dozens of customer support emails a day and can't keep up with replies."
+          placeholder={t('wizard.intent.intentPlaceholder')}
           disabled={submitting || isUploading}
         />
       </div>
 
       <div className="field">
         <label htmlFor="as-is">
-          How do you handle this today? <span className="hint">(optional)</span>
+          {t('wizard.intent.asIsLabel')} <span className="hint">{t('wizard.optional')}</span>
         </label>
         <textarea
           id="as-is"
           rows={4}
           value={asIsText}
           onChange={(e) => setAsIsText(e.target.value)}
-          placeholder="e.g. One person reads every email and replies manually using a few canned templates."
+          placeholder={t('wizard.intent.asIsPlaceholder')}
           disabled={submitting || isUploading}
         />
       </div>
@@ -212,10 +212,10 @@ export default function IntentPage() {
           disabled={!intentText.trim() || submitting || isUploading || catalogLoading || catalogUnavailable}
         >
           {submitting
-            ? STAGE_LABELS[stage ?? ''] ?? 'Starting…'
+            ? submitLabel()
             : catalogLoading
-              ? 'Loading available models…'
-              : 'Start building my team'}
+              ? t('wizard.intent.loadingModels')
+              : t('wizard.intent.start')}
         </button>
       </div>
     </div>
