@@ -368,6 +368,11 @@ backend: `ui/backend/CLAUDE.md`.
   (outside the bubble, so tests still match the bubble's text alone).
   Colours come from tokens (`--accent`/`--accent-contrast`) and the page is
   `100dvh` so a phone's collapsing address bar can't hide the composer.
+  Transient notices are stored as i18n keys (never the backend's detail) and
+  translated at render; the header/language control also renders on the
+  "link unavailable" page. `lib/dateFormat.ts::formatDateTime` is
+  locale-aware (keyed on `i18n.resolvedLanguage`; Chinese dates in Chinese)
+  for every panel that shows a date, and `endOfLocalDay` lives there too.
   Spec: `docs/superpowers/specs/2026-08-22-share-chat-beta-patch-design.md`.
 - Org side, both on **My teams**' team cards only (`pages/wizard/
   SessionsPage.tsx`, gated on `session.pipeline_id != null` — a YAML-only
