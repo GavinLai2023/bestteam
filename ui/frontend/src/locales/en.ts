@@ -10,6 +10,12 @@
 export const en = {
   nav: {
     brand: 'bestteam',
+    // The product slogan, one key for the whole app. It used to be three
+    // near-copies -- README's, the wizard heading's and the login page's --
+    // that had already drifted apart in wording; the Chinese side had one
+    // string all along. README.md carries the fourth copy and cannot read
+    // this, so it is the one place to keep in step by hand.
+    tagline: 'Intent in, BestTeam out',
     dashboard: 'Dashboard',
     buildTeam: 'Build a team',
     myTeams: 'My teams',
@@ -48,9 +54,6 @@ export const en = {
   // was hardcoded English, which made a Chinese customer's very first
   // impression untranslatable however bilingual the rest of the app was.
   login: {
-    // The product slogan, not the wizard's page title (`wizard.title` is the
-    // singular, second-person variant that belongs on the build flow).
-    tagline: 'Intent in, best AI teams out',
     heading: 'Log in',
     username: 'Username',
     password: 'Password',
@@ -186,7 +189,6 @@ export const en = {
   // DocumentsPage each hardcoded), the page now reads the existing key rather
   // than getting a second copy here.
   wizard: {
-    title: 'Intent in, your best AI team out',
     subtitle: "Answer a few questions and we'll design, test, and launch a custom AI team for you.",
     sessionLoadFailed: "Couldn't load this session: {{detail}}",
     optional: '(optional)',

@@ -8,6 +8,9 @@ import type { Resources } from './en'
 export const zhCN: Resources = {
   nav: {
     brand: 'bestteam',
+    // The English slogan is wordplay on the product name; this carries the
+    // meaning rather than the pun, and is the string both pages already showed.
+    tagline: '说出需求，收获最合适的 AI 团队',
     dashboard: '概览',
     buildTeam: '组建团队',
     myTeams: '我的团队',
@@ -37,7 +40,6 @@ export const zhCN: Resources = {
     image: '图片',
   },
   login: {
-    tagline: '说出需求，收获最合适的 AI 团队',
     heading: '登录',
     username: '用户名',
     password: '密码',
@@ -145,7 +147,6 @@ export const zhCN: Resources = {
     invalidJson: 'JSON 格式有误 —— {{detail}}',
   },
   wizard: {
-    title: '说出需求，收获最合适的 AI 团队',
     subtitle: '回答几个问题，我们就为你设计、测试并启用一支专属 AI 团队。',
     sessionLoadFailed: '无法加载这个会话：{{detail}}',
     optional: '（选填）',

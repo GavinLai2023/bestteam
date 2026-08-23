@@ -44,10 +44,16 @@
   in the process). Login by email without recovery by email buys a schema
   migration and an identity-model change for a cosmetic gain. Revisit only if
   a mail channel ever exists.
-  Known wart: the product slogan now has three wordings in the repo —
-  `README.md:3` ("best AI team out"), `en.ts` `wizard.title` ("your best AI
-  team out") and `login.tagline` ("best AI teams out"). The last is the one
-  the customer meets first; the other two are worth one line each to align.
+  Also settled here: the product slogan is **"Intent in, BestTeam out"**, and
+  it is now `nav.tagline` — one key that both the login page and
+  `WizardLayout`'s `<h1>` read. It had drifted into three near-copies
+  (`README.md`'s "best AI team out", `wizard.title`'s "your best AI team out",
+  and the login page's "best AI teams out") while the Chinese side had one
+  string all along, so the fix was to delete the copies rather than reword
+  them. `README.md` keeps the fourth copy — it is outside the bundle and
+  cannot read a locale key, so it is the one place to keep in step by hand.
+  The Chinese stays a translation of the meaning (说出需求，收获最合适的 AI
+  团队) rather than the pun, which does not survive translation.
 
 - **A hierarchical team no longer dies on its first call under a thinking-mode
   model** (2026-08-23). Every turn of a deployed `Payroll Q&A` team was

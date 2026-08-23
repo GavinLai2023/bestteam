@@ -69,7 +69,7 @@ export default function LoginPage() {
           <BrandMark size={26} />
           {t('nav.brand')}
         </span>
-        <p className="login-tagline">{t('login.tagline')}</p>
+        <p className="login-tagline">{t('nav.tagline')}</p>
         {/* Decoration, not information: hidden rather than stacked on a phone,
             where it would push the form below the fold. */}
         <ul className="login-points">

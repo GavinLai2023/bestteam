@@ -468,10 +468,13 @@ all, so a Chinese customer's very first impression was untranslatable however
 bilingual the rest of the app was. Two-panel layout (brand + three shipped
 capabilities on the left, form on the right) collapsing to one under 820px,
 where the bullets are hidden rather than stacked — they are decoration, and on
-a phone they would push the form below the fold. `login.tagline` is the
-*product* slogan and is deliberately its own key rather than a read of
-`wizard.title`, which is the singular, second-person variant that belongs on
-the build flow. `components/BrandMark.tsx` is a pure extraction of the SVG
+a phone they would push the form below the fold. The slogan is
+`nav.tagline`, **one key for the whole app** — the login page and
+`WizardLayout`'s `<h1>` both read it. It used to be three near-copies that had
+already drifted ("best AI team out" / "your best AI team out" / "best AI teams
+out") while the Chinese side had one string all along; `README.md`'s copy is
+the fourth and, being outside the bundle, is the one to keep in step by hand.
+`components/BrandMark.tsx` is a pure extraction of the SVG
 that was inline in `Layout.tsx`, with its two fills moved out of `Layout.css`
 alongside it.
 

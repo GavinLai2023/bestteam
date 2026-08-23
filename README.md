@@ -1,6 +1,6 @@
 # BestTeam
 
-> Intent in, best AI team out.
+> Intent in, BestTeam out.
 
 **GitHub:** https://github.com/GavinLai2023/bestteam
 
