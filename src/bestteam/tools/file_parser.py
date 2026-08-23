@@ -409,6 +409,31 @@ def _qualified_name(name: str, ns_prefixes: dict) -> str:
     return f"{prefix}:{local}" if prefix else local
 
 
+# The OMG "diagram interchange" namespaces: where a BPMN/DMN exporter puts
+# the picture rather than the process. Everything under them is coordinates,
+# sizes and internal element ids -- across the diagrams this was measured on,
+# not one element carried a single character of text, yet they were 48% of the
+# rendered document, so every knowledge-base chunk cut from one was competing
+# for retrieval against thousands of near-identical boxes of numbers.
+#
+# Matched by namespace URI, never by prefix: `bpmndi`/`dc`/`di` are the
+# document author's choice and nothing stops another schema using them (Dublin
+# Core's `dc:title` is real content), while these URIs are fixed by the spec.
+_XML_DIAGRAM_LAYOUT_NAMESPACES = frozenset(
+    {
+        "http://www.omg.org/spec/BPMN/20100524/DI",
+        "http://www.omg.org/spec/DD/20100524/DC",
+        "http://www.omg.org/spec/DD/20100524/DI",
+    }
+)
+_XML_OMITTED_NOTE = "[diagram layout omitted]"
+
+
+def _namespace_uri(tag: str) -> str:
+    """The `{uri}` half of a Clark-notation tag, empty for an unqualified one."""
+    return tag[1:].partition("}")[0] if tag.startswith("{") else ""
+
+
 def _normalize_xml_text(text: "str | None") -> str:
     return " ".join(text.split()) if text else ""
 
@@ -442,6 +467,14 @@ def _render_xml_tree(root, lines: list, ns_prefixes: dict) -> None:
             continue
 
         elem = payload
+        if _namespace_uri(elem.tag) in _XML_DIAGRAM_LAYOUT_NAMESPACES:
+            # One line rather than nothing: `parse_file` is a general-purpose
+            # tool, and a reader who wonders where the diagram went deserves an
+            # answer. Children are never pushed, so the note appears once per
+            # outermost layout element, not once per box.
+            tag = _qualified_name(elem.tag, ns_prefixes)
+            lines.append(f"{'  ' * depth}<{tag}> {_XML_OMITTED_NOTE}")
+            continue
         lines.append(_render_element_open_line(elem, depth, ns_prefixes))
 
         items = []

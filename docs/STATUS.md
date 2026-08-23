@@ -6,6 +6,38 @@
 
 ## Done
 
+- **XML ingestion drops BPMN/DMN diagram geometry, and a parser change now
+  invalidates carried-forward chunks** (2026-08-23). The `eb_and_awards`
+  collection is seven exported process diagrams; **48% of what the renderer
+  produced from them was layout** — `bpmndi:BPMNShape`/`BPMNEdge`,
+  `dc:Bounds`, `di:waypoint`. Checked element by element, those namespaces
+  held no text whatsoever: only coordinates, sizes and internal ids. Indexed,
+  they buried the process they decorate — thousands of near-identical boxes of
+  numbers that every real query had to outrank, which is the likeliest reason
+  the live `awards_specialist` burned all five of its tool iterations on
+  eleven searches. `_render_xml_tree` now skips any element in the three OMG
+  diagram-interchange namespaces, **matched by URI, not by prefix** (`dc` is
+  Dublin Core's too, and a prefix is the author's choice), leaving one
+  `[diagram layout omitted]` line per outermost layout element rather than a
+  silent drop — `parse_file` is a general-purpose tool. Measured on the real
+  files: 3,662,859 → 1,891,954 characters, of which the omission markers are
+  336.
+  The second half is what makes that reach an existing collection at all.
+  Incremental ingestion matches on the sha256 of a file's **raw bytes**, which
+  is blind to a change in the code that turns bytes into text, so re-uploading
+  the same seven files would have carried the old coordinate-heavy chunks
+  forward forever. `IngestionJob.parser_revision` (migration `s6t7u8v9w0x1`,
+  nullable, no backfill) records which generation of the parser and chunker cut
+  a job's chunks and `_carryable` requires a match — the first upload after
+  this upgrade re-cuts once, every one after that is incremental again.
+  `ingestion._PARSER_REVISION` is a hand-bumped integer, not a hash of the two
+  modules' source: a hash would also fire on a comment or a rename, and every
+  false bump re-embeds a whole collection at the customer's expense.
+  Not done here, and worth revisiting: `bpmn:incoming`/`bpmn:outgoing` are a
+  further 11% of pure id cross-references, and every chunk still repeats a
+  ~250-character XML ancestor prefix that is identical across thousands of
+  them.
+
 - **A manager's delegations in one turn now run concurrently** (2026-08-23).
   A shared-chat question to the deployed `Payroll Q&A` team took 146s. Its
   trace (`c730b4c5`) put 124s of that in two delegations the manager had asked

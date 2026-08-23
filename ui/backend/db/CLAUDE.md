@@ -157,7 +157,9 @@ rows → `default`; admins and built-in skills stay NULL.
   (`content_hash`, `size_bytes`, CHECK-constrained
   `pending`/`parsing`/`chunked`/`failed`, capped `error`). ⚠️ **`content_hash` is
   read, not merely recorded** — it's what `_reusable_documents` matches on to
-  carry an unchanged document's chunks and embeddings forward. Per-document
+  carry an unchanged document's chunks and embeddings forward. It is over the
+  raw bytes, so it is blind to a change in the code that turns them into text;
+  that is what `IngestionJob.parser_revision` covers. Per-document
   status is the partial-failure unit: one bad file is `failed` without aborting
   the job. Indexed on `ingestion_job_id`.
 

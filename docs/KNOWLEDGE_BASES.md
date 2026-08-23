@@ -733,9 +733,15 @@ or changed documents are parsed, embedded and metered. That reuse is refused,
 and everything re-embedded, whenever the previous job's `kb_type`,
 `embedding_model`, `chunk_size` or `chunk_overlap` differ from this one's, so
 switching the Standard/Enhanced toggle still re-indexes from scratch as
-described above. A job created before this feature existed records no chunk
-parameters and is never reused: the first upload after that upgrade re-embeds
-once.
+described above. It is refused for one more reason: the content hash is taken
+over the file's raw bytes, so it cannot see a change in the code that turns
+those bytes into text. `IngestionJob.parser_revision` records which generation
+of the parser and chunker cut a job's chunks, and a mismatch re-cuts
+everything -- otherwise an improvement to how a document is read (dropping
+BPMN diagram geometry, say) would never reach a collection that was already
+ingested, however many times the same files were re-uploaded. A job created
+before either feature existed records neither, and is never reused: the first
+upload after that upgrade re-embeds once.
 
 **Removing one document** (`DELETE /api/org/knowledge-bases/{name}/documents/{filename}`,
 self-service) is the same pipeline with no new files: the live generation is

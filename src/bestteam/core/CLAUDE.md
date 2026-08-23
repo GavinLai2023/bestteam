@@ -297,7 +297,13 @@ by `ui/backend/ingestion.py`. Full detail: `docs/KNOWLEDGE_BASES.md`.
   get no character overlap** — the path is the cross-chunk context, every split
   lands on a whole line, and a raw slice would put a cut-open tag ahead of the
   path. Edge-based diagram exports (draw.io's `<mxCell source= target=>`) get no
-  special treatment: their branches are id references, not nesting.
+  special treatment: their branches are id references, not nesting. What the
+  chunker never sees is a BPMN/DMN export's layout geometry: the renderer drops
+  the OMG diagram-interchange namespaces before this stage (see
+  `src/bestteam/tools/CLAUDE.md`). ⚠️ Any change to what these chunkers or that
+  renderer produce has to bump `ui.backend.ingestion._PARSER_REVISION`, or an
+  already-ingested collection carries its old chunks forward on an unchanged
+  content hash.
 - **Everything else** goes through `_split_pieces` then `_apply_overlap` — the
   two halves `_chunk_text` is composed of — so a `.md` chunk's section heading can
   be read off the pieces *before* overlap prefixes each one with the previous

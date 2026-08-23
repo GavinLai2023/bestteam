@@ -912,7 +912,12 @@ included** — forward from the previous completed job, matched on
 `embed_documents_in_batches` and only their tokens are metered.
 
 `_carryable` gates the lookup on the previous job's shape matching: `kb_type`,
-`embedding_model`, `chunk_size`, `chunk_overlap`. Those last two sit on the job
+`embedding_model`, `chunk_size`, `chunk_overlap`, `parser_revision` (migration
+`b5c6d7e8f9g0`). The last of those is `_PARSER_REVISION`, bumped by hand
+whenever the parser or a chunker changes what it produces: the content hash is
+over raw bytes and cannot see that, so without it an already-ingested
+collection would carry chunks cut by the old code forward forever. The middle
+two sit on the job
 row for the same reason the first two do — **`KnowledgeBaseRecord.config` has
 already advanced to the new upload's spec by the time the worker runs, so only
 the job can say what its chunks were actually cut with.** A job predating the

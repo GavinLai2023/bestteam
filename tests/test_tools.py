@@ -790,6 +790,67 @@ def test_parse_file_xml_resolves_namespace_prefixes(tmp_path):
     assert "{http://example.com}" not in result
 
 
+_BPMN_WITH_DIAGRAM = """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI">
+  <bpmn:process id="Process_1">
+    <bpmn:userTask id="Task_1" name="Approve purchased leave" />
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="Task_1" targetRef="Task_2" name="Yes" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="Diagram_1">
+    <bpmndi:BPMNPlane id="Plane_1" bpmnElement="Process_1">
+      <bpmndi:BPMNShape id="Shape_1" bpmnElement="Task_1">
+        <dc:Bounds x="152" y="1837" width="100" height="80" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Edge_1" bpmnElement="Flow_1">
+        <di:waypoint x="252" y="1877" />
+        <di:waypoint x="410" y="1877" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
+"""
+
+
+def test_parse_file_xml_omits_bpmn_diagram_layout(tmp_path):
+    """The BPMN DI section is rendering geometry -- it carries no text at all,
+    only coordinates and internal ids, so indexing it dilutes every search."""
+    f = tmp_path / "flow.bpmn.xml"
+    f.write_text(_BPMN_WITH_DIAGRAM, encoding="utf-8")
+
+    result = parse_file(str(f))
+
+    # the semantic model survives untouched
+    assert "Approve purchased leave" in result
+    assert '<bpmn:sequenceFlow id="Flow_1"' in result
+    # ...and none of the geometry does
+    assert "dc:Bounds" not in result
+    assert "di:waypoint" not in result
+    assert "BPMNShape" not in result
+    assert "BPMNEdge" not in result
+    # one honest marker rather than a silent drop
+    assert result.count("[diagram layout omitted]") == 1
+
+
+def test_parse_file_xml_matches_diagram_namespace_by_uri_not_prefix(tmp_path):
+    """A prefix is the document author's choice; the URI is what OMG fixed.
+    An unrelated schema that happens to use the prefix `dc` keeps its content."""
+    f = tmp_path / "dublin.xml"
+    f.write_text(
+        '<record xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:title>Enterprise Agreement 2026</dc:title>"
+        "</record>",
+        encoding="utf-8",
+    )
+
+    result = parse_file(str(f))
+    assert "Enterprise Agreement 2026" in result
+    assert "[diagram layout omitted]" not in result
+
+
 def test_parse_file_xml_normalizes_multiline_text(tmp_path):
     f = tmp_path / "pretty.xml"
     f.write_text(

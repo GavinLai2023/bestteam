@@ -270,6 +270,24 @@ of it, so the shape is a contract between the two modules.
 | Table | `[Table N]` / `[Sheet: name]` / `[CSV: name]` marker, then CSV rows, **one row per line**, in document order, ended by a blank line | `TABLE_MARKER_RE` (**defined here, imported there**), `_chunk_table_block` |
 | PDF page break | `PAGE_BREAK` (`\f`) | `_chunk_document` → `_Chunk.page` |
 | XML element | `<tag attr="v"> text`, two spaces of indent per level | `_chunk_xml_document` (**indentation IS the tree**) |
+| XML diagram layout | `<bpmndi:BPMNDiagram> [diagram layout omitted]`, one line in place of the subtree | nothing — it is the *absence* that matters |
+
+**The XML renderer drops the OMG diagram-interchange namespaces.** An exported
+BPMN/DMN process carries its picture alongside its process:
+`http://www.omg.org/spec/BPMN/20100524/DI`,
+`http://www.omg.org/spec/DD/20100524/DC` and
+`http://www.omg.org/spec/DD/20100524/DI` hold box coordinates, connector
+waypoints and label bounds. Across the seven diagrams this was measured on they
+were **48% of the rendered document** and, checked element by element, held not
+one character of text — only numbers and internal ids. Indexed, they buried the
+process they decorate. `_XML_DIAGRAM_LAYOUT_NAMESPACES` is matched **by
+namespace URI, never by prefix**: `dc`/`di`/`bpmndi` are the document author's
+choice and Dublin Core's `dc:title` is real content, while the URIs are fixed by
+the spec. One marker line replaces each outermost layout element rather than
+nothing at all — `parse_file` is general-purpose, and a reader who wonders where
+the diagram went deserves an answer. ⚠️ Changing what this produces means
+bumping `ui.backend.ingestion._PARSER_REVISION`, or an already-ingested
+knowledge base keeps its old chunks forever.
 
 `PAGE_BREAK`, `MARKDOWN_HEADING_RE` and `TABLE_MARKER_RE` all live **here, with
 the producer that writes them**, and are imported by the consumer. Two copies
