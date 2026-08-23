@@ -417,6 +417,13 @@ export const api = {
     request<OrgKnowledgeBase>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`),
   deleteOwnKnowledgeBase: (name: string) =>
     request<void>(`/api/org/knowledge-bases/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  // Removes one document; a 202 with the job to poll, like an upload -- the
+  // collection keeps answering from its current documents until then.
+  removeOwnKnowledgeBaseDocument: (name: string, filename: string) =>
+    request<{ name: string; job_id: number; status: string }>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
+      { method: 'DELETE' },
+    ),
   // "Try a search": one query against the org's own collection, returning the
   // passages an agent would have retrieved. A collection that can't answer
   // yet (still processing, last upload failed, or never uploaded through the

@@ -213,8 +213,8 @@ def _stage_previous_generation(
             status_code=413,
             detail=(
                 f"'{item_name}' would hold {total} documents; the limit is "
-                f"{max_documents}. Remove some documents by replacing the "
-                "collection, or start another one."
+                f"{max_documents}. Remove some documents first, or start "
+                "another collection."
             ),
         )
     for path in carried:
@@ -455,35 +455,216 @@ def upload_knowledge_base(
             shutil.rmtree(version_dir, ignore_errors=True)
             raise
 
-        # Dispatch strictly AFTER the commit and outside the handler above:
-        # the job and record rows are durable by now, so rmtree-ing the
-        # staged files on a submit failure would strand a permanently
-        # `queued` job pointing at a deleted directory. Resolve the job to
-        # `failed` instead, so the customer's poll terminates with a real
-        # error rather than spinning (F6).
-        try:
-            ingestion._executor.submit(
-                ingestion.run_ingestion_job,
-                job.id,
-                item.id,
-                org_id,
-                version_dir,
-                kb_type=kb_type,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                embedding_model=spec.embedding_model,
-                engine=db.get_bind(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            job.status = "failed"
-            job.error = "Could not start processing these documents. Please try uploading again."
-            job.completed_at = ingestion._now()
-            db.commit()
-            raise HTTPException(
-                status_code=503,
-                detail="Could not start processing these documents. Please try uploading again.",
-            ) from exc
+        _dispatch_ingestion_job(
+            db, job, item.id, org_id, version_dir,
+            kb_type=kb_type, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            embedding_model=spec.embedding_model,
+        )
+        return {"name": item_name, "job_id": job.id, "status": "queued"}
 
+
+def _dispatch_ingestion_job(
+    db: Session,
+    job: IngestionJob,
+    kb_id: int,
+    org_id: Optional[int],
+    version_dir: Path,
+    *,
+    kb_type: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    embedding_model: Optional[str],
+) -> None:
+    """Submit a committed `queued` job to the ingestion worker.
+
+    Called strictly AFTER the commit and outside the staging handler: the
+    job and record rows are durable by now, so rmtree-ing the staged files on
+    a submit failure would strand a permanently `queued` job pointing at a
+    deleted directory. Resolve the job to `failed` instead, so the customer's
+    poll terminates with a real error rather than spinning (F6).
+    """
+    try:
+        ingestion._executor.submit(
+            ingestion.run_ingestion_job,
+            job.id,
+            kb_id,
+            org_id,
+            version_dir,
+            kb_type=kb_type,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model,
+            engine=db.get_bind(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        job.status = "failed"
+        job.error = "Could not start processing these documents. Please try uploading again."
+        job.completed_at = ingestion._now()
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="Could not start processing these documents. Please try uploading again.",
+        ) from exc
+
+
+def live_documents(db: Session, record: KnowledgeBaseRecord) -> List[KnowledgeDocument]:
+    """The documents of the collection's live generation -- the newest
+    completed job's rows, every status, sorted by name -- or `[]` when no
+    job has completed. A `failed` document is listed too: its file is still
+    in the generation (every `add` carries it and reports it skipped again),
+    so it is something the customer can remove."""
+    live = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id, status="completed")
+        .order_by(IngestionJob.id.desc())
+        .first()
+    )
+    if live is None:
+        return []
+    return (
+        db.query(KnowledgeDocument)
+        .filter_by(ingestion_job_id=live.id)
+        .order_by(KnowledgeDocument.filename)
+        .all()
+    )
+
+
+def remove_knowledge_base_document(
+    db: Session,
+    org_id: Optional[int],
+    item_name: str,
+    filename: str,
+    *,
+    created_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Drop one document from a collection and dispatch the job that makes
+    that the live set. Returns `{"name", "job_id", "status": "queued"}`,
+    exactly like an upload -- callers poll the job the same way.
+
+    A removal is the upload pipeline with no new files: the live generation
+    is staged into a fresh version directory minus the named file
+    (`_stage_previous_generation` with that name as the one superseded
+    entry), and a new job ingests the staged set under the live job's own
+    shape and chunk parameters, so `ingestion._reusable_documents` carries
+    every remaining document's chunks and embeddings forward and nothing is
+    re-parsed or re-embedded. One completed job is still the live set, the
+    status flip is still the atomic swap, and retention/pruning see an
+    ordinary generation. `record.config` is not touched: removing a document
+    changes what the collection holds, not how it searches.
+
+    Refused (409) while a `queued`/`running` job exists for the collection:
+    whichever of two jobs finished last would otherwise become live, and a
+    removal built from the previous generation could then silently undo an
+    upload that was still being processed. Refused (409) when the named file
+    is the last one -- an empty collection cannot be built
+    (`_init_from_chunks` raises on no chunks), so the job would only fail;
+    deleting the collection is the operation that means that. Unknown names
+    are a 404 naming the file. The name must match the document's exactly:
+    that is how the collection lists it, and on a case-insensitive filesystem
+    the carry would drop a case-variant too, which would make "removed
+    `policy.txt`" true of a file the customer never named.
+    """
+    record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+
+    kb_root = _KB_UPLOADS_DIR / str(org_id) / item_name
+    version = f"v_{uuid.uuid4().hex[:12]}"
+    version_dir = kb_root / version
+    # The same per-KB lock uploads and deletes take, held across the in-flight
+    # check, staging, commit and dispatch, so no upload can slip a job in
+    # between "nothing is processing" and this job's own row.
+    with _kb_upload_lock(f"{org_id}/{item_name}"):
+        in_flight = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.kb_id == record.id, IngestionJob.status.in_(("queued", "running")))
+            .first()
+        )
+        if in_flight is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{item_name}' is still processing an upload. Wait for it "
+                    "to finish, then remove the document."
+                ),
+            )
+        live = (
+            db.query(IngestionJob)
+            .filter_by(kb_id=record.id, status="completed")
+            .order_by(IngestionJob.id.desc())
+            .first()
+        )
+        if live is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{item_name}' has no finished upload to remove a document from.",
+            )
+        documents = (
+            db.query(KnowledgeDocument).filter_by(ingestion_job_id=live.id).all()
+        )
+        names = {doc.filename for doc in documents}
+        if filename not in names:
+            raise HTTPException(
+                status_code=404,
+                detail=f"'{item_name}' has no document named '{filename}'.",
+            )
+        if names == {filename}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{filename}' is the only document in '{item_name}'. A "
+                    "collection can't be empty -- delete the collection instead."
+                ),
+            )
+        if not (kb_root / live.version).is_dir():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The files for '{item_name}' are no longer on the server. "
+                    "Upload the documents you want to keep, replacing the collection."
+                ),
+            )
+
+        # The live job's own shape and chunk parameters, so every remaining
+        # document is reusable (`ingestion._carryable`). A job written before
+        # those columns existed re-chunks once under the record's config --
+        # the same one-time cost the first `add` after an upgrade pays.
+        config = record.config or {}
+        kb_type = live.kb_type or config.get("type", "local_folder")
+        chunk_size = live.chunk_size if live.chunk_size is not None else config.get("chunk_size", 1000)
+        chunk_overlap = (
+            live.chunk_overlap if live.chunk_overlap is not None else config.get("chunk_overlap", 100)
+        )
+        embedding_model = live.embedding_model if kb_type in ("vector", "hybrid") else None
+
+        version_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _stage_previous_generation(
+                db, org_id, item_name, kb_root, version_dir,
+                superseded={filename}, max_documents=_MAX_DOCUMENTS_PER_KB,
+            )
+            job = IngestionJob(
+                kb_id=record.id,
+                org_id=org_id,
+                version=version,
+                kb_type=kb_type,
+                embedding_model=embedding_model,
+                status="queued",
+                file_count=sum(1 for p in version_dir.rglob("*") if p.is_file()),
+                created_by=created_by,
+            )
+            db.add(job)
+            db.commit()
+        except Exception:
+            db.rollback()
+            shutil.rmtree(version_dir, ignore_errors=True)
+            raise
+
+        _dispatch_ingestion_job(
+            db, job, record.id, org_id, version_dir,
+            kb_type=kb_type, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model,
+        )
         return {"name": item_name, "job_id": job.id, "status": "queued"}
 
 

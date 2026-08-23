@@ -305,6 +305,16 @@ export interface OrgKnowledgeBase {
   // "the latest job succeeded".
   servable: boolean
   latest_job: Omit<IngestionJobStatus, 'config'> | null
+  // The live generation's documents, by name. Empty until a first upload
+  // completes. A `failed` one could not be read but is still in the
+  // collection's files, so it can be removed like any other.
+  documents: OrgKnowledgeBaseDocument[]
+}
+
+export interface OrgKnowledgeBaseDocument {
+  filename: string
+  status: 'chunked' | 'failed' | string
+  size_bytes: number
 }
 
 // One passage returned by the "Try a search" panel

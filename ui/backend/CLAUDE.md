@@ -1587,10 +1587,24 @@ schema.
 **An org manages its own knowledge bases** (`org_knowledge_bases.py`:
 `GET /api/org/knowledge-bases`, `GET`/`DELETE /api/org/knowledge-bases/{name}`,
 `POST /api/org/knowledge-bases/{name}/search`,
+`DELETE /api/org/knowledge-bases/{name}/documents/{filename}`,
 all `get_current_org`-scoped). `_kb_summary` reports `used_by`
-(`pipelines_referencing`), `servable` and `latest_job` -- the newest attempt of
-*any* status, `config` stripped, since that field carries the server's absolute
-upload path and this list is customer-facing. The DELETE is the same
+(`pipelines_referencing`), `servable`, `documents` (`knowledge_bases.live_documents`:
+the newest completed job's rows, every status, by name) and `latest_job` -- the
+newest attempt of *any* status, `config` stripped, since that field carries the
+server's absolute upload path and this list is customer-facing. The per-document
+DELETE is `knowledge_bases.remove_knowledge_base_document`: the upload pipeline
+with no new files -- `_stage_previous_generation` with the named file as the one
+superseded entry, a job under the live job's own `kb_type`/`embedding_model`/
+`chunk_size`/`chunk_overlap` so `_reusable_documents` carries everything else
+forward unmetered, dispatched through the same `_dispatch_ingestion_job` tail an
+upload uses -- a `202` with the job to poll. Held under `_kb_upload_lock`; 409
+while a job is queued/running (two jobs' completion order would decide the live
+set), 409 for the last document (an empty collection cannot be built -- delete
+it instead), 404 for a name not in the live generation (exact match: the carry
+drops a case-variant too on Windows/macOS, and "removed `policy.txt`" must not be
+true of a file the customer never named). Allowed while teams use the
+collection, as `add` is. The collection DELETE is the same
 `knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
 (deployed dependency, in-flight ingestion) hold here too. Two consequences
 elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only

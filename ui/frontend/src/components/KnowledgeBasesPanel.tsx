@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import KnowledgeBaseSearch from './KnowledgeBaseSearch'
 import { api } from '../lib/api'
 import { useConfirm } from '../lib/useConfirm'
-import type { OrgKnowledgeBase } from '../lib/types'
+import type { OrgKnowledgeBase, OrgKnowledgeBaseDocument } from '../lib/types'
 import './KnowledgeBasesPanel.css'
 
 // Only while something is actually being indexed -- an idle "My teams" page
@@ -44,6 +44,22 @@ function deleteBlockedReason(kb: OrgKnowledgeBase): string | null {
   return null
 }
 
+// Why removing one document is refused, in the reader's own terms, or null
+// when it's allowed. The backend refuses both with a 409 regardless.
+function removeBlockedReason(kb: OrgKnowledgeBase): string | null {
+  if (isProcessing(kb)) return 'This upload is still processing. Wait for it to finish, then remove a document.'
+  if (kb.documents.length <= 1) {
+    return 'This is the only document. To remove it, delete the whole collection.'
+  }
+  return null
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 // Why "Try a search" is refused, in the reader's own terms, or null when it's
 // allowed. Mirrors the endpoint's own 409 cases, which it cannot resolve for
 // them: nothing has finished indexing yet, or something still is. A legacy
@@ -66,6 +82,7 @@ export default function KnowledgeBasesPanel() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
   const [openSkipped, setOpenSkipped] = useState<string | null>(null)
   const [openSearch, setOpenSearch] = useState<string | null>(null)
+  const [openDocuments, setOpenDocuments] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -105,6 +122,32 @@ export default function KnowledgeBasesPanel() {
     }
   }
 
+  const handleRemoveDocument = async (kb: OrgKnowledgeBase, doc: OrgKnowledgeBaseDocument) => {
+    // Removing a document from a collection a live team searches is allowed
+    // (so is adding one), but the reader should know whose answers change.
+    const usedBy = kb.used_by.length > 0 ? ` Teams using "${kb.name}": ${kb.used_by.join(', ')}.` : ''
+    const ok = await confirm({
+      title: `Remove "${doc.filename}"?`,
+      body: `It is taken out of "${kb.name}" and teams can no longer search it.${usedBy}`,
+      confirmLabel: 'Remove',
+      destructive: true,
+    })
+    if (!ok) return
+    try {
+      await api.removeOwnKnowledgeBaseDocument(kb.name, doc.filename)
+      setRowErrors((prev) => {
+        const next = { ...prev }
+        delete next[kb.name]
+        return next
+      })
+      // The row now shows "Processing…" and the poll above picks up the
+      // finished generation, documents list included.
+      await refresh()
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
+    }
+  }
+
   if (items.length === 0 && !error) return null
 
   return (
@@ -131,6 +174,8 @@ export default function KnowledgeBasesPanel() {
           const skippedCount = job?.status === 'completed' ? job.documents_failed : 0
           const blocked = deleteBlockedReason(kb)
           const searchBlocked = searchBlockedReason(kb)
+          const removeBlocked = removeBlockedReason(kb)
+          const docCount = kb.documents.length
           return (
             <li key={kb.name} className="session-item kb-card">
               <h3>{kb.name}</h3>
@@ -150,6 +195,40 @@ export default function KnowledgeBasesPanel() {
                       {skipped.map((e, i) => (
                         <li key={i} className="hint">
                           {e.filename ?? 'This upload'}: {e.error}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+              {docCount > 0 && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-link"
+                    onClick={() => setOpenDocuments((n) => (n === kb.name ? null : kb.name))}
+                  >
+                    {openDocuments === kb.name ? 'Hide documents' : `Show ${docCount} document${docCount === 1 ? '' : 's'}`}
+                  </button>
+                  {openDocuments === kb.name && (
+                    <ul className="kb-documents">
+                      {kb.documents.map((doc) => (
+                        <li key={doc.filename} className="kb-document">
+                          <span className="kb-document-name">{doc.filename}</span>
+                          <span className="hint">
+                            {formatSize(doc.size_bytes)}
+                            {doc.status === 'failed' ? " · couldn't be read" : ''}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-link kb-document-remove"
+                            disabled={removeBlocked !== null}
+                            title={removeBlocked ?? `Remove ${doc.filename}`}
+                            aria-label={`Remove ${doc.filename}`}
+                            onClick={() => void handleRemoveDocument(kb, doc)}
+                          >
+                            Remove
+                          </button>
                         </li>
                       ))}
                     </ul>
