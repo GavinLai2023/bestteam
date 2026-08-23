@@ -22,10 +22,19 @@ overview, architecture, and commands.
   `Requirements` (summary/pain_points/goals/success_criteria/constraints/
   clarifying_questions) is the Requirements-stage counterpart to
   `Specification`. `generate_requirements(model, intent_text, as_is_text,
-  feedback=...)` calls `model.with_structured_output(Requirements)` —
+  current=..., feedback=...)` calls `model.with_structured_output(Requirements)` —
   no `_build_pipeline` validation applies at this stage (it's a plain-language
   summary, not yet a team design). `Requirements.to_prompt()` renders it as
   text for the Solution Architect's `requirements` argument.
+  **`current` is what makes a second round a refinement rather than a
+  restart**: without it the prompt is `intent_text` + this round's `feedback`
+  alone, so each correction re-derives from the customer's original sentence
+  and silently undoes the one before it, and any field the customer edited by
+  hand is overwritten by a fresh derivation. It renders through `to_prompt()`
+  and is placed *before* `feedback`, which the system prompt makes meaningful:
+  the current understanding is the customer's own words and is preserved
+  unless the newer text contradicts it. Default `None` = the pre-2026-08-23
+  behaviour, which is still what the wizard's first, generating call wants.
 
 ## Skills (`SkillSpec`, `AgentSpec.skills`)
 

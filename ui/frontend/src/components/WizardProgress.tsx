@@ -5,6 +5,12 @@ import './WizardProgress.css'
 
 interface WizardProgressProps {
   session: BuilderSession | null
+  // Set while a stage page has a long request in flight. Every step stops
+  // being a link -- "Go live" unlocks on the specification merely existing,
+  // so it stays lit while the Architect is redesigning that very
+  // specification, and leaving mid-update publishes a team the customer has
+  // not seen.
+  busy?: boolean
 }
 
 // Stage order only. The labels live in the locale files and are
@@ -23,7 +29,7 @@ function pathFor(stage: string, sessionId: string | undefined) {
 // while the Intent stage hasn't created one yet) determines which later stages
 // are reachable -- a customer can always look back, but can't skip ahead of
 // what's actually been generated.
-export default function WizardProgress({ session }: WizardProgressProps) {
+export default function WizardProgress({ session, busy }: WizardProgressProps) {
   const { t } = useTranslation()
   const { sessionId } = useParams()
   const location = useLocation()
@@ -57,7 +63,7 @@ export default function WizardProgress({ session }: WizardProgressProps) {
     <ol className="wizard-progress">
       {STEPS.map((stage, index) => {
         const isCurrent = stage === currentStage
-        const isReachable = unlocked[stage]
+        const isReachable = unlocked[stage] && !busy
         const className = `wizard-step${isCurrent ? ' current' : ''}${isReachable ? '' : ' locked'}`
         const label = labelFor(stage)
 

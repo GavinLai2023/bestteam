@@ -148,3 +148,112 @@ def _repo_root():
     from pathlib import Path
 
     return Path(__file__).resolve().parents[1]
+
+
+# --- schema drift -------------------------------------------------------
+#
+# `init_db` runs `create_all`, which creates missing *tables* and never adds a
+# column to a table that already exists. So a database left behind head boots
+# clean and dies later, inside whichever feature touches the new column first
+# (observed 2026-08-23: a dev database two revisions behind raised "no such
+# column: knowledge_ingestion_jobs.chunk_size" from an ingestion run).
+
+
+def _script_head():
+    pytest.importorskip("alembic")
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory(str(_repo_root() / "alembic")).get_current_head()
+
+
+def _stamped_db(path, revision):
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+    if revision is not None:
+        con.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+    con.commit()
+    con.close()
+
+
+def test_a_database_stamped_at_head_is_ok(tmp_path):
+    from ui.backend.env_check import check_schema
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, _script_head())
+    finding = check_schema(db)
+    assert finding.level == "OK", finding
+
+
+def test_a_database_behind_head_fails_and_names_the_revisions(tmp_path):
+    # The whole point: this is the FAIL that should have fired at launch
+    # instead of a 500 from an ingestion run.
+    from ui.backend.env_check import check_schema
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, "d2e3f4a5b6c7")  # the knowledge-ingestion-tables revision
+    finding = check_schema(db)
+    assert finding.level == "FAIL"
+    assert "d2e3f4a5b6c7" in finding.message
+    assert _script_head() in finding.message
+    assert "alembic upgrade head" in finding.message
+
+
+def test_a_database_that_does_not_exist_yet_is_not_a_failure(tmp_path):
+    # check-env is documented as safe to run before the first start, and
+    # `test_check_env_does_not_create_the_database` pins that it stays safe.
+    from ui.backend.env_check import check_schema
+
+    db = tmp_path / "data" / "bestteam.db"
+    finding = check_schema(db)
+    assert finding.level == "OK"
+    assert not db.exists(), "check_schema created the database"
+    assert not db.parent.exists()
+
+
+def test_an_unstamped_create_all_database_warns(tmp_path):
+    # `docs/deployment.md` says start the backend, then `alembic upgrade
+    # head`. Between those two the schema is at head but carries no stamp;
+    # it works, but the next migration has nothing to measure from.
+    from ui.backend.env_check import check_schema
+
+    db = tmp_path / "bestteam.db"
+    import sqlite3
+
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY)")
+    con.commit()
+    con.close()
+    finding = check_schema(db)
+    assert finding.level == "WARN"
+    assert "alembic upgrade head" in finding.message
+
+
+def test_a_revision_the_code_does_not_know_fails(tmp_path):
+    # A database from a newer checkout than the code being launched.
+    from ui.backend.env_check import check_schema
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, "deadbeefcafe")
+    finding = check_schema(db)
+    assert finding.level == "FAIL"
+    assert "deadbeefcafe" in finding.message
+
+
+def test_the_cli_reports_schema_drift_and_exits_1(monkeypatch, capsys, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from ui.backend import admin
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, "d2e3f4a5b6c7")
+    for name in list(_GOOD) + ["BESTTEAM_DEMO_PIPELINES"]:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in _GOOD.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(db))
+
+    assert admin.main(["check-env"]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] schema" in out

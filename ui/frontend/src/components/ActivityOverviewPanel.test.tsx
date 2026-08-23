@@ -62,8 +62,8 @@ describe('ActivityOverviewPanel', () => {
     mockedApi.getActivityOverview.mockResolvedValue(
       overview({
         team_counts: [
-          { pipeline: 'payroll_qa', count: 5 },
-          { pipeline: 'sales_bot', count: 2 },
+          { pipeline: 'payroll_qa', count: 5, deleted: false },
+          { pipeline: 'sales_bot', count: 2, deleted: false },
         ],
       }),
     )
@@ -80,6 +80,35 @@ describe('ActivityOverviewPanel', () => {
     // rather than hiding the row.
     expect(screen.getByText('sales_bot')).toBeInTheDocument()
     expect(screen.getByText('2 tasks')).toBeInTheDocument()
+  })
+
+  it('marks a team that no longer exists, without dropping its work', async () => {
+    // A deleted team keeps its runs (Run.pipeline is a name snapshot, not a
+    // foreign key), so its row is labelled rather than hidden -- hiding it
+    // would leave the rows not adding up to the headline.
+    mockedApi.getActivityOverview.mockResolvedValue(
+      overview({
+        completed_count: 9,
+        team_counts: [
+          { pipeline: 'payroll_qa', count: 7, deleted: false },
+          { pipeline: 'e2e_support_team', count: 2, deleted: true },
+        ],
+      }),
+    )
+    mockedApi.listPipelines.mockResolvedValue({
+      pipelines: ['payroll_qa'],
+      display_names: { payroll_qa: 'Payroll Q&A Team' },
+    })
+
+    render(<ActivityOverviewPanel />)
+
+    const gone = await screen.findByText('e2e_support_team')
+    expect(gone.closest('li')).toHaveTextContent('deleted')
+    expect(screen.getByText('2 tasks')).toBeInTheDocument()
+    expect(screen.getByText('9')).toBeInTheDocument()
+
+    const live = screen.getByText('Payroll Q&A Team')
+    expect(live.closest('li')).not.toHaveTextContent('deleted')
   })
 
   it('shows the longest-streak note only when there is a personal best to report', async () => {

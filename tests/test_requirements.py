@@ -187,3 +187,52 @@ def test_requirements_to_prompt_omits_empty_sections():
     prompt = requirements.to_prompt()
 
     assert prompt == "Just a summary."
+
+
+def test_generate_requirements_includes_the_current_understanding_in_prompt():
+    """A refinement round re-derives from the customer's *edited* summary, not
+    from the original intent alone -- otherwise each round forgets the last."""
+    seen_messages = []
+
+    class _RecordingModel(_FakeAnalystChatModel):
+        def with_structured_output(self, schema, **kwargs):
+            def _invoke(messages):
+                seen_messages.append(messages)
+                return self.responses[0]
+
+            return RunnableLambda(_invoke)
+
+    model = _RecordingModel(responses=[Requirements(summary="Updated summary")])
+    current = Requirements(
+        summary="They want faster email support.",
+        goals=["Answer customer emails within an hour"],
+        constraints=["Never quote a refund amount"],
+    )
+
+    generate_requirements(model, "Help with support.", "Manual today.", current=current)
+
+    content = seen_messages[0][1].content
+    assert "Answer customer emails within an hour" in content
+    assert "Never quote a refund amount" in content
+
+
+def test_generate_requirements_puts_feedback_after_the_current_understanding():
+    """The customer's new sentence is the later, winning word when it conflicts
+    with a field they had edited earlier."""
+    seen_messages = []
+
+    class _RecordingModel(_FakeAnalystChatModel):
+        def with_structured_output(self, schema, **kwargs):
+            def _invoke(messages):
+                seen_messages.append(messages)
+                return self.responses[0]
+
+            return RunnableLambda(_invoke)
+
+    model = _RecordingModel(responses=[Requirements(summary="Updated summary")])
+    current = Requirements(goals=["Answer customer emails within an hour"])
+
+    generate_requirements(model, "Help with support.", "", current=current, feedback="Make it two hours instead.")
+
+    content = seen_messages[0][1].content
+    assert content.index("Answer customer emails within an hour") < content.index("Make it two hours instead.")

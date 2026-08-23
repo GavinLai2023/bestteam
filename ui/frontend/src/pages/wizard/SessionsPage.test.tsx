@@ -459,3 +459,57 @@ describe('SessionsPage sharing audit', () => {
     expect(mockedApi.listShareLinks).toHaveBeenCalledWith(5)
   })
 })
+
+describe('SessionsPage deployed team visibility', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: false,
+      pipeline_name: null,
+      status: 'disabled',
+      daily_cap: 0,
+      last_checked_at: null,
+    })
+  })
+
+  // Editing a deployed team walks its session back through the wizard, and
+  // `submit_requirements` writes status='requirements' (builder.py). That is
+  // not a resumable status, so the card for a team that is still live and
+  // serving traffic disappeared from My Teams entirely.
+  it('still lists a deployed team whose session went back to an earlier stage', async () => {
+    mockedApi.listSessions.mockResolvedValue({
+      sessions: [session({ status: 'requirements', pipeline_id: 8 })],
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('my-team')).toBeInTheDocument()
+  })
+})
+
+describe('SessionsPage live grouping', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({
+      enabled: false,
+      pipeline_name: null,
+      status: 'disabled',
+      daily_cap: 0,
+      last_checked_at: null,
+    })
+  })
+
+  // The team is deployed and serving traffic; only the wizard session is
+  // mid-edit. Filing it under "In Progress" would tell a customer their live
+  // team is not live yet.
+  it('groups a deployed team under Live even while its session is mid-edit', async () => {
+    mockedApi.listSessions.mockResolvedValue({
+      sessions: [session({ status: 'requirements', pipeline_id: 8 })],
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Live (1)')).toBeInTheDocument()
+    expect(screen.queryByText(/In Progress/)).not.toBeInTheDocument()
+  })
+})

@@ -45,7 +45,7 @@ def test_t4_1_apply_feedback_regenerates_team(page):
     _build_to_confirm(page, "We handle customer support emails.")
 
     page.fill("#solution-feedback", "Make the team also draft a summary of each reply.")
-    page.click("button:has-text('Apply this change')")
+    page.click("button:has-text('Update the team')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)
     assert "summary" in page.locator(".banner-info").inner_text().lower()
 
@@ -68,7 +68,7 @@ def test_t4_2_test_run_before_deploy(page):
 
 
 def test_t4_3_apply_button_requires_a_model(page):
-    """The Confirm page's "Apply this change" button is gated on the model
+    """The Confirm page's "Update the team" button is gated on the model
     catalog having loaded (ConfirmPage.tsx's applyFeedback: `if
     (catalogNotReady || busy) return`), not on feedback text -- feedback
     itself is optional (an empty description still re-runs the Architect,
@@ -84,7 +84,7 @@ def test_t4_3_apply_button_requires_a_model(page):
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
 
-    apply_button = page.locator("button:has-text('Apply this change')")
+    apply_button = page.locator("button:has-text('Update the team')")
     # pw_expect retries until the catalog fetch has settled.
     pw_expect(apply_button).to_be_enabled(timeout=8000)
     assert page.locator("#solution-feedback").input_value() == ""
@@ -101,18 +101,23 @@ def test_t4_3_apply_button_requires_a_model(page):
     page.wait_for_selector(".team-flow, .employee-card", timeout=5000)
 
 
-def test_t4_4_regenerate_requirements_summary(page):
-    """The "Show what we understood about your business" panel's
-    regenerate-with-feedback loop."""
+def test_t4_4_one_action_carries_a_hand_edit_and_a_described_change(page):
+    """The Confirm page has a single action, and it carries both of the
+    customer's inputs: a field they edited by hand and a change they
+    described in words. Both the understanding and the team come back
+    rewritten from them, with no separate save step in between."""
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
 
-    page.click("button:has-text('Show what we understood about your business')")
-    page.wait_for_selector("#req-feedback", timeout=5000)
-    page.fill("#req-feedback", "We also handle billing questions, not just support.")
-    page.click("button:has-text('Regenerate summary')")
-    page.wait_for_selector("#summary", timeout=15000)
+    page.wait_for_selector("#summary", timeout=5000)
+    page.fill("#summary", "They handle customer support and billing email.")
+    page.fill("#solution-feedback", "We also handle billing questions, not just support.")
+    page.click("button:has-text('Update the team')")
+    page.wait_for_selector("button:has-text('Updating…')", state="hidden", timeout=20000)
+
+    assert not page.locator(".banner-error").is_visible()
     assert page.locator("#summary").input_value()
+    page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=5000)
 
 
 def test_t4_5_deploy_then_run_for_real(page):
@@ -150,7 +155,7 @@ def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
     page.fill("#solution-feedback", "Always sign off with 'Best, the Support Team'.")
-    page.click("button:has-text('Apply this change')")
+    page.click("button:has-text('Update the team')")
     page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=15000)
 
     page.click("text=Need to add or update a document? Upload it here")

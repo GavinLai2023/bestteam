@@ -6,6 +6,59 @@
 
 ## Done
 
+- **A hierarchical team no longer dies on its first call under a thinking-mode
+  model** (2026-08-23). Every turn of a deployed `Payroll Q&A` team was
+  failing with `400 Thinking mode does not support this tool_choice`, which
+  the visitor saw only as "Sorry, something went wrong producing a reply" —
+  the real error was in `runs.output`. Both HIERARCHICAL paths force
+  `tool_choice="required"` on an agent's first call (`_hierarchical_node` for
+  the manager, `_make_delegate_tool` for a tool-carrying subordinate), and
+  DeepSeek's reasoning models reject that outright, at call time rather than
+  at bind time. `_first_call` now retries once on the unforced binding when
+  the provider's refusal names `tool_choice`, mirroring what
+  `core/_structured_output.invoke_structured` already did for the
+  structured-output path. Only the forcing is dropped — the delegation
+  guidance stays in the system prompt, so the worst case is a manager that
+  answers directly rather than a run with no answer at all. The retry is keyed
+  on the provider's wording so an unrelated failure still surfaces, and a
+  rejected request bills nothing, so the fallback costs one call, not two.
+  Not a share-chat bug: the same team failed identically from Run a team and
+  from automation.
+
+- **Confirm page: one action instead of three** (2026-08-23, branch
+  `refactor/confirm-single-update-action`). The page carried "Save this
+  summary", "Regenerate summary" and "Update the team", which a customer
+  could not tell apart and two of which could destroy the third's work.
+  Three defects, all confirmed in code: regenerating the summary never
+  touched the deployed team, so a customer could save an understanding the
+  team had never seen with nothing on screen saying so; `generate_requirements`
+  re-derived from `intent_text` plus one round's feedback, so two corrections
+  in a row silently undid the first; and clicking Regenerate discarded any
+  field the customer had hand-edited but not saved. Now: `generate_requirements`
+  takes `current`, making a second round a refinement rather than a restart;
+  `POST /api/builder/sessions/{id}/refine` runs the analyst (only when
+  something was described in words, with the edited draft as `current`) and
+  then always the architect, writing both halves in one `update_session()` so
+  a failed redesign cannot split them; and the page submits the edited fields
+  and the free text together under a single "Update the team", never gated on
+  the text box being non-empty. Requirements fields stay directly editable —
+  adding a goal is a precise act a natural-language round trip does worse —
+  they just no longer have a button of their own. `_redesign_specification()`
+  is extracted for the architect call `/refine` and `/solution` share.
+  The page also **locks while that request is in flight**: two model calls now
+  run behind one button, and the page previously disabled only the button
+  itself. Everything it owns is disabled (both textareas, every
+  `BulletEditor` — which gained a `disabled` prop — the upload link, Back to
+  preview, Continue to deploy) and one waiting line asks the customer to stay
+  on the page. `WizardProgress` gained a `busy` prop, raised through the
+  outlet context's new `setNavBusy`, that suspends every step link: "Go live"
+  unlocks on the specification merely existing, so it stayed clickable while
+  the Architect was redesigning that very specification — publishing either a
+  stale team or one the customer had never seen, with no error either way. The
+  top nav is deliberately left alone (no cancel exists, so a hung request must
+  not trap anyone), and the waiting line is one honest sentence rather than
+  `DocumentsPage`-style staged labels, since `/refine` is a single request and
+  the page cannot see the Analyst hand over to the Architect.
 - **Share-link chat, step 2 — token streaming, progress, Stop, markdown**
   (2026-08-23, branch `feat/share-chat-streaming`; spec
   `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`, plan
@@ -1685,6 +1738,19 @@
   process-wide mailbox env, retention unset, error channel unset or a
   malformed DSN, no trusted proxy). Table in `docs/deployment.md`, "Beta
   launch checklist".
+  A tenth check, `schema` (`env_check.check_schema`, added 2026-08-23), is
+  the one thing on the list that reads the database rather than the
+  environment, so it is a second function rather than another branch in the
+  pure one. It compares the `alembic_version` stamp with the migrations in
+  the checkout: at head is OK, no database yet is OK (the checklist runs
+  before the first start), an unstamped `create_all` database WARNs, and
+  **behind head FAILs**, naming the pending revisions. `create_all` creates
+  missing *tables* and never adds a column to one that exists, so a database
+  behind head boots clean and then raises `no such column` from whichever
+  feature touches the new column first -- which is exactly how a dev database
+  two revisions behind surfaced on 2026-08-23, as a failed ingestion run
+  rather than a failed launch. Opened read-only through a `file:` URI so the
+  checklist still cannot create the database.
 - **Beta gate G7** is a runbook step, not code: an M365 beta customer needs
   `docs/email-smoke-test.md` §9 walked against their live tenant before
   go-live (still never done -- see Known issues). The checklist and
@@ -1754,11 +1820,71 @@
   diagnose` refuses only autonomous email runs — the diagnostic row has no
   `trigger_context`, so it cannot touch the visitor's session).
 
+- **Deleted teams are marked, not hidden, in the Activity overview**
+  (2026-08-23). `Run.pipeline` is a name snapshot on the run row rather than
+  a foreign key, so a team's completed runs outlive the team — a customer saw
+  a deleted `e2e_support_team` sitting beside a live one with no way to tell
+  them apart, made worse by the deleted one showing its raw stored name
+  (`ActivityOverviewPanel.tsx`'s `teamLabel` falls back to the slug when
+  `display_names` has no entry, which a deleted team never does).
+  `compute_overview` now takes the org's live team names — passed in, since
+  the module does no I/O — and each `team_counts` row carries `deleted`. The
+  endpoint's lookup is org-scoped, so one org's live "support" cannot
+  un-delete another's, and it unions in the shipped YAML demos wherever
+  `BESTTEAM_DEMO_PIPELINES` has them enabled — those are runnable from
+  `/api/pipelines` but have no `pipelines` row, so every completed demo run
+  was reporting a team that had been deleted while it sat there, runnable
+  (Codex review, 2026-08-23). Marked rather than filtered on purpose: the rows still
+  sum to `completed_count`, and hiding them would retroactively shrink what
+  the org accomplished. Same snapshot property means a *renamed* team still
+  splits into two historical rows — untouched, and listed under Known issues.
+
+- **Editing a deployed team no longer makes it vanish from My teams**
+  (2026-08-23). My teams lists builder *sessions*, filtered to
+  `RESUMABLE_STATUSES` (`spec`/`solution`/`testing`/`deployed`). Editing a
+  deployed team walks its session back through the wizard, and
+  `submit_requirements` writes `status='requirements'` — outside that set, so
+  the card disappeared while the pipeline stayed deployed and serving.
+  `list_sessions`' synthetic-pipeline fallback did not cover it either: that
+  only synthesizes rows for pipelines *not* linked to a session. Nothing was
+  lost — the `pipelines` row, its versions and its share links were all
+  intact — but the team was unreachable from the UI. A session with a
+  `pipeline_id` is now listed whatever stage it sits at, and grouped under
+  **Live**, because the team really is live; only the wizard session is
+  mid-edit. Frontend-only: the status field still means "furthest wizard
+  stage", which is what the resume path wants.
+
+- **The Confirm page reads cause-before-effect** (2026-08-23). The page
+  carries two methodology stages at once, and presented them in reverse:
+  the team design first, the understanding it was derived from below it and
+  collapsed — so most customers never opened it, and edited the downstream
+  artefact instead. Worse, the four controls looked like two redundant
+  pairs: "Apply this change" (re-runs the Solution Architect on the team)
+  beside "Save changes" (persists hand-edited Requirements fields, no model
+  call), and two near-identically-labelled optional feedback boxes. The
+  operations were always distinct; nothing on screen said so. Now the
+  understanding sits on top, expanded, and each button names its object
+  ("Update the team" / "Save this summary" / "Regenerate summary") under a
+  "Your team" heading for the design section. Both feedback boxes were kept
+  — direct field editing and "let the analyst re-derive it from a
+  correction" are genuinely different jobs — but each now sits inside a
+  visibly separate section, so the parallel structure reads as deliberate.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
+
+- **A renamed team splits into two rows in the Activity overview.**
+  `Run.pipeline` stores the name the run executed under, so runs from before
+  a rename group separately from runs after it, and both rows show as live
+  (each name still resolves). Deleted teams are handled — they carry
+  `deleted` since 2026-08-23 — but a rename is indistinguishable from two
+  different teams without a stable id on the run. The fix is to count by
+  `pipeline_version_id`'s owning pipeline where it is set and fall back to
+  the name only for older rows; not done, because every deployment has runs
+  predating that column.
 
 - **The two share-chat fallback replies are persisted in English.**
   `share_transcript._FALLBACK_REPLY` and `share_chat._DISPATCH_FAILED_MESSAGE`
@@ -2183,6 +2309,34 @@
 
 ## Next steps / roadmap
 
+- **The platform should ask the customer questions** (decided 2026-08-23, not
+  started). `Requirements.clarifying_questions` already exists, the analyst
+  prompt already generates it, and `ConfirmPage` already renders it — but it
+  is inert in four ways: the prompt only asks when the description is "too
+  vague", capped at 1-2 questions; `IntentPage` generates requirements and
+  goes straight to Documents, so the questions first appear on Confirm, after
+  the team has been designed; the banner is read-only, so answers arrive as
+  free text with no link to the question they answer; and each regeneration
+  overwrites the list, so an unanswered question can vanish or be re-asked
+  forever. Decided shape: **a batch of questions, one input each, answers
+  stored paired with their question, skippable as a batch**; asked **after
+  Intent, before the team is designed**, and again **on Confirm when a change
+  is requested**. The architect deliberately does *not* get to ask (it would
+  mean a `Specification` schema change, the largest part). The governing
+  constraint: the platform promises "intent in, best AI team out", so asking
+  is pushing work back onto the customer — skipping must always be possible,
+  and a skipped question must make the analyst **write down the assumption it
+  made instead**, into `constraints`, where the customer can see it.
+- **Should the wizard still pin every agent to one model?**
+  `submit_solution_feedback` pins each agent's `model` to the request's
+  `model`, and `/refine` copies that so the Confirm page's behaviour did not
+  change. The pin was added when the wizard had a customer-facing model
+  picker, so the deployed agents would match what the customer chose. That
+  picker no longer exists — the page resolves `pickDefaultModel()` itself, an
+  invisible platform choice — so the pin now silently flattens the
+  architect's per-role model judgement onto one default, which is what
+  `_with_model_catalog()` exists to inform. Decide whether to drop it from
+  both endpoints.
 - **Share-link chat, what step 2 deliberately left out** (2026-08-23; each is
   scoped in the streaming spec's own "Out of scope" section): streaming on the
   authenticated monitor page -- the SDK capability is generic and the runtime

@@ -1,9 +1,12 @@
 """`python -m ui.backend.admin check-env`: the beta launch checklist as code
 (beta gate G6).
 
-A pure function over an environment mapping, so it is testable without a
-process and the CLI is one print loop. It only *reads*: nothing here changes
-a value or starts anything. Run inside the container (`docker compose run
+`check_environment` is a pure function over an environment mapping, so it is
+testable without a process and the CLI is one print loop; `check_schema`
+takes the database file, which is why it is a second function rather than
+another branch inside the first. Both only *read*: nothing here changes
+a value or starts anything, and neither creates the database. Run inside the
+container (`docker compose run
 --rm --no-deps backend python -m ui.backend.admin check-env`) so it sees the
 same `.env` the backend will, not a copy on the host.
 
@@ -18,8 +21,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import sqlite3
 from dataclasses import dataclass
-from typing import List, Mapping, Optional
+from pathlib import Path
+from typing import List, Mapping, Optional, Union
+from urllib.request import pathname2url
 
 from .auth import is_insecure_secret_key
 
@@ -169,3 +175,105 @@ def _dsn_problem(dsn: str) -> Optional[str]:
 
 def has_failures(findings: List[Finding]) -> bool:
     return any(f.level == "FAIL" for f in findings)
+
+
+# --- schema version ------------------------------------------------------
+#
+# Separate from `check_environment`, which is pure over an environment
+# mapping and must stay that way. This one needs the database file, so it
+# gets its own function and its own Finding, and the CLI appends it.
+
+_SCHEMA = "schema"
+
+# Keep this default in sync with ui/backend/db_session.py::DB_PATH and
+# alembic/env.py::_default_db_path.
+_DEFAULT_DB_PATH = Path(__file__).parent / "data" / "bestteam.db"
+_DEFAULT_SCRIPT_LOCATION = Path(__file__).resolve().parents[2] / "alembic"
+
+
+def default_db_path(env: Mapping[str, str]) -> Path:
+    return Path(_get(env, "BESTTEAM_DB_PATH") or _DEFAULT_DB_PATH)
+
+
+def _stamped_revision(path: Path) -> Optional[str]:
+    """The database's Alembic revision, or None if it carries no stamp.
+
+    Opened read-only through a `file:` URI, so a checklist run can neither
+    create the file nor write to one that exists -- `check-env` is documented
+    as safe on a box whose database does not exist yet, and
+    `test_check_env_does_not_create_the_database` pins that. Read-only still
+    reads a live WAL database, which a plain `sqlite3.connect` on a missing
+    path would silently create instead.
+    """
+    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    try:
+        stamped = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+        ).fetchone()
+        if not stamped:
+            return None
+        row = con.execute("SELECT version_num FROM alembic_version").fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def check_schema(
+    db_path: Union[str, Path, None] = None,
+    *,
+    script_location: Union[str, Path, None] = None,
+) -> Finding:
+    """Whether the database's schema matches the migrations in this checkout.
+
+    `init_db` runs `create_all`, which creates missing *tables* and never adds
+    a column to a table that already exists. So a database left behind head
+    boots clean, serves most of the app, and then raises `no such column` from
+    whichever feature touches the new column first -- observed 2026-08-23,
+    when a dev database two revisions behind failed an ingestion run rather
+    than the launch that should have caught it. Hence FAIL: being behind head
+    is not a preference, it is a deployment that will break somewhere.
+    """
+    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
+    if str(path) == ":memory:":
+        return Finding("OK", _SCHEMA, "in-memory database; nothing to migrate")
+    if not path.exists():
+        return Finding("OK", _SCHEMA, f"no database at {path} yet; the first start creates it at "
+                       "the current schema. Run `alembic upgrade head` afterwards to stamp it")
+
+    try:
+        from alembic.script import ScriptDirectory
+        from alembic.script.revision import RevisionError
+    except ImportError:
+        return Finding("WARN", _SCHEMA, "alembic is not installed, so the schema version cannot be "
+                       "checked (pip install 'bestteam[ui]')")
+
+    try:
+        stamped = _stamped_revision(path)
+    except sqlite3.Error as exc:
+        return Finding("WARN", _SCHEMA, f"could not read the schema version from {path}: {exc}")
+
+    script = ScriptDirectory(str(script_location or _DEFAULT_SCRIPT_LOCATION))
+    head = script.get_current_head()
+
+    if stamped is None:
+        # `docs/deployment.md` has the operator start the backend and *then*
+        # run `alembic upgrade head`. In between, create_all has built the
+        # tables at the current models but nothing stamped them, so the next
+        # migration has no floor to measure from.
+        return Finding("WARN", _SCHEMA, "the database carries no Alembic stamp; create_all built it "
+                       f"but no migration has been recorded. Run `alembic upgrade head` (head is {head})")
+    if stamped == head:
+        return Finding("OK", _SCHEMA, f"at head ({head})")
+
+    try:
+        pending = [rev.revision for rev in script.iterate_revisions(head, stamped)]
+    except RevisionError:
+        # A database written by a newer checkout than the code being launched.
+        return Finding("FAIL", _SCHEMA, f"stamped {stamped}, which is not a revision in this "
+                       f"checkout (head is {head}). The database is newer than the code -- deploy the "
+                       "matching version rather than migrating")
+    return Finding("FAIL", _SCHEMA, f"stamped {stamped}, {len(pending)} migration(s) behind head "
+                   f"({head}): {', '.join(reversed(pending))}. The backend will start and then fail "
+                   "with `no such column` in whichever feature touches a new column first. "
+                   "Run `alembic upgrade head`")

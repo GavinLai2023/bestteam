@@ -90,3 +90,16 @@ planned on the roadmap, not started. HIERARCHICAL *is* implemented: the
 alongside its own `tools` and run through the same tool-calling loop as
 SEQUENTIAL/PARALLEL agents — see `_hierarchical_node` in
 `adapters/langgraph_adapter.py`.
+
+Both hierarchical paths force `tool_choice="required"` on an agent's **first**
+call — a manager's, so it delegates rather than answering from its own
+guesswork, and a tool-carrying subordinate's, so it actually consults the tool
+it was delegated to use. That forcing is insurance, not a requirement:
+`_first_call` catches a provider that rejects it (DeepSeek's thinking mode
+returns `400 Thinking mode does not support this tool_choice`, which arrives at
+call time, not at bind time) and retries once on the unforced binding. Without
+that fallback a whole hierarchical team was dead on its first call — the
+guidance is still in the system prompt, so the worst case is a manager that
+answers directly instead of delegating. `core/_structured_output.py` handles
+the identical refusal on the structured-output path; the two are the same
+provider behaviour met in two places.

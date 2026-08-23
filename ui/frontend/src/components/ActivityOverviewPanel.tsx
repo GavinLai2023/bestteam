@@ -108,8 +108,12 @@ export default function ActivityOverviewPanel() {
       {overview.team_counts.length > 0 && (
         <ul className="overview-team-breakdown">
           {overview.team_counts.map((tc) => (
-            <li key={tc.pipeline}>
+            <li key={tc.pipeline} className={tc.deleted ? 'overview-team-deleted' : undefined}>
               <span className="overview-team-name">{teamLabel(tc.pipeline)}</span>
+              {/* A deleted team has no friendly name left to look up, so it
+                  shows its raw stored name -- say why, rather than leaving a
+                  stranger's slug beside the customer's own team. */}
+              {tc.deleted && <span className="overview-team-deleted-tag">{t('overview.deletedTeam')}</span>}
               <span className="overview-team-count">{t('overview.teamTaskCount', { count: tc.count })}</span>
             </li>
           ))}

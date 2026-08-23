@@ -570,6 +570,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  // The Confirm page's one action: the customer's edited understanding and
+  // whatever they described in words, updating both halves together.
+  refineTeam: (id: string, payload: { requirements?: Requirements; feedback: string; model: string }) =>
+    request<BuilderSession>(`/api/builder/sessions/${id}/refine`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   createTestRun: (id: string, input: string) =>
     request<{ run_id: string }>(`/api/builder/sessions/${id}/test-runs`, {
       method: 'POST',

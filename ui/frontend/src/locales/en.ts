@@ -125,6 +125,8 @@ export const en = {
     empty: 'No runs yet — once your teams get to work, your stats will show up here.',
     completedLabel: 'Tasks completed',
     teamTaskCount: '{{count}} tasks',
+    // A team can be deleted while the work it completed stays on the record.
+    deletedTeam: '(deleted)',
     activeDays: 'Active days',
     currentStreak: 'Current streak',
     longestStreakNote: 'Personal best: {{count}} days',
@@ -165,14 +167,18 @@ export const en = {
         "Here's your team again. If something's off, describe the change and we'll redesign it — you can always go back to try it out again.",
       historyHeading: 'Adjustments so far:',
       changeLabel: 'What should change?',
-      changePlaceholder: 'e.g. Have the team check our FAQ document before replying.',
+      changePlaceholder:
+        'e.g. We also use Zendesk for tickets, and the team should check our FAQ document before replying.',
       uploadLink: 'Need to add or update a document? Upload it here',
-      apply: 'Apply this change',
+      apply: 'Update the team',
       updating: 'Updating…',
+      updatingNotice:
+        'Redesigning your team — this usually takes under a minute. Please stay on this page, and hold off on the other buttons until it finishes.',
       // Two whole sentences, not a 'Show'/'Hide' word swapped into one: a
       // translated fragment assembled at runtime only reads correctly in the
       // language whose grammar the split was chosen for.
       showUnderstanding: 'Show what we understood about your business',
+      teamHeading: 'Your team',
       hideUnderstanding: 'Hide what we understood about your business',
       noSummary: 'No summary was generated for this session.',
       generate: 'Generate summary',
@@ -187,13 +193,6 @@ export const en = {
       successPlaceholder: 'e.g. fewer escalations',
       constraints: 'Constraints',
       constraintsPlaceholder: 'e.g. must stay in English',
-      save: 'Save changes',
-      saving: 'Saving…',
-      reqFeedbackLabel: 'Not quite right? Tell us what to change',
-      reqFeedbackPlaceholder:
-        'e.g. We also use Zendesk for tickets, and replies must stay under 150 words.',
-      regenerate: 'Regenerate summary',
-      thinking: 'Thinking…',
       backToPreview: 'Back to preview',
       continueToDeploy: 'Continue to deploy',
     },

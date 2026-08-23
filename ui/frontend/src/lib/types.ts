@@ -80,6 +80,9 @@ export interface WizardOutletContext {
   loading: boolean
   refresh: () => Promise<BuilderSession | null>
   sessionId?: string
+  // A stage page raises this while a long request is in flight so the shared
+  // chrome can stop offering step links (see WizardProgress's `busy`).
+  setNavBusy: (busy: boolean) => void
 }
 
 export interface TraceEvent {
@@ -456,6 +459,9 @@ export interface DailyRunCount {
 export interface TeamCount {
   pipeline: string
   count: number
+  // The team has since been deleted. Its work is still counted -- marked,
+  // not hidden, so the rows keep adding up to completed_count.
+  deleted: boolean
 }
 
 // The customer-facing Activity Overview tab: how often this org's teams ran,

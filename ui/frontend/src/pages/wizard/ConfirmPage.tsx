@@ -18,7 +18,7 @@ const EMPTY_REQUIREMENTS: Requirements = {
 }
 
 export default function ConfirmPage() {
-  const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
+  const { session, setSession, loading, sessionId, setNavBusy } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
   const { t } = useTranslation()
   // Both actions on this page call the Solution Architect internally, but
@@ -42,9 +42,10 @@ export default function ConfirmPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [showRequirements, setShowRequirements] = useState(false)
+  // Expanded by default: this is the understanding the team below was
+  // designed from, and collapsed it was effectively never read.
+  const [showRequirements, setShowRequirements] = useState(true)
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
-  const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
   const [reqError, setReqError] = useState<string | null>(null)
 
@@ -75,14 +76,26 @@ export default function ConfirmPage() {
   const spec = session.specification_json
   const history = (session.feedback_history ?? []).filter((entry) => entry.stage === 'solution')
 
-  const applyFeedback = async () => {
-    // Feedback is optional -- an empty description still re-runs the
-    // Architect (e.g. after uploading new documents).
+  // The page's one action. It carries both of the customer's inputs -- the
+  // fields they edited by hand and whatever they described in words -- and
+  // the backend updates the understanding and the team from them together.
+  // Describing nothing is a legitimate use (they only edited a field, or they
+  // just uploaded a document), so the button never depends on the text box.
+  const updateTeam = async () => {
     if (catalogNotReady || busy) return
     setBusy(true)
+    // Two model calls run behind this one button, so the wait is long enough
+    // that a customer will look for something else to do. The whole page --
+    // and the step bar above it -- stops taking clicks until it finishes;
+    // "Continue to deploy" in particular would otherwise publish the team the
+    // Architect is in the middle of replacing.
+    setNavBusy(true)
     setError(null)
     try {
-      const updated = await api.submitSolution(sessionId!, {
+      const updated = await api.refineTeam(sessionId!, {
+        // Only when there is a summary to edit -- an empty draft would
+        // otherwise overwrite a session whose Requirements call failed.
+        ...(session.requirements_json ? { requirements: reqDraft } : {}),
         feedback: feedback.trim(),
         model: pickDefaultModel(catalogEntries),
       })
@@ -92,20 +105,7 @@ export default function ConfirmPage() {
       setError((e as Error).message)
     } finally {
       setBusy(false)
-    }
-  }
-
-  const saveRequirements = async () => {
-    if (reqBusy) return
-    setReqBusy(true)
-    setReqError(null)
-    try {
-      const updated = await api.submitRequirements(sessionId!, { requirements: reqDraft })
-      setSession(updated)
-    } catch (e) {
-      setReqError((e as Error).message)
-    } finally {
-      setReqBusy(false)
+      setNavBusy(false)
     }
   }
 
@@ -116,24 +116,6 @@ export default function ConfirmPage() {
     try {
       const updated = await api.submitRequirements(sessionId!, { model: pickDefaultModel(catalogEntries) })
       setSession(updated)
-    } catch (e) {
-      setReqError((e as Error).message)
-    } finally {
-      setReqBusy(false)
-    }
-  }
-
-  const regenerateRequirements = async () => {
-    if (catalogNotReady || !reqFeedback.trim() || reqBusy) return
-    setReqBusy(true)
-    setReqError(null)
-    try {
-      const updated = await api.submitRequirements(sessionId!, {
-        model: pickDefaultModel(catalogEntries),
-        feedback: reqFeedback.trim(),
-      })
-      setSession(updated)
-      setReqFeedback('')
     } catch (e) {
       setReqError((e as Error).message)
     } finally {
@@ -157,49 +139,9 @@ export default function ConfirmPage() {
         </div>
       )}
 
-      {error && <p className="banner banner-error">{error}</p>}
-
-      <TeamFlow specification={spec} />
-
-      {history.length > 0 && (
-        <div className="banner banner-info" style={{ marginTop: 16 }}>
-          <strong>{t('wizard.confirm.historyHeading')}</strong>
-          <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
-            {history.map((entry, i) => (
-              <li key={i}>{entry.note}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="field" style={{ marginTop: 16 }}>
-        <label htmlFor="solution-feedback">
-          {t('wizard.confirm.changeLabel')} <span className="hint">{t('wizard.optional')}</span>
-        </label>
-        <textarea
-          id="solution-feedback"
-          rows={3}
-          value={feedback}
-          onChange={(e) => setFeedback(e.target.value)}
-          placeholder={t('wizard.confirm.changePlaceholder')}
-        />
-        <button
-          type="button"
-          className="btn-link"
-          style={{ marginTop: 4 }}
-          onClick={() => navigate(`/wizard/${sessionId}/documents`)}
-        >
-          {t('wizard.confirm.uploadLink')}
-        </button>
-      </div>
-      <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
-          {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
-        </button>
-      </div>
-
-      <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
-
+      {/* The understanding comes first: the team below is derived from it, so
+          a customer correcting something should meet the cause before the
+          effect. */}
       <button type="button" className="btn-link" onClick={() => setShowRequirements((v) => !v)}>
         {showRequirements
           ? t('wizard.confirm.hideUnderstanding')
@@ -216,7 +158,7 @@ export default function ConfirmPage() {
                 <button
                   className="btn btn-secondary"
                   onClick={generateRequirements}
-                  disabled={catalogNotReady || reqBusy}
+                  disabled={catalogNotReady || reqBusy || busy}
                 >
                   {reqBusy ? t('wizard.confirm.generating') : t('wizard.confirm.generate')}
                 </button>
@@ -244,6 +186,7 @@ export default function ConfirmPage() {
                   rows={3}
                   value={reqDraft.summary}
                   onChange={(e) => setReqDraft({ ...reqDraft, summary: e.target.value })}
+                  disabled={busy}
                 />
               </div>
 
@@ -252,6 +195,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.pain_points}
                   onChange={(items) => setReqDraft({ ...reqDraft, pain_points: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.painPointsPlaceholder')}
                 />
               </div>
@@ -261,6 +205,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.goals}
                   onChange={(items) => setReqDraft({ ...reqDraft, goals: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.goalsPlaceholder')}
                 />
               </div>
@@ -270,6 +215,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.success_criteria}
                   onChange={(items) => setReqDraft({ ...reqDraft, success_criteria: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.successPlaceholder')}
                 />
               </div>
@@ -279,38 +225,14 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.constraints}
                   onChange={(items) => setReqDraft({ ...reqDraft, constraints: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.constraintsPlaceholder')}
                 />
               </div>
 
-              <div className="wizard-actions">
-                <button className="btn btn-secondary" onClick={saveRequirements} disabled={reqBusy}>
-                  {reqBusy ? t('wizard.confirm.saving') : t('wizard.confirm.save')}
-                </button>
-              </div>
-
-              <div className="field" style={{ marginTop: 12 }}>
-                <label htmlFor="req-feedback">
-                  {t('wizard.confirm.reqFeedbackLabel')}{' '}
-                  <span className="hint">{t('wizard.optional')}</span>
-                </label>
-                <textarea
-                  id="req-feedback"
-                  rows={2}
-                  value={reqFeedback}
-                  onChange={(e) => setReqFeedback(e.target.value)}
-                  placeholder={t('wizard.confirm.reqFeedbackPlaceholder')}
-                />
-              </div>
-              <div className="wizard-actions">
-                <button
-                  className="btn btn-secondary"
-                  onClick={regenerateRequirements}
-                  disabled={catalogNotReady || !reqFeedback.trim() || reqBusy}
-                >
-                  {reqBusy ? t('wizard.confirm.thinking') : t('wizard.confirm.regenerate')}
-                </button>
-              </div>
+              {/* No save button of its own: these fields travel with the
+                  single Update action below, so an edit can never be left
+                  unsaved and can never be thrown away by another button. */}
             </>
           )}
         </div>
@@ -318,11 +240,69 @@ export default function ConfirmPage() {
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 
+      <h3>{t('wizard.confirm.teamHeading')}</h3>
+
+      {error && <p className="banner banner-error">{error}</p>}
+
+      <TeamFlow specification={spec} />
+
+      {history.length > 0 && (
+        <div className="banner banner-info" style={{ marginTop: 16 }}>
+          <strong>{t('wizard.confirm.historyHeading')}</strong>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+            {history.map((entry, i) => (
+              <li key={i}>{entry.note}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="field" style={{ marginTop: 16 }}>
+        <label htmlFor="solution-feedback">
+          {t('wizard.confirm.changeLabel')} <span className="hint">{t('wizard.optional')}</span>
+        </label>
+        <textarea
+          id="solution-feedback"
+          rows={3}
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder={t('wizard.confirm.changePlaceholder')}
+          disabled={busy}
+        />
+        <button
+          type="button"
+          className="btn-link"
+          style={{ marginTop: 4 }}
+          onClick={() => navigate(`/wizard/${sessionId}/documents`)}
+          disabled={busy}
+        >
+          {t('wizard.confirm.uploadLink')}
+        </button>
+      </div>
       <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/preview`)}>
+        <button className="btn btn-secondary" onClick={updateTeam} disabled={catalogNotReady || busy}>
+          {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
+        </button>
+      </div>
+      {/* An honest single line, not a staged one: this is one request, so the
+          page cannot know when the Analyst hands over to the Architect. */}
+      {busy && <p className="hint">{t('wizard.confirm.updatingNotice')}</p>}
+
+      <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
+
+      <div className="wizard-actions">
+        <button
+          className="btn btn-secondary"
+          onClick={() => navigate(`/wizard/${sessionId}/preview`)}
+          disabled={busy}
+        >
           {t('wizard.confirm.backToPreview')}
         </button>
-        <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/deploy`)}>
+        <button
+          className="btn btn-primary"
+          onClick={() => navigate(`/wizard/${sessionId}/deploy`)}
+          disabled={busy}
+        >
           {t('wizard.confirm.continueToDeploy')}
         </button>
       </div>

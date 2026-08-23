@@ -32,6 +32,10 @@ class DailyCount(TypedDict):
 class TeamCount(TypedDict):
     pipeline: str
     count: int
+    # Whether the team that did this work has since been deleted. Marked
+    # rather than hidden, so the rows still add up to `completed_count` --
+    # dropping them would retroactively shrink what the org accomplished.
+    deleted: bool
 
 
 class OverviewStats(TypedDict):
@@ -57,6 +61,13 @@ def compute_overview(
     # separate from sessions/streaks/heatmap above, which count every run
     # regardless of outcome (engagement, not accomplishment).
     completed_pipelines: Optional[List[str]] = None,
+    # The names of the org's teams that still exist. `Run.pipeline` is a name
+    # snapshot on the run row, not a foreign key, so a name counted above may
+    # belong to a team that has since been deleted -- and, because it is a
+    # snapshot, to one that has merely been renamed. Passed in rather than
+    # looked up: this module does no I/O. Omitted means "not known", and
+    # nothing is reported deleted rather than everything.
+    live_pipelines: Optional[Set[str]] = None,
 ) -> OverviewStats:
     active_days: Set[date] = {ts.date() for ts in run_timestamps}
     today = now.date()
@@ -78,7 +89,11 @@ def compute_overview(
 
     completed_pipelines = completed_pipelines or []
     team_counts: List[TeamCount] = [
-        {"pipeline": name, "count": count}
+        {
+            "pipeline": name,
+            "count": count,
+            "deleted": live_pipelines is not None and name not in live_pipelines,
+        }
         for name, count in sorted(Counter(completed_pipelines).items(), key=lambda kv: (-kv[1], kv[0]))
     ]
 

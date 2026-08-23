@@ -15,6 +15,15 @@ import './SessionsPage.css'
 // name and nowhere sensible to resume into.
 const RESUMABLE_STATUSES = new Set(['spec', 'solution', 'testing', 'deployed'])
 
+// ...but a session with a deployed team is always listable, whatever stage it
+// is currently sitting at. Editing a deployed team walks its session back
+// through the wizard -- `submit_requirements` writes status='requirements'
+// (builder.py) -- and status alone would then hide a team that is still live
+// and serving traffic.
+function isListable(session: BuilderSession) {
+  return RESUMABLE_STATUSES.has(session.status) || session.pipeline_id != null
+}
+
 // Spec/solution/testing all resume into the same Confirm page with identical
 // content -- there's no customer-visible difference between them (testing in
 // particular is set just from trying the team once on the Preview page, not
@@ -22,8 +31,11 @@ const RESUMABLE_STATUSES = new Set(['spec', 'solution', 'testing', 'deployed'])
 // than three technical-sounding statuses.
 const STATUS_ORDER = ['deployed', 'in_progress']
 
-function bucketFor(status: string) {
-  return status === 'deployed' ? 'deployed' : 'in_progress'
+// A session with a deployed team is Live even while it is being edited: the
+// pipeline is still running and answering. Only the wizard session is
+// mid-flow, and that is not what this heading tells the customer about.
+function bucketFor(session: BuilderSession) {
+  return session.status === 'deployed' || session.pipeline_id != null ? 'deployed' : 'in_progress'
 }
 
 function resumePathFor(session: BuilderSession) {
@@ -65,7 +77,7 @@ export default function SessionsPage() {
   useEffect(() => {
     api
       .listSessions()
-      .then((data) => setSessions(data.sessions.filter((s) => RESUMABLE_STATUSES.has(s.status))))
+      .then((data) => setSessions(data.sessions.filter(isListable)))
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
     api.getEmailTrigger().then(setTrigger).catch(() => {})
@@ -97,7 +109,7 @@ export default function SessionsPage() {
 
   const statusGroups = STATUS_ORDER.map((bucket) => ({
     status: bucket,
-    sessions: sessions.filter((s) => bucketFor(s.status) === bucket),
+    sessions: sessions.filter((s) => bucketFor(s) === bucket),
   })).filter((group) => group.sessions.length > 0)
 
   const handleDelete = async (session: BuilderSession) => {

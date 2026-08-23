@@ -8,7 +8,7 @@ import type { BuilderSession } from '../../lib/types'
 vi.mock('../../lib/api', () => ({
   api: {
     modelCatalog: vi.fn(),
-    submitSolution: vi.fn(),
+    refineTeam: vi.fn(),
     submitRequirements: vi.fn(),
   },
 }))
@@ -22,6 +22,7 @@ let mockContext: {
   setSession: (session: BuilderSession) => void
   loading: boolean
   sessionId: string
+  setNavBusy: ReturnType<typeof vi.fn>
 }
 
 vi.mock('react-router-dom', async () => {
@@ -49,16 +50,16 @@ const sessionWithSpec = (): BuilderSession => ({
 describe('ConfirmPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' }])
   })
 
-  it('enables Apply this change once the catalog loads, even with no described change', async () => {
-    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+  it('enables Update the team once the catalog loads, even with no described change', async () => {
+    mockedApi.refineTeam.mockResolvedValue(sessionWithSpec())
 
     renderPage()
 
-    const button = await screen.findByText('Apply this change')
+    const button = await screen.findByText('Update the team')
     // The model catalog resolves asynchronously; the page picks the
     // Architect's model itself -- there's nothing for the customer to choose.
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
@@ -66,7 +67,7 @@ describe('ConfirmPage', () => {
     fireEvent.click(button)
 
     await waitFor(() =>
-      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
         feedback: '',
         model: 'deepseek:friendly-assistant',
       }),
@@ -74,19 +75,19 @@ describe('ConfirmPage', () => {
   })
 
   it('sends the typed feedback alongside the picked model', async () => {
-    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+    mockedApi.refineTeam.mockResolvedValue(sessionWithSpec())
 
     renderPage()
-    const button = await screen.findByText('Apply this change')
+    const button = await screen.findByText('Update the team')
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
 
-    fireEvent.change(screen.getByPlaceholderText(/Have the team check our FAQ/i), {
+    fireEvent.change(screen.getByPlaceholderText(/FAQ document/i), {
       target: { value: 'Make replies friendlier' },
     })
     fireEvent.click(button)
 
     await waitFor(() =>
-      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
         feedback: 'Make replies friendlier',
         model: 'deepseek:friendly-assistant',
       }),
@@ -107,7 +108,7 @@ describe('ConfirmPage', () => {
   it('never shows a model picker or an advanced-settings toggle', async () => {
     renderPage()
 
-    await screen.findByText('Apply this change')
+    await screen.findByText('Update the team')
     expect(screen.queryByText('Advanced settings')).not.toBeInTheDocument()
     expect(screen.queryByLabelText(/assistant/i)).not.toBeInTheDocument()
   })
@@ -123,7 +124,7 @@ describe('ConfirmPage', () => {
       renderPage()
 
       expect(await screen.findByText(/No AI models are available yet/i)).toBeInTheDocument()
-      expect(screen.getByText('Apply this change').closest('button')).toBeDisabled()
+      expect(screen.getByText('Update the team').closest('button')).toBeDisabled()
     })
 
     it('explains a failed catalog fetch and offers a retry that recovers', async () => {
@@ -142,7 +143,7 @@ describe('ConfirmPage', () => {
         expect(screen.queryByText(/Couldn't load the available AI models/i)).not.toBeInTheDocument(),
       )
       await waitFor(() =>
-        expect(screen.getByText('Apply this change').closest('button')).toBeEnabled(),
+        expect(screen.getByText('Update the team').closest('button')).toBeEnabled(),
       )
     })
   })
@@ -156,17 +157,16 @@ describe('ConfirmPage', () => {
     const sessionWithoutRequirements = (): BuilderSession => ({ ...sessionWithSpec(), requirements_json: undefined })
 
     it('offers a way to generate one instead of a dead end', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
 
       expect(screen.getByText('No summary was generated for this session.')).toBeInTheDocument()
       expect(await screen.findByText('Generate summary')).toBeInTheDocument()
     })
 
     it('generates and shows the summary once clicked', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
       const withRequirements = {
         ...sessionWithoutRequirements(),
         requirements_json: { summary: 'They want faster replies.', pain_points: [], goals: [], success_criteria: [], constraints: [], clarifying_questions: [] },
@@ -174,7 +174,6 @@ describe('ConfirmPage', () => {
       mockedApi.submitRequirements.mockResolvedValue(withRequirements)
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
       const button = await screen.findByText('Generate summary')
       await waitFor(() => expect(button.closest('button')).toBeEnabled())
       fireEvent.click(button)
@@ -186,16 +185,227 @@ describe('ConfirmPage', () => {
     })
 
     it('shows an error if generating the summary fails', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
       mockedApi.submitRequirements.mockRejectedValue(new Error('Model call failed'))
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
       const button = await screen.findByText('Generate summary')
       await waitFor(() => expect(button.closest('button')).toBeEnabled())
       fireEvent.click(button)
 
       expect(await screen.findByText('Model call failed')).toBeInTheDocument()
     })
+  })
+})
+
+describe('ConfirmPage layout', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: [],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+  })
+
+  // The understanding is what the team design is derived from, so a customer
+  // who wants to correct something should meet it before the thing it
+  // produced. Collapsed by default, most never saw it at all.
+  it('shows what we understood without needing a click', async () => {
+    renderPage()
+
+    expect(await screen.findByDisplayValue('They answer payroll questions by hand.')).toBeInTheDocument()
+  })
+
+  it('puts what we understood above the team it produced', async () => {
+    renderPage()
+
+    const understanding = await screen.findByText(/what we understood about your business/i)
+    const team = await screen.findByText('Your team')
+
+    expect(understanding.compareDocumentPosition(team) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+// The page used to carry three buttons -- Save this summary, Regenerate
+// summary and Update the team -- whose effects a customer could not tell
+// apart, and two of which could destroy the third's work. There is one
+// action now, and it carries everything the customer touched.
+describe('ConfirmPage single update action', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: [],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+    mockedApi.refineTeam.mockResolvedValue(sessionWithRequirements())
+  })
+
+  it('sends the hand-edited fields and the described change together', async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+
+    fireEvent.change(screen.getByDisplayValue('They answer payroll questions by hand.'), {
+      target: { value: 'They answer payroll questions by hand, slowly.' },
+    })
+    fireEvent.change(screen.getByPlaceholderText(/FAQ document/i), {
+      target: { value: 'Keep replies under 150 words.' },
+    })
+    fireEvent.click(button)
+
+    await waitFor(() =>
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
+        requirements: expect.objectContaining({ summary: 'They answer payroll questions by hand, slowly.' }),
+        feedback: 'Keep replies under 150 words.',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('carries a hand-edited field even when nothing is described in words', async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+
+    fireEvent.change(screen.getByDisplayValue('They answer payroll questions by hand.'), {
+      target: { value: 'They answer payroll questions by hand, slowly.' },
+    })
+    fireEvent.click(button)
+
+    await waitFor(() =>
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
+        requirements: expect.objectContaining({ summary: 'They answer payroll questions by hand, slowly.' }),
+        feedback: '',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('offers no separate save or regenerate button', async () => {
+    renderPage()
+
+    await screen.findByText('Update the team')
+    expect(screen.queryByText('Save this summary')).not.toBeInTheDocument()
+    expect(screen.queryByText('Regenerate summary')).not.toBeInTheDocument()
+  })
+
+  it('offers one place to describe a change, not two', async () => {
+    renderPage()
+
+    await screen.findByText('Update the team')
+    expect(screen.queryByLabelText(/Not quite right/i)).not.toBeInTheDocument()
+  })
+
+  it('puts the change box below the team, since it changes both', async () => {
+    renderPage()
+
+    const team = await screen.findByText('Your team')
+    const box = screen.getByPlaceholderText(/FAQ document/i)
+
+    expect(team.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+// Two model calls run behind the one button, so the wait is long enough that
+// a customer will look for something else to do. Nothing on the page should
+// take a click while it is going on -- least of all "Continue to deploy",
+// which would publish the team the Architect is in the middle of replacing.
+describe('ConfirmPage while the update is in flight', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: ['replies take days'],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  let resolveRefine: (session: BuilderSession) => void
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+    mockedApi.refineTeam.mockReturnValue(
+      new Promise<BuilderSession>((resolve) => {
+        resolveRefine = resolve
+      }),
+    )
+  })
+
+  const startUpdate = async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+    fireEvent.click(button)
+    return button
+  }
+
+  it('asks the customer to wait instead of leaving them guessing', async () => {
+    await startUpdate()
+
+    expect(await screen.findByText(/stay on this page/i)).toBeInTheDocument()
+  })
+
+  it('takes no further input from anything on the page', async () => {
+    await startUpdate()
+
+    await waitFor(() => expect(screen.getByPlaceholderText(/FAQ document/i)).toBeDisabled())
+    expect(screen.getByDisplayValue('They answer payroll questions by hand.')).toBeDisabled()
+    expect(screen.getByDisplayValue('replies take days')).toBeDisabled()
+    expect(screen.getAllByText('+ add')[0].closest('button')).toBeDisabled()
+    expect(screen.getByText('Need to add or update a document? Upload it here').closest('button')).toBeDisabled()
+    expect(screen.getByText('Back to preview').closest('button')).toBeDisabled()
+    expect(screen.getByText('Continue to deploy').closest('button')).toBeDisabled()
+  })
+
+  it('tells the wizard chrome to stop offering step links, and to start again after', async () => {
+    await startUpdate()
+
+    await waitFor(() => expect(mockContext.setNavBusy).toHaveBeenCalledWith(true))
+
+    resolveRefine(sessionWithRequirements())
+
+    await waitFor(() => expect(mockContext.setNavBusy).toHaveBeenLastCalledWith(false))
+  })
+
+  it('gives the page back once the team has been updated', async () => {
+    await startUpdate()
+    await screen.findByText(/stay on this page/i)
+
+    resolveRefine(sessionWithRequirements())
+
+    await waitFor(() => expect(screen.queryByText(/stay on this page/i)).not.toBeInTheDocument())
+    expect(screen.getByText('Continue to deploy').closest('button')).toBeEnabled()
+    expect(screen.getByPlaceholderText(/FAQ document/i)).toBeEnabled()
   })
 })
