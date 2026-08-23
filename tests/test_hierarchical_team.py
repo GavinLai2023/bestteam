@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -240,10 +242,14 @@ class _ThinkingModeChatModel(_FakeToolCallingChatModel):
             return self
         refusing = _ThinkingModeChatModel(responses=self.responses)
         object.__setattr__(refusing, "refuses", True)
+        # A test that seeded `refused_calls` on the model it built gets the
+        # rejected calls recorded there; the forced clone shares the list.
+        object.__setattr__(refusing, "refused_calls", getattr(self, "refused_calls", []))
         return refusing
 
     def invoke(self, input, *args, **kwargs):
         if getattr(self, "refuses", False):
+            getattr(self, "refused_calls", []).append(input)
             raise Exception(
                 "Error code: 400 - {'error': {'message': 'Thinking mode does not "
                 "support this tool_choice', 'type': 'invalid_request_error'}}"
@@ -397,3 +403,125 @@ def test_delegation_guidance_omits_a_manager_listed_among_its_own_agents():
     prompt = [m for m in manager_model.last_messages if isinstance(m, SystemMessage)][0].content
     assert "delegate_to_researcher" in prompt
     assert "delegate_to_manager" not in prompt
+
+
+def test_a_model_that_refused_forced_tool_choice_is_not_probed_again():
+    # Falling back per agent meant every agent on a refusing model spent one
+    # rejected call before answering -- three per turn on a manager plus two
+    # specialists, all with the same model behind them. The refusal is a
+    # property of the model, not of the agent, so the first one is remembered
+    # for the rest of the process and later agents skip the forcing outright.
+    def lookup_policy(query: str) -> str:
+        return "policy info"
+
+    manager_model = _ThinkingModeChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "delegate_to_researcher", "args": {"task": "look into X"}, "id": "call_1"}
+                ],
+            ),
+            AIMessage(content="Final report based on: research findings"),
+        ]
+    )
+    researcher_model = _ThinkingModeChatModel(responses=[AIMessage(content="research findings")])
+    object.__setattr__(manager_model, "refused_calls", [])
+    object.__setattr__(researcher_model, "refused_calls", [])
+
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=researcher_model,
+        tools=[lookup_policy],
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+    Pipeline(name="wf", steps=[team]).run("do the thing")
+
+    assert len(manager_model.refused_calls) == 1
+    assert researcher_model.refused_calls == []
+
+
+# Long enough that a serial run really does exhaust it (and so fails for the
+# right reason), short enough that the failure is not a slow test.
+_BARRIER_TIMEOUT = 2.0
+
+
+class _BarrierChatModel(_FakeToolCallingChatModel):
+    """Blocks in `invoke()` until a second thread reaches the same barrier.
+
+    Two delegations executed one after the other can never both be inside this
+    call at once, so the barrier times out and breaks. That is what makes an
+    assertion on `barrier.broken` a test of genuine concurrency rather than of
+    scheduling luck.
+    """
+
+    def invoke(self, input, *args, **kwargs):
+        try:
+            getattr(self, "barrier").wait(timeout=_BARRIER_TIMEOUT)
+        except threading.BrokenBarrierError:
+            pass  # the assertion reads `barrier.broken`; let the run finish
+        return super().invoke(input, *args, **kwargs)
+
+
+def _barrier_team(barrier):
+    """A manager that delegates to two specialists in a single turn, both of
+    whose models block on `barrier`."""
+    subordinates = []
+    for name in ("researcher", "writer"):
+        model = _BarrierChatModel(responses=[AIMessage(content=f"{name} findings")])
+        object.__setattr__(model, "barrier", barrier)
+        subordinates.append(
+            Agent(name=name, role=name.title(), goal=f"{name} things", model=model)
+        )
+
+    manager_model = _RecordingToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "delegate_to_researcher", "args": {"task": "research X"}, "id": "call_1"},
+                    {"name": "delegate_to_writer", "args": {"task": "write about X"}, "id": "call_2"},
+                ],
+            ),
+            AIMessage(content="Combined answer"),
+        ]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+    team = Team(
+        name="team",
+        agents=subordinates,
+        mode=CollaborationMode.HIERARCHICAL,
+        manager=manager,
+    )
+    return manager_model, Pipeline(name="wf", steps=[team])
+
+
+def test_multiple_delegations_in_one_turn_run_concurrently():
+    # A manager that asks for two specialists in one turn used to get them one
+    # after the other, so the turn cost the sum of both. The barrier only
+    # releases if both delegations are genuinely in flight at the same time.
+    barrier = threading.Barrier(2)
+
+    _, pipeline = _barrier_team(barrier)
+    result = pipeline.run("do the thing")
+
+    assert not barrier.broken
+    assert result.output == "Combined answer"
+
+
+def test_concurrent_delegations_answer_in_the_order_the_manager_asked():
+    # Running the batch concurrently must not let the replies reach the model
+    # in completion order: a ToolMessage is matched to its call by id, and the
+    # manager reads them as the transcript of what it asked for.
+    barrier = threading.Barrier(2)
+
+    manager_model, pipeline = _barrier_team(barrier)
+    pipeline.run("do the thing")
+
+    tool_messages = [m for m in manager_model.last_messages if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in tool_messages] == ["call_1", "call_2"]
+    assert [m.content for m in tool_messages] == ["researcher findings", "writer findings"]

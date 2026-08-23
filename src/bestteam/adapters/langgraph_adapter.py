@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import operator
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -66,6 +67,18 @@ def _tool_loop_exhausted_notice(agent_name: str) -> str:
         f"[Agent '{agent_name}' stopped after {_MAX_TOOL_ITERATIONS} tool "
         "iterations without producing a final answer.]"
     )
+
+
+# Model specs (`_model_spec`) whose provider has rejected a forced
+# `tool_choice` in this process -- see `_first_call`, which is what adds to it.
+# The refusal is a property of the model, so every later agent behind the same
+# spec skips the forcing instead of paying for its own rejected call: a team of
+# a manager plus two specialists otherwise spends three per turn. Deliberately
+# process-local and never persisted: whether a provider still refuses is a
+# server-side behaviour that can change under us, so a restart re-probes rather
+# than pinning a stale answer forever. A bare set needs no lock -- a race
+# between two threads costs at most one extra probe, never a wrong result.
+_FORCED_TOOL_CHOICE_REFUSED: set = set()
 
 
 class _TeamState(TypedDict):
@@ -602,7 +615,10 @@ def _run_agent(
     tool, for the same reason. Later iterations in this same call always use
     the unforced binding, so the agent can still settle on a final text answer once it has
     gathered what it needs. A model that refuses the forcing outright (see
-    `_first_call`) falls back to the unforced binding rather than failing. If `usage_sink` is given, each model invocation's
+    `_first_call`) falls back to the unforced binding rather than failing, and
+    that refusal is remembered for the process, so every later agent behind the
+    same model spec skips the forcing instead of repeating the probe.
+    If `usage_sink` is given, each model invocation's
     `usage_metadata` (when reported) is appended to it for usage metering.
     If `on_event` is given, it's called with each granular `TraceEvent`
     (agent_started/tool_started/tool_completed/agent_progress) as this turn
@@ -639,15 +655,15 @@ def _run_agent(
     # The KB tool results' text, verbatim -- the claim grader's evidence
     # (grounding_level: "claim"). Same material as the turn's ToolMessages.
     kb_result_texts: List[str] = []
+    model_spec = _model_spec(agent)
+    force_first_call = require_tool_use_on_first_call and model_spec not in _FORCED_TOOL_CHOICE_REFUSED
     first_call_model = model
     forced_first_call = False
     if all_tools:
         try:
             model = model.bind_tools(all_tools)
-            first_call_model = (
-                model.bind_tools(all_tools, tool_choice="required") if require_tool_use_on_first_call else model
-            )
-            forced_first_call = require_tool_use_on_first_call
+            first_call_model = model.bind_tools(all_tools, tool_choice="required") if force_first_call else model
+            forced_first_call = force_first_call
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
 
@@ -734,15 +750,23 @@ def _run_agent(
         is keyed on the provider's own wording so an unrelated failure is not
         quietly paid for twice, and a rejected request is billed for nothing,
         so the second call is the only one that costs anything.
+
+        The spec is then added to `_FORCED_TOOL_CHOICE_REFUSED`, which is what
+        makes this probe once per model per process rather than once per agent:
+        a manager plus two specialists on one refusing model spent three
+        rejected calls, and roughly 0.8s, on every single turn.
         """
         try:
             return _call(first_call_model, msgs)
         except Exception as exc:
             if not forced_first_call or "tool_choice" not in str(exc).lower():
                 raise
+            _FORCED_TOOL_CHOICE_REFUSED.add(model_spec)
             _logger.info(
-                "Agent '%s': model refused a forced tool_choice, retrying without it (%s)",
+                "Agent '%s': model refused a forced tool_choice, retrying without it "
+                "and not forcing it again for '%s' (%s)",
                 agent.name,
+                model_spec,
                 exc,
             )
             return _call(model, msgs)
@@ -767,6 +791,91 @@ def _run_agent(
     if diagnostic:
         _emit("model_turn", _model_turn_data(model_turns, response))
 
+    def _execute_call(call: Dict[str, Any]) -> str:
+        """Run one tool call and return the text the model reads next.
+
+        Extracted so a batch has one implementation whether it runs serially or
+        in parallel. Safe to call from a worker thread: the reporting box is a
+        `ContextVar` scoped to this call (see core/tool_context.py), and
+        `_emit`/`usage_sink` only ever append to their lists. The
+        grounding-lite counters below are rebound rather than appended to, but
+        the parallel path only ever runs a batch that is all delegations and a
+        delegation is never a knowledge-base tool, so they are still only ever
+        touched by one thread at a time.
+        """
+        nonlocal kb_searches, kb_hit_count
+        tool_fn = tools_by_name.get(call["name"])
+        if tool_fn is None:
+            return f"Error: unknown tool '{call['name']}'"
+        # An email tool's args/result are mail content -- redacted on
+        # every path, diagnostic or not (see _EMAIL_TOOLS_NEEDING_REDACTION).
+        reveal = diagnostic and call["name"] not in _EMAIL_TOOLS_NEEDING_REDACTION
+        started_data: Dict[str, Any] = {"tool": call["name"]}
+        if reveal:
+            started_data["args"] = _diagnostic_args(call["args"])
+        _emit("tool_started", started_data)
+        start = time.monotonic()
+        try:
+            with tool_call_context() as tool_ctx:
+                result = tool_fn(**call["args"])
+        except Exception as exc:
+            _logger.warning(
+                "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
+            )
+            result = f"Error calling tool '{call['name']}': {exc}"
+            failure_data: Dict[str, Any] = {
+                "tool": call["name"],
+                "success": False,
+                "duration_ms": int((time.monotonic() - start) * 1000),
+                "summary": "Tool call failed",
+            }
+            if reveal:
+                # What the model is about to read (the ToolMessage
+                # below) -- the raw exception text stays out of the
+                # business-safe `summary` as before.
+                failure_data["result"] = _diagnostic_text(result)
+            if call["name"] in ("email_read", "email_read_attachment", "email_draft_reply"):
+                # Retain the bounded message id on failure too, same as a
+                # successful call's redacted data -- otherwise a failed
+                # email_read/email_read_attachment/email_draft_reply can't
+                # be correlated back to its UID downstream
+                # (automation_results.py's per-UID needs_attention
+                # enforcement, Codex review finding).
+                failure_data["message_id"] = _bounded_message_id(call["args"])
+            _emit("tool_completed", failure_data)
+        else:
+            if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION:
+                extra_data = _redacted_email_tool_data(call["name"], call["args"], result)
+            elif getattr(tool_fn, "__bestteam_tool_kind__", None) == "knowledge_base":
+                extra_data = _kb_tool_trace_data(tool_ctx.trace)
+                kb_searches += 1
+                kb_hit_count += int(tool_ctx.trace.get("hit_count") or 0)
+                kb_citations.extend(tool_ctx.trace.get("citations") or ())
+                kb_documents.extend(tool_ctx.trace.get("citation_documents") or ())
+                kb_result_texts.append(str(result))
+            else:
+                extra_data = {"summary": _summarize(result)}
+            if reveal:
+                extra_data["result"] = _diagnostic_text(result)
+            _emit(
+                "tool_completed",
+                {
+                    "tool": call["name"],
+                    "success": True,
+                    "duration_ms": int((time.monotonic() - start) * 1000),
+                    **extra_data,
+                },
+            )
+        if usage_sink is not None:
+            # LLM/embedding calls the tool made internally (a knowledge
+            # base's query embedding and its query-expansion call) ride
+            # the agent's own usage list, so they reach `usage_records`
+            # through the same `agent_completed.usage` path as a model
+            # call -- no new event field, no backend change. Drained on
+            # the failure path too: the paid call already happened.
+            usage_sink.extend(tool_ctx.usage)
+        return result
+
     for i in range(_MAX_TOOL_ITERATIONS):
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
@@ -785,87 +894,39 @@ def _run_agent(
             # metered.
             return ""
         messages.append(response)
-        for call in tool_calls:
+        # A manager that asks for several specialists in one turn used to get
+        # them one after the other, so the turn cost the SUM of the delegations
+        # rather than the longest one -- 47s + 77s on the live Payroll team.
+        # Only delegations run concurrently: a delegation just runs a
+        # subordinate's own turn, whereas an arbitrary tool can have side
+        # effects whose interleaving nobody asked for (the email toolkit talks
+        # to one IMAP connection). A single call, or a batch mixing delegations
+        # with anything else, takes the serial path below exactly as before.
+        delegations = [c for c in tool_calls if _is_delegation(c, tools_by_name)]
+        if len(delegations) > 1 and len(delegations) == len(tool_calls):
             if should_cancel is not None and should_cancel():
-                # A stop that lands while an earlier call in this batch is
-                # running must abandon the rest of it: each one is its own
-                # side effect (Codex review finding). Returning rather than
-                # breaking matters -- a break would fall through to another
-                # model call on a half-answered batch. Empty for the same
-                # reason as the guard above: a stopped agent must not be
-                # recorded as having completed with partial output.
                 return ""
-            tool_fn = tools_by_name.get(call["name"])
-            if tool_fn is None:
-                result = f"Error: unknown tool '{call['name']}'"
-            else:
-                # An email tool's args/result are mail content -- redacted on
-                # every path, diagnostic or not (see _EMAIL_TOOLS_NEEDING_REDACTION).
-                reveal = diagnostic and call["name"] not in _EMAIL_TOOLS_NEEDING_REDACTION
-                started_data: Dict[str, Any] = {"tool": call["name"]}
-                if reveal:
-                    started_data["args"] = _diagnostic_args(call["args"])
-                _emit("tool_started", started_data)
-                start = time.monotonic()
-                try:
-                    with tool_call_context() as tool_ctx:
-                        result = tool_fn(**call["args"])
-                except Exception as exc:
-                    _logger.warning(
-                        "Tool call to '%s' failed for agent '%s': %s", call["name"], agent.name, exc, exc_info=True
-                    )
-                    result = f"Error calling tool '{call['name']}': {exc}"
-                    failure_data: Dict[str, Any] = {
-                        "tool": call["name"],
-                        "success": False,
-                        "duration_ms": int((time.monotonic() - start) * 1000),
-                        "summary": "Tool call failed",
-                    }
-                    if reveal:
-                        # What the model is about to read (the ToolMessage
-                        # below) -- the raw exception text stays out of the
-                        # business-safe `summary` as before.
-                        failure_data["result"] = _diagnostic_text(result)
-                    if call["name"] in ("email_read", "email_read_attachment", "email_draft_reply"):
-                        # Retain the bounded message id on failure too, same as a
-                        # successful call's redacted data -- otherwise a failed
-                        # email_read/email_read_attachment/email_draft_reply can't
-                        # be correlated back to its UID downstream
-                        # (automation_results.py's per-UID needs_attention
-                        # enforcement, Codex review finding).
-                        failure_data["message_id"] = _bounded_message_id(call["args"])
-                    _emit("tool_completed", failure_data)
-                else:
-                    if call["name"] in _EMAIL_TOOLS_NEEDING_REDACTION:
-                        extra_data = _redacted_email_tool_data(call["name"], call["args"], result)
-                    elif getattr(tool_fn, "__bestteam_tool_kind__", None) == "knowledge_base":
-                        extra_data = _kb_tool_trace_data(tool_ctx.trace)
-                        kb_searches += 1
-                        kb_hit_count += int(tool_ctx.trace.get("hit_count") or 0)
-                        kb_citations.extend(tool_ctx.trace.get("citations") or ())
-                        kb_documents.extend(tool_ctx.trace.get("citation_documents") or ())
-                        kb_result_texts.append(str(result))
-                    else:
-                        extra_data = {"summary": _summarize(result)}
-                    if reveal:
-                        extra_data["result"] = _diagnostic_text(result)
-                    _emit(
-                        "tool_completed",
-                        {
-                            "tool": call["name"],
-                            "success": True,
-                            "duration_ms": int((time.monotonic() - start) * 1000),
-                            **extra_data,
-                        },
-                    )
-                if usage_sink is not None:
-                    # LLM/embedding calls the tool made internally (a knowledge
-                    # base's query embedding and its query-expansion call) ride
-                    # the agent's own usage list, so they reach `usage_records`
-                    # through the same `agent_completed.usage` path as a model
-                    # call -- no new event field, no backend change. Drained on
-                    # the failure path too: the paid call already happened.
-                    usage_sink.extend(tool_ctx.usage)
+            with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
+                # `map` yields in submission order however the calls finish, so
+                # the ToolMessages below still match the order the model asked
+                # in. A stop landing mid-batch is not re-checked here:
+                # `should_cancel` is threaded into each subordinate's own run,
+                # which is where a delegation's remaining cost actually is.
+                results = list(pool.map(_execute_call, tool_calls))
+        else:
+            results = []
+            for call in tool_calls:
+                if should_cancel is not None and should_cancel():
+                    # A stop that lands while an earlier call in this batch is
+                    # running must abandon the rest of it: each one is its own
+                    # side effect (Codex review finding). Returning rather than
+                    # breaking matters -- a break would fall through to another
+                    # model call on a half-answered batch. Empty for the same
+                    # reason as the guard above: a stopped agent must not be
+                    # recorded as having completed with partial output.
+                    return ""
+                results.append(_execute_call(call))
+        for call, result in zip(tool_calls, results):
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = _call(model, messages)
@@ -1053,6 +1114,11 @@ def _run_agent(
     return text
 
 
+def _is_delegation(call: Dict[str, Any], tools_by_name: Dict[str, Callable]) -> bool:
+    """Whether one tool call is a delegation to a subordinate agent."""
+    return getattr(tools_by_name.get(call["name"]), "__bestteam_tool_kind__", None) == "delegate"
+
+
 def _make_delegate_tool(
     agent: Agent,
     *,
@@ -1136,6 +1202,10 @@ def _make_delegate_tool(
         return result
 
     delegate.__name__ = f"delegate_to_{agent.name}"
+    # Marks this as a delegation for the tool loop, which runs a batch of
+    # them concurrently (see `_is_delegation`). Same marker convention as a
+    # knowledge base tool's "knowledge_base".
+    delegate.__bestteam_tool_kind__ = "delegate"
     delegate.__doc__ = (
         f"Delegate a task to {agent.name}, a {agent.role} whose goal is: "
         f"{agent.goal}. Returns their response as text."
