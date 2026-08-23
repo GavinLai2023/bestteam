@@ -19,8 +19,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .auth import AuthError, create_access_token, decode_access_token_claims
-from .db.models import Organization, User
+from .auth import (
+    AuthError,
+    create_access_token,
+    decode_access_token_claims,
+    hash_password,
+    verify_password,
+)
+from .db.models import Organization, User, new_security_stamp
 from .db.orgs import get_org_by_name
 from .db.users import authenticate_user, get_user_by_username
 from .db_session import get_db
@@ -179,6 +185,63 @@ def get_current_org_or_admin(
         return OrgScope(org_id=org_row.id, is_admin=True)
     resolved = get_current_org(user, db)
     return OrgScope(org_id=resolved.id, is_admin=False)
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+# The operator's reset (`POST /api/admin/users/{username}/password`) has no
+# minimum: it sets a temporary password for an account the operator already
+# controls, and tightening it would invalidate nothing while breaking every
+# fixture that provisions a user. This path is the customer choosing a password
+# they will keep, so it is the one worth a floor.
+_MIN_NEW_PASSWORD_LENGTH = 8
+
+
+@router.post("/password", response_model=TokenResponse)
+def change_password(
+    body: PasswordChange,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Change your own password, proving you know the current one.
+
+    Shares `_LOGIN_LIMITER` with `/login` rather than keeping its own budget:
+    both ration guesses at the same secret, so a separate one here would just
+    hand an attacker a second allowance -- and this endpoint is reachable from
+    an unattended logged-in browser, which `/login` is not.
+
+    Rotating the security stamp revokes every token and WS ticket for the
+    account, the caller's own included, so a fresh one comes back in the
+    response. That is what keeps the browser that made the change signed in
+    while every other session ends -- the point of changing a password. An open
+    run stream drops with the old ticket and the page reconnects.
+    """
+    ip = request.client.host if request.client else None
+    retry_after = _LOGIN_LIMITER.reserve(user.username, ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    if not verify_password(body.current_password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    _LOGIN_LIMITER.record_success(user.username, ip)
+    # Length over the raw value (a password may legitimately be padded, and
+    # `auth.py` never strips), but blank-only is rejected however long it is.
+    if not body.new_password.strip() or len(body.new_password) < _MIN_NEW_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"New password must be at least {_MIN_NEW_PASSWORD_LENGTH} characters.",
+        )
+    user.password_hash = hash_password(body.new_password)
+    user.security_stamp = new_security_stamp()
+    db.commit()
+    return TokenResponse(access_token=create_access_token(user.username, user.security_stamp))
 
 
 @router.get("/me")

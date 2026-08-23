@@ -1,0 +1,9 @@
+/* Moved out of Layout.css unchanged, so the mark carries its own colours to
+   the login page (which renders outside the app shell). */
+.brand-mark-soft {
+  fill: var(--accent-border);
+}
+
+.brand-mark-strong {
+  fill: var(--accent);
+}

@@ -1,7 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMe } from '../lib/useMe'
+import BrandMark from './BrandMark'
+import ChangePasswordDialog from './ChangePasswordDialog'
 import LanguageSelect from './LanguageSelect'
 import './Layout.css'
 
@@ -10,6 +12,7 @@ export default function Layout() {
   const { pathname } = useLocation()
   const { isAdmin } = useMe()
   const { t } = useTranslation()
+  const [changingPassword, setChangingPassword] = useState(false)
 
   // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
   // scroll position the previous page was at, landing the new page mid-way
@@ -27,10 +30,7 @@ export default function Layout() {
     <div className="app-shell">
       <nav className="top-nav">
         <span className="brand">
-          <svg className="brand-mark" width="22" height="22" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-            <rect x="2" y="2" width="14" height="22" rx="7" className="brand-mark-soft" />
-            <rect x="9" y="2" width="15" height="14" rx="7" className="brand-mark-strong" />
-          </svg>
+          <BrandMark />
           {t('nav.brand')}
         </span>
         <div className="top-nav-links">
@@ -69,7 +69,19 @@ export default function Layout() {
             </>
           )}
           <LanguageSelect />
-          <button type="button" className="logout-button" onClick={logOut}>
+          {/* Shown to platform operators too: an operator's own password
+              deserves the same self-service as a customer's. */}
+          <button
+            type="button"
+            className="nav-action"
+            onClick={() => setChangingPassword(true)}
+          >
+            {t('nav.changePassword')}
+          </button>
+          {/* `logout-button` carries no styling any more -- it is kept because
+              tests/e2e/test_smoke.py clicks `button.logout-button`, and it must
+              stay unique to this button for Playwright's strict mode. */}
+          <button type="button" className="nav-action logout-button" onClick={logOut}>
             {t('nav.logOut')}
           </button>
         </div>
@@ -77,6 +89,7 @@ export default function Layout() {
       <main className="app-main">
         <Outlet />
       </main>
+      <ChangePasswordDialog open={changingPassword} onClose={() => setChangingPassword(false)} />
     </div>
   )
 }

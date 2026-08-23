@@ -44,6 +44,35 @@ describe('Layout nav', () => {
   })
 })
 
+describe('Layout change-password entry point', () => {
+  it.each([
+    ['a platform operator', { is_admin: true, username: 'x', org: null }, true],
+    ['an org member', { is_admin: false, username: 'x', org: 'acme' }, false],
+  ])('offers it to %s', (_who, me, isAdmin) => {
+    vi.mocked(useMe).mockReturnValue({ me, loading: false, isAdmin })
+    renderLayout()
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeInTheDocument()
+  })
+
+  // tests/e2e/test_smoke.py clicks `button.logout-button`; a second button
+  // wearing that class is a Playwright strict-mode failure, not a style bug.
+  it('leaves the log-out selector matching exactly one button', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    const { container } = renderLayout()
+    expect(container.querySelectorAll('button.logout-button')).toHaveLength(1)
+  })
+
+  it('opens the dialog, which stays closed until asked for', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    expect(screen.queryByLabelText(/current password/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }))
+
+    expect(screen.getByLabelText(/current password/i)).toBeInTheDocument()
+  })
+})
+
 describe('Layout scroll restoration', () => {
   it('scrolls to the top when navigating to a new route', async () => {
     vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })

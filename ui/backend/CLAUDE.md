@@ -1656,7 +1656,22 @@ that KB permanently undeletable.
   (defaults: a dev-only secret, 1440 minutes).
 - **`ui/backend/auth_api.py`** (`/api/auth`) — `POST /login` (returns
   `{access_token, token_type}`), `GET /me` (requires `Authorization: Bearer
-  <token>`; returns `{username, is_admin, org}`). **There is no public
+  <token>`; returns `{username, is_admin, org}`), and `POST /password`
+  (self-service change: `{current_password, new_password}` → a **fresh**
+  `{access_token, …}`). Three things about that last one are load-bearing.
+  It shares `_LOGIN_LIMITER` with `/login` rather than keeping its own budget,
+  because both ration guesses at the same secret and it is reachable from an
+  unattended logged-in browser, which `/login` is not. It rotates
+  `security_stamp`, so *every* token and WS ticket for the account dies — the
+  caller's included, which is why a new one comes back and the dialog swaps it
+  into `localStorage` before anything else renders (an open run stream drops
+  and the page reconnects). And it requires 8 characters, a floor the
+  operator's `POST /api/admin/users/{username}/password` deliberately does
+  **not** have: that one sets a temporary password for an account the operator
+  already controls, and a floor there would break every fixture that
+  provisions a user while protecting nothing. The operator reset stays the
+  only path for a *forgotten* password — there is no email channel to recover
+  one with, by design. **There is no public
   registration endpoint** — orgs, users, and admins are all provisioned via
   the operator CLI (`python -m ui.backend.admin create-org / create-user /
   promote`; tests use `tests/helpers.py::create_user_and_login`). Exports

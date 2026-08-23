@@ -1,0 +1,170 @@
+/* Two panels side by side on a laptop, one on a phone. The page owns the full
+   viewport because it renders outside `Layout` -- there is no app shell around
+   it to provide a background. */
+.login-page {
+  display: grid;
+  grid-template-columns: 1fr;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+@media (min-width: 820px) {
+  .login-page {
+    grid-template-columns: 1.1fr 1fr;
+  }
+}
+
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+  padding: 32px 28px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent-border);
+}
+
+@media (min-width: 820px) {
+  .login-brand {
+    padding: 56px 8%;
+    border-bottom: none;
+    border-right: 1px solid var(--accent-border);
+  }
+}
+
+.login-brand-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 1.2rem;
+  color: var(--accent);
+}
+
+.login-tagline {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+@media (min-width: 820px) {
+  .login-tagline {
+    font-size: 2rem;
+  }
+}
+
+.login-points {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 0.95rem;
+  color: var(--text-soft);
+}
+
+.login-points li::before {
+  content: '·';
+  margin-right: 10px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* Decoration, not information. On a phone the form is what the page is for,
+   so the bullets go rather than push it below the fold. */
+@media (max-width: 819px) {
+  .login-points {
+    display: none;
+  }
+
+  .login-brand {
+    gap: 10px;
+    padding: 26px 24px 22px;
+  }
+
+  .login-tagline {
+    font-size: 1.2rem;
+  }
+}
+
+.login-form-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 32px 28px 48px;
+  background: var(--surface);
+}
+
+@media (min-width: 820px) {
+  .login-form-panel {
+    padding: 56px 9%;
+  }
+}
+
+.login-language {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+
+.login-form-panel h1 {
+  margin: 0 0 20px;
+  font-size: 1.35rem;
+}
+
+.login-form-panel form {
+  max-width: 22rem;
+}
+
+.login-password-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.login-password-field input {
+  /* Room for the reveal button, which sits inside the field. */
+  padding-right: 42px;
+}
+
+.login-reveal {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.login-reveal:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.login-reveal:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.login-caps-lock {
+  margin: 6px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 8px;
+}

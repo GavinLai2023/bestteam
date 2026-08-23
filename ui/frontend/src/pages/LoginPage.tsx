@@ -1,12 +1,49 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api } from '../lib/api'
+import { useTranslation } from 'react-i18next'
+import { api, TOKEN_KEY } from '../lib/api'
+import BrandMark from '../components/BrandMark'
+import LanguageSelect from '../components/LanguageSelect'
+// `.field`, `.btn` and `.banner-error` live here despite the file's name -- it
+// is the app's shared form stylesheet, and the page has always read it.
 import '../components/WizardLayout.css'
+import './LoginPage.css'
+
+// The only page outside `Layout`, so it renders its own brand and its own
+// language control -- without the latter a customer who cannot read English
+// has no way out of it, which is where the whole bilingual app used to start.
+//
+// `#username`, `#password`, `button[type=submit]` and `.banner-error` are
+// load-bearing: tests/e2e/test_smoke.py drives the real page through them.
+// Struck through once the password is visible. Drawn rather than set in an
+// emoji: the two obvious ones (👁 / 🙈) render at the mercy of the platform's
+// font and one of them is a joke.
+function EyeIcon({ crossed }: { crossed: boolean }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M1 8s2.6-4.4 7-4.4S15 8 15 8s-2.6 4.4-7 4.4S1 8 1 8z" />
+      <circle cx="8" cy="8" r="1.9" />
+      {crossed && <path d="M2.5 2.5l11 11" />}
+    </svg>
+  )
+}
 
 export default function LoginPage() {
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [revealed, setRevealed] = useState(false)
+  const [capsLock, setCapsLock] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -17,7 +54,7 @@ export default function LoginPage() {
     setError(null)
     try {
       const { access_token } = await api.login(username.trim(), password)
-      localStorage.setItem('bestteam_token', access_token)
+      localStorage.setItem(TOKEN_KEY, access_token)
       navigate('/')
     } catch (e) {
       setError((e as Error).message)
@@ -26,41 +63,80 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="wizard-card" style={{ maxWidth: 360, margin: '64px auto' }}>
-      <h2>Log in</h2>
+    <div className="login-page">
+      <section className="login-brand">
+        <span className="login-brand-name">
+          <BrandMark size={26} />
+          {t('nav.brand')}
+        </span>
+        <p className="login-tagline">{t('login.tagline')}</p>
+        {/* Decoration, not information: hidden rather than stacked on a phone,
+            where it would push the form below the fold. */}
+        <ul className="login-points">
+          <li>{t('login.points.noCode')}</li>
+          <li>{t('login.points.seeEverything')}</li>
+          <li>{t('login.points.share')}</li>
+        </ul>
+      </section>
 
-      {error && <div className="banner banner-error">{error}</div>}
-
-      <form onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="username">Username</label>
-          <input
-            id="username"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            disabled={submitting}
-            autoFocus
-          />
+      <section className="login-form-panel">
+        <div className="login-language">
+          <LanguageSelect />
         </div>
 
-        <div className="field">
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={submitting}
-          />
-        </div>
+        <h1>{t('login.heading')}</h1>
 
-        <div className="wizard-actions">
-          <button type="submit" className="btn btn-primary" disabled={!username.trim() || !password || submitting}>
-            {submitting ? 'Logging in…' : 'Log in'}
+        {error && <div className="banner banner-error">{error}</div>}
+
+        <form onSubmit={submit}>
+          <div className="field">
+            <label htmlFor="username">{t('login.username')}</label>
+            <input
+              id="username"
+              type="text"
+              autoComplete="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              disabled={submitting}
+              autoFocus
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="password">{t('login.password')}</label>
+            <div className="login-password-field">
+              <input
+                id="password"
+                type={revealed ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyUp={(e) => setCapsLock(e.getModifierState('CapsLock'))}
+                disabled={submitting}
+              />
+              <button
+                type="button"
+                className="login-reveal"
+                aria-label={revealed ? t('login.hidePassword') : t('login.showPassword')}
+                aria-pressed={revealed}
+                onClick={() => setRevealed((r) => !r)}
+                disabled={submitting}
+              >
+                <EyeIcon crossed={revealed} />
+              </button>
+            </div>
+            {capsLock && <p className="login-caps-lock">{t('login.capsLock')}</p>}
+          </div>
+
+          <button
+            type="submit"
+            className="btn btn-primary login-submit"
+            disabled={!username.trim() || !password || submitting}
+          >
+            {submitting ? t('login.submitting') : t('login.submit')}
           </button>
-        </div>
-      </form>
+        </form>
+      </section>
     </div>
   )
 }

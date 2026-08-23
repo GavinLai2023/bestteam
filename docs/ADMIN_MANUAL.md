@@ -189,10 +189,19 @@ policy on memory yet (see `docs/STATUS.md`).
 
 ## 5. The Accounts page
 
-The day-to-day subset of the operator CLI: create/deactivate organizations;
+The day-to-day subset of the operator CLI: create/deactivate organisations;
 create, reset the password of, move, or delete their users. It cannot grant
 or revoke admin, manage platform-operator accounts, or bootstrap the first
 admin — those are CLI-only (§6).
+
+**Resetting a password here is for a customer who has *forgotten* theirs.** A
+customer who still knows their password changes it themselves, from "Change
+password" in the top bar — you never see the new one, and you no longer need
+to be in the loop. Both paths revoke every existing session for that account.
+There is no email-based recovery and there will not be one: the deployment has
+no SMTP at all (see the root `CLAUDE.md`), so a forgotten password reaches you
+by whatever channel the customer already uses to reach you, and you set a
+temporary one for them to change.
 
 ---
 

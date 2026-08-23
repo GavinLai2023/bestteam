@@ -574,3 +574,143 @@ def test_stream_run_rejects_ticket_for_deleted_user(client, pipelines_dir, monke
     with pytest.raises(Exception):
         with client.websocket_connect(f"/api/runs/{run_id}/stream?ticket={ticket}") as ws:
             ws.receive_json()
+
+
+# --- self-service password change -------------------------------------------
+#
+# The operator-only reset (`POST /api/admin/users/{username}/password`) stays
+# what it always was, for a *forgotten* password. These cover the customer's
+# own path, which needs the current password and is throttled with it.
+
+
+def test_change_password_requires_authentication(client):
+    resp = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": "correct-horse"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_change_password_rejects_a_wrong_current_password(client):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+
+    resp = client.post(
+        "/api/auth/password",
+        json={"current_password": "not-my-password", "new_password": "correct-horse"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 401
+    # The stored password is untouched.
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "hunter2"}).status_code == 200
+
+
+def test_change_password_replaces_the_password(client):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+
+    resp = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": "correct-horse"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "hunter2"}).status_code == 401
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-horse"}).status_code == 200
+
+
+def test_change_password_returns_a_token_that_still_works(client):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+
+    fresh = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": "correct-horse"},
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["access_token"]
+
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {fresh}"})
+    assert me.status_code == 200
+    assert me.json()["username"] == "alice"
+
+
+def test_change_password_revokes_every_token_issued_before_it(client):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+    other_device = client.post(
+        "/api/auth/login", json={"username": "alice", "password": "hunter2"}
+    ).json()["access_token"]
+
+    client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": "correct-horse"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # The security stamp rotated, so a session on another device is gone -- and
+    # so is the one that made the change, which is why a fresh token comes back
+    # in the response rather than the caller being left holding a dead one.
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {other_device}"}).status_code == 401
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+@pytest.mark.parametrize("new_password", ["", "   ", "short7c", "        "])
+def test_change_password_rejects_a_new_password_under_eight_characters(client, new_password):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+
+    resp = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": new_password},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 400
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "hunter2"}).status_code == 200
+
+
+def test_change_password_keeps_a_password_that_is_only_padded_with_spaces(client):
+    """Eight blanks is not a password; a padded one is (auth.py never strips)."""
+    token = create_user_and_login(client, username="alice", password="hunter2")
+
+    resp = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": " secret1 "},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert client.post("/api/auth/login", json={"username": "alice", "password": " secret1 "}).status_code == 200
+
+
+def test_change_password_throttles_current_password_guessing(client):
+    """Shares the login limiter, so the endpoint cannot be an unthrottled oracle
+    for the very password `/api/auth/login` rations guesses at."""
+    token = create_user_and_login(client, username="alice", password="hunter2")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"current_password": "wrong", "new_password": "correct-horse"}
+
+    codes = [client.post("/api/auth/password", json=body, headers=headers).status_code for _ in range(6)]
+
+    assert codes[:5] == [401] * 5
+    assert codes[5] == 429
+
+
+def test_a_successful_change_forgives_the_earlier_failures(client):
+    token = create_user_and_login(client, username="alice", password="hunter2")
+    headers = {"Authorization": f"Bearer {token}"}
+    wrong = {"current_password": "wrong", "new_password": "correct-horse"}
+    for _ in range(4):
+        client.post("/api/auth/password", json=wrong, headers=headers)
+
+    fresh = client.post(
+        "/api/auth/password",
+        json={"current_password": "hunter2", "new_password": "correct-horse"},
+        headers=headers,
+    )
+    assert fresh.status_code == 200
+
+    # Not one slip from a lockout: the four failures were cleared, so four more
+    # are still 401 rather than 429.
+    new_token = fresh.json()["access_token"]
+    headers = {"Authorization": f"Bearer {new_token}"}
+    codes = [client.post("/api/auth/password", json=wrong, headers=headers).status_code for _ in range(4)]
+    assert codes == [401] * 4
