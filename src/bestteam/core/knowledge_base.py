@@ -1096,8 +1096,17 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
     """
 
     def _tool(query: str) -> str:
-        hits = kb.search_hits(query)
-        chunks = [hit.chunk for hit in hits]
+        search_hits = getattr(kb, "search_hits", None)
+        if search_hits is not None:
+            hits = search_hits(query)
+            chunks = [hit.chunk for hit in hits]
+        else:
+            # A knowledge-base-shaped object from before `search_hits` existed
+            # (a custom wrapper exposing only `search()`): still searchable,
+            # still traced -- just with no scores to report, rather than
+            # invented ones.
+            hits = []
+            chunks = kb.search(query)
         bounded_query = query[:_MAX_TRACE_QUERY_CHARS]
         # dict.fromkeys de-duplicates while keeping best-first order: several
         # chunks of one document cite it once.

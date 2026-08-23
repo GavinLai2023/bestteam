@@ -620,6 +620,26 @@ def test_kb_tool_completed_names_the_generation_and_scores_each_hit():
     assert _CHUNK_SENTINEL not in repr(data)
 
 
+def test_kb_tool_wraps_a_search_only_knowledge_base_and_reports_no_scores():
+    """A custom knowledge base that predates `search_hits()` -- one exposing
+    only `search()` -- still works as a tool: same results, same trace shape,
+    and `hits` empty rather than filled with made-up scores (Codex review)."""
+    from bestteam.core.knowledge_base import _Chunk
+
+    class _SearchOnly:
+        name = "legacy"
+        description = None
+
+        def search(self, query, top_k=None):
+            return [_Chunk(source="a.txt", text="alpha beta", heading="A")]
+
+    data = _kb_tool_completed(_SearchOnly(), "alpha")
+    assert data["hit_count"] == 1
+    assert data["sources"] == ["a.txt § A"]
+    assert data["hits"] == []
+    assert data["ingestion_job_id"] is None
+
+
 def test_kb_tool_completed_hits_are_bounded_and_present_when_empty():
     from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk
 
