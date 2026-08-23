@@ -905,10 +905,13 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   but this is still single-level chunking — no "small-to-big"/parent-child
   multi-resolution indexing, and overlap between chunks is a raw
   character-slice of the previous chunk's tail (not structure-aware).
-- **No external vector store.** `vector`/`hybrid` knowledge bases embed into
-  an in-memory numpy matrix plus an optional JSON file cache — no
+- **No external vector store.** `vector`/`hybrid` knowledge bases search an
+  in-memory numpy matrix — built per process from the persisted
+  `knowledge_chunks` rows on the upload path, or from an optional JSON file
+  cache on the SDK path — with a linear cosine scan and no ANN index. No
   Chroma/FAISS/Pinecone/Weaviate/pgvector, so this doesn't scale past a
-  single-process, small-to-medium corpus.
+  single-process, small-to-medium corpus (the per-collection document caps
+  are what keep it in range today).
 - **No DMS connectors.** None of the three types can ingest directly from
   SharePoint, Confluence, Google Drive, etc. — only a local folder of files.
 - **No OCR, and no image understanding at all.** A scanned PDF (or any
@@ -918,10 +921,14 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   quietly indexed as a header-only chunk, but the document still cannot be
   searched. The same gap as the email toolkit's attachment reading, which
   is deliberately text-only (`src/bestteam/tools/CLAUDE.md`).
-- **No re-embedding on document changes.** The embedding cache is
-  content-addressed (by chunk text) but there's no logic to detect "this
-  document changed, drop its stale chunks" beyond the chunk text itself
-  changing.
+- **Change detection is per whole document, by name + content hash.** On the
+  upload path an ingestion job reuses an unchanged document's chunks and
+  embeddings (see "Uploads are asynchronous") and re-chunks/re-embeds a
+  changed one in full — there is no chunk-level diff, so editing one
+  paragraph of a 50-page PDF re-embeds all 50 pages. A renamed file with
+  identical content is treated as new (the reuse key includes the filename),
+  and the SDK path (a path-constructed KB) has only the per-chunk-text JSON
+  cache, with no document-level reuse at all.
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
