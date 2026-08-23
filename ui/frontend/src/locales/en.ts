@@ -169,12 +169,13 @@ export const en = {
       changeLabel: 'What should change?',
       changePlaceholder: 'e.g. Have the team check our FAQ document before replying.',
       uploadLink: 'Need to add or update a document? Upload it here',
-      apply: 'Apply this change',
+      apply: 'Update the team',
       updating: 'Updating…',
       // Two whole sentences, not a 'Show'/'Hide' word swapped into one: a
       // translated fragment assembled at runtime only reads correctly in the
       // language whose grammar the split was chosen for.
       showUnderstanding: 'Show what we understood about your business',
+      teamHeading: 'Your team',
       hideUnderstanding: 'Hide what we understood about your business',
       noSummary: 'No summary was generated for this session.',
       generate: 'Generate summary',
@@ -189,7 +190,7 @@ export const en = {
       successPlaceholder: 'e.g. fewer escalations',
       constraints: 'Constraints',
       constraintsPlaceholder: 'e.g. must stay in English',
-      save: 'Save changes',
+      save: 'Save this summary',
       saving: 'Saving…',
       reqFeedbackLabel: 'Not quite right? Tell us what to change',
       reqFeedbackPlaceholder:

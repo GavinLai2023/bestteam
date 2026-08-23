@@ -1797,6 +1797,22 @@
   mid-edit. Frontend-only: the status field still means "furthest wizard
   stage", which is what the resume path wants.
 
+- **The Confirm page reads cause-before-effect** (2026-08-23). The page
+  carries two methodology stages at once, and presented them in reverse:
+  the team design first, the understanding it was derived from below it and
+  collapsed — so most customers never opened it, and edited the downstream
+  artefact instead. Worse, the four controls looked like two redundant
+  pairs: "Apply this change" (re-runs the Solution Architect on the team)
+  beside "Save changes" (persists hand-edited Requirements fields, no model
+  call), and two near-identically-labelled optional feedback boxes. The
+  operations were always distinct; nothing on screen said so. Now the
+  understanding sits on top, expanded, and each button names its object
+  ("Update the team" / "Save this summary" / "Regenerate summary") under a
+  "Your team" heading for the design section. Both feedback boxes were kept
+  — direct field editing and "let the analyst re-derive it from a
+  correction" are genuinely different jobs — but each now sits inside a
+  visibly separate section, so the parallel structure reads as deliberate.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.

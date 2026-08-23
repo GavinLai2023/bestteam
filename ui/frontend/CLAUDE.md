@@ -279,11 +279,20 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     `DocumentsPage` uploads a knowledge base (or skips) and then generates --
     or, revisiting after a spec exists, *refines* -- the Specification;
     `PreviewPage` renders `TeamFlow` and runs a test run over the same
-    `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `ConfirmPage` applies
-    solution feedback and hides the model picker behind "Advanced settings"
-    (the page, not `ModelPicker`, owns the catalog and the default model --
-    defaulting from inside a collapsed component left the page's actions
-    permanently disabled); `DeployPage` calls `api.deploySession()` and links
+    `/api/runs/{id}/stream` WebSocket as `MonitorPage`; `ConfirmPage` is
+    **two stages stacked on one page** and is ordered cause-before-effect:
+    the Requirements panel ("what we understood about your business",
+    expanded by default) sits above the Specification one ("Your team"),
+    because the team is derived from that understanding. Each stage has its
+    own free-text box and its own button, and the buttons name the object
+    they act on -- "Save this summary" (persists hand-edited Requirements
+    fields, no model call) and "Regenerate summary" (re-runs the Business
+    Analyst) against "Update the team" (re-runs the Solution Architect).
+    They read as duplicates when named generically, which is what
+    "Apply this change"/"Save changes" did until 2026-08-23. There is no
+    model picker: the page owns the catalog and the default model, since
+    which model runs the Architect is a platform choice the customer never
+    sees. `DeployPage` calls `api.deploySession()` and links
     to `/run?pipeline=<name>`.
   - `components/TeamFlow.tsx` + `EmployeeCard.tsx` — the customer-facing
     "meet your team" diagram: renders `Specification.teams`/`agents` as

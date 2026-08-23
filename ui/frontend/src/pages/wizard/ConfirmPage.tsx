@@ -42,7 +42,9 @@ export default function ConfirmPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [showRequirements, setShowRequirements] = useState(false)
+  // Expanded by default: this is the understanding the team below was
+  // designed from, and collapsed it was effectively never read.
+  const [showRequirements, setShowRequirements] = useState(true)
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
   const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
@@ -157,49 +159,9 @@ export default function ConfirmPage() {
         </div>
       )}
 
-      {error && <p className="banner banner-error">{error}</p>}
-
-      <TeamFlow specification={spec} />
-
-      {history.length > 0 && (
-        <div className="banner banner-info" style={{ marginTop: 16 }}>
-          <strong>{t('wizard.confirm.historyHeading')}</strong>
-          <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
-            {history.map((entry, i) => (
-              <li key={i}>{entry.note}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="field" style={{ marginTop: 16 }}>
-        <label htmlFor="solution-feedback">
-          {t('wizard.confirm.changeLabel')} <span className="hint">{t('wizard.optional')}</span>
-        </label>
-        <textarea
-          id="solution-feedback"
-          rows={3}
-          value={feedback}
-          onChange={(e) => setFeedback(e.target.value)}
-          placeholder={t('wizard.confirm.changePlaceholder')}
-        />
-        <button
-          type="button"
-          className="btn-link"
-          style={{ marginTop: 4 }}
-          onClick={() => navigate(`/wizard/${sessionId}/documents`)}
-        >
-          {t('wizard.confirm.uploadLink')}
-        </button>
-      </div>
-      <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
-          {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
-        </button>
-      </div>
-
-      <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
-
+      {/* The understanding comes first: the team below is derived from it, so
+          a customer correcting something should meet the cause before the
+          effect. */}
       <button type="button" className="btn-link" onClick={() => setShowRequirements((v) => !v)}>
         {showRequirements
           ? t('wizard.confirm.hideUnderstanding')
@@ -315,6 +277,51 @@ export default function ConfirmPage() {
           )}
         </div>
       )}
+
+      <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
+
+      <h3>{t('wizard.confirm.teamHeading')}</h3>
+
+      {error && <p className="banner banner-error">{error}</p>}
+
+      <TeamFlow specification={spec} />
+
+      {history.length > 0 && (
+        <div className="banner banner-info" style={{ marginTop: 16 }}>
+          <strong>{t('wizard.confirm.historyHeading')}</strong>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+            {history.map((entry, i) => (
+              <li key={i}>{entry.note}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="field" style={{ marginTop: 16 }}>
+        <label htmlFor="solution-feedback">
+          {t('wizard.confirm.changeLabel')} <span className="hint">{t('wizard.optional')}</span>
+        </label>
+        <textarea
+          id="solution-feedback"
+          rows={3}
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder={t('wizard.confirm.changePlaceholder')}
+        />
+        <button
+          type="button"
+          className="btn-link"
+          style={{ marginTop: 4 }}
+          onClick={() => navigate(`/wizard/${sessionId}/documents`)}
+        >
+          {t('wizard.confirm.uploadLink')}
+        </button>
+      </div>
+      <div className="wizard-actions">
+        <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
+          {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
+        </button>
+      </div>
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 

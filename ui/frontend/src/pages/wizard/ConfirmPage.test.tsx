@@ -53,12 +53,12 @@ describe('ConfirmPage', () => {
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' }])
   })
 
-  it('enables Apply this change once the catalog loads, even with no described change', async () => {
+  it('enables Update the team once the catalog loads, even with no described change', async () => {
     mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
 
     renderPage()
 
-    const button = await screen.findByText('Apply this change')
+    const button = await screen.findByText('Update the team')
     // The model catalog resolves asynchronously; the page picks the
     // Architect's model itself -- there's nothing for the customer to choose.
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
@@ -77,7 +77,7 @@ describe('ConfirmPage', () => {
     mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
 
     renderPage()
-    const button = await screen.findByText('Apply this change')
+    const button = await screen.findByText('Update the team')
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
 
     fireEvent.change(screen.getByPlaceholderText(/Have the team check our FAQ/i), {
@@ -107,7 +107,7 @@ describe('ConfirmPage', () => {
   it('never shows a model picker or an advanced-settings toggle', async () => {
     renderPage()
 
-    await screen.findByText('Apply this change')
+    await screen.findByText('Update the team')
     expect(screen.queryByText('Advanced settings')).not.toBeInTheDocument()
     expect(screen.queryByLabelText(/assistant/i)).not.toBeInTheDocument()
   })
@@ -123,7 +123,7 @@ describe('ConfirmPage', () => {
       renderPage()
 
       expect(await screen.findByText(/No AI models are available yet/i)).toBeInTheDocument()
-      expect(screen.getByText('Apply this change').closest('button')).toBeDisabled()
+      expect(screen.getByText('Update the team').closest('button')).toBeDisabled()
     })
 
     it('explains a failed catalog fetch and offers a retry that recovers', async () => {
@@ -142,7 +142,7 @@ describe('ConfirmPage', () => {
         expect(screen.queryByText(/Couldn't load the available AI models/i)).not.toBeInTheDocument(),
       )
       await waitFor(() =>
-        expect(screen.getByText('Apply this change').closest('button')).toBeEnabled(),
+        expect(screen.getByText('Update the team').closest('button')).toBeEnabled(),
       )
     })
   })
@@ -159,7 +159,6 @@ describe('ConfirmPage', () => {
       mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
 
       expect(screen.getByText('No summary was generated for this session.')).toBeInTheDocument()
       expect(await screen.findByText('Generate summary')).toBeInTheDocument()
@@ -174,7 +173,6 @@ describe('ConfirmPage', () => {
       mockedApi.submitRequirements.mockResolvedValue(withRequirements)
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
       const button = await screen.findByText('Generate summary')
       await waitFor(() => expect(button.closest('button')).toBeEnabled())
       fireEvent.click(button)
@@ -190,12 +188,51 @@ describe('ConfirmPage', () => {
       mockedApi.submitRequirements.mockRejectedValue(new Error('Model call failed'))
 
       renderPage()
-      fireEvent.click(await screen.findByText('Show what we understood about your business'))
       const button = await screen.findByText('Generate summary')
       await waitFor(() => expect(button.closest('button')).toBeEnabled())
       fireEvent.click(button)
 
       expect(await screen.findByText('Model call failed')).toBeInTheDocument()
     })
+  })
+})
+
+describe('ConfirmPage layout', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: [],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+  })
+
+  // The understanding is what the team design is derived from, so a customer
+  // who wants to correct something should meet it before the thing it
+  // produced. Collapsed by default, most never saw it at all.
+  it('shows what we understood without needing a click', async () => {
+    renderPage()
+
+    expect(await screen.findByDisplayValue('They answer payroll questions by hand.')).toBeInTheDocument()
+  })
+
+  it('puts what we understood above the team it produced', async () => {
+    renderPage()
+
+    const understanding = await screen.findByText(/what we understood about your business/i)
+    const team = await screen.findByText('Your team')
+
+    expect(understanding.compareDocumentPosition(team) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
