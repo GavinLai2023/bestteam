@@ -8,6 +8,9 @@ import type { Resources } from './en'
 export const zhCN: Resources = {
   nav: {
     brand: 'bestteam',
+    // The English slogan is wordplay on the product name; this carries the
+    // meaning rather than the pun, and is the string both pages already showed.
+    tagline: '说出需求，收获最合适的 AI 团队',
     dashboard: '概览',
     buildTeam: '组建团队',
     myTeams: '我的团队',
@@ -16,6 +19,7 @@ export const zhCN: Resources = {
     advanced: '高级配置',
     memory: '记忆库',
     trace: '运行追踪',
+    changePassword: '修改密码',
     logOut: '退出登录',
     language: '语言',
   },
@@ -34,6 +38,33 @@ export const zhCN: Resources = {
     working: '处理中…',
     startOver: '重新开始',
     image: '图片',
+  },
+  login: {
+    heading: '登录',
+    username: '用户名',
+    password: '密码',
+    submit: '登录',
+    submitting: '登录中…',
+    showPassword: '显示密码',
+    hidePassword: '隐藏密码',
+    capsLock: '大写锁定已开启。',
+    points: {
+      noCode: '无需编写编排代码',
+      seeEverything: '每一步都看得见',
+      share: '一个链接分享给同事',
+    },
+  },
+  password: {
+    title: '修改密码',
+    current: '当前密码',
+    new: '新密码',
+    confirm: '确认新密码',
+    hint: '至少 8 位。',
+    mismatch: '两次输入的新密码不一致。',
+    submit: '修改密码',
+    submitting: '提交中…',
+    done: '完成',
+    success: '密码已修改，其他设备均已退出登录。',
   },
   runStatus: {
     running: '进行中',
@@ -116,7 +147,6 @@ export const zhCN: Resources = {
     invalidJson: 'JSON 格式有误 —— {{detail}}',
   },
   wizard: {
-    title: '说出需求，收获最合适的 AI 团队',
     subtitle: '回答几个问题，我们就为你设计、测试并启用一支专属 AI 团队。',
     sessionLoadFailed: '无法加载这个会话：{{detail}}',
     optional: '（选填）',

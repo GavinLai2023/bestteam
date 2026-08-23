@@ -182,6 +182,13 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   me: () => request<Me>('/api/auth/me'),
+  // Returns a fresh token: the change rotates the account's security stamp,
+  // which revokes every existing token including the one that made the call.
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ access_token: string }>('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
 
   // Admin: per-user memory management
   memoryUsers: () => request<{ enabled: boolean; users: MemoryUserSummary[] }>('/api/memory/users'),

@@ -19,7 +19,7 @@ export default function WizardLayout() {
   return (
     <div className="wizard">
       <header className="wizard-header">
-        <h1>{t('wizard.title')}</h1>
+        <h1>{t('nav.tagline')}</h1>
         <p>{t('wizard.subtitle')}</p>
       </header>
 

@@ -10,6 +10,12 @@
 export const en = {
   nav: {
     brand: 'bestteam',
+    // The product slogan, one key for the whole app. It used to be three
+    // near-copies -- README's, the wizard heading's and the login page's --
+    // that had already drifted apart in wording; the Chinese side had one
+    // string all along. README.md carries the fourth copy and cannot read
+    // this, so it is the one place to keep in step by hand.
+    tagline: 'Intent in, BestTeam out',
     dashboard: 'Dashboard',
     buildTeam: 'Build a team',
     myTeams: 'My teams',
@@ -18,6 +24,7 @@ export const en = {
     advanced: 'Advanced',
     memory: 'Memory',
     trace: 'Trace',
+    changePassword: 'Change password',
     logOut: 'Log out',
     // The language switcher labels each option in its OWN language, never
     // translated -- someone who has landed in a language they cannot read
@@ -41,6 +48,38 @@ export const en = {
     // Stands in for an image in a team's reply, which is never fetched --
     // see components/MarkdownText.tsx.
     image: 'image',
+  },
+  // The first screen anyone sees, and the only one outside `Layout` -- so it
+  // carries its own language control. Before this namespace existed the page
+  // was hardcoded English, which made a Chinese customer's very first
+  // impression untranslatable however bilingual the rest of the app was.
+  login: {
+    heading: 'Log in',
+    username: 'Username',
+    password: 'Password',
+    submit: 'Log in',
+    submitting: 'Logging in…',
+    showPassword: 'Show password',
+    hidePassword: 'Hide password',
+    capsLock: 'Caps Lock is on.',
+    // Three shipped capabilities, deliberately not three adjectives.
+    points: {
+      noCode: 'No orchestration code to write',
+      seeEverything: 'Watch every step as it happens',
+      share: 'Share a link with a colleague',
+    },
+  },
+  password: {
+    title: 'Change password',
+    current: 'Current password',
+    new: 'New password',
+    confirm: 'Confirm new password',
+    hint: 'At least 8 characters.',
+    mismatch: 'The two new passwords do not match.',
+    submit: 'Change password',
+    submitting: 'Changing…',
+    done: 'Done',
+    success: 'Your password has been changed. Any other device has been signed out.',
   },
   runStatus: {
     running: 'Running',
@@ -150,7 +189,6 @@ export const en = {
   // DocumentsPage each hardcoded), the page now reads the existing key rather
   // than getting a second copy here.
   wizard: {
-    title: 'Intent in, your best AI team out',
     subtitle: "Answer a few questions and we'll design, test, and launch a custom AI team for you.",
     sessionLoadFailed: "Couldn't load this session: {{detail}}",
     optional: '(optional)',

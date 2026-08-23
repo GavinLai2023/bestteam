@@ -458,7 +458,40 @@ attaches `Authorization: Bearer <token>` to every request, and on a `401`
 (except from `/api/auth/*`, to avoid masking login errors) clears the token
 and redirects to `/login`. `pages/LoginPage.tsx` is the username/password
 form; `App.tsx`'s `RequireAuth` route guard redirects to `/login` when no
-token is present, and `components/Layout.tsx` has a "Log out" button.
+token is present, and `components/Layout.tsx` has "Change password" and
+"Log out" buttons.
+
+**The login page is the one screen outside `Layout`**, which is why it renders
+its own `BrandMark` and its own `LanguageSelect`: before the `login.*`
+namespace existed it was hardcoded English with no language control on it at
+all, so a Chinese customer's very first impression was untranslatable however
+bilingual the rest of the app was. Two-panel layout (brand + three shipped
+capabilities on the left, form on the right) collapsing to one under 820px,
+where the bullets are hidden rather than stacked — they are decoration, and on
+a phone they would push the form below the fold. The slogan is
+`nav.tagline`, **one key for the whole app** — the login page and
+`WizardLayout`'s `<h1>` both read it. It used to be three near-copies that had
+already drifted ("best AI team out" / "your best AI team out" / "best AI teams
+out") while the Chinese side had one string all along; `README.md`'s copy is
+the fourth and, being outside the bundle, is the one to keep in step by hand.
+`components/BrandMark.tsx` is a pure extraction of the SVG
+that was inline in `Layout.tsx`, with its two fills moved out of `Layout.css`
+alongside it.
+
+`#username`, `#password`, `button[type=submit]` and `.banner-error` on that
+page are a contract with `tests/e2e/test_smoke.py`, which drives the real page
+through exactly those selectors; `LoginPage.test.tsx` asserts each of them so
+a rename fails in the unit tier instead of the e2e one.
+
+**`components/ChangePasswordDialog.tsx`** is the self-service change, built on
+`<dialog showModal()>` like `ConfirmDialog` (same jsdom `showModal` fallback).
+It posts to `POST /api/auth/password` and **swaps the returned token into
+`localStorage` immediately** — the change revokes the old one, so any request
+made before the swap would 401. Its success state stays on screen rather than
+closing, because the customer needs telling that every other session has just
+been signed out. Client-side it only blocks the obvious (empty current, new
+under 8 characters, a mismatched confirmation); the backend is the authority
+on all three.
 
 **Role-aware routing.** A platform operator (`is_admin`, `org_id IS NULL`) and
 an org member see disjoint UIs, partitioned by two symmetric `App.tsx` guards

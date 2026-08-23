@@ -6,6 +6,55 @@
 
 ## Done
 
+- **The login page is bilingual and branded, and a customer can change their
+  own password** (2026-08-23). Two defects, one screen apart. `LoginPage.tsx`
+  was 66 lines of **hardcoded English** — `en.ts` had eight namespaces and none
+  of them was `login` — and `/login` renders outside `Layout`, so there was no
+  language control on it either. A Chinese customer's *first* screen was
+  therefore untranslatable, however bilingual the rest of the app was, which
+  `docs/BETA_NOTES.md`'s "the whole customer-facing app is translated" already
+  claimed otherwise. It is now a two-panel page (brand mark, the product
+  slogan, three shipped capabilities on the left; the form and a
+  `LanguageSelect` on the right) collapsing to one panel under 820px, with its
+  own stylesheet instead of borrowing the wizard's, a password reveal toggle
+  and a Caps Lock warning. `components/BrandMark.tsx` is a pure extraction of
+  the SVG that was inline in `Layout.tsx`. The four selectors
+  `tests/e2e/test_smoke.py` drives the page through (`#username`, `#password`,
+  `button[type=submit]`, `.banner-error`) are unchanged and now asserted in
+  `LoginPage.test.tsx` too, so a future rename fails in the unit tier rather
+  than the e2e one.
+  The second half: there was **no self-service password change at all** and no
+  self-registration either, so every account's password was chosen by the
+  operator and told to the customer — and, with no way to change it, known to
+  the operator forever. `POST /api/auth/password` takes the current password,
+  requires 8 characters for the new one, rotates `security_stamp` (revoking
+  every token and WS ticket for the account) and hands back a fresh token, so
+  the browser that made the change stays signed in while every other session
+  ends. It shares `_LOGIN_LIMITER` with `/login` rather than keeping its own
+  budget: both ration guesses at the same secret, and this one is reachable
+  from an unattended logged-in browser. The operator's reset
+  (`POST /api/admin/users/{username}/password`) is untouched and keeps no
+  minimum — it sets a temporary password for an account the operator already
+  controls, and a floor there would break every user-provisioning fixture
+  while protecting nothing.
+  Deliberately not done: **email as a login identity**. `users` has no email
+  column, and the reason to add one is self-service recovery — which needs
+  SMTP, which this deployment deliberately does not have anywhere (the
+  draft-only email toolkit's containment argument is that no send verb exists
+  in the process). Login by email without recovery by email buys a schema
+  migration and an identity-model change for a cosmetic gain. Revisit only if
+  a mail channel ever exists.
+  Also settled here: the product slogan is **"Intent in, BestTeam out"**, and
+  it is now `nav.tagline` — one key that both the login page and
+  `WizardLayout`'s `<h1>` read. It had drifted into three near-copies
+  (`README.md`'s "best AI team out", `wizard.title`'s "your best AI team out",
+  and the login page's "best AI teams out") while the Chinese side had one
+  string all along, so the fix was to delete the copies rather than reword
+  them. `README.md` keeps the fourth copy — it is outside the bundle and
+  cannot read a locale key, so it is the one place to keep in step by hand.
+  The Chinese stays a translation of the meaning (说出需求，收获最合适的 AI
+  团队) rather than the pun, which does not survive translation.
+
 - **A hierarchical team no longer dies on its first call under a thinking-mode
   model** (2026-08-23). Every turn of a deployed `Payroll Q&A` team was
   failing with `400 Thinking mode does not support this tool_choice`, which

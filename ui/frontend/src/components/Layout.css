@@ -24,13 +24,7 @@
   color: var(--accent);
 }
 
-.brand-mark-soft {
-  fill: var(--accent-border);
-}
-
-.brand-mark-strong {
-  fill: var(--accent);
-}
+/* .brand-mark-soft / -strong moved to components/BrandMark.css with the SVG. */
 
 .top-nav-links {
   display: flex;
@@ -49,7 +43,7 @@
   }
 
   .top-nav-links a,
-  .logout-button {
+  .nav-action {
     padding: 6px 10px;
     font-size: 0.85rem;
   }
@@ -73,7 +67,9 @@
   color: var(--accent-strong);
 }
 
-.logout-button {
+/* Named for what it is, not for the one button that used to wear it: "Change
+   password" sits beside "Log out" in the same bar and shares the styling. */
+.nav-action {
   text-decoration: none;
   color: var(--text-soft);
   font-size: 0.9rem;
@@ -86,7 +82,7 @@
   font-family: inherit;
 }
 
-.logout-button:hover {
+.nav-action:hover {
   background: var(--hover);
 }
 
