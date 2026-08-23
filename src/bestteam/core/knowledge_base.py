@@ -6,7 +6,7 @@ import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from ..exceptions import ConfigurationError
 from ..tools import parse_file
@@ -95,10 +95,21 @@ class KnowledgeBase(ABC):
     #: in the tool's own description. `None` for a knowledge base that was
     #: never given one.
     description: Optional[str] = None
+    #: The ingestion job (content generation) every indexed chunk came from,
+    #: when the chunks carry one and all agree -- the backend's DB-backed
+    #: `from_chunks` path. `None` for a knowledge base built from a folder.
+    #: Reported on the trace of every search, hits or not, so a run's record
+    #: says which generation of a collection it was answered from.
+    ingestion_job_id: Optional[int] = None
 
     @abstractmethod
+    def search_hits(self, query: str, top_k: Optional[int] = None) -> List["RetrievalHit"]:
+        """Return the chunks most relevant to the query, best first, each with
+        the scores that put it there and the identity it carries."""
+
     def search(self, query: str, top_k: Optional[int] = None) -> List["_Chunk"]:
         """Return the chunks most relevant to the query, best first."""
+        return [hit.chunk for hit in self.search_hits(query, top_k)]
 
     def query(self, query: str, top_k: Optional[int] = None) -> str:
         """Return formatted excerpts most relevant to the query."""
@@ -118,6 +129,42 @@ class _Chunk(NamedTuple):
     text: str
     page: Optional[int] = None
     heading: Optional[str] = None
+    #: Opaque identity supplied by whoever built the chunks -- the backend's
+    #: `knowledge_chunks` row, its document, and the ingestion job that wrote
+    #: them. `None` on the SDK path (a folder has no rows). Never part of the
+    #: citation the model sees; carried so a hit can be tied back to a row.
+    chunk_id: Optional[int] = None
+    document_id: Optional[int] = None
+    ingestion_job_id: Optional[int] = None
+
+
+class RetrievalHit(NamedTuple):
+    """One search result: the chunk plus why it ranked where it did.
+
+    `fused_score` is the reciprocal-rank-fusion score across every
+    (query variant x retrieval leg) list the chunk appeared in -- the order
+    candidates reach the reranker in. `leg_scores` is each retrieval leg's
+    own raw score for the chunk (`"bm25"`: Okapi score; `"vector"`: cosine),
+    keyed by leg name and keeping the best value across query variants, so
+    its keys also say *which* leg surfaced the chunk. `rerank_score` is the
+    cross-encoder's score when a reranker ran and succeeded; `None` when no
+    reranker is configured or scoring failed and the retrieval order was
+    kept -- a missing score is never faked.
+    """
+
+    chunk: _Chunk
+    fused_score: float
+    leg_scores: Dict[str, float]
+    rerank_score: Optional[float] = None
+
+
+def _generation_of(chunks: List[_Chunk]) -> Optional[int]:
+    """The one `ingestion_job_id` every chunk carries, or `None` when any
+    chunk has none or they disagree (a mixed list has no single generation)."""
+    ids = {chunk.ingestion_job_id for chunk in chunks}
+    if len(ids) == 1:
+        return next(iter(ids))
+    return None
 
 
 def _citation(chunk: _Chunk) -> str:
@@ -246,14 +293,17 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
                 f"Knowledge base '{name}' has no readable documents"
                 + (f" in {self.path}" if self.path is not None else "")
             )
+        self.ingestion_job_id = _generation_of(self._chunks)
 
         self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
 
-    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[int]:
+    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[Tuple[int, float]]:
         """Identical scoring logic to the pre-refactor `query()` body,
-        returning chunk indices instead of `(score, chunk)` tuples."""
+        returning `(chunk index, BM25 score)` pairs, best first. The order is
+        by shared-significant-term overlap first and BM25 score second; the
+        score is carried for the hit's `leg_scores`, not for ordering."""
         query_tokens = tokenize(query_text)
         query_terms = significant_terms(query_tokens)
         scores = self._bm25.get_scores(query_tokens)
@@ -264,19 +314,15 @@ class LocalFolderKnowledgeBase(KnowledgeBase):
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        return [idx for _overlap, _score, idx in matches[:fetch_k]]
+        return [(idx, float(score)) for _overlap, score, idx in matches[:fetch_k]]
 
-    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
+    def search_hits(self, query: str, top_k: Optional[int] = None) -> List[RetrievalHit]:
         top_k = top_k or self.default_top_k
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        ranked_indices = _rrf_retrieve(variants, [self._bm25_leg], fetch_k)
-        # The score half of each tuple is a synthetic rank-derived placeholder,
-        # not a real retrieval score -- RRF has already re-ordered by fused
-        # rank, and _rerank_candidates only reads candidate order/chunk.text.
-        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
-        results = _rerank_candidates(query, results, self._reranker, top_k)
-        return [chunk for _score, chunk in results]
+        candidates = _rrf_retrieve(variants, [("bm25", self._bm25_leg)], fetch_k)
+        hits = [_hit_from_candidate(self._chunks, candidate) for candidate in candidates[:fetch_k]]
+        return _rerank_candidates(query, hits, self._reranker, top_k)
 
 
 _DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
@@ -889,24 +935,51 @@ def _load_document_chunks(path: Path, chunk_size: int, chunk_overlap: int) -> Li
     return chunks
 
 
+#: A named retrieval leg: `(name, fn)` where `fn(query_text, fetch_k)` returns
+#: `(chunk index, raw score)` pairs, best first, at most `fetch_k` of them.
+_Leg = Tuple[str, Callable[[str, int], List[Tuple[int, float]]]]
+
+#: One fused candidate: `(chunk index, fused RRF score, {leg name: raw score})`.
+_Candidate = Tuple[int, float, Dict[str, float]]
+
+
 def _rrf_retrieve(
     query_variants: List[str],
-    legs: List[Callable[[str, int], List[int]]],
+    legs: List[_Leg],
     fetch_k: int,
-) -> List[int]:
+) -> List[_Candidate]:
     """Run every (query_variant, leg) pair -- each leg returns a ranked list
-    of chunk indices capped at fetch_k -- and fuse ALL resulting lists
-    (variants x legs) with one unweighted `reciprocal_rank_fusion` call.
-    Returns chunk indices ordered by fused score, descending. A leg is a
-    closure over one KB's own chunks/index (BM25 scoring, or cosine
-    scoring); parameterizing on `(query_text, fetch_k) -> List[int]` lets
-    one function serve local_folder (1 leg), vector (1 leg), and hybrid (2
-    legs) identically. With exactly one variant and one leg this reproduces
-    that leg's own order exactly (RRF over a single ranked list is
+    of `(chunk index, raw score)` pairs capped at fetch_k -- and fuse ALL
+    resulting lists (variants x legs) with one unweighted
+    `reciprocal_rank_fusion` call. Returns candidates ordered by fused score,
+    descending, each carrying that fused score and the best raw score every
+    leg gave the chunk across the variants (so the dict's keys say which legs
+    surfaced it). A leg is a closure over one KB's own chunks/index (BM25
+    scoring, or cosine scoring); parameterizing on the leg shape lets one
+    function serve local_folder (1 leg), vector (1 leg), and hybrid (2 legs)
+    identically. With exactly one variant and one leg this reproduces that
+    leg's own order exactly (RRF over a single ranked list is
     order-preserving -- see the design spec's "Key facts")."""
-    ranked_lists = [leg(variant, fetch_k) for variant in query_variants for leg in legs]
+    ranked_lists: List[List[int]] = []
+    leg_scores: Dict[int, Dict[str, float]] = {}
+    for variant in query_variants:
+        for leg_name, leg in legs:
+            scored = leg(variant, fetch_k)
+            ranked_lists.append([idx for idx, _score in scored])
+            for idx, score in scored:
+                per_leg = leg_scores.setdefault(idx, {})
+                if leg_name not in per_leg or score > per_leg[leg_name]:
+                    per_leg[leg_name] = score
     fused = reciprocal_rank_fusion(*ranked_lists)
-    return [idx for idx, _score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)]
+    return [
+        (idx, score, leg_scores[idx])
+        for idx, score in sorted(fused.items(), key=lambda pair: pair[1], reverse=True)
+    ]
+
+
+def _hit_from_candidate(chunks: List[_Chunk], candidate: _Candidate) -> RetrievalHit:
+    idx, fused_score, leg_scores = candidate
+    return RetrievalHit(chunk=chunks[idx], fused_score=fused_score, leg_scores=leg_scores)
 
 
 def _report_expansion_usage(response: Any, model_spec: Any) -> None:
@@ -958,28 +1031,29 @@ def _rerank_fetch_k(top_k: int, candidate_k: int, reranker: Optional[Reranker]) 
 
 def _rerank_candidates(
     query: str,
-    candidates: List["tuple[float, _Chunk]"],
+    candidates: List[RetrievalHit],
     reranker: Optional[Reranker],
     top_k: int,
-) -> List["tuple[float, _Chunk]"]:
+) -> List[RetrievalHit]:
     """Never mutates `candidates`. `candidates` is already sorted by
-    retrieval rank (the score half of each tuple may be a synthetic
-    placeholder, not a real score -- this function never reads it) and
-    sliced to `candidate_k` by the caller. Empty input or no reranker
-    configured is a pure slice -- no model call, no logging. Any exception
-    during scoring (including a `_RerankScoringError` contract violation)
-    falls back to the pre-rerank `candidates[:top_k]` slice, logged as a
-    warning: rerank is a quality layer, never a reason the knowledge base
-    query itself fails."""
+    retrieval rank (this function never reads their scores, only their order
+    and `chunk.text`) and sliced to `candidate_k` by the caller. Empty input
+    or no reranker configured is a pure slice -- no model call, no logging,
+    `rerank_score` left `None`. Any exception during scoring (including a
+    `_RerankScoringError` contract violation) falls back to the pre-rerank
+    `candidates[:top_k]` slice, logged as a warning and again with no
+    `rerank_score`: rerank is a quality layer, never a reason the knowledge
+    base query itself fails. A successful rerank returns the hits in the
+    cross-encoder's order, each carrying its score."""
     if reranker is None or not candidates:
         return candidates[:top_k]
     try:
-        rerank_scores = reranker.score(query, [chunk.text for _score, chunk in candidates])
+        rerank_scores = reranker.score(query, [hit.chunk.text for hit in candidates])
     except Exception:
         _logger.warning("Rerank failed; falling back to retrieval order", exc_info=True)
         return candidates[:top_k]
     order = sorted(range(len(candidates)), key=lambda i: (-rerank_scores[i], i))
-    return [candidates[i] for i in order[:top_k]]
+    return [candidates[i]._replace(rerank_score=float(rerank_scores[i])) for i in order[:top_k]]
 
 
 # Trace bounds for a knowledge base tool call. The query is model-written
@@ -988,6 +1062,19 @@ def _rerank_candidates(
 # event into a wall of filenames.
 _MAX_TRACE_QUERY_CHARS = 200
 _MAX_TRACE_SOURCES = 10
+
+
+def _trace_hit(hit: RetrievalHit) -> Dict[str, Any]:
+    """One hit as the trace records it: citation, row identity, scores --
+    rounded so ten of them stay a few hundred bytes -- and no chunk text."""
+    return {
+        "citation": _citation(hit.chunk),
+        "chunk_id": hit.chunk.chunk_id,
+        "document_id": hit.chunk.document_id,
+        "fused_score": round(hit.fused_score, 4),
+        "leg_scores": {name: round(score, 4) for name, score in hit.leg_scores.items()},
+        "rerank_score": None if hit.rerank_score is None else round(hit.rerank_score, 4),
+    }
 
 
 def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
@@ -1009,7 +1096,17 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
     """
 
     def _tool(query: str) -> str:
-        chunks = kb.search(query)
+        search_hits = getattr(kb, "search_hits", None)
+        if search_hits is not None:
+            hits = search_hits(query)
+            chunks = [hit.chunk for hit in hits]
+        else:
+            # A knowledge-base-shaped object from before `search_hits` existed
+            # (a custom wrapper exposing only `search()`): still searchable,
+            # still traced -- just with no scores to report, rather than
+            # invented ones.
+            hits = []
+            chunks = kb.search(query)
         bounded_query = query[:_MAX_TRACE_QUERY_CHARS]
         # dict.fromkeys de-duplicates while keeping best-first order: several
         # chunks of one document cite it once.
@@ -1018,6 +1115,11 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
             query=bounded_query,
             hit_count=len(chunks),
             sources=sources,
+            # Which generation of the collection answered (None for a
+            # folder-built KB), and per hit the row identity and the scores
+            # behind its rank -- never the text. Bounded like `sources`.
+            ingestion_job_id=getattr(kb, "ingestion_job_id", None),
+            hits=[_trace_hit(hit) for hit in hits[:_MAX_TRACE_SOURCES]],
             summary=(
                 f"{len(chunks)} result(s) for “{bounded_query}” — sources: {', '.join(sources)}"
                 if chunks

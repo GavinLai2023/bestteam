@@ -889,7 +889,12 @@ text** (P0-5). It used to be `_summarize(result)` — the first 200 characters o
 the retrieved excerpts, i.e. an org's own indexed documents, in every
 `trace_events` row and every UI that renders one. The adapter now builds that
 event from what the tool reported through `core/tool_context.py`:
-`summary` plus `query` (≤200 chars), `hit_count` and `sources` (at most 10).
+`summary` plus `query` (≤200 chars), `hit_count`, `sources` (at most 10),
+`ingestion_job_id` (the completed job the collection was built from — `None`
+for a folder-built KB — present even on a zero-hit search) and `hits` (at most
+10: each hit's citation, `chunk_id`/`document_id`, `fused_score`,
+per-leg `leg_scores` and `rerank_score`, rounded, never text; see
+`docs/KNOWLEDGE_BASES.md` "What a search looks like in the trace").
 A source is a *citation label*, not an excerpt: the filename, then `, p.<n>`
 for a PDF and ` § <heading>` for Markdown (a heading is document text, capped
 at 80 characters — it is what makes a citation findable, and it is the only
@@ -1206,9 +1211,11 @@ that org, and the run is **filtered out of a non-admin `GET /api/runs`**
 (`diagnostic_of_run_id IS NULL`) so it never appears on the customer's
 Activity page -- a list-cleanliness rule, not a security boundary (the org's
 own run read routes still serve it by id). Not done, on purpose for v1:
-rebuilding the *pinned* version, relevance scores on KB hits (`_Chunk` has
-none, and a fused/reranked order has no single meaningful number), an admin
-purge of one diagnostic run, excluding them from `run_analytics.py`. Spec:
+rebuilding the *pinned* version, an admin purge of one diagnostic run,
+excluding them from `run_analytics.py`. (Relevance scores on KB hits, once
+also excluded, now ride every KB `tool_completed` as `hits` — fused, per-leg
+and rerank scores rather than one number — so a diagnostic re-run's trace
+shows them too.) Spec:
 `docs/superpowers/specs/2026-08-21-diagnostic-rerun-design.md`.
 
 ## Backend API (`ui/backend/`)
@@ -1605,9 +1612,12 @@ closed, because there the KB is one an agent actually references.
 **A customer can try a search against their own collection** (P1-4):
 `POST /api/org/knowledge-bases/{name}/search`, body
 `{"query": <1..500 chars>, "top_k": <1..10>}`, returning
-`{"query", "hit_count", "results": [{"citation", "source", "page", "heading",
-"text"}]}` with each `text` capped at 1,500 characters -- enough to judge the
-retrieval by, not a document reader. It resolves the knowledge base through
+`{"query", "hit_count", "ingestion_job_id", "results": [{"citation", "source",
+"page", "heading", "text", "chunk_id", "document_id", "fused_score",
+"leg_scores", "rerank_score"}]}` with each `text` capped at 1,500 characters
+-- enough to judge the retrieval by, not a document reader -- and the identity
+and scores being the same ones the agent's trace event carries (no model name
+among them; the panel does not render them). It resolves the knowledge base through
 `resolve_knowledge_base(db, record)` with **no `source`**, which is what
 turns the legacy file-based fallback off for this surface: rebuilding a
 disk-backed collection would re-parse every file, and re-embed a `vector` one
