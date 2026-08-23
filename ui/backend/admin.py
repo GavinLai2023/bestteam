@@ -62,7 +62,7 @@ from .db.users import (
     set_admin_status,
     set_user_org,
 )
-from .env_check import check_environment, has_failures
+from .env_check import check_environment, check_schema, default_db_path, has_failures
 
 
 def _open_session():
@@ -177,7 +177,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Deliberately before the database is opened (`_open_session` is what
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
-        findings = check_environment(os.environ)
+        findings = check_environment(os.environ) + [check_schema(default_db_path(os.environ))]
         for finding in findings:
             print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
         failures = sum(1 for f in findings if f.level == "FAIL")
