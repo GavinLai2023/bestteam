@@ -6,6 +6,25 @@
 
 ## Done
 
+- **A hierarchical team no longer dies on its first call under a thinking-mode
+  model** (2026-08-23). Every turn of a deployed `Payroll Q&A` team was
+  failing with `400 Thinking mode does not support this tool_choice`, which
+  the visitor saw only as "Sorry, something went wrong producing a reply" —
+  the real error was in `runs.output`. Both HIERARCHICAL paths force
+  `tool_choice="required"` on an agent's first call (`_hierarchical_node` for
+  the manager, `_make_delegate_tool` for a tool-carrying subordinate), and
+  DeepSeek's reasoning models reject that outright, at call time rather than
+  at bind time. `_first_call` now retries once on the unforced binding when
+  the provider's refusal names `tool_choice`, mirroring what
+  `core/_structured_output.invoke_structured` already did for the
+  structured-output path. Only the forcing is dropped — the delegation
+  guidance stays in the system prompt, so the worst case is a manager that
+  answers directly rather than a run with no answer at all. The retry is keyed
+  on the provider's wording so an unrelated failure still surfaces, and a
+  rejected request bills nothing, so the fallback costs one call, not two.
+  Not a share-chat bug: the same team failed identically from Run a team and
+  from automation.
+
 - **Confirm page: one action instead of three** (2026-08-23, branch
   `refactor/confirm-single-update-action`). The page carried "Save this
   summary", "Regenerate summary" and "Update the team", which a customer

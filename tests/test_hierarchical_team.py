@@ -1,6 +1,6 @@
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from bestteam import Agent, CollaborationMode, Team, Pipeline
 from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
@@ -223,3 +223,118 @@ def test_manager_delegate_loop_is_bounded():
     # The manager exhausting its delegate loop must surface explicitly rather
     # than as a silent empty success (CR-011).
     assert result.output == _tool_loop_exhausted_notice("manager")
+
+
+class _ThinkingModeChatModel(_FakeToolCallingChatModel):
+    """Refuses a forced `tool_choice` the way DeepSeek's reasoning models do.
+
+    `bind_tools` accepts the argument -- the refusal is a 400 from the provider
+    when the call is actually made, not a bind-time error -- so the unforced
+    binding keeps working and only the forced one fails. The message is the
+    real one, from a run stored in a live deployment's `runs.output`.
+    """
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        if tool_choice is None:
+            return self
+        refusing = _ThinkingModeChatModel(responses=self.responses)
+        object.__setattr__(refusing, "refuses", True)
+        return refusing
+
+    def invoke(self, input, *args, **kwargs):
+        if getattr(self, "refuses", False):
+            raise Exception(
+                "Error code: 400 - {'error': {'message': 'Thinking mode does not "
+                "support this tool_choice', 'type': 'invalid_request_error'}}"
+            )
+        return super().invoke(input, *args, **kwargs)
+
+
+class _FailingChatModel(_FakeToolCallingChatModel):
+    """Fails every call for a reason that has nothing to do with `tool_choice`."""
+
+    def invoke(self, input, *args, **kwargs):
+        raise Exception("Error code: 401 - {'error': {'message': 'Invalid API key'}}")
+
+
+def test_a_manager_that_refuses_forced_tool_choice_still_produces_an_answer():
+    # A whole hierarchical team was failing on its manager's very first call:
+    # `_hierarchical_node` forces `tool_choice="required"` so the manager
+    # always delegates, and a thinking-mode model 400s on that outright. The
+    # delegation guidance is still in the system prompt after the retry, so
+    # this is a weaker first turn -- but a turn, instead of a dead run.
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=FakeMessagesListChatModel(responses=[AIMessage(content="research findings")]),
+    )
+    manager_model = _ThinkingModeChatModel(responses=[AIMessage(content="An answer without delegating")])
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+    result = Pipeline(name="wf", steps=[team]).run("do the thing")
+
+    assert result.output == "An answer without delegating"
+
+
+def test_a_delegated_specialist_that_refuses_forced_tool_choice_still_answers():
+    # The other forcing site: a subordinate carrying tools of its own is
+    # forced on its first call too (`_make_delegate_tool`), so a team whose
+    # manager tolerates forcing can still die inside a delegate call.
+    def lookup_policy(query: str) -> str:
+        return "policy info"
+
+    researcher_model = _ThinkingModeChatModel(responses=[AIMessage(content="research findings")])
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=researcher_model,
+        tools=[lookup_policy],
+    )
+    manager_model = _RecordingToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "delegate_to_researcher", "args": {"task": "look into X"}, "id": "call_1"}
+                ],
+            ),
+            AIMessage(content="Final report based on: research findings"),
+        ]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+    Pipeline(name="wf", steps=[team]).run("do the thing")
+
+    # Asserting on the run's output would prove nothing: the manager's final
+    # answer is scripted, and `_run_agent` turns a failed tool call into an
+    # "Error calling tool ..." string the manager simply reads past. What the
+    # delegation actually delivered is the only honest subject here.
+    delivered = [m.content for m in manager_model.last_messages if isinstance(m, ToolMessage)]
+    assert delivered == ["research findings"]
+
+
+def test_a_failure_that_is_not_about_tool_choice_is_not_retried_away():
+    # The retry is keyed on the provider's own wording, so an unrelated
+    # failure on the forced call must still surface rather than being spent
+    # twice and then reported as something else.
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=FakeMessagesListChatModel(responses=[AIMessage(content="research findings")]),
+    )
+    manager = Agent(
+        name="manager",
+        role="Manager",
+        goal="coordinate the team",
+        model=_FailingChatModel(responses=[AIMessage(content="never reached")]),
+    )
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+
+    with pytest.raises(Exception, match="Invalid API key"):
+        Pipeline(name="wf", steps=[team]).run("do the thing")

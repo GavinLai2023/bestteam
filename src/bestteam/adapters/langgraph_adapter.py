@@ -509,7 +509,8 @@ def _run_agent(
     manager's first turn always delegate rather than merely suggesting it
     should. Later iterations in this same call always use the unforced
     binding, so the agent can still settle on a final text answer once it has
-    gathered what it needs. If `usage_sink` is given, each model invocation's
+    gathered what it needs. A model that refuses the forcing outright (see
+    `_first_call`) falls back to the unforced binding rather than failing. If `usage_sink` is given, each model invocation's
     `usage_metadata` (when reported) is appended to it for usage metering.
     If `on_event` is given, it's called with each granular `TraceEvent`
     (agent_started/tool_started/tool_completed/agent_progress) as this turn
@@ -537,12 +538,14 @@ def _run_agent(
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
     first_call_model = model
+    forced_first_call = False
     if all_tools:
         try:
             model = model.bind_tools(all_tools)
             first_call_model = (
                 model.bind_tools(all_tools, tool_choice="required") if require_tool_use_on_first_call else model
             )
+            forced_first_call = require_tool_use_on_first_call
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
 
@@ -607,6 +610,37 @@ def _run_agent(
                 break
         return full if full is not None else bound_model.invoke(msgs)
 
+    def _first_call(msgs: List[Any]) -> Any:
+        """The opening call, dropping a forced `tool_choice` if it is refused.
+
+        Some reasoning/"thinking mode" models -- DeepSeek's, for one -- reject
+        a forced `tool_choice` outright with a 400, and it arrives when the
+        call is made rather than when the tools are bound. Left unhandled it
+        fails the run on its very first call, so a whole HIERARCHICAL team is
+        unusable on such a model: both forcing sites are on that path (a
+        manager's first turn, and a delegated subordinate that carries tools).
+        `core/_structured_output.invoke_structured` already meets the same
+        refusal on the structured-output path; this is the tool-calling one.
+
+        Only the forcing is dropped -- the delegation guidance is still in the
+        system prompt, so a manager that heeds it still delegates and one that
+        does not answers directly. A weaker first turn, but a turn. The retry
+        is keyed on the provider's own wording so an unrelated failure is not
+        quietly paid for twice, and a rejected request is billed for nothing,
+        so the second call is the only one that costs anything.
+        """
+        try:
+            return _call(first_call_model, msgs)
+        except Exception as exc:
+            if not forced_first_call or "tool_choice" not in str(exc).lower():
+                raise
+            _logger.info(
+                "Agent '%s': model refused a forced tool_choice, retrying without it (%s)",
+                agent.name,
+                exc,
+            )
+            return _call(model, msgs)
+
     system_prompt = agent.system_prompt()
     if extra_system_prompt:
         system_prompt = f"{system_prompt}\n\n{extra_system_prompt}"
@@ -621,7 +655,7 @@ def _run_agent(
             "agent_prompt",
             {"system_prompt": _diagnostic_text(system_prompt), "input": _diagnostic_text(input_text)},
         )
-    response = _call(first_call_model, messages)
+    response = _first_call(messages)
     _record_usage(agent, response, usage_sink)
     if diagnostic:
         _emit("model_turn", _model_turn_data(1, response))
@@ -889,7 +923,10 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
     real model can ignore, so the manager's first call also forces
     `tool_choice="required"` (via `require_tool_use_on_first_call`) --
     without this, a real LLM can just answer directly and never call a
-    delegate tool at all.
+    delegate tool at all. It is insurance, not a requirement: a model that
+    rejects the forcing (DeepSeek's thinking mode does) gets the unforced
+    binding instead, so the guidance goes back to being a suggestion rather
+    than taking the whole team down with it.
     """
     manager = team.manager
     if manager is None:
