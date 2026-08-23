@@ -12,7 +12,8 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec
+from bestteam import AgentSpec, Requirements, Specification, TeamSpec, PipelineSpec
+from bestteam.exceptions import ConfigurationError
 from helpers import create_user_and_login, get_user_principal_id, make_concurrent_safe_engine
 from ui.backend import main as backend_main
 from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
@@ -1218,3 +1219,143 @@ def test_model_catalog_prompt_hides_embedding_tier():
 
     assert "openai:gpt-4o-mini" in with_catalog
     assert "text-embedding-3-small" not in with_catalog
+
+
+def _session_with_team(client):
+    """A session that has both an understanding and a team -- the state the
+    Confirm page's single Update action operates on."""
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"requirements": {"summary": "Faster support", "goals": ["Reply within an hour"]}},
+    )
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+    return session_id
+
+
+def test_refine_updates_the_understanding_and_the_team_in_one_call(client):
+    """The Confirm page has one action: the customer's hand edits and their
+    described change both land, and the team is redesigned from the result."""
+    session_id = _session_with_team(client)
+    analyst_result = Requirements(summary="Faster support", goals=["Reply within two hours"])
+    architect_result = Specification.model_validate(_VALID_SPEC)
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_requirements", return_value=analyst_result), \
+         patch("ui.backend.builder.generate_specification", return_value=architect_result) as mock_architect:
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/refine",
+            json={
+                "requirements": {"summary": "Faster support", "goals": ["Reply within an hour"]},
+                "feedback": "Make it two hours instead.",
+                "model": "fake:designer",
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "solution"
+    assert body["requirements_json"]["goals"] == ["Reply within two hours"]
+    mock_architect.assert_called_once()
+
+
+def test_refine_gives_the_analyst_the_edited_draft_and_the_feedback(client):
+    """The edited fields are the analyst's `current`, not the stored copy --
+    otherwise a customer's hand edit is overwritten by the round it triggered."""
+    session_id = _session_with_team(client)
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_requirements", return_value=Requirements(summary="x")) as mock_analyst, \
+         patch("ui.backend.builder.generate_specification", return_value=Specification.model_validate(_VALID_SPEC)):
+        client.post(
+            f"/api/builder/sessions/{session_id}/refine",
+            json={
+                "requirements": {
+                    "summary": "Faster support",
+                    "goals": ["Reply within an hour"],
+                    "constraints": ["Stay polite"],
+                },
+                "feedback": "Make it two hours instead.",
+                "model": "fake:designer",
+            },
+        )
+
+    current = mock_analyst.call_args.kwargs["current"]
+    assert current.goals == ["Reply within an hour"]
+    assert current.constraints == ["Stay polite"]
+    assert mock_analyst.call_args.kwargs["feedback"] == "Make it two hours instead."
+
+
+def test_refine_without_a_note_saves_the_edited_fields_verbatim(client):
+    """Nothing described in words means nothing for the analyst to interpret:
+    the customer's own wording is stored as-is, and only the team is rebuilt."""
+    session_id = _session_with_team(client)
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_requirements") as mock_analyst, \
+         patch(
+             "ui.backend.builder.generate_specification",
+             return_value=Specification.model_validate(_VALID_SPEC),
+         ) as mock_architect:
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/refine",
+            json={
+                "requirements": {"summary": "Faster support", "goals": ["Reply within an hour", "Escalate refunds"]},
+                "feedback": "",
+                "model": "fake:designer",
+            },
+        )
+
+    assert resp.status_code == 200
+    mock_analyst.assert_not_called()
+    mock_architect.assert_called_once()
+    assert resp.json()["requirements_json"]["goals"] == ["Reply within an hour", "Escalate refunds"]
+
+
+def test_refine_persists_nothing_when_the_architect_fails(client):
+    """Both halves land or neither does -- a saved understanding with a team
+    that never saw it is the split state this endpoint exists to prevent."""
+    session_id = _session_with_team(client)
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_requirements", return_value=Requirements(summary="Rewritten")), \
+         patch("ui.backend.builder.generate_specification", side_effect=ConfigurationError("no such tool")):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/refine",
+            json={
+                "requirements": {"summary": "Faster support"},
+                "feedback": "Add a reviewer.",
+                "model": "fake:designer",
+            },
+        )
+
+    assert resp.status_code == 400
+    body = client.get(f"/api/builder/sessions/{session_id}").json()
+    assert body["requirements_json"]["summary"] == "Faster support"
+    assert body["status"] == "spec"
+
+
+def test_refine_records_the_customers_note_in_history(client):
+    session_id = _session_with_team(client)
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), \
+         patch("ui.backend.builder.generate_requirements", return_value=Requirements(summary="x")), \
+         patch("ui.backend.builder.generate_specification", return_value=Specification.model_validate(_VALID_SPEC)):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/refine",
+            json={"requirements": {"summary": "x"}, "feedback": "Make it two hours.", "model": "fake:designer"},
+        )
+
+    history = resp.json()["feedback_history"]
+    assert [(e["stage"], e["note"]) for e in history] == [("solution", "Make it two hours.")]
+
+
+def test_refine_requires_an_existing_team(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/refine",
+        json={"requirements": {"summary": "x"}, "feedback": "", "model": "fake:designer"},
+    )
+
+    assert resp.status_code == 400

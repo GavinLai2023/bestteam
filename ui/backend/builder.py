@@ -304,6 +304,15 @@ class SolutionRequest(BaseModel):
     specification: Optional[Dict[str, Any]] = None
 
 
+class RefineRequest(BaseModel):
+    """The Confirm page's one action: the customer's edited understanding
+    (`requirements`) plus whatever they described in words (`feedback`)."""
+
+    requirements: Optional[Dict[str, Any]] = None
+    feedback: str = ""
+    model: str
+
+
 class TestRunRequest(BaseModel):
     input: str
 
@@ -427,6 +436,41 @@ def delete_builder_session(
         )
 
 
+def _redesign_specification(
+    db: Session,
+    org_id: int,
+    source: Path,
+    chat_model: Any,
+    requirements_text: str,
+    current: Specification,
+    feedback: str,
+) -> Specification:
+    """Re-run the Solution Architect over a design that already exists.
+
+    `current` goes into the prompt so a refinement is incremental: without it
+    each round rebuilds the team from the requirements alone and the
+    adjustments earlier rounds made drift away.
+    """
+    prompt = f"{requirements_text}\n\nThe current team design is:\n{current.model_dump_json()}"
+    if feedback.strip():
+        prompt += f"\n\nCustomer feedback on this design:\n{feedback}"
+    # Build the tools first: the catalog only names knowledge bases that
+    # actually resolved, so the architect can't reference a broken one.
+    kb_tools = _all_knowledge_base_tools(db, source, org_id)
+    prompt = _with_model_catalog(db, prompt)
+    prompt = _with_skill_catalog(db, prompt, org_id)
+    prompt = _with_knowledge_base_catalog(db, prompt, org_id, names=set(kb_tools))
+    return _call_model(
+        generate_specification,
+        chat_model,
+        prompt,
+        source=source,
+        extra_tools=kb_tools,
+        extra_skills=load_skills(db, org_id),
+        pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+    )
+
+
 @router.post("/{session_id}/requirements")
 def submit_requirements(
     session_id: str,
@@ -534,23 +578,8 @@ def submit_solution_feedback(
         # still 400s clearly instead of silently landing on every agent.
         chat_model = _call_model(_resolve_model, req.model)
         if req.feedback.strip():
-            requirements_text = (
-                f"{_requirements_text(session)}\n\n"
-                f"The current team design is:\n{current.model_dump_json()}\n\n"
-                f"Customer feedback on this design:\n{req.feedback}"
-            )
-            kb_tools = _all_knowledge_base_tools(db, source, org.id)
-            requirements_text = _with_model_catalog(db, requirements_text)
-            requirements_text = _with_skill_catalog(db, requirements_text, org.id)
-            requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id, names=set(kb_tools))
-            spec = _call_model(
-                generate_specification,
-                chat_model,
-                requirements_text,
-                source=source,
-                extra_tools=kb_tools,
-                extra_skills=load_skills(db, org.id),
-                pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+            spec = _redesign_specification(
+                db, org.id, source, chat_model, _requirements_text(session), current, req.feedback
             )
         else:
             # No described change -- the customer is only switching which
@@ -577,6 +606,80 @@ def submit_solution_feedback(
         append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
     _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
     session = update_session(db, session_id, specification_json=spec.model_dump(), status="solution")
+    return _session_to_dict(session, db, org.id)
+
+
+@router.post("/{session_id}/refine")
+def refine_team(
+    session_id: str,
+    req: RefineRequest,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+) -> Dict[str, Any]:
+    """Update the understanding and the team together, in one call.
+
+    The wizard used to expose these as two buttons, and a customer who used
+    only the first one saved an understanding their team had never seen --
+    with nothing on screen saying so. Here the two stages are one action: the
+    analyst runs only when there is something described in words for it to
+    interpret, and the architect always runs, because the customer pressed a
+    button that says the team will be updated.
+
+    Nothing is persisted until both stages succeed, so a failed redesign
+    cannot leave the understanding ahead of the team.
+    """
+    session = _get_session_or_404(db, session_id, org.id)
+    if session.specification_json is None:
+        raise HTTPException(status_code=400, detail="Generate a specification before requesting refinements")
+
+    if req.requirements is not None:
+        try:
+            requirements = Requirements.model_validate(req.requirements)
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif session.requirements_json is not None:
+        requirements = Requirements.model_validate(session.requirements_json)
+    else:
+        requirements = None
+
+    chat_model = _call_model(_resolve_model, req.model)
+
+    if req.feedback.strip():
+        # `current` is the customer's edited draft, not the stored copy --
+        # otherwise the round their edit triggered overwrites that edit.
+        requirements = _call_model(
+            generate_requirements,
+            chat_model,
+            session.intent_text,
+            session.as_is_text,
+            current=requirements,
+            feedback=req.feedback,
+        )
+
+    source = _source_for(session_id)
+    requirements_text = requirements.to_prompt() if requirements is not None else _requirements_text(session)
+    spec = _redesign_specification(
+        db,
+        org.id,
+        source,
+        chat_model,
+        requirements_text,
+        Specification.model_validate(session.specification_json),
+        req.feedback,
+    )
+    # Same pin as `submit_solution_feedback` -- see its comment. Keeping it
+    # here means moving the Confirm page onto this endpoint changes which
+    # models the customer's agents run on in no way at all.
+    for agent in spec.agents:
+        agent.model = req.model
+    _prepare_generated_specification(spec, source)  # contain the stored spec's KB paths (CR-001)
+
+    if req.feedback.strip():
+        append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    fields: Dict[str, Any] = {"specification_json": spec.model_dump(), "status": "solution"}
+    if requirements is not None:
+        fields["requirements_json"] = requirements.model_dump()
+    session = update_session(db, session_id, **fields)
     return _session_to_dict(session, db, org.id)
 
 
