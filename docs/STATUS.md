@@ -1782,6 +1782,21 @@
   the org accomplished. Same snapshot property means a *renamed* team still
   splits into two historical rows — untouched, and listed under Known issues.
 
+- **Editing a deployed team no longer makes it vanish from My teams**
+  (2026-08-23). My teams lists builder *sessions*, filtered to
+  `RESUMABLE_STATUSES` (`spec`/`solution`/`testing`/`deployed`). Editing a
+  deployed team walks its session back through the wizard, and
+  `submit_requirements` writes `status='requirements'` — outside that set, so
+  the card disappeared while the pipeline stayed deployed and serving.
+  `list_sessions`' synthetic-pipeline fallback did not cover it either: that
+  only synthesizes rows for pipelines *not* linked to a session. Nothing was
+  lost — the `pipelines` row, its versions and its share links were all
+  intact — but the team was unreachable from the UI. A session with a
+  `pipeline_id` is now listed whatever stage it sits at, and grouped under
+  **Live**, because the team really is live; only the wizard session is
+  mid-edit. Frontend-only: the status field still means "furthest wizard
+  stage", which is what the resume path wants.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
