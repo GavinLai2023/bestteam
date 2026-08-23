@@ -103,6 +103,7 @@ export const zhCN: Resources = {
     empty: '还没有运行记录 —— 团队开始工作后，这里会显示你的使用情况。',
     completedLabel: '已完成任务',
     teamTaskCount: '{{count}} 个任务',
+    deletedTeam: '（已删除）',
     activeDays: '活跃天数',
     currentStreak: '当前连续天数',
     longestStreakNote: '最长纪录 {{count}} 天',

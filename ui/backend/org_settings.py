@@ -47,7 +47,7 @@ from .db.email_credentials import (
 )
 from .db.email_filter_settings import get_filter_settings, set_filter_settings
 from .db.email_triggers import get_email_trigger
-from .db.models import Organization, Run, iso_utc
+from .db.models import Organization, PipelineRecord, Run, iso_utc
 from .db.notifications import get_notification_settings, set_notification_settings
 from .db.retention import get_retention_settings, set_retention_days
 from .db_session import get_db
@@ -536,7 +536,17 @@ def activity_overview(
     rows = db.query(Run.created_at, Run.status, Run.pipeline).filter(Run.org_id == org.id).all()
     timestamps = [row[0] for row in rows]
     completed_pipelines = [row[2] for row in rows if row[1] == "completed"]
-    return compute_overview(timestamps, now=datetime.now(timezone.utc), completed_pipelines=completed_pipelines)
+    # Org-scoped like the runs above: two orgs may each have a team called
+    # "support", and one org's live team must not un-delete another's.
+    live_pipelines = {
+        name for (name,) in db.query(PipelineRecord.name).filter(PipelineRecord.org_id == org.id).all()
+    }
+    return compute_overview(
+        timestamps,
+        now=datetime.now(timezone.utc),
+        completed_pipelines=completed_pipelines,
+        live_pipelines=live_pipelines,
+    )
 
 
 # --- pre-LLM mail filter and automation budgets (Phase 4a) --------------------

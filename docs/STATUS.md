@@ -1685,6 +1685,19 @@
   process-wide mailbox env, retention unset, error channel unset or a
   malformed DSN, no trusted proxy). Table in `docs/deployment.md`, "Beta
   launch checklist".
+  A tenth check, `schema` (`env_check.check_schema`, added 2026-08-23), is
+  the one thing on the list that reads the database rather than the
+  environment, so it is a second function rather than another branch in the
+  pure one. It compares the `alembic_version` stamp with the migrations in
+  the checkout: at head is OK, no database yet is OK (the checklist runs
+  before the first start), an unstamped `create_all` database WARNs, and
+  **behind head FAILs**, naming the pending revisions. `create_all` creates
+  missing *tables* and never adds a column to one that exists, so a database
+  behind head boots clean and then raises `no such column` from whichever
+  feature touches the new column first -- which is exactly how a dev database
+  two revisions behind surfaced on 2026-08-23, as a failed ingestion run
+  rather than a failed launch. Opened read-only through a `file:` URI so the
+  checklist still cannot create the database.
 - **Beta gate G7** is a runbook step, not code: an M365 beta customer needs
   `docs/email-smoke-test.md` §9 walked against their live tenant before
   go-live (still never done -- see Known issues). The checklist and
@@ -1754,11 +1767,36 @@
   diagnose` refuses only autonomous email runs — the diagnostic row has no
   `trigger_context`, so it cannot touch the visitor's session).
 
+- **Deleted teams are marked, not hidden, in the Activity overview**
+  (2026-08-23). `Run.pipeline` is a name snapshot on the run row rather than
+  a foreign key, so a team's completed runs outlive the team — a customer saw
+  a deleted `e2e_support_team` sitting beside a live one with no way to tell
+  them apart, made worse by the deleted one showing its raw stored name
+  (`ActivityOverviewPanel.tsx`'s `teamLabel` falls back to the slug when
+  `display_names` has no entry, which a deleted team never does).
+  `compute_overview` now takes the org's live team names — passed in, since
+  the module does no I/O — and each `team_counts` row carries `deleted`. The
+  endpoint's lookup is org-scoped, so one org's live "support" cannot
+  un-delete another's. Marked rather than filtered on purpose: the rows still
+  sum to `completed_count`, and hiding them would retroactively shrink what
+  the org accomplished. Same snapshot property means a *renamed* team still
+  splits into two historical rows — untouched, and listed under Known issues.
+
 ## In Progress
 
 - _Nothing actively in progress._ See "Next steps / roadmap" below.
 
 ## Known issues / tech debt
+
+- **A renamed team splits into two rows in the Activity overview.**
+  `Run.pipeline` stores the name the run executed under, so runs from before
+  a rename group separately from runs after it, and both rows show as live
+  (each name still resolves). Deleted teams are handled — they carry
+  `deleted` since 2026-08-23 — but a rename is indistinguishable from two
+  different teams without a stable id on the run. The fix is to count by
+  `pipeline_version_id`'s owning pipeline where it is set and fall back to
+  the name only for older rows; not done, because every deployment has runs
+  predating that column.
 
 - **The two share-chat fallback replies are persisted in English.**
   `share_transcript._FALLBACK_REPLY` and `share_chat._DISPATCH_FAILED_MESSAGE`

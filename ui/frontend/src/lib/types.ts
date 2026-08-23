@@ -456,6 +456,9 @@ export interface DailyRunCount {
 export interface TeamCount {
   pipeline: string
   count: number
+  // The team has since been deleted. Its work is still counted -- marked,
+  // not hidden, so the rows keep adding up to completed_count.
+  deleted: boolean
 }
 
 // The customer-facing Activity Overview tab: how often this org's teams ran,

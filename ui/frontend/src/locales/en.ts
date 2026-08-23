@@ -125,6 +125,8 @@ export const en = {
     empty: 'No runs yet — once your teams get to work, your stats will show up here.',
     completedLabel: 'Tasks completed',
     teamTaskCount: '{{count}} tasks',
+    // A team can be deleted while the work it completed stays on the record.
+    deletedTeam: '(deleted)',
     activeDays: 'Active days',
     currentStreak: 'Current streak',
     longestStreakNote: 'Personal best: {{count}} days',

@@ -132,8 +132,8 @@ def test_team_counts_breaks_completed_runs_down_by_pipeline_descending():
     )
 
     assert stats["team_counts"] == [
-        {"pipeline": "a", "count": 3},
-        {"pipeline": "b", "count": 2},
+        {"pipeline": "a", "count": 3, "deleted": False},
+        {"pipeline": "b", "count": 2, "deleted": False},
     ]
 
 
@@ -141,6 +141,51 @@ def test_team_counts_ties_break_alphabetically_for_determinism():
     stats = compute_overview([], now=NOW, completed_pipelines=["b", "a"])
 
     assert stats["team_counts"] == [
-        {"pipeline": "a", "count": 1},
-        {"pipeline": "b", "count": 1},
+        {"pipeline": "a", "count": 1, "deleted": False},
+        {"pipeline": "b", "count": 1, "deleted": False},
     ]
+
+
+# --- deleted teams ------------------------------------------------------
+#
+# `Run.pipeline` is a name snapshot on the run row, not a foreign key, so a
+# deleted team keeps its history (deliberate -- the same reason a retention
+# purge clears content but keeps accounting). The overview therefore has to
+# say which of the names it counted no longer exists, or the customer reads a
+# stranger's name beside their own team.
+
+
+def test_a_team_that_no_longer_exists_is_marked_deleted():
+    stats = compute_overview(
+        [datetime(2026, 8, 20, 9, 0)],
+        now=datetime(2026, 8, 20, 12, 0),
+        completed_pipelines=["live_team", "gone_team"],
+        live_pipelines={"live_team"},
+    )
+    assert stats["team_counts"] == [
+        {"pipeline": "gone_team", "count": 1, "deleted": True},
+        {"pipeline": "live_team", "count": 1, "deleted": False},
+    ]
+
+
+def test_a_deleted_team_still_counts_toward_completed():
+    # The user's ruling (2026-08-23): mark, don't hide. The headline stays
+    # equal to the sum of the rows, so the list never fails to add up.
+    stats = compute_overview(
+        [datetime(2026, 8, 20, 9, 0)],
+        now=datetime(2026, 8, 20, 12, 0),
+        completed_pipelines=["gone_team", "gone_team", "live_team"],
+        live_pipelines={"live_team"},
+    )
+    assert stats["completed_count"] == 3
+    assert sum(tc["count"] for tc in stats["team_counts"]) == 3
+
+
+def test_without_a_live_set_nothing_is_reported_deleted():
+    # Purity: the function is given the live names or it does not guess.
+    stats = compute_overview(
+        [datetime(2026, 8, 20, 9, 0)],
+        now=datetime(2026, 8, 20, 12, 0),
+        completed_pipelines=["whatever"],
+    )
+    assert stats["team_counts"] == [{"pipeline": "whatever", "count": 1, "deleted": False}]
