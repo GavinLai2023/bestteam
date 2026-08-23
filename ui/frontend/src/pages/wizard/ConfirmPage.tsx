@@ -46,7 +46,6 @@ export default function ConfirmPage() {
   // designed from, and collapsed it was effectively never read.
   const [showRequirements, setShowRequirements] = useState(true)
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
-  const [reqFeedback, setReqFeedback] = useState('')
   const [reqBusy, setReqBusy] = useState(false)
   const [reqError, setReqError] = useState<string | null>(null)
 
@@ -77,14 +76,20 @@ export default function ConfirmPage() {
   const spec = session.specification_json
   const history = (session.feedback_history ?? []).filter((entry) => entry.stage === 'solution')
 
-  const applyFeedback = async () => {
-    // Feedback is optional -- an empty description still re-runs the
-    // Architect (e.g. after uploading new documents).
+  // The page's one action. It carries both of the customer's inputs -- the
+  // fields they edited by hand and whatever they described in words -- and
+  // the backend updates the understanding and the team from them together.
+  // Describing nothing is a legitimate use (they only edited a field, or they
+  // just uploaded a document), so the button never depends on the text box.
+  const updateTeam = async () => {
     if (catalogNotReady || busy) return
     setBusy(true)
     setError(null)
     try {
-      const updated = await api.submitSolution(sessionId!, {
+      const updated = await api.refineTeam(sessionId!, {
+        // Only when there is a summary to edit -- an empty draft would
+        // otherwise overwrite a session whose Requirements call failed.
+        ...(session.requirements_json ? { requirements: reqDraft } : {}),
         feedback: feedback.trim(),
         model: pickDefaultModel(catalogEntries),
       })
@@ -97,20 +102,6 @@ export default function ConfirmPage() {
     }
   }
 
-  const saveRequirements = async () => {
-    if (reqBusy) return
-    setReqBusy(true)
-    setReqError(null)
-    try {
-      const updated = await api.submitRequirements(sessionId!, { requirements: reqDraft })
-      setSession(updated)
-    } catch (e) {
-      setReqError((e as Error).message)
-    } finally {
-      setReqBusy(false)
-    }
-  }
-
   const generateRequirements = async () => {
     if (catalogNotReady || reqBusy) return
     setReqBusy(true)
@@ -118,24 +109,6 @@ export default function ConfirmPage() {
     try {
       const updated = await api.submitRequirements(sessionId!, { model: pickDefaultModel(catalogEntries) })
       setSession(updated)
-    } catch (e) {
-      setReqError((e as Error).message)
-    } finally {
-      setReqBusy(false)
-    }
-  }
-
-  const regenerateRequirements = async () => {
-    if (catalogNotReady || !reqFeedback.trim() || reqBusy) return
-    setReqBusy(true)
-    setReqError(null)
-    try {
-      const updated = await api.submitRequirements(sessionId!, {
-        model: pickDefaultModel(catalogEntries),
-        feedback: reqFeedback.trim(),
-      })
-      setSession(updated)
-      setReqFeedback('')
     } catch (e) {
       setReqError((e as Error).message)
     } finally {
@@ -245,34 +218,9 @@ export default function ConfirmPage() {
                 />
               </div>
 
-              <div className="wizard-actions">
-                <button className="btn btn-secondary" onClick={saveRequirements} disabled={reqBusy}>
-                  {reqBusy ? t('wizard.confirm.saving') : t('wizard.confirm.save')}
-                </button>
-              </div>
-
-              <div className="field" style={{ marginTop: 12 }}>
-                <label htmlFor="req-feedback">
-                  {t('wizard.confirm.reqFeedbackLabel')}{' '}
-                  <span className="hint">{t('wizard.optional')}</span>
-                </label>
-                <textarea
-                  id="req-feedback"
-                  rows={2}
-                  value={reqFeedback}
-                  onChange={(e) => setReqFeedback(e.target.value)}
-                  placeholder={t('wizard.confirm.reqFeedbackPlaceholder')}
-                />
-              </div>
-              <div className="wizard-actions">
-                <button
-                  className="btn btn-secondary"
-                  onClick={regenerateRequirements}
-                  disabled={catalogNotReady || !reqFeedback.trim() || reqBusy}
-                >
-                  {reqBusy ? t('wizard.confirm.thinking') : t('wizard.confirm.regenerate')}
-                </button>
-              </div>
+              {/* No save button of its own: these fields travel with the
+                  single Update action below, so an edit can never be left
+                  unsaved and can never be thrown away by another button. */}
             </>
           )}
         </div>
@@ -318,7 +266,7 @@ export default function ConfirmPage() {
         </button>
       </div>
       <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={applyFeedback} disabled={catalogNotReady || busy}>
+        <button className="btn btn-secondary" onClick={updateTeam} disabled={catalogNotReady || busy}>
           {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
         </button>
       </div>

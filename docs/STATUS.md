@@ -6,6 +6,26 @@
 
 ## Done
 
+- **Confirm page: one action instead of three** (2026-08-23, branch
+  `refactor/confirm-single-update-action`). The page carried "Save this
+  summary", "Regenerate summary" and "Update the team", which a customer
+  could not tell apart and two of which could destroy the third's work.
+  Three defects, all confirmed in code: regenerating the summary never
+  touched the deployed team, so a customer could save an understanding the
+  team had never seen with nothing on screen saying so; `generate_requirements`
+  re-derived from `intent_text` plus one round's feedback, so two corrections
+  in a row silently undid the first; and clicking Regenerate discarded any
+  field the customer had hand-edited but not saved. Now: `generate_requirements`
+  takes `current`, making a second round a refinement rather than a restart;
+  `POST /api/builder/sessions/{id}/refine` runs the analyst (only when
+  something was described in words, with the edited draft as `current`) and
+  then always the architect, writing both halves in one `update_session()` so
+  a failed redesign cannot split them; and the page submits the edited fields
+  and the free text together under a single "Update the team", never gated on
+  the text box being non-empty. Requirements fields stay directly editable —
+  adding a goal is a precise act a natural-language round trip does worse —
+  they just no longer have a button of their own. `_redesign_specification()`
+  is extracted for the architect call `/refine` and `/solution` share.
 - **Share-link chat, step 2 — token streaming, progress, Stop, markdown**
   (2026-08-23, branch `feat/share-chat-streaming`; spec
   `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`, plan
@@ -2252,6 +2272,34 @@
 
 ## Next steps / roadmap
 
+- **The platform should ask the customer questions** (decided 2026-08-23, not
+  started). `Requirements.clarifying_questions` already exists, the analyst
+  prompt already generates it, and `ConfirmPage` already renders it — but it
+  is inert in four ways: the prompt only asks when the description is "too
+  vague", capped at 1-2 questions; `IntentPage` generates requirements and
+  goes straight to Documents, so the questions first appear on Confirm, after
+  the team has been designed; the banner is read-only, so answers arrive as
+  free text with no link to the question they answer; and each regeneration
+  overwrites the list, so an unanswered question can vanish or be re-asked
+  forever. Decided shape: **a batch of questions, one input each, answers
+  stored paired with their question, skippable as a batch**; asked **after
+  Intent, before the team is designed**, and again **on Confirm when a change
+  is requested**. The architect deliberately does *not* get to ask (it would
+  mean a `Specification` schema change, the largest part). The governing
+  constraint: the platform promises "intent in, best AI team out", so asking
+  is pushing work back onto the customer — skipping must always be possible,
+  and a skipped question must make the analyst **write down the assumption it
+  made instead**, into `constraints`, where the customer can see it.
+- **Should the wizard still pin every agent to one model?**
+  `submit_solution_feedback` pins each agent's `model` to the request's
+  `model`, and `/refine` copies that so the Confirm page's behaviour did not
+  change. The pin was added when the wizard had a customer-facing model
+  picker, so the deployed agents would match what the customer chose. That
+  picker no longer exists — the page resolves `pickDefaultModel()` itself, an
+  invisible platform choice — so the pin now silently flattens the
+  architect's per-role model judgement onto one default, which is what
+  `_with_model_catalog()` exists to inform. Decide whether to drop it from
+  both endpoints.
 - **Share-link chat, what step 2 deliberately left out** (2026-08-23; each is
   scoped in the streaming spec's own "Out of scope" section): streaming on the
   authenticated monitor page -- the SDK capability is generic and the runtime

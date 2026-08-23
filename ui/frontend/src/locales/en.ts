@@ -167,7 +167,8 @@ export const en = {
         "Here's your team again. If something's off, describe the change and we'll redesign it — you can always go back to try it out again.",
       historyHeading: 'Adjustments so far:',
       changeLabel: 'What should change?',
-      changePlaceholder: 'e.g. Have the team check our FAQ document before replying.',
+      changePlaceholder:
+        'e.g. We also use Zendesk for tickets, and the team should check our FAQ document before replying.',
       uploadLink: 'Need to add or update a document? Upload it here',
       apply: 'Update the team',
       updating: 'Updating…',
@@ -190,13 +191,6 @@ export const en = {
       successPlaceholder: 'e.g. fewer escalations',
       constraints: 'Constraints',
       constraintsPlaceholder: 'e.g. must stay in English',
-      save: 'Save this summary',
-      saving: 'Saving…',
-      reqFeedbackLabel: 'Not quite right? Tell us what to change',
-      reqFeedbackPlaceholder:
-        'e.g. We also use Zendesk for tickets, and replies must stay under 150 words.',
-      regenerate: 'Regenerate summary',
-      thinking: 'Thinking…',
       backToPreview: 'Back to preview',
       continueToDeploy: 'Continue to deploy',
     },

@@ -8,7 +8,7 @@ import type { BuilderSession } from '../../lib/types'
 vi.mock('../../lib/api', () => ({
   api: {
     modelCatalog: vi.fn(),
-    submitSolution: vi.fn(),
+    refineTeam: vi.fn(),
     submitRequirements: vi.fn(),
   },
 }))
@@ -54,7 +54,7 @@ describe('ConfirmPage', () => {
   })
 
   it('enables Update the team once the catalog loads, even with no described change', async () => {
-    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+    mockedApi.refineTeam.mockResolvedValue(sessionWithSpec())
 
     renderPage()
 
@@ -66,7 +66,7 @@ describe('ConfirmPage', () => {
     fireEvent.click(button)
 
     await waitFor(() =>
-      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
         feedback: '',
         model: 'deepseek:friendly-assistant',
       }),
@@ -74,19 +74,19 @@ describe('ConfirmPage', () => {
   })
 
   it('sends the typed feedback alongside the picked model', async () => {
-    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+    mockedApi.refineTeam.mockResolvedValue(sessionWithSpec())
 
     renderPage()
     const button = await screen.findByText('Update the team')
     await waitFor(() => expect(button.closest('button')).toBeEnabled())
 
-    fireEvent.change(screen.getByPlaceholderText(/Have the team check our FAQ/i), {
+    fireEvent.change(screen.getByPlaceholderText(/FAQ document/i), {
       target: { value: 'Make replies friendlier' },
     })
     fireEvent.click(button)
 
     await waitFor(() =>
-      expect(mockedApi.submitSolution).toHaveBeenCalledWith('s1', {
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
         feedback: 'Make replies friendlier',
         model: 'deepseek:friendly-assistant',
       }),
@@ -234,5 +234,97 @@ describe('ConfirmPage layout', () => {
     const team = await screen.findByText('Your team')
 
     expect(understanding.compareDocumentPosition(team) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+// The page used to carry three buttons -- Save this summary, Regenerate
+// summary and Update the team -- whose effects a customer could not tell
+// apart, and two of which could destroy the third's work. There is one
+// action now, and it carries everything the customer touched.
+describe('ConfirmPage single update action', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: [],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+    mockedApi.refineTeam.mockResolvedValue(sessionWithRequirements())
+  })
+
+  it('sends the hand-edited fields and the described change together', async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+
+    fireEvent.change(screen.getByDisplayValue('They answer payroll questions by hand.'), {
+      target: { value: 'They answer payroll questions by hand, slowly.' },
+    })
+    fireEvent.change(screen.getByPlaceholderText(/FAQ document/i), {
+      target: { value: 'Keep replies under 150 words.' },
+    })
+    fireEvent.click(button)
+
+    await waitFor(() =>
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
+        requirements: expect.objectContaining({ summary: 'They answer payroll questions by hand, slowly.' }),
+        feedback: 'Keep replies under 150 words.',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('carries a hand-edited field even when nothing is described in words', async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+
+    fireEvent.change(screen.getByDisplayValue('They answer payroll questions by hand.'), {
+      target: { value: 'They answer payroll questions by hand, slowly.' },
+    })
+    fireEvent.click(button)
+
+    await waitFor(() =>
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
+        requirements: expect.objectContaining({ summary: 'They answer payroll questions by hand, slowly.' }),
+        feedback: '',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('offers no separate save or regenerate button', async () => {
+    renderPage()
+
+    await screen.findByText('Update the team')
+    expect(screen.queryByText('Save this summary')).not.toBeInTheDocument()
+    expect(screen.queryByText('Regenerate summary')).not.toBeInTheDocument()
+  })
+
+  it('offers one place to describe a change, not two', async () => {
+    renderPage()
+
+    await screen.findByText('Update the team')
+    expect(screen.queryByLabelText(/Not quite right/i)).not.toBeInTheDocument()
+  })
+
+  it('puts the change box below the team, since it changes both', async () => {
+    renderPage()
+
+    const team = await screen.findByText('Your team')
+    const box = screen.getByPlaceholderText(/FAQ document/i)
+
+    expect(team.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

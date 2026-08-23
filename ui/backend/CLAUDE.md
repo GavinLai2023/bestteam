@@ -1232,6 +1232,23 @@ WebSocket — all in `main.py`), Phase 2 adds two routers:
   - `POST /{id}/solution` — Stage 4: like `/specification`, but requires
     `feedback` and always records it via `append_feedback()`; with `model`,
     the current Specification + feedback are fed back to the architect.
+    Blank feedback deliberately skips the architect entirely (no drift) and
+    only re-pins the agents' models. Still used by `DocumentsPage` after an
+    upload; the Confirm page uses `/refine` instead.
+  - `POST /{id}/refine` — **the Confirm page's single action.** Takes the
+    customer's edited `requirements` draft plus a free-text `feedback`, and
+    updates the understanding *and* the team in one call. The Business
+    Analyst runs only when `feedback` is non-blank, with the edited draft as
+    `generate_requirements(current=...)` — so a hand edit survives the round
+    it triggered, and with nothing described the fields are stored verbatim
+    for no model call at all. The Solution Architect always runs (the button
+    says the team will be updated), through the same
+    `_redesign_specification()` helper `/solution` uses, so a refinement is
+    incremental rather than a rebuild. Both halves land in **one**
+    `update_session()`, so a failed redesign cannot leave a saved
+    understanding that the team has never seen — the split state that made
+    the old two-button page misleading. Requires an existing
+    `specification_json` (400 otherwise).
   - `POST /{id}/test-runs` — Stage 5: validates `specification_json` and
     runs it through the same `RunRegistry`/`Pipeline.stream()`/
     `ThreadPoolExecutor` machinery as `/api/runs` (factored into

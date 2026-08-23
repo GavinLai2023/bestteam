@@ -283,13 +283,20 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     **two stages stacked on one page** and is ordered cause-before-effect:
     the Requirements panel ("what we understood about your business",
     expanded by default) sits above the Specification one ("Your team"),
-    because the team is derived from that understanding. Each stage has its
-    own free-text box and its own button, and the buttons name the object
-    they act on -- "Save this summary" (persists hand-edited Requirements
-    fields, no model call) and "Regenerate summary" (re-runs the Business
-    Analyst) against "Update the team" (re-runs the Solution Architect).
-    They read as duplicates when named generically, which is what
-    "Apply this change"/"Save changes" did until 2026-08-23. There is no
+    because the team is derived from that understanding. It has exactly
+    **one action** -- "Update the team", below both panels, calling
+    `POST /refine` -- and that action carries *both* of the customer's
+    inputs: the Requirements fields they edited by hand and whatever they
+    described in the single free-text box. There is deliberately no separate
+    save button and no second change box. Until 2026-08-23 there were three
+    buttons ("Save this summary" / "Regenerate summary" / "Update the team")
+    whose effects a customer could not tell apart, and two of which could
+    destroy the third's work: regenerating discarded unsaved field edits, and
+    a saved summary left the deployed team unaware of it with nothing on
+    screen saying so. The fields stay directly editable -- adding a goal is a
+    precise act that a natural-language round trip does worse -- they just
+    have no button of their own. The button is never gated on the text box
+    being non-empty (a customer may only have edited a field). There is no
     model picker: the page owns the catalog and the default model, since
     which model runs the Architect is a platform choice the customer never
     sees. `DeployPage` calls `api.deploySession()` and links

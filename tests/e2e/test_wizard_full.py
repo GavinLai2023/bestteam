@@ -101,18 +101,23 @@ def test_t4_3_apply_button_requires_a_model(page):
     page.wait_for_selector(".team-flow, .employee-card", timeout=5000)
 
 
-def test_t4_4_regenerate_requirements_summary(page):
-    """The "what we understood about your business" panel's
-    regenerate-with-feedback loop. The panel is expanded by default, so this
-    starts straight at its feedback box."""
+def test_t4_4_one_action_carries_a_hand_edit_and_a_described_change(page):
+    """The Confirm page has a single action, and it carries both of the
+    customer's inputs: a field they edited by hand and a change they
+    described in words. Both the understanding and the team come back
+    rewritten from them, with no separate save step in between."""
     _login(page)
     _build_to_confirm(page, "We handle customer support emails.")
 
-    page.wait_for_selector("#req-feedback", timeout=5000)
-    page.fill("#req-feedback", "We also handle billing questions, not just support.")
-    page.click("button:has-text('Regenerate summary')")
-    page.wait_for_selector("#summary", timeout=15000)
+    page.wait_for_selector("#summary", timeout=5000)
+    page.fill("#summary", "They handle customer support and billing email.")
+    page.fill("#solution-feedback", "We also handle billing questions, not just support.")
+    page.click("button:has-text('Update the team')")
+    page.wait_for_selector("button:has-text('Updating…')", state="hidden", timeout=20000)
+
+    assert not page.locator(".banner-error").is_visible()
     assert page.locator("#summary").input_value()
+    page.wait_for_selector(".banner-info:has-text('Adjustments so far')", timeout=5000)
 
 
 def test_t4_5_deploy_then_run_for_real(page):
