@@ -1506,6 +1506,61 @@ def test_removing_the_last_document_is_refused(client):
     assert "delete the collection" in resp.json()["detail"].lower()
 
 
+def test_removing_the_last_readable_document_is_refused_even_if_a_failed_one_remains(client):
+    # Codex review: the guard used to count every document, so removing the
+    # only readable one beside an unreadable one returned 202 and queued a job
+    # that could only fail -- leaving the "removed" document live.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[
+            ("files", ("valid.txt", b"Refunds within 30 days.", "text/plain")),
+            ("files", ("blank.txt", b"   \n  ", "text/plain")),
+        ],
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/valid.txt")
+    assert resp.status_code == 409
+    assert "could be read" in resp.json()["detail"]
+    # Nothing was queued: the collection still answers.
+    assert client.post("/api/org/knowledge-bases/policies/search", json={"query": "refunds"}).json()["hit_count"] == 1
+
+
+def test_removal_staging_matches_the_name_exactly(client, tmp_path):
+    """The carry's case-insensitive match is right for an upload (the
+    filesystem may fold case) and wrong for a removal on a case-sensitive
+    one, where `Policy.txt` and `policy.txt` can both be live: naming one
+    must not drop the other (Codex review). Exercised at the staging helper,
+    since a Windows checkout cannot hold both files at once."""
+    from ui.backend.knowledge_bases import _stage_previous_generation
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = KnowledgeBaseRecord(name="casey", org_id=org_id, config={"name": "casey", "type": "local_folder", "path": str(tmp_path)})
+        db.add(record)
+        db.flush()
+        job = IngestionJob(kb_id=record.id, org_id=org_id, version="v_live", kb_type="local_folder", status="completed", file_count=2)
+        db.add(job)
+        db.commit()
+        (tmp_path / "v_live").mkdir()
+        (tmp_path / "v_live" / "policy.txt").write_text("lower")
+        (tmp_path / "v_live" / "other.txt").write_text("other")
+
+        staged = tmp_path / "v_new"
+        staged.mkdir()
+        _stage_previous_generation(
+            db, org_id, "casey", tmp_path, staged, superseded={"Policy.txt"}, max_documents=30, exact=True,
+        )
+        assert sorted(p.name for p in staged.iterdir()) == ["other.txt", "policy.txt"]
+
+        folded = tmp_path / "v_fold"
+        folded.mkdir()
+        _stage_previous_generation(
+            db, org_id, "casey", tmp_path, folded, superseded={"Policy.txt"}, max_documents=30,
+        )
+        assert sorted(p.name for p in folded.iterdir()) == ["other.txt"]
+
+
 def test_removing_while_an_upload_is_processing_is_409(client, monkeypatch):
     from ui.backend import ingestion as backend_ingestion
 

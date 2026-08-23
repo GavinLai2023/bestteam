@@ -83,6 +83,9 @@ export default function KnowledgeBasesPanel() {
   const [openSkipped, setOpenSkipped] = useState<string | null>(null)
   const [openSearch, setOpenSearch] = useState<string | null>(null)
   const [openDocuments, setOpenDocuments] = useState<string | null>(null)
+  // The collection whose removal is in flight: its Remove buttons are
+  // disabled until the request returns, so one click is one removal.
+  const [removing, setRemoving] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -133,18 +136,29 @@ export default function KnowledgeBasesPanel() {
       destructive: true,
     })
     if (!ok) return
+    setRemoving(kb.name)
     try {
-      await api.removeOwnKnowledgeBaseDocument(kb.name, doc.filename)
+      const job = await api.removeOwnKnowledgeBaseDocument(kb.name, doc.filename)
       setRowErrors((prev) => {
         const next = { ...prev }
         delete next[kb.name]
         return next
       })
-      // The row now shows "Processing…" and the poll above picks up the
-      // finished generation, documents list included.
+      // Mark the row processing from the 202 itself rather than waiting on a
+      // re-fetch: the poll above keys off this, so it starts even if the
+      // refresh below fails or an older list response lands after it.
+      setItems((prev) =>
+        prev.map((i) =>
+          i.name === kb.name && i.latest_job
+            ? { ...i, latest_job: { ...i.latest_job, job_id: job.job_id, status: 'queued' } }
+            : i,
+        ),
+      )
       await refresh()
     } catch (e) {
       setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
+    } finally {
+      setRemoving(null)
     }
   }
 
@@ -222,7 +236,7 @@ export default function KnowledgeBasesPanel() {
                           <button
                             type="button"
                             className="btn-link kb-document-remove"
-                            disabled={removeBlocked !== null}
+                            disabled={removeBlocked !== null || removing === kb.name}
                             title={removeBlocked ?? `Remove ${doc.filename}`}
                             aria-label={`Remove ${doc.filename}`}
                             onClick={() => void handleRemoveDocument(kb, doc)}

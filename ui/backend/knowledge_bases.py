@@ -162,6 +162,7 @@ def _stage_previous_generation(
     *,
     superseded: Set[str],
     max_documents: int,
+    exact: bool = False,
 ) -> None:
     """Copy the live generation's files into `version_dir` beside the new ones.
 
@@ -182,7 +183,11 @@ def _stage_previous_generation(
     top of the upload -- leaving the collection holding the *old* text under
     the new name, with nothing anywhere reporting it. Two documents whose
     names differ only in case cannot coexist there anyway, so the upload wins,
-    which is what it does for an exact name match.
+    which is what it does for an exact name match. `exact=True` matches the
+    name as written instead -- a *removal* names one document the way the
+    collection lists it, and on a case-sensitive filesystem (where
+    `Policy.txt` and `policy.txt` can both be live) dropping the variant too
+    would remove a document the customer never named (Codex review).
     """
     record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if record is None:
@@ -200,12 +205,13 @@ def _stage_previous_generation(
     if not previous_dir.is_dir():
         return
 
-    superseded_lower = {name.lower() for name in superseded}
+    fold = (lambda name: name) if exact else str.lower
+    superseded_keys = {fold(name) for name in superseded}
     carried = [
         path
         for path in sorted(previous_dir.rglob("*"))
         if path.is_file()
-        and path.relative_to(previous_dir).as_posix().lower() not in superseded_lower
+        and fold(path.relative_to(previous_dir).as_posix()) not in superseded_keys
     ]
     total = len(superseded) + len(carried)
     if total > max_documents:
@@ -556,9 +562,11 @@ def remove_knowledge_base_document(
     whichever of two jobs finished last would otherwise become live, and a
     removal built from the previous generation could then silently undo an
     upload that was still being processed. Refused (409) when the named file
-    is the last one -- an empty collection cannot be built
-    (`_init_from_chunks` raises on no chunks), so the job would only fail;
-    deleting the collection is the operation that means that. Unknown names
+    is the last one **that could be read** -- an empty collection cannot be
+    built (`_init_from_chunks` raises on no chunks), so the job would only
+    fail and the document would stay live; a `failed` document left behind
+    does not count, it has no chunks (Codex review). Deleting the collection
+    is the operation that means "nothing left". Unknown names
     are a 404 naming the file. The name must match the document's exactly:
     that is how the collection lists it, and on a case-insensitive filesystem
     the carry would drop a case-variant too, which would make "removed
@@ -608,12 +616,16 @@ def remove_knowledge_base_document(
                 status_code=404,
                 detail=f"'{item_name}' has no document named '{filename}'.",
             )
-        if names == {filename}:
+        readable_after = [
+            doc for doc in documents if doc.status == "chunked" and doc.filename != filename
+        ]
+        if not readable_after:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"'{filename}' is the only document in '{item_name}'. A "
-                    "collection can't be empty -- delete the collection instead."
+                    f"'{filename}' is the only document in '{item_name}' that "
+                    "could be read. A collection can't be empty -- delete the "
+                    "collection instead."
                 ),
             )
         if not (kb_root / live.version).is_dir():
@@ -641,7 +653,7 @@ def remove_knowledge_base_document(
         try:
             _stage_previous_generation(
                 db, org_id, item_name, kb_root, version_dir,
-                superseded={filename}, max_documents=_MAX_DOCUMENTS_PER_KB,
+                superseded={filename}, max_documents=_MAX_DOCUMENTS_PER_KB, exact=True,
             )
             job = IngestionJob(
                 kb_id=record.id,

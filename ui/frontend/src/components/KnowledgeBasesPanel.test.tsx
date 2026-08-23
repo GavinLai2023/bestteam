@@ -374,6 +374,24 @@ describe('KnowledgeBasesPanel', () => {
     await waitFor(() => expect(mockedApi.listOwnKnowledgeBases).toHaveBeenCalledTimes(2))
   })
 
+  it('shows the row as processing from the 202 itself, even if the re-fetch fails', async () => {
+    // Codex review: a failed (or out-of-order) refresh after a removal must
+    // not leave the row looking idle with polling stopped.
+    mockedApi.listOwnKnowledgeBases.mockResolvedValueOnce([kb({ documents: threeDocuments })])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockResolvedValue({ name: 'policies', job_id: 9, status: 'queued' })
+    mockedApi.listOwnKnowledgeBases.mockRejectedValueOnce(new Error('network down'))
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 3 documents/i }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove hours.txt' }))
+    })
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(await screen.findByText('Processing…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove handbook.pdf' })).toBeDisabled()
+  })
+
   it('does not remove a document if the reader cancels', async () => {
     mockedApi.listOwnKnowledgeBases.mockResolvedValue([kb({ documents: threeDocuments })])
     render(<KnowledgeBasesPanel />)
