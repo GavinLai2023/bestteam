@@ -163,3 +163,36 @@ def test_another_orgs_live_team_does_not_unmark_this_orgs_deleted_one(client):
     body = client.get("/api/org/activity-overview").json()
 
     assert body["team_counts"] == [{"pipeline": "support", "count": 1, "deleted": True}]
+
+
+def test_an_enabled_demo_team_is_not_reported_deleted(client, monkeypatch, tmp_path):
+    # `/api/pipelines` lists the shipped YAML demos as runnable whenever
+    # BESTTEAM_DEMO_PIPELINES is on (main.demo_pipelines_enabled), so a run of
+    # one is a run of a team that still exists -- there is no `pipelines` row
+    # behind it to look up, which is exactly what made it look deleted.
+    monkeypatch.setenv("BESTTEAM_DEMO_PIPELINES", "1")
+    (tmp_path / "support_demo.yaml").write_text("name: support_demo\n", encoding="utf-8")
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        _seed_run(db, org_id, run_id="r1", pipeline="support_demo")
+        db.commit()
+
+    body = client.get("/api/org/activity-overview").json()
+
+    assert body["team_counts"] == [{"pipeline": "support_demo", "count": 1, "deleted": False}]
+
+
+def test_a_demo_team_is_reported_deleted_once_the_demos_are_off(client, tmp_path):
+    # The gate is the flag, not the file: with the demos off the same YAML is
+    # not runnable from `/api/pipelines` either.
+    (tmp_path / "support_demo.yaml").write_text("name: support_demo\n", encoding="utf-8")
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        _seed_run(db, org_id, run_id="r1", pipeline="support_demo")
+        db.commit()
+
+    body = client.get("/api/org/activity-overview").json()
+
+    assert body["team_counts"] == [{"pipeline": "support_demo", "count": 1, "deleted": True}]

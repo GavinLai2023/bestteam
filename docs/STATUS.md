@@ -1811,7 +1811,11 @@
   `compute_overview` now takes the org's live team names — passed in, since
   the module does no I/O — and each `team_counts` row carries `deleted`. The
   endpoint's lookup is org-scoped, so one org's live "support" cannot
-  un-delete another's. Marked rather than filtered on purpose: the rows still
+  un-delete another's, and it unions in the shipped YAML demos wherever
+  `BESTTEAM_DEMO_PIPELINES` has them enabled — those are runnable from
+  `/api/pipelines` but have no `pipelines` row, so every completed demo run
+  was reporting a team that had been deleted while it sat there, runnable
+  (Codex review, 2026-08-23). Marked rather than filtered on purpose: the rows still
   sum to `completed_count`, and hiding them would retroactively shrink what
   the org accomplished. Same snapshot property means a *renamed* team still
   splits into two historical rows — untouched, and listed under Known issues.

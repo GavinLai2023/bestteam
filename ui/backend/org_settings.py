@@ -541,6 +541,16 @@ def activity_overview(
     live_pipelines = {
         name for (name,) in db.query(PipelineRecord.name).filter(PipelineRecord.org_id == org.id).all()
     }
+    # `/api/pipelines` also offers the shipped YAML demos wherever they are
+    # deliberately enabled, and those have no `pipelines` row to look up -- so
+    # without this every completed demo run reported a team that had been
+    # deleted while it was still sitting there, runnable. Imported inside the
+    # handler because `main` imports this router; reading its module globals
+    # is also what keeps the two lists agreeing under a patched PIPELINES_DIR.
+    from .main import PIPELINES_DIR, demo_pipelines_enabled
+
+    if demo_pipelines_enabled():
+        live_pipelines |= {path.stem for path in PIPELINES_DIR.glob("*.yaml")}
     return compute_overview(
         timestamps,
         now=datetime.now(timezone.utc),
