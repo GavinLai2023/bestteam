@@ -5,7 +5,7 @@ import json
 import os
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..exceptions import ConfigurationError
 from .embeddings import (
@@ -17,7 +17,10 @@ from .embeddings import (
 )
 from .knowledge_base import (
     KnowledgeBase,
+    RetrievalHit,
     _Chunk,
+    _generation_of,
+    _hit_from_candidate,
     _load_document_chunks,
     _query_variants,
     _rerank_candidates,
@@ -170,6 +173,7 @@ class VectorKnowledgeBase(KnowledgeBase):
         # a caller mutating the list it handed in must not reshape this KB's
         # index behind its (already-computed) vector matrix.
         self._chunks = list(chunks)
+        self.ingestion_job_id = _generation_of(self._chunks)
 
     def _set_vectors(self, name: str, vectors: List[List[float]]) -> None:
         import numpy as np
@@ -216,7 +220,9 @@ class VectorKnowledgeBase(KnowledgeBase):
 
         return [cache[key] for key in keys]
 
-    def _vector_leg(self, query_text: str, fetch_k: int) -> List[int]:
+    def _vector_leg(self, query_text: str, fetch_k: int) -> List[Tuple[int, float]]:
+        """`(chunk index, cosine score)` pairs, best first, at most `fetch_k`,
+        minus any below `score_threshold`."""
         import numpy as np
 
         query_vec = np.array(self._embeddings.embed_query(query_text), dtype=np.float64)
@@ -232,19 +238,15 @@ class VectorKnowledgeBase(KnowledgeBase):
         indices = [int(i) for i in top_indices]
         if self.score_threshold is not None:
             indices = [i for i in indices if scores[i] >= self.score_threshold]
-        return indices
+        return [(i, float(scores[i])) for i in indices]
 
-    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
-        # Mirrors LocalFolderKnowledgeBase.search()'s `top_k or self.default_top_k`:
+    def search_hits(self, query: str, top_k: Optional[int] = None) -> List[RetrievalHit]:
+        # Mirrors LocalFolderKnowledgeBase.search_hits()'s `top_k or self.default_top_k`:
         # a caller-supplied top_k=0 falls back to default_top_k (intentional parity).
         top_k = top_k or self.default_top_k
 
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        ranked_indices = _rrf_retrieve(variants, [self._vector_leg], fetch_k)
-        # The score half of each tuple is a synthetic rank-derived placeholder,
-        # not a real retrieval score -- RRF has already re-ordered by fused
-        # rank, and _rerank_candidates only reads candidate order/chunk.text.
-        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
-        results = _rerank_candidates(query, results, self._reranker, top_k)
-        return [chunk for _score, chunk in results]
+        candidates = _rrf_retrieve(variants, [("vector", self._vector_leg)], fetch_k)
+        hits = [_hit_from_candidate(self._chunks, candidate) for candidate in candidates[:fetch_k]]
+        return _rerank_candidates(query, hits, self._reranker, top_k)

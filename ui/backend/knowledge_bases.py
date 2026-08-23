@@ -831,8 +831,14 @@ def _build_knowledge_base_from_job(record: KnowledgeBaseRecord, job: "IngestionJ
         .order_by(KnowledgeDocument.filename, KnowledgeChunk.chunk_index)
         .all()
     )
+    # Each chunk carries its row identity, so a search hit (and the trace
+    # event built from it) can name the chunk, its document and the job --
+    # i.e. which generation of the collection -- it came from.
     chunks = [
-        _Chunk(source=filename, text=chunk.text, page=chunk.page, heading=chunk.heading)
+        _Chunk(
+            source=filename, text=chunk.text, page=chunk.page, heading=chunk.heading,
+            chunk_id=chunk.id, document_id=chunk.document_id, ingestion_job_id=job.id,
+        )
         for chunk, filename in rows
     ]
 
