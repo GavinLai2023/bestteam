@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Outlet, useParams } from 'react-router-dom'
 import { useBuilderSession } from '../lib/useBuilderSession'
@@ -11,6 +12,9 @@ export default function WizardLayout() {
   const { t } = useTranslation()
   const { sessionId } = useParams()
   const { session, setSession, loading, error, refresh } = useBuilderSession(sessionId)
+  // Owned here rather than by the stage page, because the thing it locks --
+  // the step bar -- belongs to this shell.
+  const [navBusy, setNavBusy] = useState(false)
 
   return (
     <div className="wizard">
@@ -19,11 +23,11 @@ export default function WizardLayout() {
         <p>{t('wizard.subtitle')}</p>
       </header>
 
-      <WizardProgress session={session} />
+      <WizardProgress session={session} busy={navBusy} />
 
       {error && <p className="banner banner-error">{t('wizard.sessionLoadFailed', { detail: error })}</p>}
 
-      <Outlet context={{ session, setSession, loading, refresh, sessionId }} />
+      <Outlet context={{ session, setSession, loading, refresh, sessionId, setNavBusy }} />
     </div>
   )
 }

@@ -4,11 +4,12 @@ interface BulletEditorProps {
   items: string[]
   onChange: (items: string[]) => void
   placeholder?: string
+  disabled?: boolean
 }
 
 // A simple editable list of short text items (pain points, goals, etc.)
 // used by the Requirements stage's "summary card".
-export default function BulletEditor({ items, onChange, placeholder }: BulletEditorProps) {
+export default function BulletEditor({ items, onChange, placeholder, disabled }: BulletEditorProps) {
   const { t } = useTranslation()
 
   const update = (index: number, value: string) => {
@@ -30,13 +31,14 @@ export default function BulletEditor({ items, onChange, placeholder }: BulletEdi
             value={item}
             placeholder={placeholder}
             onChange={(e) => update(index, e.target.value)}
+            disabled={disabled}
           />
-          <button type="button" className="bullet-editor-remove" onClick={() => remove(index)} aria-label={t('common.remove')}>
+          <button type="button" className="bullet-editor-remove" onClick={() => remove(index)} aria-label={t('common.remove')} disabled={disabled}>
             ×
           </button>
         </div>
       ))}
-      <button type="button" className="btn-link" onClick={add}>
+      <button type="button" className="btn-link" onClick={add} disabled={disabled}>
         {t('common.addItem')}
       </button>
     </div>

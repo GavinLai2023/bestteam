@@ -18,7 +18,7 @@ const EMPTY_REQUIREMENTS: Requirements = {
 }
 
 export default function ConfirmPage() {
-  const { session, setSession, loading, sessionId } = useOutletContext<WizardOutletContext>()
+  const { session, setSession, loading, sessionId, setNavBusy } = useOutletContext<WizardOutletContext>()
   const navigate = useNavigate()
   const { t } = useTranslation()
   // Both actions on this page call the Solution Architect internally, but
@@ -84,6 +84,12 @@ export default function ConfirmPage() {
   const updateTeam = async () => {
     if (catalogNotReady || busy) return
     setBusy(true)
+    // Two model calls run behind this one button, so the wait is long enough
+    // that a customer will look for something else to do. The whole page --
+    // and the step bar above it -- stops taking clicks until it finishes;
+    // "Continue to deploy" in particular would otherwise publish the team the
+    // Architect is in the middle of replacing.
+    setNavBusy(true)
     setError(null)
     try {
       const updated = await api.refineTeam(sessionId!, {
@@ -99,6 +105,7 @@ export default function ConfirmPage() {
       setError((e as Error).message)
     } finally {
       setBusy(false)
+      setNavBusy(false)
     }
   }
 
@@ -151,7 +158,7 @@ export default function ConfirmPage() {
                 <button
                   className="btn btn-secondary"
                   onClick={generateRequirements}
-                  disabled={catalogNotReady || reqBusy}
+                  disabled={catalogNotReady || reqBusy || busy}
                 >
                   {reqBusy ? t('wizard.confirm.generating') : t('wizard.confirm.generate')}
                 </button>
@@ -179,6 +186,7 @@ export default function ConfirmPage() {
                   rows={3}
                   value={reqDraft.summary}
                   onChange={(e) => setReqDraft({ ...reqDraft, summary: e.target.value })}
+                  disabled={busy}
                 />
               </div>
 
@@ -187,6 +195,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.pain_points}
                   onChange={(items) => setReqDraft({ ...reqDraft, pain_points: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.painPointsPlaceholder')}
                 />
               </div>
@@ -196,6 +205,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.goals}
                   onChange={(items) => setReqDraft({ ...reqDraft, goals: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.goalsPlaceholder')}
                 />
               </div>
@@ -205,6 +215,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.success_criteria}
                   onChange={(items) => setReqDraft({ ...reqDraft, success_criteria: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.successPlaceholder')}
                 />
               </div>
@@ -214,6 +225,7 @@ export default function ConfirmPage() {
                 <BulletEditor
                   items={reqDraft.constraints}
                   onChange={(items) => setReqDraft({ ...reqDraft, constraints: items })}
+                  disabled={busy}
                   placeholder={t('wizard.confirm.constraintsPlaceholder')}
                 />
               </div>
@@ -255,12 +267,14 @@ export default function ConfirmPage() {
           value={feedback}
           onChange={(e) => setFeedback(e.target.value)}
           placeholder={t('wizard.confirm.changePlaceholder')}
+          disabled={busy}
         />
         <button
           type="button"
           className="btn-link"
           style={{ marginTop: 4 }}
           onClick={() => navigate(`/wizard/${sessionId}/documents`)}
+          disabled={busy}
         >
           {t('wizard.confirm.uploadLink')}
         </button>
@@ -270,14 +284,25 @@ export default function ConfirmPage() {
           {busy ? t('wizard.confirm.updating') : t('wizard.confirm.apply')}
         </button>
       </div>
+      {/* An honest single line, not a staged one: this is one request, so the
+          page cannot know when the Analyst hands over to the Architect. */}
+      {busy && <p className="hint">{t('wizard.confirm.updatingNotice')}</p>}
 
       <hr style={{ margin: '24px 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 
       <div className="wizard-actions">
-        <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/preview`)}>
+        <button
+          className="btn btn-secondary"
+          onClick={() => navigate(`/wizard/${sessionId}/preview`)}
+          disabled={busy}
+        >
           {t('wizard.confirm.backToPreview')}
         </button>
-        <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/deploy`)}>
+        <button
+          className="btn btn-primary"
+          onClick={() => navigate(`/wizard/${sessionId}/deploy`)}
+          disabled={busy}
+        >
           {t('wizard.confirm.continueToDeploy')}
         </button>
       </div>

@@ -273,7 +273,16 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     "unlocked" based on **data presence** (`session.requirements_json` /
     `session.specification_json`), not the session's `status` string, so
     revisiting earlier stages after a `solution`/`testing`/`deployed` status
-    doesn't relock later steps.
+    doesn't relock later steps. A `busy` prop suspends *every* step link:
+    `WizardLayout` owns that flag and a stage page raises it through the
+    outlet context's `setNavBusy` while a long request is in flight. It exists
+    because "Go live" unlocks on the specification merely existing, so it
+    stayed lit while the Architect was redesigning that very specification --
+    one click mid-update and the customer publishes a team they have not seen.
+    The top nav is deliberately **not** blocked: these actions have no cancel,
+    so a hung request would otherwise trap the customer with no way out, and
+    leaving costs nothing anyway (`/refine` commits in one transaction and
+    `useBuilderSession` refetches on return).
   - `pages/wizard/*.tsx` — one page per step. `IntentPage` has no
     `sessionId` yet and creates the session via `api.createSession()`;
     `DocumentsPage` uploads a knowledge base (or skips) and then generates --
@@ -296,7 +305,14 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     screen saying so. The fields stay directly editable -- adding a goal is a
     precise act that a natural-language round trip does worse -- they just
     have no button of their own. The button is never gated on the text box
-    being non-empty (a customer may only have edited a field). There is no
+    being non-empty (a customer may only have edited a field). While that
+    request is in flight the page disables everything it owns -- both
+    textareas, every `BulletEditor` (which took a `disabled` prop for this),
+    the upload link, Back to preview and Continue to deploy -- and shows one
+    honest waiting line asking the customer to stay put. One line, not
+    `DocumentsPage`'s staged labels: `/refine` is a single request, so the
+    page genuinely cannot see the Analyst hand over to the Architect, and
+    faking that handover would be inventing progress. There is no
     model picker: the page owns the catalog and the default model, since
     which model runs the Architect is a platform choice the customer never
     sees. `DeployPage` calls `api.deploySession()` and links

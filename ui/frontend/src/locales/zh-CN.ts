@@ -137,6 +137,7 @@ export const zhCN: Resources = {
       uploadLink: '需要添加或更新文档？点这里上传',
       apply: '重新设计团队',
       updating: '正在更新…',
+      updatingNotice: '正在重新设计你的团队，通常不到一分钟。请留在本页，完成之前先不要点击其它按钮。',
       showUnderstanding: '查看我们对你业务的理解',
       teamHeading: '你的团队',
       hideUnderstanding: '收起我们对你业务的理解',

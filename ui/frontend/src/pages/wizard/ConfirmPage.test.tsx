@@ -22,6 +22,7 @@ let mockContext: {
   setSession: (session: BuilderSession) => void
   loading: boolean
   sessionId: string
+  setNavBusy: ReturnType<typeof vi.fn>
 }
 
 vi.mock('react-router-dom', async () => {
@@ -49,7 +50,7 @@ const sessionWithSpec = (): BuilderSession => ({
 describe('ConfirmPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' }])
   })
 
@@ -156,7 +157,7 @@ describe('ConfirmPage', () => {
     const sessionWithoutRequirements = (): BuilderSession => ({ ...sessionWithSpec(), requirements_json: undefined })
 
     it('offers a way to generate one instead of a dead end', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
 
       renderPage()
 
@@ -165,7 +166,7 @@ describe('ConfirmPage', () => {
     })
 
     it('generates and shows the summary once clicked', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
       const withRequirements = {
         ...sessionWithoutRequirements(),
         requirements_json: { summary: 'They want faster replies.', pain_points: [], goals: [], success_criteria: [], constraints: [], clarifying_questions: [] },
@@ -184,7 +185,7 @@ describe('ConfirmPage', () => {
     })
 
     it('shows an error if generating the summary fails', async () => {
-      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+      mockContext = { session: sessionWithoutRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
       mockedApi.submitRequirements.mockRejectedValue(new Error('Model call failed'))
 
       renderPage()
@@ -212,7 +213,7 @@ describe('ConfirmPage layout', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
     mockedApi.modelCatalog.mockResolvedValue([
       { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
     ])
@@ -256,7 +257,7 @@ describe('ConfirmPage single update action', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
     mockedApi.modelCatalog.mockResolvedValue([
       { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
     ])
@@ -326,5 +327,85 @@ describe('ConfirmPage single update action', () => {
     const box = screen.getByPlaceholderText(/FAQ document/i)
 
     expect(team.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+// Two model calls run behind the one button, so the wait is long enough that
+// a customer will look for something else to do. Nothing on the page should
+// take a click while it is going on -- least of all "Continue to deploy",
+// which would publish the team the Architect is in the middle of replacing.
+describe('ConfirmPage while the update is in flight', () => {
+  const sessionWithRequirements = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: ['replies take days'],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [],
+    },
+  })
+
+  let resolveRefine: (session: BuilderSession) => void
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithRequirements(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+    mockedApi.refineTeam.mockReturnValue(
+      new Promise<BuilderSession>((resolve) => {
+        resolveRefine = resolve
+      }),
+    )
+  })
+
+  const startUpdate = async () => {
+    renderPage()
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+    fireEvent.click(button)
+    return button
+  }
+
+  it('asks the customer to wait instead of leaving them guessing', async () => {
+    await startUpdate()
+
+    expect(await screen.findByText(/stay on this page/i)).toBeInTheDocument()
+  })
+
+  it('takes no further input from anything on the page', async () => {
+    await startUpdate()
+
+    await waitFor(() => expect(screen.getByPlaceholderText(/FAQ document/i)).toBeDisabled())
+    expect(screen.getByDisplayValue('They answer payroll questions by hand.')).toBeDisabled()
+    expect(screen.getByDisplayValue('replies take days')).toBeDisabled()
+    expect(screen.getAllByText('+ add')[0].closest('button')).toBeDisabled()
+    expect(screen.getByText('Need to add or update a document? Upload it here').closest('button')).toBeDisabled()
+    expect(screen.getByText('Back to preview').closest('button')).toBeDisabled()
+    expect(screen.getByText('Continue to deploy').closest('button')).toBeDisabled()
+  })
+
+  it('tells the wizard chrome to stop offering step links, and to start again after', async () => {
+    await startUpdate()
+
+    await waitFor(() => expect(mockContext.setNavBusy).toHaveBeenCalledWith(true))
+
+    resolveRefine(sessionWithRequirements())
+
+    await waitFor(() => expect(mockContext.setNavBusy).toHaveBeenLastCalledWith(false))
+  })
+
+  it('gives the page back once the team has been updated', async () => {
+    await startUpdate()
+    await screen.findByText(/stay on this page/i)
+
+    resolveRefine(sessionWithRequirements())
+
+    await waitFor(() => expect(screen.queryByText(/stay on this page/i)).not.toBeInTheDocument())
+    expect(screen.getByText('Continue to deploy').closest('button')).toBeEnabled()
+    expect(screen.getByPlaceholderText(/FAQ document/i)).toBeEnabled()
   })
 })

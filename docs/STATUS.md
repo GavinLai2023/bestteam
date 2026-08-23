@@ -26,6 +26,20 @@
   adding a goal is a precise act a natural-language round trip does worse —
   they just no longer have a button of their own. `_redesign_specification()`
   is extracted for the architect call `/refine` and `/solution` share.
+  The page also **locks while that request is in flight**: two model calls now
+  run behind one button, and the page previously disabled only the button
+  itself. Everything it owns is disabled (both textareas, every
+  `BulletEditor` — which gained a `disabled` prop — the upload link, Back to
+  preview, Continue to deploy) and one waiting line asks the customer to stay
+  on the page. `WizardProgress` gained a `busy` prop, raised through the
+  outlet context's new `setNavBusy`, that suspends every step link: "Go live"
+  unlocks on the specification merely existing, so it stayed clickable while
+  the Architect was redesigning that very specification — publishing either a
+  stale team or one the customer had never seen, with no error either way. The
+  top nav is deliberately left alone (no cancel exists, so a hung request must
+  not trap anyone), and the waiting line is one honest sentence rather than
+  `DocumentsPage`-style staged labels, since `/refine` is a single request and
+  the page cannot see the Analyst hand over to the Architect.
 - **Share-link chat, step 2 — token streaming, progress, Stop, markdown**
   (2026-08-23, branch `feat/share-chat-streaming`; spec
   `docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`, plan

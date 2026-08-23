@@ -172,6 +172,8 @@ export const en = {
       uploadLink: 'Need to add or update a document? Upload it here',
       apply: 'Update the team',
       updating: 'Updating…',
+      updatingNotice:
+        'Redesigning your team — this usually takes under a minute. Please stay on this page, and hold off on the other buttons until it finishes.',
       // Two whole sentences, not a 'Show'/'Hide' word swapped into one: a
       // translated fragment assembled at runtime only reads correctly in the
       // language whose grammar the split was chosen for.
