@@ -105,3 +105,26 @@
   text-align: center;
   color: var(--text-muted);
 }
+
+/* Marks a reply as still being written. */
+.share-chat-streaming::after {
+  content: '▍';
+  margin-left: 0.1rem;
+  animation: share-chat-caret 1s steps(2) infinite;
+}
+
+@keyframes share-chat-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-chat-streaming::after {
+    animation: none;
+  }
+}
+
+.share-chat-progress {
+  padding: 0.25rem 0;
+}

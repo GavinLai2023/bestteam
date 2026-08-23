@@ -1016,6 +1016,67 @@ fabricated prior assistant turn. The visitor WS is redacted to `type` only
 output, tool summaries and `usage` never leave the org, same spirit as the
 `_PM_TRACE_REDACTED` boundary above.
 
+**Token streaming, progress and Stop** (step 2, 2026-08-23; spec:
+`docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md`). The final
+agent's reply streams to the visitor as it is written. Three pieces:
+
+- **`registry.publish_transient(run_id, event)`** is `publish`'s
+  record-nothing twin: it fans out to live subscribers and appends nothing to
+  `run.events`, drives no status change, and is replayed to nobody. A long
+  reply would otherwise put thousands of entries into the log every new
+  subscriber is seeded with and which is held for up to `_MAX_RETAINED_RUNS`
+  runs. The consequence is deliberate -- a visitor who reconnects mid-run sees
+  no partial text, then gets the complete reply on `run_completed`, which IS
+  replayed.
+- **`runtime._TokenSink`** turns the SDK's per-delta callback into
+  WebSocket-sized `reply_delta` events: an arriving delta flushes the buffer
+  once either 40 characters have accumulated or 80 ms have passed since the
+  last flush -- evaluated on arrival, never on a timer, so a provider stall
+  leaves up to 39 characters unshown until the next delta (deliberate; see
+  the constant's own comment). Plus one flush before **every** event the
+  runtime yields -- that last one is what guarantees a buffered delta reaches the
+  visitor ahead of the `agent_completed`/`run_completed` that supersedes it.
+  The SDK's `STREAM_RESET` sentinel becomes a `reply_reset` event and drops
+  the buffer. `run_in_background` builds the sink **only for share-chat runs**
+  (a `trigger_context` carrying `share_session_id`): the monitor page has no
+  UI for deltas, and pushing thousands of unhandled events per run through an
+  authenticated WebSocket would buy nothing. One condition moves it later.
+- **`visitor_safe_event` admits two new types.** `reply_delta` carries `data`
+  by exactly the argument that already admits `run_completed.data` -- it is
+  the final agent's own reply, which the visitor is about to be given in full,
+  and only one node in the graph is ever wired to stream, so no other agent's
+  text can reach it. `reply_reset` carries nothing. `agent_completed` is
+  unchanged: still type-only, which is what lets the page count steps without
+  learning a single name.
+
+Two more public routes on the same surface, both re-validating link/org state
+like every other route in `share_chat.py`:
+
+- **`GET /{token}/team`** -> `{"name", "steps"}`. A pure read that neither
+  requires nor creates a session cookie, so a first-time visitor can render
+  the header before sending anything -- and it reads `PipelineRecord.config`
+  rather than calling `_resolve_pipeline_and_version`, because that cache-miss
+  path loads every skill/KB/email tool and a path-constructed vector KB embeds
+  at load time: real spend on an anonymous endpoint with no cap in front of it
+  (Codex review finding). `steps` is how many `agent_completed` events the
+  visitor will see (the sum of `len(team.agents)` over the SEQUENTIAL/PARALLEL
+  teams the pipeline actually steps through) and is **null if any team is HIERARCHICAL** --
+  that manager emits one completion however many subordinates it delegates to,
+  and subordinates emit `subagent_completed`, which the boundary renders
+  indistinguishable; the page then shows a pulse rather than a dishonest
+  count. The team's *name* is disclosed (the org member sharing the link is
+  deliberately saying "talk to this team"); agent names, roles, models and the
+  collaboration mode itself are not -- only its consequence.
+- **`POST /{token}/runs/{run_id}/cancel`** -> 202. Authorised exactly like the
+  stream WebSocket (cookie -> session on this link -> session owns the run),
+  with the same single 404 on every failure. **No cap refund**: the tokens
+  were spent, and a free retry after a stop is an unlimited-work primitive
+  against the org's budget. `request_cancel` already no-ops for an unknown or
+  terminal run, so a Stop racing the reply is harmless. `runtime`'s existing
+  `_mark_cancelled` then persists "This conversation was stopped before a
+  reply was ready." as the turn's reply -- a third English literal the
+  frontend translates by string equality.
+
 Rate limiting is `ShareLink.daily_cap` applied **twice**: as the per-session
 ceiling (`db/share_sessions.py::try_consume_turn`) and as the link-wide
 aggregate ceiling (`db/share_links.py::try_consume_link_turn`), both the same

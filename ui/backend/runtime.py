@@ -13,12 +13,13 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from bestteam import MemoryManager, Pipeline, SqliteBM25Memory
+from bestteam.adapters.langgraph_adapter import STREAM_RESET
 from bestteam.core.trace import TraceEvent
 
 from . import error_reporting
@@ -44,6 +45,80 @@ _logger = logging.getLogger(__name__)
 
 registry = RunRegistry()
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bestteam-run")
+
+
+# Token deltas are coalesced before they become WebSocket frames: one frame
+# per token is wasteful on a public surface and jitters badly on a phone.
+#
+# Both thresholds are evaluated when a delta ARRIVES, never on a timer -- so
+# the honest statement is "a delta flushes the buffer once either 40
+# characters have accumulated or 80 ms have passed since the last flush",
+# not "the buffer is flushed within 80 ms". In practice the time threshold is
+# the one that fires: at a typical 30 tokens/second, ~3 tokens cross 80 ms
+# well before 10 of them cross 40 characters, which is what keeps a real
+# stream smooth rather than arriving in 40-character steps. What the absence
+# of a timer costs is the tail: if the provider stalls mid-reply, up to 39
+# characters sit unshown until the next delta. A timer thread was considered
+# and rejected for that -- a second thread per run, publishing across a
+# lock, to reveal a sub-word tail during a pause when the run's own
+# `run_completed`/event flush already bounds it (Codex review finding).
+_TOKEN_FLUSH_CHARS = 40
+_TOKEN_FLUSH_SECONDS = 0.08
+
+
+class _TokenSink:
+    """Coalesces one run's token deltas into `reply_delta` events.
+
+    Called synchronously from the worker thread, inside the final agent's
+    model loop (see
+    docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+    Publishes through `registry.publish_transient`, so nothing here is
+    recorded, replayed or persisted -- the authoritative reply is still the
+    one `run_completed` carries and `record_share_reply` stores.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
+        self._buffer: List[str] = []
+        self._pending = 0
+        self._last_flush = time.monotonic()
+        # The FIRST flush of a reply waits for the character threshold, never
+        # the time one. A tool-capable agent can emit a short preamble ("Let
+        # me check the pricing handbook") and only then decide to call a tool;
+        # `STREAM_RESET` retracts that from the screen, but it cannot retract
+        # bytes already sent over the visitor's socket (Codex review finding).
+        # Holding the first flush to 40 characters means a short preamble --
+        # the common shape -- never crosses the wire at all. A longer one
+        # still can; see docs/STATUS.md, Known issues.
+        self._flushed_any = False
+
+    def __call__(self, delta: str) -> None:
+        if delta == STREAM_RESET:
+            # The text so far belonged to what turned out to be a tool call.
+            self._buffer.clear()
+            self._pending = 0
+            # Back to "nothing sent yet": whatever follows is a fresh reply and
+            # gets the same first-flush protection.
+            self._flushed_any = False
+            registry.publish_transient(self._run_id, {"type": "reply_reset", "data": None})
+            return
+        self._buffer.append(delta)
+        self._pending += len(delta)
+        if self._pending >= _TOKEN_FLUSH_CHARS or (
+            self._flushed_any and time.monotonic() - self._last_flush >= _TOKEN_FLUSH_SECONDS
+        ):
+            self.flush()
+
+    def flush(self) -> None:
+        """Publish whatever is buffered. A no-op when there is nothing."""
+        self._last_flush = time.monotonic()
+        if not self._buffer:
+            return
+        text = "".join(self._buffer)
+        self._buffer.clear()
+        self._pending = 0
+        self._flushed_any = True
+        registry.publish_transient(self._run_id, {"type": "reply_delta", "data": text})
 
 INTERRUPTED_RUN_MESSAGE = (
     "The run was interrupted by a server restart before it finished."
@@ -725,8 +800,30 @@ def run_in_background(
             # behind other runs on the thread pool) -- skip streaming entirely.
             _mark_cancelled()
         else:
-            stream_iter = pipeline.stream(input, user_id=user_id, memory=memory, diagnostic=diagnostic)
+            # Share-chat turns are the only consumer of token streaming today:
+            # the monitor page has no UI for deltas, and pushing thousands of
+            # unhandled events per run through an authenticated WebSocket
+            # would buy nothing. One condition moves it later (see
+            # docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+            share_session_id = (
+                (run_row.trigger_context or {}).get("share_session_id") if run_row is not None else None
+            )
+            token_sink = _TokenSink(run_id) if share_session_id is not None else None
+            stream_iter = pipeline.stream(
+                input,
+                user_id=user_id,
+                memory=memory,
+                diagnostic=diagnostic,
+                on_token=token_sink,
+                should_cancel=(lambda: registry.cancel_requested(run_id)) if token_sink else None,
+            )
             for event in stream_iter:
+                if token_sink is not None:
+                    # Any buffered delta must reach the visitor before the
+                    # event that supersedes it (`agent_completed`, then
+                    # `run_completed` with the authoritative text). A no-op
+                    # when the buffer is empty, which is every non-final event.
+                    token_sink.flush()
                 raw_run_completed_output: Optional[str] = None
                 if is_pm_contract_run and (
                     event.type in _PM_REDACTED_EVENT_TYPES or _is_delegate_tool_completed(event)

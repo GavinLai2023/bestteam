@@ -347,6 +347,14 @@ export interface ShareMessage {
   created_at?: string
 }
 
+// GET /api/share/{token}/team. `steps` is null when no honest denominator
+// exists (a hierarchical team emits one completion however many subordinates
+// its manager delegates to) -- the page shows a pulse instead of a count.
+export interface ShareTeamInfo {
+  name: string
+  steps: number | null
+}
+
 // --- notifications ----------------------------------------------------------
 
 export type NotificationSeverity = 'error' | 'warning' | 'info'

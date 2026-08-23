@@ -6,8 +6,11 @@ import time
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.language_models.fake_chat_models import (
+    FakeListChatModel,
+    FakeMessagesListChatModel,
+)
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
@@ -70,6 +73,14 @@ class _TeamState(TypedDict):
     # `memory_preamble` -- read by nodes, set once by `_initial_state`, so the
     # cached compiled graph needs no recompile to switch it on.
     diagnostic: bool
+    # Optional per-run side channel for token streaming (see
+    # docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md). Plain
+    # fields, no reducer: set once by `_initial_state`, only ever read by
+    # nodes. They hold callables rather than data because `compile()`'s result
+    # is cached and reused across runs, so a per-run sink baked into a node
+    # closure would leak into the next run.
+    on_token: Optional[Callable[[str], None]]
+    should_cancel: Optional[Callable[[], bool]]
 
 
 def _fake_architect_specification() -> "Specification":
@@ -194,6 +205,61 @@ def _model_spec(agent: Agent) -> str:
     if isinstance(agent.model, str):
         return agent.model
     return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
+
+
+# Emitted through `on_token` when a model call that had already produced text
+# turns out to be a tool call after all: the consumer must discard what it has
+# shown. A NUL-prefixed sentinel cannot collide with model output, and one
+# callback stays a smaller interface change than two (see
+# docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+STREAM_RESET = "\x00bestteam:reset"
+
+
+def _supports_stream_usage(model: Any) -> bool:
+    """True if this model reports token usage while streaming.
+
+    ChatOpenAI and family declare a `stream_usage` field; binding it makes the
+    aggregated chunk carry `usage_metadata`, so metering is unchanged. Binding
+    it on a model that does NOT declare it would push an unexpected kwarg down
+    into its `_stream()`, so this is checked before the bind, on the resolved
+    model rather than on a `RunnableBinding` wrapper.
+    """
+    return "stream_usage" in getattr(type(model), "model_fields", {})
+
+
+def _should_stream(model: BaseChatModel) -> bool:
+    """Whether this model's calls may be streamed.
+
+    Streaming a billable model that does not report usage while streaming
+    would silently stop metering the largest call in the run, so it is
+    refused -- an unstreamed reply is better than an unmetered one. A fake
+    reports no usage on any path, so streaming it loses nothing; that is also
+    what makes this feature testable at zero cost.
+    """
+    return _supports_stream_usage(model) or isinstance(
+        model, (FakeListChatModel, FakeMessagesListChatModel)
+    )
+
+
+def _chunk_text(chunk: Any) -> str:
+    """The plain text of one streamed chunk.
+
+    `content` is a string for every provider we support today; the list form
+    (content blocks) is handled so a provider that returns one degrades to its
+    text parts rather than to `str(list)` on a visitor's screen. Deliberately
+    avoids `BaseMessage.text`, which is a method in langchain-core 0.3 and a
+    property in 1.x.
+    """
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
 
 
 # Upper bound on each string field of a diagnostic-only event (`agent_prompt`,
@@ -416,6 +482,9 @@ def _run_agent(
     usage_sink: Optional[List[Dict[str, Any]]] = None,
     on_event: Optional[Callable[[TraceEvent], None]] = None,
     diagnostic: bool = False,
+    streams: bool = False,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> str:
     """Run one agent's full tool-calling turn on `input_text`, returning its final text.
 
@@ -446,6 +515,17 @@ def _run_agent(
     (agent_started/tool_started/tool_completed/agent_progress) as this turn
     progresses -- `LangGraphAdapter.stream()` buffers these per-node and
     flushes them just before that node's `agent_completed`.
+
+    `streams` (set at wiring time for the one agent whose text IS the run's
+    output) plus an `on_token` sink makes each model call stream, with every
+    text delta handed to the sink as it arrives. This is a side channel out of
+    the node on purpose: `LangGraphAdapter.stream()` only yields at node
+    boundaries, so nothing on that path can reach a subscriber while the reply
+    is still being written. `should_cancel`, if given, is polled between
+    deltas so a long reply can be stopped mid-generation rather than merely
+    ignored. Streaming is refused for a model whose usage would be lost (see
+    `_should_stream`); with `streams=False` or no sink, behaviour here is
+    identical to a plain `invoke()`.
     """
 
     def _emit(event_type: str, data: Any = None) -> None:
@@ -453,6 +533,7 @@ def _run_agent(
             on_event(TraceEvent(type=event_type, pipeline="", agent=agent.name, data=data))
 
     model = _resolve_model(agent.model)
+    raw_model = model
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
     first_call_model = model
@@ -464,6 +545,67 @@ def _run_agent(
             )
         except NotImplementedError:
             pass  # model doesn't support tool calling (e.g. FakeListChatModel in tests)
+
+    # Two separate questions. `forward_text` is "may this agent's text reach
+    # the visitor" -- true only for the one agent wired to stream.
+    # `stream_call` is "must this call be interruptible", which is true for
+    # every agent in a run that supplied a cancel check: `invoke()` blocks
+    # until the whole paid generation finishes, so Stop would sit unresponsive
+    # through an earlier agent's entire turn (Codex review finding). A
+    # non-forwarding agent still consumes its chunks; it just drops the text.
+    forward_text = streams and on_token is not None
+    stream_call = (forward_text or should_cancel is not None) and _should_stream(raw_model)
+    if stream_call and _supports_stream_usage(raw_model):
+        # Bound after bind_tools: `.bind()` on a RunnableBinding merges kwargs,
+        # so both bindings survive. Without this the aggregated chunk carries
+        # no `usage_metadata` and the run's largest call goes unmetered.
+        model = model.bind(stream_usage=True)
+        first_call_model = first_call_model.bind(stream_usage=True)
+
+    def _call(bound_model: Any, msgs: List[Any]) -> Any:
+        """One model call -- streamed with deltas, or a plain `invoke`.
+
+        The streamed branch accumulates chunks into a message equivalent to
+        what `invoke()` would have returned (tool calls merged, usage attached),
+        so everything downstream of this function is unaware of the difference.
+        """
+        if should_cancel is not None and should_cancel():
+            # Never open a NEW provider request after a stop. Without this the
+            # next call in the tool loop is dispatched -- billable, and Stop
+            # then waits on that provider's first chunk before it can take
+            # effect (Codex review finding). An empty response settles the
+            # loop: no tool calls, so the agent returns what it has.
+            return AIMessage(content="")
+        if not stream_call:
+            return bound_model.invoke(msgs)
+        full = None
+        emitted = False
+        tool_call_seen = False
+        for chunk in bound_model.stream(msgs):
+            full = chunk if full is None else full + chunk
+            if getattr(chunk, "tool_call_chunks", None) and not tool_call_seen:
+                tool_call_seen = True
+                if emitted and on_token is not None:
+                    # Text already went out for what turns out to be a tool
+                    # call -- tell the consumer to discard it. Providers
+                    # normally emit tool calls from the first chunk, so this is
+                    # insurance rather than a common path.
+                    on_token(STREAM_RESET)
+            if forward_text and on_token is not None and not tool_call_seen:
+                text = _chunk_text(chunk)
+                if text:
+                    on_token(text)
+                    emitted = True
+            if should_cancel is not None and should_cancel():
+                # Stop generating rather than merely ignoring the result. The
+                # node then finishes early and the caller's own cancellation
+                # handling does the rest -- no new terminal path. The
+                # provider's usage arrives in a final chunk this never reads,
+                # so a cancelled call goes unmetered: a bounded, deliberate
+                # cost, since draining the stream would spend exactly the
+                # tokens we are stopping.
+                break
+        return full if full is not None else bound_model.invoke(msgs)
 
     system_prompt = agent.system_prompt()
     if extra_system_prompt:
@@ -479,7 +621,7 @@ def _run_agent(
             "agent_prompt",
             {"system_prompt": _diagnostic_text(system_prompt), "input": _diagnostic_text(input_text)},
         )
-    response = first_call_model.invoke(messages)
+    response = _call(first_call_model, messages)
     _record_usage(agent, response, usage_sink)
     if diagnostic:
         _emit("model_turn", _model_turn_data(1, response))
@@ -488,8 +630,30 @@ def _run_agent(
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
             break
+        if should_cancel is not None and should_cancel():
+            # Cancellation observed while THIS response was streaming. Stopping
+            # the model call is not enough: a tool call has side effects, and
+            # running one after the visitor pressed Stop -- then calling the
+            # model again on its result -- is exactly what a stop must prevent
+            # (Codex review finding). The empty return is deliberate: the
+            # partial text has already been shown live, and returning it here
+            # would PERSIST it as this agent's `agent_completed` output --
+            # recording a stopped agent as one that completed with a partial
+            # reply, which the live-only contract for streamed text forbids.
+            # `usage_sink` is untouched, so calls already paid for are still
+            # metered.
+            return ""
         messages.append(response)
         for call in tool_calls:
+            if should_cancel is not None and should_cancel():
+                # A stop that lands while an earlier call in this batch is
+                # running must abandon the rest of it: each one is its own
+                # side effect (Codex review finding). Returning rather than
+                # breaking matters -- a break would fall through to another
+                # model call on a half-answered batch. Empty for the same
+                # reason as the guard above: a stopped agent must not be
+                # recorded as having completed with partial output.
+                return ""
             tool_fn = tools_by_name.get(call["name"])
             if tool_fn is None:
                 result = f"Error: unknown tool '{call['name']}'"
@@ -558,11 +722,19 @@ def _run_agent(
                     usage_sink.extend(tool_ctx.usage)
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
-        response = model.invoke(messages)
+        response = _call(model, messages)
         _record_usage(agent, response, usage_sink)
         if diagnostic:
             _emit("model_turn", _model_turn_data(i + 2, response))
 
+    if should_cancel is not None and should_cancel():
+        # A stop reached this turn, including one that only interrupted the
+        # chunk loop. Whatever streamed has already been shown live; returning
+        # it here would persist it as this agent's `agent_completed` output
+        # and record a stopped agent as one that completed with a partial
+        # reply (Codex review finding). `usage_sink` is untouched, so calls
+        # already paid for are still metered.
+        return ""
     if getattr(response, "tool_calls", None):
         # The loop ran out while the model was still asking for tools, so it
         # never produced a text answer -- `response.content` is empty here.
@@ -578,6 +750,7 @@ def _make_delegate_tool(
     on_event: Optional[Callable[[TraceEvent], None]] = None,
     manager_name: str = "",
     diagnostic: bool = False,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Callable[[str], str]:
     """Wrap a subordinate agent as a `delegate_to_<name>(task)` tool for a manager.
 
@@ -626,6 +799,11 @@ def _make_delegate_tool(
             usage_sink=usage_sink,
             on_event=on_event,
             diagnostic=diagnostic,
+            # Cancellation follows the delegation; the token sink deliberately
+            # does not. A subordinate's answer is working material, not the
+            # reply -- but it can call side-effecting tools and burn model
+            # turns, so a stop has to reach it (Codex review finding).
+            should_cancel=should_cancel,
         )
         if on_event is not None:
             on_event(
@@ -654,13 +832,17 @@ def _make_delegate_tool(
     return delegate
 
 
-def _agent_node(agent: Agent, *, propagate_context: bool):
+def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False):
     """Build a LangGraph node function that runs a single agent.
 
     `propagate_context` controls whether this agent's output becomes the
     shared context/output for whatever runs next. Sequential agents propagate
     (each hands off to the next); parallel agents don't (they all see the same
     incoming context and only contribute to the final aggregation).
+
+    `streams` marks the one agent per pipeline whose text IS the run's output,
+    so its model calls are streamed token by token when the run supplies a
+    sink (see `_run_agent` and `LangGraphAdapter.compile`).
     """
     if agent.model is None:
         raise ConfigurationError(f"Agent '{agent.name}' has no model configured")
@@ -675,6 +857,9 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
             usage_sink=usage_sink,
             on_event=sub_events.append,
             diagnostic=state.get("diagnostic", False),
+            streams=streams,
+            on_token=state.get("on_token"),
+            should_cancel=state.get("should_cancel"),
         )
 
         update: Dict[str, Any] = {
@@ -690,7 +875,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool):
     return node
 
 
-def _hierarchical_node(team: Team):
+def _hierarchical_node(team: Team, *, streams: bool = False):
     """Build a LangGraph node function for a HIERARCHICAL team's manager.
 
     The manager is run with one extra `delegate_to_<name>` tool per
@@ -746,6 +931,7 @@ def _hierarchical_node(team: Team):
                 on_event=sub_events.append,
                 manager_name=manager.name,
                 diagnostic=diagnostic,
+                should_cancel=state.get("should_cancel"),
             )
             for agent in team.agents
         ]
@@ -759,6 +945,12 @@ def _hierarchical_node(team: Team):
             usage_sink=usage_sink,
             on_event=sub_events.append,
             diagnostic=diagnostic,
+            # The manager's final text is the run's output, so it is the one
+            # that streams. The delegate tools above deliberately get no sink:
+            # a subordinate's answer is working material, not the reply.
+            streams=streams,
+            on_token=state.get("on_token"),
+            should_cancel=state.get("should_cancel"),
         )
         return {
             "contributions": {manager.name: text},
@@ -771,7 +963,13 @@ def _hierarchical_node(team: Team):
     return node
 
 
-def _initial_state(input: str, memory_preamble: str = "", diagnostic: bool = False) -> _TeamState:
+def _initial_state(
+    input: str,
+    memory_preamble: str = "",
+    diagnostic: bool = False,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> _TeamState:
     return {
         "input": input,
         "context": "",
@@ -781,6 +979,8 @@ def _initial_state(input: str, memory_preamble: str = "", diagnostic: bool = Fal
         "output": "",
         "memory_preamble": memory_preamble,
         "diagnostic": diagnostic,
+        "on_token": on_token,
+        "should_cancel": should_cancel,
     }
 
 
@@ -823,32 +1023,45 @@ class LangGraphAdapter(EngineAdapter):
         graph = StateGraph(_TeamState)
         previous_exit = START
 
-        for team in pipeline.steps:
-            entry, exit_ = self._wire_team(graph, team)
+        # Exactly one agent per pipeline streams: the one whose text IS the
+        # run's output. Decided here, at wiring time, so no node has to work
+        # out at runtime whether it happens to be last.
+        teams = list(pipeline.steps)
+        for index, team in enumerate(teams):
+            entry, exit_ = self._wire_team(graph, team, streams_final=index == len(teams) - 1)
             graph.add_edge(previous_exit, entry)
             previous_exit = exit_
 
         graph.add_edge(previous_exit, END)
         return graph.compile()
 
-    def _wire_team(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_team(self, graph: StateGraph, team: Team, streams_final: bool = False) -> Tuple[str, str]:
         if team.mode == CollaborationMode.SEQUENTIAL:
-            return self._wire_sequential(graph, team)
+            return self._wire_sequential(graph, team, streams_final)
         if team.mode == CollaborationMode.PARALLEL:
-            return self._wire_parallel(graph, team)
+            return self._wire_parallel(graph, team, streams_final)
         if team.mode == CollaborationMode.HIERARCHICAL:
-            return self._wire_hierarchical(graph, team)
+            return self._wire_hierarchical(graph, team, streams_final)
         raise NotImplementedError(
             f"Collaboration mode '{team.mode.value}' is not implemented yet "
             f"(team '{team.name}'). SEQUENTIAL, PARALLEL, and HIERARCHICAL are "
             "available; DEBATE is on the roadmap."
         )
 
-    def _wire_sequential(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_sequential(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
         node_names = []
-        for agent in team.agents:
+        for position, agent in enumerate(team.agents):
             node_name = f"{team.name}.{agent.name}"
-            graph.add_node(node_name, _agent_node(agent, propagate_context=True))
+            graph.add_node(
+                node_name,
+                _agent_node(
+                    agent,
+                    propagate_context=True,
+                    streams=streams_final and position == len(team.agents) - 1,
+                ),
+            )
             node_names.append(node_name)
 
         for current, nxt in zip(node_names, node_names[1:]):
@@ -856,7 +1069,12 @@ class LangGraphAdapter(EngineAdapter):
 
         return node_names[0], node_names[-1]
 
-    def _wire_parallel(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_parallel(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
+        # `streams_final` is deliberately unused: a parallel team's output is
+        # `_aggregate_node`'s join of several contributions, produced with no
+        # model call at all, so there is no single reply to stream.
         entry_name = f"{team.name}.__fan_out__"
         exit_name = f"{team.name}.__aggregate__"
 
@@ -871,14 +1089,16 @@ class LangGraphAdapter(EngineAdapter):
 
         return entry_name, exit_name
 
-    def _wire_hierarchical(self, graph: StateGraph, team: Team) -> Tuple[str, str]:
+    def _wire_hierarchical(
+        self, graph: StateGraph, team: Team, streams_final: bool = False
+    ) -> Tuple[str, str]:
         manager = team.manager
         if manager is None:
             raise ConfigurationError(
                 f"Team '{team.name}' uses hierarchical mode and requires a 'manager' agent"
             )
         node_name = f"{team.name}.{manager.name}"
-        graph.add_node(node_name, _hierarchical_node(team))
+        graph.add_node(node_name, _hierarchical_node(team, streams=streams_final))
         return node_name, node_name
 
     def execute(
@@ -908,17 +1128,32 @@ class LangGraphAdapter(EngineAdapter):
         return compiled.get_graph().draw_mermaid()
 
     def stream(
-        self, compiled: Any, input: str, memory_preamble: str = "", diagnostic: bool = False
+        self,
+        compiled: Any,
+        input: str,
+        memory_preamble: str = "",
+        diagnostic: bool = False,
+        *,
+        on_token: Optional[Callable[[str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Iterator[TraceEvent]:
         """Yield an `agent_completed` TraceEvent each time a node finishes.
 
         Built on LangGraph's `stream_mode="updates"`, which yields exactly the
         partial state each node returned — so `contributions` always holds
         just that node's own entry, never a merged view of the whole run.
+
+        `on_token`, if given, receives the final agent's text deltas as they
+        are produced. That is a side channel out of the node on purpose: this
+        generator only yields at node boundaries, so nothing on this path can
+        reach a subscriber while the reply is still being written. Deltas are
+        NOT TraceEvents and are never persisted. `should_cancel` is polled
+        between deltas so a long reply can be stopped mid-generation.
         """
         try:
             for update in compiled.stream(
-                _initial_state(input, memory_preamble, diagnostic), stream_mode="updates"
+                _initial_state(input, memory_preamble, diagnostic, on_token, should_cancel),
+                stream_mode="updates",
             ):
                 for partial in update.values():
                     if not isinstance(partial, dict):

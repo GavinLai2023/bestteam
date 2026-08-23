@@ -38,6 +38,9 @@ export const en = {
     continue: 'Continue',
     working: 'Working…',
     startOver: 'Start over',
+    // Stands in for an image in a team's reply, which is never fetched --
+    // see components/MarkdownText.tsx.
+    image: 'image',
   },
   runStatus: {
     running: 'Running',
@@ -327,6 +330,12 @@ export const en = {
     // recognises them by value and renders these instead (lib/shareTraceEvents.ts).
     fallbackReply: 'Sorry, something went wrong producing a reply.',
     dispatchFailedReply: "Couldn't start a reply just now. Please try sending your message again.",
+    // runtime.py's `_mark_cancelled` persists this one when a turn is stopped.
+    stoppedReply: 'This conversation was stopped before a reply was ready.',
+    stop: 'Stop',
+    stopping: 'Stopping…',
+    // Anonymous progress: a position, never a name (components/ShareProgress.tsx).
+    stepProgress: 'Step {{n}} of {{total}}',
     // Deliberately generic -- never a tool or agent name (lib/shareTraceEvents.ts).
     status: {
       sending: 'Sending your message…',

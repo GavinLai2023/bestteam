@@ -1,5 +1,5 @@
 import { API_BASE, WS_BASE } from './api'
-import type { ShareMessage } from './types'
+import type { ShareMessage, ShareTeamInfo } from './types'
 
 // The public, anonymous counterpart to lib/api.ts's authenticated `request`.
 // No bearer token: the visitor's identity is a signed session cookie the
@@ -40,6 +40,12 @@ export const shareChatApi = {
     }),
   getMessages: (token: string) =>
     shareRequest<{ messages: ShareMessage[] }>(`/api/share/${encodeURIComponent(token)}/messages`),
+  getTeam: (token: string) => shareRequest<ShareTeamInfo>(`/api/share/${encodeURIComponent(token)}/team`),
+  cancelRun: (token: string, runId: string) =>
+    shareRequest<{ cancelled: boolean }>(
+      `/api/share/${encodeURIComponent(token)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' },
+    ),
   streamUrl: (token: string, runId: string) =>
     `${WS_BASE}/api/share/${encodeURIComponent(token)}/stream/${encodeURIComponent(runId)}`,
 }

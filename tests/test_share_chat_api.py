@@ -800,3 +800,186 @@ def test_cors_allows_credentials():
         m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"
     )
     assert cors_middleware.kwargs.get("allow_credentials") is True
+
+
+_HIERARCHICAL_CONFIG = {
+    "name": "delegating",
+    "agents": [
+        {"name": "boss", "role": "Manager", "goal": "manage", "model": "fake:done"},
+        {"name": "worker", "role": "Doer", "goal": "do", "model": "fake:sub"},
+    ],
+    "teams": [{"name": "tm", "agents": ["worker"], "manager": "boss", "mode": "hierarchical"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+_TWO_STEP_CONFIG = {
+    "name": "pair",
+    "agents": [
+        {"name": "a", "role": "R", "goal": "g", "model": "fake:first"},
+        {"name": "b", "role": "R", "goal": "g", "model": "fake:second"},
+    ],
+    "teams": [{"name": "tm", "agents": ["a", "b"], "mode": "sequential"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def _make_link_with_config(config, **overrides):
+    with open_test_db() as db:
+        org_id = get_org_id()
+        user = create_user(db, f"owner-{config['name']}", "pw", org_id=org_id)
+        team = PipelineRecord(name=config["name"], org_id=org_id, config=config, status="deployed")
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=user.id, **overrides)
+        return link.token
+
+
+def test_the_team_endpoint_names_the_team_and_counts_its_steps(client):
+    token, _ = _make_link()
+
+    resp = client.get(f"/api/share/{token}/team")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"name": "greeter", "steps": 1}
+
+
+def test_the_step_count_covers_every_agent_the_visitor_will_see(client):
+    token = _make_link_with_config(_TWO_STEP_CONFIG)
+
+    assert client.get(f"/api/share/{token}/team").json()["steps"] == 2
+
+
+def test_a_hierarchical_team_has_no_honest_denominator(client):
+    token = _make_link_with_config(_HIERARCHICAL_CONFIG)
+
+    body = client.get(f"/api/share/{token}/team").json()
+
+    assert body["steps"] is None
+    assert body["name"] == "delegating"
+
+
+def test_the_team_endpoint_refuses_a_revoked_link_without_minting_a_session(client):
+    token, _ = _make_link()
+    with open_test_db() as db:
+        from ui.backend.db.share_links import get_share_link_by_token
+
+        patch_share_link(db, get_share_link_by_token(db, token), active=False)
+
+    resp = client.get(f"/api/share/{token}/team")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+    assert "set-cookie" not in {key.lower() for key in resp.headers}
+
+
+def test_a_visitor_can_stop_their_own_run(client, monkeypatch):
+    token, _ = _make_link()
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        "ui.backend.share_chat.registry.request_cancel",
+        lambda run_id: bool(cancelled.append(run_id)) or True,
+    )
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+
+    resp = client.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    assert resp.status_code == 202
+    assert cancelled == [run_id]
+
+
+def test_another_session_cannot_stop_someone_elses_run(client):
+    token, _ = _make_link()
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+
+    # A second visitor: same link, no cookie of their own yet.
+    stranger = TestClient(backend_main.app)
+    resp = stranger.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
+def test_an_unknown_run_is_refused_with_the_same_message(client):
+    token, _ = _make_link()
+    client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+
+    resp = client.post(f"/api/share/{token}/runs/no-such-run/cancel")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
+def test_stopping_a_turn_does_not_refund_the_daily_cap(client, monkeypatch):
+    monkeypatch.setattr("ui.backend.share_chat.registry.request_cancel", lambda run_id: True)
+    token, link_id = _make_link()
+    run_id = client.post(f"/api/share/{token}/messages", json={"content": "hi"}).json()["run_id"]
+    with open_test_db() as db:
+        from ui.backend.db.models import ShareLink
+
+        spent = db.get(ShareLink, link_id).turns_today
+
+    client.post(f"/api/share/{token}/runs/{run_id}/cancel")
+
+    with open_test_db() as db:
+        from ui.backend.db.models import ShareLink
+
+        assert db.get(ShareLink, link_id).turns_today == spent
+
+
+def test_the_team_endpoint_never_builds_the_pipeline(client, monkeypatch):
+    # Building it would load every skill, knowledge base and email tool, and a
+    # path-constructed vector KB embeds at load time -- real spend, on an
+    # anonymous uncapped GET (Codex review finding).
+    def _explode(*args, **kwargs):
+        raise AssertionError("the team endpoint must not build the pipeline")
+
+    monkeypatch.setattr("ui.backend.main._resolve_pipeline_and_version", _explode)
+    token, _ = _make_link()
+
+    assert client.get(f"/api/share/{token}/team").json() == {"name": "greeter", "steps": 1}
+
+
+def test_a_step_count_that_cannot_be_read_is_reported_as_unknown():
+    from ui.backend.share_chat import _visible_step_count
+
+    # A wrong denominator is worse than none.
+    assert _visible_step_count(None) is None
+    assert _visible_step_count({}) is None
+    assert _visible_step_count({"teams": [], "pipeline": {"steps": ["missing"]}}) is None
+
+
+def test_only_the_teams_the_pipeline_steps_through_are_counted():
+    from ui.backend.share_chat import _visible_step_count
+
+    config = {
+        "teams": [
+            {"name": "used", "agents": ["a", "b"], "mode": "sequential"},
+            {"name": "declared_but_unused", "agents": ["c"], "mode": "sequential"},
+        ],
+        "pipeline": {"steps": ["used"]},
+    }
+
+    assert _visible_step_count(config) == 2
+
+
+_NAMED_CONFIG = {
+    "name": "contract_review_v2",
+    "agents": [{"name": "a", "role": "Asst", "goal": "help", "model": "fake:hi"}],
+    "teams": [
+        {"name": "tm", "display_name": "Contract Review Team", "agents": ["a"], "mode": "sequential"}
+    ],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def test_the_visitor_sees_the_friendly_team_name_not_the_identifier(client):
+    token = _make_link_with_config(_NAMED_CONFIG)
+
+    assert client.get(f"/api/share/{token}/team").json()["name"] == "Contract Review Team"
+
+
+def test_the_technical_name_is_the_fallback_when_there_is_no_display_name(client):
+    token, _ = _make_link()
+
+    assert client.get(f"/api/share/{token}/team").json()["name"] == "greeter"

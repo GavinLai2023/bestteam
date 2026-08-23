@@ -392,6 +392,129 @@ def get_share_messages(token: str, request: Request, db: Session = Depends(get_d
     }
 
 
+@router.get("/{token}/team")
+def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
+    """The team's name, and how many steps a visitor will see it take.
+
+    Deliberately a pure read: a first-time visitor must be able to render the
+    page header before sending anything, so this neither requires nor creates
+    a session cookie.
+
+    `steps` is the number of `agent_completed` events the visitor will
+    observe. A HIERARCHICAL team emits exactly one however many subordinates
+    its manager delegates to (subordinates emit `subagent_completed`, which
+    `visitor_safe_event` renders indistinguishable), so no honest denominator
+    exists and this is None -- the page shows a pulse instead of a count.
+
+    What is NOT disclosed: agent names, roles, models, or the collaboration
+    mode itself -- only its consequence. The org member generating a link is
+    deliberately telling a colleague "talk to this team", so the team's name
+    is shared; everything else stays behind `visitor_safe_event`.
+    """
+    link = _resolve_active_link(db, token)
+    pipeline_record = (
+        db.query(PipelineRecord)
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
+        .one_or_none()
+    )
+    if pipeline_record is None:
+        # Same detail as every other failure here -- see send_share_message.
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+
+    return {
+        "name": _display_name(pipeline_record),
+        "steps": _visible_step_count(pipeline_record.config),
+    }
+
+
+def _display_name(pipeline_record: PipelineRecord) -> str:
+    """The team's customer-facing name.
+
+    `PipelineRecord.name` is the technical identifier the YAML, the API and
+    the admin surfaces use (`contract_review_v2`); a builder-created team also
+    carries a friendly `teams[0].display_name`, which is what every other
+    customer-facing surface shows (`main.py::_team_display_name`). A visitor
+    on a shared link is the most customer-facing audience there is, so it must
+    not be the one place an internal identifier leaks out (Codex review
+    finding). Falls back to the technical name when there is no display name,
+    exactly as those surfaces do.
+    """
+    config = pipeline_record.config
+    if isinstance(config, dict):
+        teams = config.get("teams") or []
+        if teams and isinstance(teams[0], dict):
+            display_name = teams[0].get("display_name")
+            if display_name:
+                return str(display_name)
+    return pipeline_record.name
+
+
+def _visible_step_count(config: Optional[dict]) -> Optional[int]:
+    """How many `agent_completed` events a visitor will see, from the stored
+    spec alone.
+
+    Deliberately reads `PipelineRecord.config` rather than building the
+    pipeline: `_resolve_pipeline_and_version`'s cache-miss path loads every
+    skill, knowledge base and email tool, and a path-constructed vector
+    knowledge base embeds at load time -- so building here would let an
+    anonymous, uncapped GET incur build latency and real embedding spend
+    before the visitor has sent a single capped message (Codex review
+    finding).
+
+    Counts the teams the pipeline actually steps through, in order, not every
+    team defined in the spec -- a team can be declared and never used. None
+    when any of them is HIERARCHICAL: that manager emits one completion
+    however many subordinates it delegates to, so no honest denominator
+    exists and the page shows a pulse instead. None too for a spec this
+    cannot read, for the same reason -- a wrong count is worse than none.
+    """
+    if not isinstance(config, dict):
+        return None
+    teams_by_name = {
+        team.get("name"): team for team in config.get("teams") or [] if isinstance(team, dict)
+    }
+    step_names = (config.get("pipeline") or {}).get("steps") or []
+    total = 0
+    for name in step_names:
+        team = teams_by_name.get(name)
+        if team is None:
+            return None
+        if str(team.get("mode") or "sequential").lower() == "hierarchical":
+            return None
+        total += len(team.get("agents") or [])
+    return total or None
+
+
+@router.post("/{token}/runs/{run_id}/cancel", status_code=202)
+def cancel_share_run(token: str, run_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """Let a visitor stop a turn they no longer want.
+
+    Authorised exactly like the stream WebSocket below: the signed session
+    cookie must resolve to a session on this link, and that session must own
+    the run. Any failure is the standard 404, preserving the single-message
+    convention that stops a prober telling "not your run" apart from
+    "revoked link".
+
+    The turn is NOT refunded against either daily cap: the tokens were spent,
+    and a free retry after a stop would hand an abusive visitor unlimited
+    work against the org's budget. `registry.request_cancel` already no-ops
+    for an unknown or already-terminal run, so a Stop racing the reply is
+    harmless.
+    """
+    link = _resolve_active_link(db, token)
+    session = _resolve_session_from_cookie(request, db, link)
+    run_row = db.get(Run, run_id)
+    owns_run = (
+        session is not None
+        and run_row is not None
+        and run_row.trigger_context is not None
+        and run_row.trigger_context.get("share_session_id") == session.id
+    )
+    if not owns_run:
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+    return {"cancelled": registry.request_cancel(run_id)}
+
+
 def _link_and_org_active(engine, link_id: int) -> bool:
     """Fresh re-check of link active/expiry/org-active state -- used both at
     WS connect and before delivering every event, so a revoke, expiry, or
@@ -421,11 +544,18 @@ def visitor_safe_event(event: dict) -> dict:
     `_PM_TRACE_REDACTED` redaction (final whole-branch review I4).
     """
     event_type = event.get("type")
+    # `reply_delta` (see runtime.py's `_TokenSink`) carries text by exactly the
+    # argument that already admits `run_completed.data`: it is the final
+    # agent's own reply, which the visitor is about to be given in full. Only
+    # one node in the graph is ever wired to stream (the `streams` flag in
+    # adapters/langgraph_adapter.py), so no other agent's text can reach this
+    # event. `reply_reset` carries nothing at all.
+    carries_text = event_type in ("run_completed", "reply_delta")
     return {
         "type": event_type,
         "pipeline": None,
         "agent": None,
-        "data": event.get("data") if event_type == "run_completed" else None,
+        "data": event.get("data") if carries_text else None,
         "usage": [],
     }
 

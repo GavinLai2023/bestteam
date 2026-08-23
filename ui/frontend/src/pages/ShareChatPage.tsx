@@ -2,9 +2,11 @@ import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import LanguageSelect from '../components/LanguageSelect'
+import MarkdownText from '../components/MarkdownText'
+import ShareProgress from '../components/ShareProgress'
 import { shareChatApi } from '../lib/shareChatApi'
-import { FALLBACK_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
-import type { ShareMessage, TraceEvent } from '../lib/types'
+import { FALLBACK_REPLY, STOPPED_REPLY, fallbackReplyKey, friendlyStatusFor } from '../lib/shareTraceEvents'
+import type { ShareMessage, ShareTeamInfo, TraceEvent } from '../lib/types'
 import './ShareChatPage.css'
 
 const TERMINAL_TYPES = ['run_completed', 'run_failed', 'run_cancelled']
@@ -39,6 +41,15 @@ export default function ShareChatPage() {
   const [rateLimited, setRateLimited] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
+  // The reply as it is being written. Only ever a preview: `run_completed`
+  // discards it and appends the authoritative text instead, so nothing
+  // partial is ever kept or persisted (see the step-2 streaming spec).
+  const [streamedReply, setStreamedReply] = useState('')
+  const [team, setTeam] = useState<ShareTeamInfo | null>(null)
+  // The run this turn is streaming, so the visitor can stop it. Cleared on
+  // every terminal path, so Stop can never target the previous turn.
+  const [runId, setRunId] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // Set inside onmessage's own terminal-event branches; onclose checks it to
@@ -73,8 +84,27 @@ export default function ShareChatPage() {
   }, [token])
 
   useEffect(() => {
+    let ignore = false
+    shareChatApi
+      .getTeam(token)
+      .then((info) => {
+        if (!ignore) setTeam(info)
+      })
+      // A failure here costs the header and the step count, not the chat --
+      // the page falls back to the brand and an anonymous pulse.
+      .catch(() => {})
+    return () => {
+      ignore = true
+    }
+  }, [token])
+
+  useEffect(() => {
+    // `streamedReply` belongs here as much as the other two: a long final
+    // answer grows without any intervening agent event, so without it the
+    // visitor is left behind the tokens until the turn completes (Codex
+    // review finding).
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, liveEvents])
+  }, [messages, liveEvents, streamedReply])
 
   useEffect(() => {
     return () => {
@@ -104,14 +134,29 @@ export default function ShareChatPage() {
     }
     setMessages((prev) => [...prev, optimisticUserMessage])
     setLiveEvents([])
+    setStreamedReply('')
+    setRunId(null)
+    setStopping(false)
     terminalSeenRef.current = false
 
     try {
-      const { run_id: runId } = await shareChatApi.sendMessage(token, content)
-      const ws = new WebSocket(shareChatApi.streamUrl(token, runId))
+      const { run_id: dispatchedRunId } = await shareChatApi.sendMessage(token, content)
+      setRunId(dispatchedRunId)
+      const ws = new WebSocket(shareChatApi.streamUrl(token, dispatchedRunId))
       wsRef.current = ws
       ws.onmessage = (msg: MessageEvent<string>) => {
         const traceEvent = JSON.parse(msg.data) as TraceEvent
+        if (traceEvent.type === 'reply_delta') {
+          // Not a trace event as far as the page is concerned: it never joins
+          // liveEvents, so the progress indicator keeps counting agents.
+          setStreamedReply((prev) => prev + String(traceEvent.data ?? ''))
+          return
+        }
+        if (traceEvent.type === 'reply_reset') {
+          // The text so far belonged to a tool call, not the reply.
+          setStreamedReply('')
+          return
+        }
         setLiveEvents((prev) => [...prev, traceEvent])
         if (traceEvent.type === 'run_completed') {
           terminalSeenRef.current = true
@@ -120,19 +165,28 @@ export default function ShareChatPage() {
             { role: 'assistant', content: String(traceEvent.data ?? ''), turn_number: prev.length + 1 },
           ])
           setSending(false)
+          setStreamedReply('')
+          setRunId(null)
+          setStopping(false)
         } else if (TERMINAL_TYPES.includes(traceEvent.type)) {
           // run_failed / run_cancelled: the backend has already persisted its
-          // own friendly fallback reply for this turn, so show the same thing
-          // now instead of leaving the visitor's message looking unanswered
-          // until they happen to reload the page. Stored as the backend's
-          // English literal (what a reload would return) and translated at
-          // render by fallbackReplyKey, the same way a reloaded one is.
+          // own friendly reply for this turn, so show the same thing now
+          // instead of leaving the visitor's message looking unanswered until
+          // they happen to reload the page. Stored as the backend's English
+          // literal (what a reload would return) and translated at render by
+          // fallbackReplyKey, the same way a reloaded one is -- and it is a
+          // DIFFERENT literal for a stop than for a failure, or a reload
+          // would contradict what the visitor just saw.
           terminalSeenRef.current = true
+          const persisted = traceEvent.type === 'run_cancelled' ? STOPPED_REPLY : FALLBACK_REPLY
           setMessages((prev) => [
             ...prev,
-            { role: 'assistant', content: FALLBACK_REPLY, turn_number: prev.length + 1 },
+            { role: 'assistant', content: persisted, turn_number: prev.length + 1 },
           ])
           setSending(false)
+          setStreamedReply('')
+          setRunId(null)
+          setStopping(false)
         }
       }
       ws.onerror = () => setSending(false)
@@ -154,6 +208,9 @@ export default function ShareChatPage() {
           .catch(() => {})
           .finally(() => {
             setSending(false)
+            setStreamedReply('')
+            setRunId(null)
+            setStopping(false)
             setNotice({ key: 'share.recovered' })
           })
       }
@@ -199,6 +256,18 @@ export default function ShareChatPage() {
     }
   }
 
+  const handleStop = async () => {
+    if (!runId || stopping) return
+    setStopping(true)
+    try {
+      await shareChatApi.cancelRun(token, runId)
+    } catch {
+      // The run may have finished between the click and this call; the
+      // terminal event that follows resolves the button either way.
+      setStopping(false)
+    }
+  }
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== 'Enter' || e.shiftKey) return
     // An IME (Chinese, Japanese...) uses Enter to commit the candidate text;
@@ -227,7 +296,7 @@ export default function ShareChatPage() {
   // read must still be able to switch (Codex review).
   const header = (
     <header className="share-chat-header">
-      <span className="share-chat-brand">{t('nav.brand')}</span>
+      <span className="share-chat-brand">{team?.name ?? t('nav.brand')}</span>
       <LanguageSelect />
     </header>
   )
@@ -258,7 +327,9 @@ export default function ShareChatPage() {
           const key = fallbackReplyKey(m.content)
           return (
             <div key={i} className="share-chat-assistant">
-              <div className="share-chat-bubble assistant">{key ? t(key) : m.content}</div>
+              <div className="share-chat-bubble assistant">
+                {key ? t(key) : <MarkdownText text={m.content} />}
+              </div>
               {!key && (
                 <button type="button" className="btn-link share-chat-copy" onClick={() => void handleCopy(i, m.content)}>
                   {copiedIndex === i ? t('common.copied') : t('common.copy')}
@@ -270,10 +341,26 @@ export default function ShareChatPage() {
         {/* A polite live region, so assistive technology hears the progress
             line and any notice change without the focus moving. */}
         <div role="status" aria-live="polite">
-          {sending && <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>}
+          {sending && streamedReply === '' && (
+            <div className="share-chat-bubble status">{t(friendlyStatusFor(liveEvents))}</div>
+          )}
         </div>
+        {sending && streamedReply !== '' && (
+          <div className="share-chat-assistant">
+            <div className="share-chat-bubble assistant share-chat-streaming">
+              {/* Half-written markdown renders as the text it currently is
+                  and settles as it completes. */}
+              <MarkdownText text={streamedReply} />
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
+      {sending && (
+        <div className="share-chat-progress">
+          <ShareProgress events={liveEvents} steps={team?.steps ?? null} />
+        </div>
+      )}
       <div role="status" aria-live="polite">
         {rateLimited && <p className="share-chat-bubble status">{t('share.rateLimited')}</p>}
         {notice && <p className="share-chat-bubble status">{t(notice.key, notice.values)}</p>}
@@ -290,9 +377,15 @@ export default function ShareChatPage() {
           aria-describedby="share-chat-hint"
           disabled={sending || rateLimited}
         />
-        <button type="submit" disabled={sending || rateLimited || !draft.trim()}>
-          {t('share.send')}
-        </button>
+        {sending ? (
+          <button type="button" onClick={() => void handleStop()} disabled={!runId || stopping}>
+            {stopping ? t('share.stopping') : t('share.stop')}
+          </button>
+        ) : (
+          <button type="submit" disabled={rateLimited || !draft.trim()}>
+            {t('share.send')}
+          </button>
+        )}
       </form>
       <p id="share-chat-hint" className="hint share-chat-hint">
         {t('share.sendHint')}

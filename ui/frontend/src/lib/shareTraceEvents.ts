@@ -47,12 +47,16 @@ export function friendlyStatusFor(events: TraceEvent[]): ShareStatusKey {
 // with the backend (docs/STATUS.md, Known issues).
 export const FALLBACK_REPLY = 'Sorry, something went wrong producing a reply.'
 export const DISPATCH_FAILED_REPLY = "Couldn't start a reply just now. Please try sending your message again."
+// runtime.py's `_mark_cancelled` persists this one when a visitor stops a turn
+// (or an operator cancels the run).
+export const STOPPED_REPLY = 'This conversation was stopped before a reply was ready.'
 
-export type FallbackReplyKey = 'share.fallbackReply' | 'share.dispatchFailedReply'
+export type FallbackReplyKey = 'share.fallbackReply' | 'share.dispatchFailedReply' | 'share.stoppedReply'
 
 const FALLBACK_REPLY_KEYS: Record<string, FallbackReplyKey> = {
   [FALLBACK_REPLY]: 'share.fallbackReply',
   [DISPATCH_FAILED_REPLY]: 'share.dispatchFailedReply',
+  [STOPPED_REPLY]: 'share.stoppedReply',
 }
 
 export function fallbackReplyKey(content: string): FallbackReplyKey | null {
