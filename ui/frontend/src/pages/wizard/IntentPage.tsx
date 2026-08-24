@@ -84,15 +84,20 @@ export default function IntentPage() {
 
     // Best-effort: the Requirements summary is a nice-to-have internal
     // artifact. /specification degrades gracefully (falls back to the raw
-    // intent/as-is text) if this fails, so don't block on it.
+    // intent/as-is text) if this fails, so don't block on it. When the
+    // analyst has questions, the interview step comes before any documents.
     setStage('requirements')
+    let next = `/wizard/${id}/documents`
     try {
-      await api.submitRequirements(id, { model })
+      const updated = await api.submitRequirements(id, { model })
+      if (updated.requirements_json?.clarifying_questions?.length) {
+        next = `/wizard/${id}/questions`
+      }
     } catch {
       // ignored — non-blocking
     }
 
-    navigate(`/wizard/${id}/documents`)
+    navigate(next)
   }
 
   const retry = () => {
