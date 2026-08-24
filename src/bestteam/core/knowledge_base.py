@@ -1115,6 +1115,12 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
             query=bounded_query,
             hit_count=len(chunks),
             sources=sources,
+            # Every label the model was shown, in rank order and unbounded --
+            # for the adapter's grounding check (core/grounding.py), which
+            # must not mistake the eleventh passage's citation for an
+            # invented one. `_kb_tool_trace_data` copies named fields only,
+            # so this never reaches the trace event.
+            citations=[_citation(chunk) for chunk in chunks],
             # Which generation of the collection answered (None for a
             # folder-built KB), and per hit the row identity and the scores
             # behind its rank -- never the text. Bounded like `sources`.
