@@ -6,6 +6,7 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage
 
 from bestteam import Agent, CollaborationMode, Team, Pipeline
+from bestteam.core.tool_context import report_trace
 
 pytestmark = pytest.mark.unit
 
@@ -663,8 +664,6 @@ def test_kb_tool_completed_hits_are_bounded_and_present_when_empty():
 # and its [source: …] tags are checked against what its searches returned.
 # ---------------------------------------------------------------------------
 
-from bestteam.core.tool_context import report_trace
-
 
 def _stub_knowledge_base_tool(citations):
     """A tool shaped like `make_knowledge_base_tool`'s: the marker the adapter
@@ -910,4 +909,128 @@ def test_hierarchical_subordinate_with_a_knowledge_base_tool_emits_grounding_che
         "cited": 2,
         "verified": 1,
         "unverified": ["made-up.pdf"],
+    }
+
+
+class _ThinkingModeChatModel(_FakeToolCallingChatModel):
+    """Refuses a forced `tool_choice` the way DeepSeek's reasoning models do
+    (the same shape as `tests/test_hierarchical_team.py`'s identical class,
+    which only exercises the hierarchical manager/delegate forcing sites --
+    this one exercises the SEQUENTIAL/PARALLEL forcing site grounding-lite
+    added).
+
+    `bind_tools` accepts the argument -- the refusal is a 400 from the
+    provider when the call is actually made, not a bind-time error -- so the
+    unforced binding keeps working and only the forced one fails.
+    """
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        if tool_choice is None:
+            return self
+        refusing = _ThinkingModeChatModel(responses=self.responses)
+        object.__setattr__(refusing, "refuses", True)
+        return refusing
+
+    def invoke(self, input, *args, **kwargs):
+        if getattr(self, "refuses", False):
+            raise Exception(
+                "Error code: 400 - {'error': {'message': 'Thinking mode does not "
+                "support this tool_choice', 'type': 'invalid_request_error'}}"
+            )
+        return super().invoke(input, *args, **kwargs)
+
+
+def test_sequential_knowledge_base_agent_with_forcing_refused_still_produces_an_answer():
+    """This is grounding-lite's highest-blast-radius change: forcing
+    `tool_choice="required"` now applies to a knowledge-base agent on every
+    team mode, not only a hierarchical manager/delegate's first call. A
+    thinking-mode model that 400s on a forced tool_choice must still produce
+    an answer rather than failing the whole run -- `_first_call`'s fallback
+    (already covered for the hierarchical paths by
+    `tests/test_hierarchical_team.py::test_a_manager_that_refuses_forced_tool_choice_still_produces_an_answer`)
+    has to hold here too."""
+    model = _ThinkingModeChatModel(responses=[AIMessage(content="An answer without searching")])
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    result = _single_agent_pipeline(agent).run("refund window?")
+
+    assert result.output == "An answer without searching"
+
+
+def test_tool_loop_exhausted_emits_no_grounding_checked_event():
+    """The grounding_checked emission sits after the "tool loop exhausted"
+    early return in `_run_agent` (see `_tool_loop_exhausted_notice`) -- a
+    turn that never settles on a text answer because the tool loop ran out
+    must not get a grounding_checked event either."""
+    from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
+
+    # A single scripted response that always re-requests the same tool call;
+    # FakeMessagesListChatModel cycles it, so the tool loop never settles on
+    # a text-only answer and _MAX_TOOL_ITERATIONS is exhausted (same pattern
+    # as test_hierarchical_team.py::test_manager_delegate_loop_is_bounded).
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+        ]
+    )
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+
+    assert "grounding_checked" not in [e.type for e in events]
+    agent_completed = next(e for e in events if e.type == "agent_completed")
+    assert agent_completed.data == _tool_loop_exhausted_notice("a")
+
+
+def test_a_raising_knowledge_base_tool_call_contributes_nothing_to_grounding():
+    """A knowledge-base tool call that raises must not count as a search:
+    `kb_searches`/`kb_hit_count`/`kb_citations` are only updated on the tool
+    loop's success (`else`) branch in `_run_agent`, never in the `except`
+    branch. The turn still emits grounding_checked, with searches: 0 -- the
+    model's own [source: …] tag (if any) is checked against an empty
+    citation set and reported unverified."""
+
+    def product_docs(query: str) -> str:
+        raise RuntimeError("boom")
+
+    product_docs.__bestteam_tool_kind__ = "knowledge_base"
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="I could not find an answer [source: handbook.pdf]."),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[product_docs])
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+
+    grounding = next(e for e in events if e.type == "grounding_checked")
+    assert grounding.data == {
+        "searches": 0,
+        "hit_count": 0,
+        "cited": 1,
+        "verified": 0,
+        "unverified": ["handbook.pdf"],
     }
