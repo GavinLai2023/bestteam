@@ -2442,10 +2442,12 @@
   the 2026-08-19 re-review's pre-launch hardening (B1–B5, B8 -- see Done).
   G7 is conditional and operator-run: a live Microsoft 365 tenant smoke test
   (`docs/email-smoke-test.md` §9) before the first M365 customer. XML
-  tree-aware chunking (PR #69) is merged and in the beta build. Still open
-  before freeze: rehearse `scripts/restore.sh` once against a throwaway
-  stack, then freeze and name the beta build from a green `main` run of
-  `backend-full`/`e2e-full`. Stage 1 of the review (ruff/mypy,
+  tree-aware chunking (PR #69) is merged and in the beta build. The build is
+  named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.2`
+  (`9afba75`, 2026-08-24), each from a `main` run with `backend-full` and
+  `e2e-full` green. Still open: rehearse `scripts/restore.sh` once against a
+  throwaway stack -- it needs Docker, so it happens on the target VPS, not on
+  a developer workstation. Stage 1 of the review (ruff/mypy,
   `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,
   `_resolve_model` move, `STATUS.md` → `CHANGELOG.md` split, unified
   settings) runs in parallel with the beta. The "single process + SQLite"
