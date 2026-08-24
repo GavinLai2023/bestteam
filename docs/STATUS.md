@@ -6,6 +6,24 @@
 
 ## Done
 
+- **A trace's knowledge-base ids keep resolving, and a customer can restore
+  the previous upload** (2026-08-24). PR #86 put `ingestion_job_id` and each
+  hit's `chunk_id` into every KB `tool_completed` event, and
+  `_KEEP_COMPLETED_GENERATIONS = 2` deleted those rows two uploads later — ids
+  recorded and then destroyed. The 2026-08-24 external review called it P0 and
+  again proposed pinning a generation to a `PipelineVersion`; refused again
+  (a customer's upload must take effect at once), and the gap closed without
+  it: `run_knowledge_generations` (written by `runtime.py` from the search
+  event) makes `_prune_old_ingestion_versions` keep a referenced generation's
+  rows with the vectors nulled and the files gone, released by
+  `retention.purge_run` and KB deletion. "Restore previous upload" is PR #87's
+  removal machinery with the previous job as source and shape, and
+  `_reusable_documents` now looks at the newest two completed jobs, so it
+  re-embeds nothing. Not done, on purpose: a read surface for a retained
+  chunk (the admin Trace page rendering `hits`), restoring further back than
+  one generation, a maintenance sweep for an idle KB's audit-only
+  generations, and backfilling references from pre-migration traces. Spec:
+  `docs/superpowers/specs/2026-08-24-kb-generation-audit-retention-and-restore-design.md`.
 - **The login page is bilingual and branded, and a customer can change their
   own password** (2026-08-23). Two defects, one screen apart. `LoginPage.tsx`
   was 66 lines of **hardcoded English** — `en.ts` had eight namespaces and none

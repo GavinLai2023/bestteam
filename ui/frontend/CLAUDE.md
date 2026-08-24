@@ -359,6 +359,16 @@ delete's. The mock factory in `KnowledgeBasesPanel.test.tsx` lists
 `removeOwnKnowledgeBaseDocument` for the same reason it lists
 `searchOwnKnowledgeBase`.
 
+Each row also has **"Restore previous upload"** beside "Try a search" —
+`POST /api/org/knowledge-bases/{name}/restore` behind a confirm that lists the
+filenames coming back (`kb.previous_generation.filenames`) and the teams using
+the collection. Disabled with the reason in its `title` while an upload is
+processing and when `previous_generation` is null (one upload so far, or the
+files are gone). A success marks the row `queued` from the 202 and re-fetches,
+like a removal; a refusal's message renders on the row. The mock factory lists
+`restoreOwnKnowledgeBase`. The panel's copy is still English-only literals
+(the F1 long tail).
+
 Each row also carries a **"Try a search"** toggle beside Delete, opening
 `components/KnowledgeBaseSearch.tsx` underneath it: one query box, and the
 passages `POST /api/org/knowledge-bases/{name}/search` returns, each under the

@@ -109,6 +109,11 @@ implemented** — don't assume they exist:
   replacing it, and a document whose content hash is unchanged keeps the
   chunks and embeddings the previous job paid for, so only genuinely new
   documents are embedded and billed.
+  **Generations a run's trace references are kept**: pruning keeps the newest
+  two completed generations intact, and an older one that some un-purged run
+  searched keeps its text rows (vectors nulled) — see `ui/backend/db/CLAUDE.md`
+  `run_knowledge_generations`. A customer can restore the previous upload
+  (one generation back) at no embedding cost.
   An ad-hoc "Try a search" from the "My documents" panel is the third source:
   one `agent="kb:search"` row with **both** foreign keys NULL, written on the
   failure path too. Embedding token counts are

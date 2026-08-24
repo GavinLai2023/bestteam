@@ -321,6 +321,7 @@ applied by `db/orgs.py::create_org` to **newly created** orgs only.
 
 The rule that is easy to break by "simplifying": **a purge clears content and
 keeps accounting.** Content is `runs.input`/`output`, the run's `trace_events`,
+the run's `run_knowledge_generations` references (derived from those events),
 and `automation_item_results.payload`. Accounting is the `runs` row itself
 (deleting it would orphan every `usage_records` row that names it -- `run_id`
 is nullable only so KB *ingestion* spend can omit it, and those rows back
@@ -1473,10 +1474,17 @@ supplies `top_k`/`rerank_model`/`candidate_k`/`query_expansion_*`, which
 apply uniformly to whichever generation is live. A successful job also invalidates the
 pipeline cache (`_invalidate_pipeline_cache()`, called at job completion,
 not at upload-dispatch time — that's the point the KB's live content
-actually changes) and best-effort prunes older completed generations,
-keeping the current one plus one grace-window generation, mirroring the
-legacy path's "prior version kept only until the new one is durable"
-precedent. A parallel step (`_prune_failed_ingestion_versions`, which runs on
+actually changes) and
+best-effort prunes older completed generations: the current one plus one
+grace-window generation stay intact (mirroring the legacy path's "prior
+version kept only until the new one is durable" precedent); an older one
+loses its version directory and, unless a run's trace still references it
+(`run_knowledge_generations`, see `db/CLAUDE.md`), its rows -- a referenced
+"audit-only" generation keeps document/chunk rows with the vectors nulled,
+and is reclaimed at this KB's next completed job after retention purges the
+referencing run. `_reusable_documents` looks at exactly that intact window
+(the newest two completed jobs, newest first), never at an audit-only one.
+A parallel step (`_prune_failed_ingestion_versions`, which runs on
 the **failed** path too — the only cleanup that does, since a customer
 retrying an unparseable upload never produces a completed job) reclaims every
 failed job's on-disk version directory except the most recent one's, kept as
@@ -1610,8 +1618,18 @@ while a job is queued/running (two jobs' completion order would decide the live
 set), 409 for the last document (an empty collection cannot be built -- delete
 it instead), 404 for a name not in the live generation (exact match: the carry
 drops a case-variant too on Windows/macOS, and "removed `policy.txt`" must not be
-true of a file the customer never named). Allowed while teams use the
-collection, as `add` is. The collection DELETE is the same
+true of a file the customer never named).
+`POST /api/org/knowledge-bases/{name}/restore` (`knowledge_bases.restore_previous_generation`)
+is the same machinery with the *previous* completed job as
+`_stage_previous_generation`'s `source` and as the new job's shape, so every
+chunk and vector is carried forward and nothing is metered; 409 while a job is
+queued/running, 409 with no earlier completed upload, 409 when the previous
+version directory is gone (`restorable_generation` is what `_kb_summary`'s
+`previous_generation` -- `{completed_at, filenames}` or null -- reports from).
+One generation back only: it is the only one whose files are still on disk.
+`record.config` is untouched, so a restore that undoes a type change serves
+under the previous type while `config` keeps the new one.
+Allowed while teams use the collection, as `add` is. The collection DELETE is the same
 `knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
 (deployed dependency, in-flight ingestion) hold here too. Two consequences
 elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only
