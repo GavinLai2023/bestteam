@@ -104,10 +104,14 @@ def _fake_architect_specification() -> "Specification":
     )
 
 
-def _fake_architect_requirements() -> "Requirements":
+_FAKE_INTERVIEW_MARKER = "[interview me]"
+_FAKE_ANSWERS_HEADER = "The customer was asked these clarifying questions:"
+
+
+def _fake_architect_requirements(prompt_text: str) -> "Requirements":
     from ..core.requirements import Requirements
 
-    return Requirements(
+    base = Requirements(
         summary="Customers need faster, friendlier email support.",
         pain_points=["Replies take too long."],
         goals=["Answer common questions quickly."],
@@ -115,6 +119,22 @@ def _fake_architect_requirements() -> "Requirements":
         constraints=["Must stay professional and on-topic."],
         clarifying_questions=[],
     )
+    if _FAKE_ANSWERS_HEADER in prompt_text:
+        # Deterministic "folding": each answered pair lands in constraints
+        # verbatim, each unanswered one becomes a fixed assumption -- so an
+        # E2E test can assert the round-trip on the Confirm page.
+        for line in prompt_text.splitlines():
+            if line.startswith("A: (not answered"):
+                base.constraints.append("Assumed: replies can go out within one business day.")
+            elif line.startswith("A: "):
+                base.constraints.append(f"The customer clarified: {line[len('A: '):]}")
+        return base
+    if _FAKE_INTERVIEW_MARKER in prompt_text:
+        base.clarifying_questions = [
+            "How many emails do you receive per day?",
+            "Which mailbox provider do you use?",
+        ]
+    return base
 
 
 class _FakeArchitectStructuredResult:
@@ -124,6 +144,9 @@ class _FakeArchitectStructuredResult:
         self._value = value
 
     def invoke(self, messages: Any) -> Any:
+        if callable(self._value):
+            text = "\n".join(str(getattr(m, "content", m)) for m in messages)
+            return self._value(text)
         return self._value
 
 
@@ -152,7 +175,7 @@ class _FakeArchitectChatModel(FakeListChatModel):
         from ..core.specification import Specification
 
         if schema is Requirements:
-            return _FakeArchitectStructuredResult(_fake_architect_requirements())
+            return _FakeArchitectStructuredResult(_fake_architect_requirements)
         if schema is Specification:
             return _FakeArchitectStructuredResult(_fake_architect_specification())
         raise NotImplementedError(
