@@ -456,14 +456,28 @@ recorded as one `grounding_checked` trace event:
 ```
 
 A tag is verified when it equals a returned citation (whitespace aside), or
-when it names only a filename and that document was among the hits. A tag
-with a page or heading the search never returned is unverified — a fabricated
-locator is exactly what this shows. The event carries counts and citation
-labels only (at most ten unverified labels, each at most 200 characters), and
-it **records rather than acts**: the answer is returned unchanged, nothing is
-retried or refused. A knowledge-base agent that never searched (`searches:
-0`) has every tag unverified. A hierarchical manager without a knowledge base
-of its own is not checked — its specialists are.
+when it names only a filename and that document was among the hits. Anything
+else is unverified — which is not the same as fabricated. It means the tag
+does not exactly match a returned citation and is not a bare filename among
+the hits; that includes a genuinely fabricated locator, but it also includes
+a passage the agent really did retrieve, cited with a page or heading it
+dropped or altered along the way (e.g. citing `handbook.pdf, p.3` for a hit
+the search returned as `handbook.pdf, p.3 § Refunds`). The event carries
+counts and citation labels only (at most ten unverified labels, each at most
+200 characters), and it **records rather than acts**: the answer is returned
+unchanged, nothing is retried or refused. A knowledge-base agent that never
+searched (`searches: 0`) has every tag unverified. A hierarchical manager
+without a knowledge base of its own is not checked — its specialists are. A
+manager that *does* carry its own knowledge-base tool is checked, but only
+against **its own** searches: a tag it retells from a subordinate's answer
+(the subordinate's own citation, quoted or paraphrased back by the manager)
+is reported unverified, because cross-agent checking is out of scope for this
+feature — a documented consequence, not a bug.
+
+Known limitation: a citation label containing its own `]` (an unusual
+document heading like "Item [2]") truncates the tag the check parses, so that
+citation is reported unverified even when it is exact. Not worth a regex
+change for a records-only check.
 
 ### What a search looks like in the trace
 

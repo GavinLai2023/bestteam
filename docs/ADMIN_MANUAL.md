@@ -61,6 +61,7 @@ toggle — see §2.5). The event types you'll see on an ordinary run:
 | `agent_progress` | "iteration N of MAX" — the agent asked for another tool round. |
 | `subagent_started` / `subagent_completed` | A HIERARCHICAL manager delegating to a subordinate. |
 | `memory_recalled` / `memory_recorded` / `memory_failed` | Per-user memory read/write, when memory is enabled. |
+| `grounding_checked` | For a knowledge-base agent's turn: how many `[source: …]` tags its final answer carried, how many of those name a passage its own searches actually retrieved, and which ones don't (up to 10 unverified labels). Recorded only — an unverified tag changes nothing about the run; see `docs/KNOWLEDGE_BASES.md`. |
 
 ### 2.3 Analytics tab
 
