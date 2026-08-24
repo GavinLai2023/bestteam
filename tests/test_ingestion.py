@@ -1047,6 +1047,7 @@ def test_prune_keeps_a_referenced_old_generations_rows_without_its_vectors_or_fi
     job2 = _completed_generation(db, kb, tmp_path, "v2")
     job3 = _completed_generation(db, kb, tmp_path, "v3")
     _reference(db, job1)
+    _reference(db, job3, run_id="r2")
 
     ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
 
@@ -1120,7 +1121,7 @@ def test_reusable_documents_looks_at_the_newest_two_completed_jobs(db, tmp_path)
     kb = _make_kb(db, name="two_jobs")
     _completed_generation(db, kb, tmp_path, "v1", filename="old.txt")
     job2 = _completed_generation(db, kb, tmp_path, "v2", filename="b.txt")
-    job3 = _completed_generation(db, kb, tmp_path, "v3", filename="c.txt")
+    _completed_generation(db, kb, tmp_path, "v3", filename="c.txt")
     new_job = IngestionJob(
         kb_id=kb.id, org_id=1, version="v4", status="queued", file_count=2,
         kb_type="local_folder", chunk_size=1000, chunk_overlap=100,
@@ -1139,7 +1140,6 @@ def test_reusable_documents_looks_at_the_newest_two_completed_jobs(db, tmp_path)
     job2.chunk_size = 500
     db.commit()
     assert set(ingestion._reusable_documents(db, kb.id, new_job)) == {("c.txt", "hash-v3-c.txt")}
-    del job3
 
 
 def test_deleting_kb_ingestion_data_drops_its_generation_references(db, tmp_path):

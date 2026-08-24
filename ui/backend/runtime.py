@@ -469,7 +469,18 @@ def _safe_record_knowledge_generation(db: Session, *, run_id: str, ingestion_job
     trace's chunk ids point at. Written the moment the search event arrives,
     not at the terminal event: a run cancelled or crashed afterwards has still
     read that generation. Isolated like `_safe_record_usage` -- an audit record
-    failing must never fail the run."""
+    failing must never fail the run.
+
+    "The moment the search event arrives" means when this helper is called,
+    not when the search actually ran: the adapter buffers a node's granular
+    events and flushes them just before that node's `agent_completed`, so a
+    KB `tool_completed` can reach here well after the search happened. If two
+    ingestions of that collection complete inside one agent node's buffering
+    window, the referenced job may already have been pruned by the time this
+    call lands -- FK enforcement is off, so the row is inserted anyway and is
+    never removed except by deleting the KB. Vanishingly rare, and the only
+    consequence is a dangling reference to a generation whose trace was
+    already unresolvable by the time it was pruned."""
     try:
         record_knowledge_generation(db, run_id, ingestion_job_id)
         db.commit()

@@ -1806,10 +1806,6 @@ def test_restore_is_refused_when_the_previous_files_are_gone(client):
 def test_restore_of_another_orgs_collection_is_404(client):
     _upload(client, "a.txt")
     _upload(client, "b.txt", mode="replace")
-    with open_test_db() as db:
-        other = get_or_create_org(db, "other")
-        db.commit()
-        other_id = other.id
     token = create_user_and_login(client, username="stranger", org="other")
 
     resp = client.post(
@@ -1817,4 +1813,3 @@ def test_restore_of_another_orgs_collection_is_404(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 404
-    del other_id
