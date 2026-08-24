@@ -1,7 +1,8 @@
 """Run-history retention: the purge engine, the sweep, and export (Phase 3b).
 
 A purge clears CONTENT and keeps ACCOUNTING. Content is `runs.input`/`output`,
-every `trace_events` row, and `automation_item_results.payload`. Accounting is
+every `trace_events` row, the run's `run_knowledge_generations` references (derived from those events),
+and `automation_item_results.payload`. Accounting is
 the `runs` row itself, `usage_records`, `trigger_context`, and an item result's
 `status`/`source_key` -- see the design spec's invariants I1-I5. Deleting the
 run row instead would take the org's token/cost history with it, and clearing
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from .db.models import AutomationItemResult, Run, TraceEventRecord, iso_utc
 from .db.retention import orgs_with_retention, record_sweep
+from .db.run_knowledge_generations import delete_for_run as _release_knowledge_generations
 
 _logger = logging.getLogger(__name__)
 
@@ -56,6 +58,11 @@ def purge_run(db: Session, run: Run) -> bool:
     db.query(TraceEventRecord).filter(TraceEventRecord.run_id == run.id).delete(
         synchronize_session=False
     )
+    # The trace is what named a knowledge-base generation's chunk ids, so the
+    # reference keeping that generation's rows alive goes with it (see
+    # db/run_knowledge_generations.py). Not a purged field: it is an index
+    # over content the export already carries.
+    _release_knowledge_generations(db, run.id)
     for item in db.query(AutomationItemResult).filter(
         AutomationItemResult.run_id == run.id
     ):
