@@ -202,8 +202,12 @@ def test_t4_7_clarifying_questions_answer_and_skip(page):
     page.click("button:has-text('Continue')")
     page.wait_for_url("**/confirm", timeout=8000)
 
-    # Constraints render as BulletEditor <input> rows -- match displayed value.
-    pw_expect(page.get_by_display_value("The customer clarified: About 40 a day")).to_be_visible()
-    pw_expect(
-        page.get_by_display_value("Assumed: replies can go out within one business day.")
-    ).to_be_visible()
+    # Constraints render as BulletEditor <input> rows. React sets the value
+    # *property*, not the attribute, so match via wait_for_function (the
+    # installed Playwright predates get_by_display_value).
+    page.wait_for_selector("#summary", timeout=8000)
+    has_input_value = "value => Array.from(document.querySelectorAll('input')).some(i => i.value === value)"
+    page.wait_for_function(has_input_value, arg="The customer clarified: About 40 a day", timeout=8000)
+    page.wait_for_function(
+        has_input_value, arg="Assumed: replies can go out within one business day.", timeout=8000
+    )
