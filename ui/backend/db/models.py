@@ -677,6 +677,36 @@ class TraceEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class RunKnowledgeGeneration(Base):
+    """One run's reference to one knowledge-base generation it searched.
+
+    Written by `runtime.run_in_background` from a KB tool's `tool_completed`
+    event (which carries `ingestion_job_id` and per-hit `chunk_id`s), so the
+    ids that trace records keep resolving: `ingestion._prune_old_ingestion_versions`
+    keeps a referenced generation's document/chunk rows (vectors nulled, files
+    deleted) instead of deleting them. Released by `retention.purge_run` (the
+    trace is gone) and by KB deletion. A materialised reference, the same idea
+    as `pipeline_dependencies`. See
+    docs/superpowers/specs/2026-08-24-kb-generation-audit-retention-and-restore-design.md.
+    """
+
+    __tablename__ = "run_knowledge_generations"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "ingestion_job_id",
+            name="uq_run_knowledge_generations_run_id_job_id",
+        ),
+        Index("ix_run_knowledge_generations_ingestion_job_id", "ingestion_job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    ingestion_job_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_ingestion_jobs.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class UsageRecord(Base):
     """One metered LLM/embedding call, for usage-based metering (Phase 3).
 
