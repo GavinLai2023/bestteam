@@ -479,6 +479,18 @@ document heading like "Item [2]") truncates the tag the check parses, so that
 citation is reported unverified even when it is exact. Not worth a regex
 change for a records-only check.
 
+Known limitation: a filename containing `, p.` or ` § ` (e.g. an upload named
+`report, p.2.pdf`) is misread as a label with a locator, because the check
+splits a label at the first occurrence of either marker without knowing where
+the filename actually ends. This cuts both ways: `[source: report, p.2.pdf]`
+for that document is reported unverified even when cited correctly, because
+the check treats `p.2.pdf` as a locator rather than part of the filename; and
+a bare `[source: report]` tag for the same document can be counted verified
+by the filename-only rule even though the tag omits the true document name.
+Carrying the filename separately through the tool→adapter→checker contract
+would fix it, but only for a check that records and never acts — not worth
+the payload-shape change.
+
 ### What a search looks like in the trace
 
 Every knowledge base search shows up in the run's trace as a `tool_completed`

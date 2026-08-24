@@ -23,6 +23,17 @@ titled "Item [2]") truncates the tag and the label is reported unverified.
 Not worth tightening the regex for -- the check only records, it never acts
 on the result, so a truncated-but-harmless label costs nothing beyond a
 slightly noisier `unverified` list.
+
+Known limitation: ``_filename`` splits a label at the first ``, p.`` or
+`` § `` it finds, with no notion of where the filename part actually ends.
+An uploaded document legitimately named e.g. ``report, p.2.pdf`` is
+therefore misread both ways: ``[source: report, p.2.pdf]`` is treated as a
+label with a locator and reported unverified even when cited correctly, and
+a bare ``[source: report]`` tag for that same document can be counted
+verified by the filename-only rule even though it omits the true document
+name. Carrying the filename separately through the tool -> adapter -> checker
+contract would fix this, but would change the ``citations`` payload shape for
+a check that only ever records -- not worth it.
 """
 
 from __future__ import annotations
