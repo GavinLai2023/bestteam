@@ -216,6 +216,87 @@ def test_generate_requirements_includes_the_current_understanding_in_prompt():
     assert "Never quote a refund amount" in content
 
 
+def _recording_model(seen_messages):
+    class _RecordingModel(_FakeAnalystChatModel):
+        def with_structured_output(self, schema, **kwargs):
+            def _invoke(messages):
+                seen_messages.append(messages)
+                return self.responses[0]
+
+            return RunnableLambda(_invoke)
+
+    return _RecordingModel(responses=[Requirements(summary="Updated summary")])
+
+
+def test_generate_requirements_renders_answers_paired_with_questions():
+    from bestteam import QuestionAnswer
+
+    seen_messages = []
+    model = _recording_model(seen_messages)
+    current = Requirements(clarifying_questions=["How many emails per day?"])
+
+    generate_requirements(
+        model,
+        "Help with support.",
+        "",
+        current=current,
+        answers=[QuestionAnswer(question="How many emails per day?", answer="About 40")],
+    )
+
+    content = seen_messages[0][1].content
+    assert "The customer was asked these clarifying questions:" in content
+    assert "Q: How many emails per day?" in content
+    assert "A: About 40" in content
+
+
+def test_generate_requirements_marks_blank_answers_for_assumption():
+    from bestteam import QuestionAnswer
+
+    seen_messages = []
+    model = _recording_model(seen_messages)
+
+    generate_requirements(
+        model,
+        "Help with support.",
+        "",
+        current=Requirements(clarifying_questions=["Which mailbox provider?"]),
+        answers=[QuestionAnswer(question="Which mailbox provider?", answer="   ")],
+    )
+
+    content = seen_messages[0][1].content
+    assert "A: (not answered" in content
+    assert '"Assumed:"' in content
+
+
+def test_generate_requirements_puts_answers_between_current_and_feedback():
+    from bestteam import QuestionAnswer
+
+    seen_messages = []
+    model = _recording_model(seen_messages)
+    current = Requirements(goals=["Reply within an hour"])
+
+    generate_requirements(
+        model,
+        "Help with support.",
+        "",
+        current=current,
+        answers=[QuestionAnswer(question="Which tone?", answer="Friendly")],
+        feedback="Also cover refunds.",
+    )
+
+    content = seen_messages[0][1].content
+    assert content.index("Reply within an hour") < content.index("Q: Which tone?")
+    assert content.index("Q: Which tone?") < content.index("Also cover refunds.")
+
+
+def test_analyst_prompt_carries_the_asking_and_folding_policy():
+    from bestteam.core.requirements import _ANALYST_SYSTEM_PROMPT
+
+    assert "up to 4" in _ANALYST_SYSTEM_PROMPT
+    assert "Assumed:" in _ANALYST_SYSTEM_PROMPT
+    assert "Never re-ask" in _ANALYST_SYSTEM_PROMPT
+
+
 def test_generate_requirements_puts_feedback_after_the_current_understanding():
     """The customer's new sentence is the later, winning word when it conflicts
     with a field they had edited earlier."""

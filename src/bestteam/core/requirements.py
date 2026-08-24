@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -27,9 +27,20 @@ tools, compliance, tone, languages, etc.) mentioned or implied. Write a short \
 plain-language `summary` a non-technical person would recognize as an \
 accurate restatement of what they told you.
 
-If the customer's description is too vague to design a team from, list 1-2 \
-short `clarifying_questions` to ask them. If their description is already \
-clear enough, leave `clarifying_questions` empty.
+List in `clarifying_questions` up to 4 short questions whose answers would \
+most change what team should be built -- missing volumes, tools, languages, \
+tone, approval steps, and the like. Every question is work pushed back onto \
+the customer: ask only what genuinely matters, and leave the list empty if \
+their description already covers it.
+
+You may also be shown clarifying questions the customer was previously \
+asked, each paired with their answer. Treat each answer as the customer's \
+own words: fold it into the requirements and remove that question from \
+`clarifying_questions`. Where an answer is marked "(not answered ...)", \
+follow its instruction: record your best assumption in `constraints` \
+prefixed "Assumed:" and remove the question. Never re-ask a question that \
+has been answered or assumed; keep a question only while it is genuinely \
+still open.
 
 You may also be given the current understanding, which the customer has just \
 reviewed and may have edited by hand, followed by additional information they \
@@ -37,6 +48,24 @@ typed. Treat the current understanding as their own words: keep its wording \
 and its individual entries unless the additional information contradicts \
 them. Where the two conflict, the additional information is the later word \
 and wins."""
+
+
+class QuestionAnswer(BaseModel):
+    """One clarifying question paired with the customer's answer.
+
+    An empty/whitespace answer means the customer declined to answer: the
+    analyst is instructed to make its best assumption, record it in
+    `constraints` prefixed "Assumed:", and retire the question.
+    """
+
+    question: str
+    answer: str = ""
+
+
+_UNANSWERED_NOTE = (
+    "(not answered -- make your best assumption, add it to `constraints` "
+    'prefixed "Assumed:", and remove the question)'
+)
 
 
 class Requirements(BaseModel):
@@ -77,6 +106,7 @@ def generate_requirements(
     as_is_text: str = "",
     *,
     current: Optional[Requirements] = None,
+    answers: Optional[Sequence[QuestionAnswer]] = None,
     feedback: Optional[str] = None,
     max_attempts: int = 3,
 ) -> Requirements:
@@ -85,6 +115,12 @@ def generate_requirements(
     `feedback` is the customer's reply to a previous round (e.g. answers to
     `clarifying_questions`, or a correction) and is appended to the prompt so
     the analyst can revise its summary.
+
+    `answers` are the customer's replies to a batch of `clarifying_questions`,
+    each paired with the question it answers. A blank answer means the
+    customer declined: the analyst assumes, records the assumption in
+    `constraints` prefixed "Assumed:", and retires the question. Rendered
+    after `current` and before `feedback`.
 
     `current` is the understanding the customer is refining, including any
     edits they made to it by hand. Without it a refinement round re-derives
@@ -102,6 +138,15 @@ def generate_requirements(
     content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
     if current is not None and (current_text := current.to_prompt()):
         content += f"\n\nThe current understanding, as the customer has edited it:\n{current_text}"
+    if answers:
+        # Each pair rides the prompt verbatim; a blank answer carries the
+        # skip contract (assume, record "Assumed:" in constraints, retire the
+        # question) so the system prompt's folding rules have one shape to act on.
+        qa_lines = ["The customer was asked these clarifying questions:"]
+        for qa in answers:
+            qa_lines.append(f"Q: {qa.question}")
+            qa_lines.append(f"A: {qa.answer.strip() or _UNANSWERED_NOTE}")
+        content += "\n\n" + "\n".join(qa_lines)
     if feedback:
         content += f"\n\nAdditional information from the customer:\n{feedback}"
 
