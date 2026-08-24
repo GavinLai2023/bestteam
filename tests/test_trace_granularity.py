@@ -859,3 +859,55 @@ def test_parallel_knowledge_base_agent_is_forced_and_checked_too():
     assert [e.agent for e in grounding] == ["kb"]
     assert grounding[0].data["cited"] == 1
     assert grounding[0].data["verified"] == 0  # the model never searched, so the tag is unverified
+
+
+def test_hierarchical_subordinate_with_a_knowledge_base_tool_emits_grounding_checked():
+    """The `grounding_checked` emission lives at the end of `_run_agent`, which
+    `_make_delegate_tool` shares with `_agent_node` -- so a HIERARCHICAL
+    subordinate carrying a knowledge-base tool gets checked too, tagged with
+    its own name, while the manager (no knowledge-base tool of its own)
+    produces none."""
+    researcher_model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="Refunds take 14 days [source: handbook.pdf]. See also [source: made-up.pdf]."),
+        ]
+    )
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=researcher_model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    manager_model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "delegate_to_researcher", "args": {"task": "look into X"}, "id": "call_1"}
+                ],
+            ),
+            AIMessage(content="Final report based on: research findings"),
+        ]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+    pipeline = Pipeline(name="wf", steps=[team])
+
+    events = list(pipeline.stream("do the thing"))
+    grounding = [e for e in events if e.type == "grounding_checked"]
+
+    assert [e.agent for e in grounding] == ["researcher"]
+    assert grounding[0].data == {
+        "searches": 1,
+        "hit_count": 1,
+        "cited": 2,
+        "verified": 1,
+        "unverified": ["made-up.pdf"],
+    }
