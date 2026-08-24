@@ -22,6 +22,13 @@ class TraceEvent:
     was searched, adding {"query": str (≤200 chars), "hit_count": int,
     "sources": List[str]} and a `summary` built from those; each source is a
     filename plus its page/heading citation label, never body text),
+    "grounding_checked" (`data` = {"searches": int, "hit_count": int,
+    "cited": int, "verified": int, "unverified": List[str]} -- emitted once
+    per turn of an agent that has a knowledge-base tool bound, after its last
+    tool event and before its `agent_completed`: how many `[source: …]` tags
+    its final text carries, how many name a citation its own searches
+    returned, and the ones that do not (≤10, each ≤200 chars); citation
+    labels only, never text -- see `core/grounding.py`),
     "delegation_started"/"delegation_completed"
     (`data` = {"to": str, "task_summary"/"summary": str}, emitted on the
     HIERARCHICAL manager), "subagent_started"/"subagent_completed" (emitted

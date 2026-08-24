@@ -6,6 +6,7 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage
 
 from bestteam import Agent, CollaborationMode, Team, Pipeline
+from bestteam.core.tool_context import report_trace
 
 pytestmark = pytest.mark.unit
 
@@ -656,3 +657,380 @@ def test_kb_tool_completed_hits_are_bounded_and_present_when_empty():
     empty = _kb_tool_completed(_policies_kb(), "quantum chromodynamics")
     assert empty["hits"] == []
     assert empty["ingestion_job_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Grounding-lite (core/grounding.py): a knowledge-base agent searches first,
+# and its [source: …] tags are checked against what its searches returned.
+# ---------------------------------------------------------------------------
+
+
+def _stub_knowledge_base_tool(citations):
+    """A tool shaped like `make_knowledge_base_tool`'s: the marker the adapter
+    dispatches on, and a `report_trace` call with the fields the real tool
+    reports -- so these tests need no documents on disk."""
+
+    def product_docs(query: str) -> str:
+        report_trace(
+            query=query,
+            hit_count=len(citations),
+            sources=list(dict.fromkeys(citations))[:10],
+            citations=list(citations),
+            summary=f"{len(citations)} result(s)",
+        )
+        return "\n".join(f"[source: {c}]\nexcerpt" for c in citations)
+
+    product_docs.__bestteam_tool_kind__ = "knowledge_base"
+    return product_docs
+
+
+class _RecordingToolCallingChatModel(_FakeToolCallingChatModel):
+    """Records every `tool_choice` passed to `bind_tools`."""
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        calls = getattr(self, "bind_tools_calls", None) or []
+        calls.append(tool_choice)
+        object.__setattr__(self, "bind_tools_calls", calls)
+        return self
+
+
+def _single_agent_pipeline(agent):
+    return Pipeline(name="wf", steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)])
+
+
+def test_knowledge_base_agent_emits_grounding_checked_between_tool_completed_and_agent_completed():
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(
+                content="Refunds take 14 days [source: handbook.pdf, p.3 § Refunds]. "
+                "Holidays are 25 days [source: handbook.pdf, p.99]."
+            ),
+        ]
+    )
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3 § Refunds", "policies.md"])],
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("what is the refund window?"))
+    types = [e.type for e in events]
+
+    assert types.index("tool_completed") < types.index("grounding_checked") < types.index("agent_completed")
+    grounding = next(e for e in events if e.type == "grounding_checked")
+    assert grounding.agent == "a"
+    assert grounding.data == {
+        "searches": 1,
+        "hit_count": 2,
+        "cited": 2,
+        "verified": 1,
+        "unverified": ["handbook.pdf, p.99"],
+    }
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert "citations" not in tool_completed.data
+    assert tool_completed.data["sources"] == ["handbook.pdf, p.3 § Refunds", "policies.md"]
+
+
+def test_agent_without_a_knowledge_base_tool_emits_no_grounding_event():
+    def echo_tool(text: str) -> str:
+        return f"echoed: {text}"
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "echo_tool", "args": {"text": "hi"}, "id": "call_1"}]),
+            AIMessage(content="Done [source: made-up.pdf]."),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[echo_tool])
+
+    events = list(_single_agent_pipeline(agent).stream("do the thing"))
+
+    assert "grounding_checked" not in [e.type for e in events]
+
+
+def test_knowledge_base_agent_that_never_searches_reports_zero_searches_and_all_tags_unverified():
+    model = _FakeToolCallingChatModel(responses=[AIMessage(content="It is 14 days [source: handbook.pdf].")])
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3"])],
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+    grounding = next(e for e in events if e.type == "grounding_checked")
+
+    assert grounding.data == {
+        "searches": 0,
+        "hit_count": 0,
+        "cited": 1,
+        "verified": 0,
+        "unverified": ["handbook.pdf"],
+    }
+
+
+def test_two_searches_accumulate_citations_and_hit_counts():
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"},
+                    {"name": "product_docs", "args": {"query": "holidays"}, "id": "call_2"},
+                ],
+            ),
+            AIMessage(content="[source: a.md] [source: b.md] [source: c.md]"),
+        ]
+    )
+    # One tool, two calls: both return the same two labels, so hit_count sums
+    # to 4 while the distinct labels stay two.
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["a.md", "b.md"])],
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("q"))
+    grounding = next(e for e in events if e.type == "grounding_checked")
+
+    assert grounding.data["searches"] == 2
+    assert grounding.data["hit_count"] == 4
+    assert grounding.data["cited"] == 3
+    assert grounding.data["verified"] == 2
+    assert grounding.data["unverified"] == ["c.md"]
+
+
+def test_sequential_knowledge_base_agent_forces_tool_choice_on_first_call():
+    model = _RecordingToolCallingChatModel(responses=[AIMessage(content="answer")])
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    _single_agent_pipeline(agent).run("q")
+
+    assert "required" in model.bind_tools_calls
+
+
+def test_sequential_agent_with_only_an_ordinary_tool_is_not_forced():
+    def echo_tool(text: str) -> str:
+        return text
+
+    model = _RecordingToolCallingChatModel(responses=[AIMessage(content="answer")])
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[echo_tool])
+
+    _single_agent_pipeline(agent).run("q")
+
+    assert model.bind_tools_calls == [None]
+
+
+def test_parallel_knowledge_base_agent_is_forced_and_checked_too():
+    model = _RecordingToolCallingChatModel(responses=[AIMessage(content="answer [source: handbook.pdf]")])
+    kb_agent = Agent(
+        name="kb",
+        role="role-kb",
+        goal="goal-kb",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+    other = _agent("other", "other output")
+    pipeline = Pipeline(
+        name="wf",
+        steps=[Team(name="team", agents=[kb_agent, other], mode=CollaborationMode.PARALLEL)],
+    )
+
+    events = list(pipeline.stream("q"))
+
+    assert "required" in model.bind_tools_calls
+    grounding = [e for e in events if e.type == "grounding_checked"]
+    assert [e.agent for e in grounding] == ["kb"]
+    assert grounding[0].data["cited"] == 1
+    assert grounding[0].data["verified"] == 0  # the model never searched, so the tag is unverified
+
+
+def test_hierarchical_subordinate_with_a_knowledge_base_tool_emits_grounding_checked():
+    """The `grounding_checked` emission lives at the end of `_run_agent`, which
+    `_make_delegate_tool` shares with `_agent_node` -- so a HIERARCHICAL
+    subordinate carrying a knowledge-base tool gets checked too, tagged with
+    its own name, while the manager (no knowledge-base tool of its own)
+    produces none."""
+    researcher_model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="Refunds take 14 days [source: handbook.pdf]. See also [source: made-up.pdf]."),
+        ]
+    )
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=researcher_model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    manager_model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "delegate_to_researcher", "args": {"task": "look into X"}, "id": "call_1"}
+                ],
+            ),
+            AIMessage(content="Final report based on: research findings"),
+        ]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(name="team", agents=[researcher], mode=CollaborationMode.HIERARCHICAL, manager=manager)
+    pipeline = Pipeline(name="wf", steps=[team])
+
+    events = list(pipeline.stream("do the thing"))
+    grounding = [e for e in events if e.type == "grounding_checked"]
+
+    assert [e.agent for e in grounding] == ["researcher"]
+    assert grounding[0].data == {
+        "searches": 1,
+        "hit_count": 1,
+        "cited": 2,
+        "verified": 1,
+        "unverified": ["made-up.pdf"],
+    }
+
+
+class _ThinkingModeChatModel(_FakeToolCallingChatModel):
+    """Refuses a forced `tool_choice` the way DeepSeek's reasoning models do
+    (the same shape as `tests/test_hierarchical_team.py`'s identical class,
+    which only exercises the hierarchical manager/delegate forcing sites --
+    this one exercises the SEQUENTIAL/PARALLEL forcing site grounding-lite
+    added).
+
+    `bind_tools` accepts the argument -- the refusal is a 400 from the
+    provider when the call is actually made, not a bind-time error -- so the
+    unforced binding keeps working and only the forced one fails.
+    """
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        if tool_choice is None:
+            return self
+        refusing = _ThinkingModeChatModel(responses=self.responses)
+        object.__setattr__(refusing, "refuses", True)
+        return refusing
+
+    def invoke(self, input, *args, **kwargs):
+        if getattr(self, "refuses", False):
+            raise Exception(
+                "Error code: 400 - {'error': {'message': 'Thinking mode does not "
+                "support this tool_choice', 'type': 'invalid_request_error'}}"
+            )
+        return super().invoke(input, *args, **kwargs)
+
+
+def test_sequential_knowledge_base_agent_with_forcing_refused_still_produces_an_answer():
+    """This is grounding-lite's highest-blast-radius change: forcing
+    `tool_choice="required"` now applies to a knowledge-base agent on every
+    team mode, not only a hierarchical manager/delegate's first call. A
+    thinking-mode model that 400s on a forced tool_choice must still produce
+    an answer rather than failing the whole run -- `_first_call`'s fallback
+    (already covered for the hierarchical paths by
+    `tests/test_hierarchical_team.py::test_a_manager_that_refuses_forced_tool_choice_still_produces_an_answer`)
+    has to hold here too."""
+    model = _ThinkingModeChatModel(responses=[AIMessage(content="An answer without searching")])
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    result = _single_agent_pipeline(agent).run("refund window?")
+
+    assert result.output == "An answer without searching"
+
+
+def test_tool_loop_exhausted_emits_no_grounding_checked_event():
+    """The grounding_checked emission sits after the "tool loop exhausted"
+    early return in `_run_agent` (see `_tool_loop_exhausted_notice`) -- a
+    turn that never settles on a text answer because the tool loop ran out
+    must not get a grounding_checked event either."""
+    from bestteam.adapters.langgraph_adapter import _tool_loop_exhausted_notice
+
+    # A single scripted response that always re-requests the same tool call;
+    # FakeMessagesListChatModel cycles it, so the tool loop never settles on
+    # a text-only answer and _MAX_TOOL_ITERATIONS is exhausted (same pattern
+    # as test_hierarchical_team.py::test_manager_delegate_loop_is_bounded).
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+        ]
+    )
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf"])],
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+
+    assert "grounding_checked" not in [e.type for e in events]
+    agent_completed = next(e for e in events if e.type == "agent_completed")
+    assert agent_completed.data == _tool_loop_exhausted_notice("a")
+
+
+def test_a_raising_knowledge_base_tool_call_contributes_nothing_to_grounding():
+    """A knowledge-base tool call that raises must not count as a search:
+    `kb_searches`/`kb_hit_count`/`kb_citations` are only updated on the tool
+    loop's success (`else`) branch in `_run_agent`, never in the `except`
+    branch. The turn still emits grounding_checked, with searches: 0 -- the
+    model's own [source: …] tag (if any) is checked against an empty
+    citation set and reported unverified."""
+
+    def product_docs(query: str) -> str:
+        raise RuntimeError("boom")
+
+    product_docs.__bestteam_tool_kind__ = "knowledge_base"
+
+    model = _FakeToolCallingChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+            ),
+            AIMessage(content="I could not find an answer [source: handbook.pdf]."),
+        ]
+    )
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[product_docs])
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+
+    tool_completed = next(e for e in events if e.type == "tool_completed")
+    assert tool_completed.data["success"] is False
+
+    grounding = next(e for e in events if e.type == "grounding_checked")
+    assert grounding.data == {
+        "searches": 0,
+        "hit_count": 0,
+        "cited": 1,
+        "verified": 0,
+        "unverified": ["handbook.pdf"],
+    }

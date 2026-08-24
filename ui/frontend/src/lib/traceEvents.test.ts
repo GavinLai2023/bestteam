@@ -43,3 +43,31 @@ describe('diagnostic trace events', () => {
     ).toBe(`turn 3 · ${'x'.repeat(200)}…`)
   })
 })
+
+// Grounding-lite (core/grounding.py): one event per knowledge-base agent
+// turn, saying whether its [source: …] tags name passages it retrieved.
+describe('grounding_checked', () => {
+  it('has a technical label', () => {
+    expect(EVENT_LABELS.grounding_checked).toBe('📎 grounding checked')
+  })
+
+  it('summarises the counts and lists the unverified labels', () => {
+    expect(
+      renderEventData({
+        type: 'grounding_checked',
+        agent: 'a',
+        data: { searches: 1, hit_count: 3, cited: 2, verified: 1, unverified: ['handbook.pdf, p.99'] },
+      }),
+    ).toBe('1 search · 3 passages · 2 cited · 1 verified — unverified: handbook.pdf, p.99')
+  })
+
+  it('omits the unverified clause when every citation was verified', () => {
+    expect(
+      renderEventData({
+        type: 'grounding_checked',
+        agent: 'a',
+        data: { searches: 2, hit_count: 4, cited: 2, verified: 2, unverified: [] },
+      }),
+    ).toBe('2 searches · 4 passages · 2 cited · 2 verified')
+  })
+})

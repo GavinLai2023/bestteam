@@ -119,6 +119,10 @@ implemented** — don't assume they exist:
   failure path too. Embedding token counts are
   *estimated* (±30%) — no provider reports them — and a local reranker is $0,
   so it is not recorded.
+  **Grounding is lite**: a knowledge-base agent's first model call is forced
+  to use a tool and its answer's `[source: …]` tags are checked against its
+  own hits (`grounding_checked` event, `core/grounding.py`) — recorded, never
+  enforced; no grader model, no retry, no answer-level evaluation.
 - **Per-user memory recall is BM25-only by default; opt-in hybrid (BM25 +
   vector, RRF-fused, with type-aware recency decay) is available via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`** — query expansion and reranking are

@@ -171,6 +171,69 @@ def test_cancel_between_buffered_event_and_its_agent_completed_preserves_usage(t
     assert usage_records[0].output_tokens == 5
 
 
+class _CancelBetweenGroundingCheckedAndAgentCompleted:
+    """Reproduces the grounding_checked usage-loss bug: cancellation lands
+    between a node's buffered grounding_checked event (see
+    core/grounding.py, emitted at the end of a knowledge-base agent's turn)
+    and the agent_completed that follows it and carries that node's usage.
+    The paid call already happened by the time either event is yielded, so
+    usage must survive."""
+
+    name = "wf"
+
+    def __init__(self, run_id, events):
+        self._run_id = run_id
+        self._events = events
+
+    def stream(self, *args, **kwargs):
+        yield self._events[0]  # run_started
+        registry.request_cancel(self._run_id)
+        yield self._events[1]  # grounding_checked (buffered, same node)
+        yield self._events[2]  # agent_completed carrying usage for that node
+        yield self._events[3]  # next node's event -- must never be delivered
+
+
+def test_cancel_between_grounding_checked_and_its_agent_completed_preserves_usage(tmp_path):
+    from ui.backend.db.usage import list_usage_for_run
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    run = registry.create("wf", "in")
+    events = [
+        TraceEvent(type="run_started", pipeline="wf"),
+        TraceEvent(
+            type="grounding_checked",
+            pipeline="wf",
+            agent="a",
+            data={"searches": 1, "hit_count": 1, "cited": 1, "verified": 1, "unverified": []},
+        ),
+        TraceEvent(
+            type="agent_completed",
+            pipeline="wf",
+            agent="a",
+            data="a-output",
+            usage=[{"model": "m", "input_tokens": 10, "output_tokens": 5}],
+        ),
+        TraceEvent(type="agent_completed", pipeline="wf", agent="b", data="should-not-be-delivered"),
+    ]
+
+    run_in_background(
+        run.id, _CancelBetweenGroundingCheckedAndAgentCompleted(run.id, events), "in", engine=engine
+    )
+
+    with Session() as s:
+        row = s.get(Run, run.id)
+        assert row.status == "cancelled"
+        rows = s.query(TraceEventRecord).filter_by(run_id=run.id).order_by(TraceEventRecord.seq).all()
+        usage_records = list_usage_for_run(s, run.id)
+
+    types = [r.type for r in rows]
+    assert types == ["run_queued", "run_started", "grounding_checked", "agent_completed", "run_cancelled"]
+    assert len(usage_records) == 1, "usage for the already-completed node must not be dropped by cancellation"
+    assert usage_records[0].input_tokens == 10
+    assert usage_records[0].output_tokens == 5
+
+
 class _CancelBetweenRunStartedAndMemoryRecalled:
     """Reproduces the memory_recalled usage-loss bug: cancellation is
     discovered right after run_started, before the memory_recalled event --

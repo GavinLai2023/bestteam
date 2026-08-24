@@ -128,15 +128,26 @@ the hybrid test is a smoke test and asserts no quality. The **retrieval trace
 now exists too** (P0-5): `make_knowledge_base_tool`'s wrapper calls `search()`
 and `format_results()` itself (instead of `query()`, which is exactly those
 two) so it can report the retrieval — `query` (first 200 chars),
-`hit_count`, `sources` (de-duplicated `_citation`s, at most 10) and a
-`summary` — through `core/tool_context.py`, a contextvar-scoped box the
-adapter's tool loop opens around each call (`ToolCallContext(trace, usage)`,
-`report_trace`/`add_usage`, all no-ops when no run is active, so an
-SDK-direct `kb.query()` is unaffected). The wrapper is marked
-`__bestteam_tool_kind__ = "knowledge_base"` (a marker, not a name set — a KB
-tool is named after its KB), and the adapter builds that call's
-`tool_completed` from the report alone: a KB tool's event never carries
-`_summarize(result)`, i.e. never the indexed documents' own text. `usage` is
+`hit_count`, `sources` (de-duplicated `_citation`s, at most 10), a
+`summary`, and `citations` (every `_citation` the search returned, in rank
+order, unbounded and not de-duplicated — grounding-lite's
+`core/grounding.py::check_grounding` needs the whole list, not the trace
+event's bounded `sources`) — through `core/tool_context.py`, a
+contextvar-scoped box the adapter's tool loop opens around each call
+(`ToolCallContext(trace, usage)`, `report_trace`/`add_usage`, all no-ops
+when no run is active, so an SDK-direct `kb.query()` is unaffected). The
+wrapper is marked `__bestteam_tool_kind__ = "knowledge_base"` (a marker, not
+a name set — a KB tool is named after its KB), and the adapter builds that
+call's `tool_completed` from the report — but **only the named fields it
+knows about** (`query`/`hit_count`/`sources`/`summary`/`ingestion_job_id`/
+`hits`), not the whole dict: `citations` rides the report solely for the
+adapter's own grounding check and never reaches a trace event, same as a KB
+tool's event never carrying `_summarize(result)`, i.e. never the indexed
+documents' own text. A hand-written custom knowledge-base tool that carries
+the `__bestteam_tool_kind__` marker but does not call `report_trace(...,
+citations=...)` will have every `[source: …]` tag in its agent's answers
+reported unverified by grounding-lite — either report the field or leave the
+marker off. `usage` is
 the same channel's other half, and is now in use (P0-4): the tool loop drains
 it onto the calling agent's `agent_completed.usage` so a KB's query embedding
 and query-expansion calls are metered -- see "Metering a knowledge base's

@@ -488,6 +488,28 @@ def test_make_knowledge_base_tool_name_and_delegation(docs_kb):
     assert tool("apples orchards") == docs_kb.query("apples orchards")
 
 
+def test_tool_reports_every_citation_while_sources_stay_capped(tmp_path):
+    """The adapter's grounding check needs every label the model was shown,
+    not the ten the trace keeps -- otherwise a top_k above 10 would make a
+    correctly cited passage look fabricated."""
+    from bestteam.core.knowledge_base import _MAX_TRACE_SOURCES, _Chunk
+    from bestteam.core.tool_context import tool_call_context
+
+    chunks = [
+        _Chunk(source=f"doc{i}.md", text=f"apples orchard harvest {i}", page=None, heading=None)
+        for i in range(_MAX_TRACE_SOURCES + 3)
+    ]
+    kb = LocalFolderKnowledgeBase.from_chunks("docs", chunks, top_k=_MAX_TRACE_SOURCES + 3)
+    tool = make_knowledge_base_tool(kb)
+
+    with tool_call_context() as ctx:
+        tool("apples orchard harvest")
+
+    assert len(ctx.trace["sources"]) == _MAX_TRACE_SOURCES
+    assert len(ctx.trace["citations"]) == _MAX_TRACE_SOURCES + 3
+    assert ctx.trace["citations"][: _MAX_TRACE_SOURCES] == ctx.trace["sources"]
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------

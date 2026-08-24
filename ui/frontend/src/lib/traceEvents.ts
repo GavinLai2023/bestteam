@@ -69,6 +69,9 @@ export const EVENT_LABELS: Record<string, string> = {
   memory_recalled: '🧠 memory recalled',
   memory_recorded: '🧠 memory recorded',
   memory_failed: '🧠 memory failed',
+  // Grounding-lite (core/grounding.py): a knowledge-base agent's citations
+  // checked against its own searches.
+  grounding_checked: '📎 grounding checked',
   // Admin diagnostic re-runs only (core/trace.py) -- never on a customer run.
   agent_prompt: '📝 prompt',
   model_turn: '💬 model turn',
@@ -123,6 +126,18 @@ export function renderEventData(event: TraceEvent): string | null {
       const content = (data.content as string | undefined) ?? ''
       if (content) parts.push(content.length > 200 ? `${content.slice(0, 200)}…` : content)
       return parts.join(' · ')
+    }
+    case 'grounding_checked': {
+      const searches = (data.searches as number | undefined) ?? 0
+      const parts = [
+        `${searches} ${searches === 1 ? 'search' : 'searches'}`,
+        `${(data.hit_count as number | undefined) ?? 0} passages`,
+        `${(data.cited as number | undefined) ?? 0} cited`,
+        `${(data.verified as number | undefined) ?? 0} verified`,
+      ]
+      const unverified = (data.unverified as string[] | undefined) ?? []
+      const line = parts.join(' · ')
+      return unverified.length > 0 ? `${line} — unverified: ${unverified.join(', ')}` : line
     }
     default:
       return JSON.stringify(data)

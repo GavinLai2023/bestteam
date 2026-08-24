@@ -6,6 +6,25 @@
 
 ## Done
 
+- **Grounding-lite** (2026-08-24, spec
+  `docs/superpowers/specs/2026-08-24-grounding-lite-design.md`). The
+  2026-08-24 external review's second P0: a SEQUENTIAL/PARALLEL agent was
+  merely *offered* its knowledge base. Now an agent with a knowledge-base tool
+  bound (`_has_knowledge_base_tool`) has its first model call forced to
+  `tool_choice="required"` on every mode, with `_first_call`'s existing
+  refusal fallback, and its final text's `[source: …]` tags are compared with
+  the citation labels its own searches returned (`core/grounding.py`;
+  the tool reports them in full via `report_trace(citations=…)`, the trace
+  event still keeps ten `sources`). One `grounding_checked` event per turn:
+  `searches`, `hit_count`, `cited`, `verified`, `unverified` (≤10, ≤200
+  chars each). Verified = exact label, or a bare filename among the hits; a
+  page/heading the search never returned is unverified. Recorded, never
+  acted on — no retry, no refusal, no `needs_attention`, no schema. Rulings:
+  force only for a knowledge-base tool (not any tool); `required`, not a
+  named tool; check in the adapter so SDK users get it; no read surface
+  beyond the technical trace (`📎 grounding checked` label). Deferred:
+  regenerating/refusing an ungrounded answer, a grader model, answer-level
+  evaluation.
 - **A trace's knowledge-base ids keep resolving, and a customer can restore
   the previous upload** (2026-08-24). PR #86 put `ingestion_job_id` and each
   hit's `chunk_id` into every KB `tool_completed` event, and
