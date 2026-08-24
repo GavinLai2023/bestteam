@@ -1001,3 +1001,153 @@ def test_a_failed_job_is_never_carried_forward(db, engine, tmp_path):
         ingestion.embed_documents_in_batches = original
 
     assert calls == [["Refunds within 30 days."]]
+
+
+# --- Generations a run's trace references are kept, not pruned ----------------
+
+from ui.backend.db.models import Run, RunKnowledgeGeneration
+from ui.backend.db.run_knowledge_generations import record as record_generation
+
+
+def _completed_generation(db, kb, tmp_path, version, filename="doc.txt", embedding='[0.1, 0.2]'):
+    """One completed job with one chunked document (and a vector, so the
+    prune's 'vectors nulled' branch is observable) and its version directory."""
+    job = IngestionJob(
+        kb_id=kb.id, org_id=1, version=version, status="completed", file_count=1,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100,
+    )
+    db.add(job)
+    db.flush()
+    doc = KnowledgeDocument(
+        kb_id=kb.id, ingestion_job_id=job.id, filename=filename,
+        content_hash=f"hash-{version}-{filename}", size_bytes=10, status="chunked",
+    )
+    db.add(doc)
+    db.flush()
+    db.add(KnowledgeChunk(
+        document_id=doc.id, kb_id=kb.id, chunk_index=0, text=f"text of {version}",
+        embedding_json=embedding,
+    ))
+    db.commit()
+    (tmp_path / version).mkdir()
+    return job
+
+
+def _reference(db, job, run_id="r1"):
+    if db.get(Run, run_id) is None:
+        db.add(Run(id=run_id, pipeline="wf", input="in", status="completed", org_id=1))
+        db.flush()
+    record_generation(db, run_id, job.id)
+    db.commit()
+
+
+def test_prune_keeps_a_referenced_old_generations_rows_without_its_vectors_or_files(db, tmp_path):
+    kb = _make_kb(db, name="audited")
+    job1 = _completed_generation(db, kb, tmp_path, "v1")
+    job2 = _completed_generation(db, kb, tmp_path, "v2")
+    job3 = _completed_generation(db, kb, tmp_path, "v3")
+    _reference(db, job1)
+
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+
+    # job1 is outside the keep-2 window but a run's trace names it: rows stay.
+    assert db.get(IngestionJob, job1.id) is not None
+    docs = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job1.id).all()
+    assert len(docs) == 1
+    chunks = db.query(KnowledgeChunk).filter_by(document_id=docs[0].id).all()
+    assert len(chunks) == 1 and chunks[0].text == "text of v1"
+    # An audit resolves a chunk id to text, page, heading, filename -- never a
+    # vector, which is the bulk of the storage.
+    assert chunks[0].embedding_json is None
+    assert not (tmp_path / "v1").exists()
+    # The window itself is untouched.
+    for job in (job2, job3):
+        (chunk,) = db.query(KnowledgeChunk).join(KnowledgeDocument).filter(
+            KnowledgeDocument.ingestion_job_id == job.id
+        ).all()
+        assert chunk.embedding_json == '[0.1, 0.2]'
+        assert (tmp_path / job.version).is_dir()
+
+
+def test_prune_is_idempotent_over_an_audit_only_generation(db, tmp_path):
+    kb = _make_kb(db, name="audited_twice")
+    job1 = _completed_generation(db, kb, tmp_path, "v1")
+    _completed_generation(db, kb, tmp_path, "v2")
+    _completed_generation(db, kb, tmp_path, "v3")
+    _reference(db, job1)
+
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+
+    assert db.get(IngestionJob, job1.id) is not None
+    assert db.query(KnowledgeDocument).filter_by(ingestion_job_id=job1.id).count() == 1
+
+
+def test_an_unreferenced_old_generation_is_still_deleted(db, tmp_path):
+    kb = _make_kb(db, name="unreferenced")
+    job1 = _completed_generation(db, kb, tmp_path, "v1")
+    _completed_generation(db, kb, tmp_path, "v2")
+    _completed_generation(db, kb, tmp_path, "v3")
+
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+
+    assert db.get(IngestionJob, job1.id) is None
+    assert db.query(KnowledgeDocument).filter_by(ingestion_job_id=job1.id).count() == 0
+    assert not (tmp_path / "v1").exists()
+
+
+def test_a_released_reference_lets_the_next_prune_delete_the_generation(db, tmp_path):
+    from ui.backend.db.run_knowledge_generations import delete_for_run
+
+    kb = _make_kb(db, name="released")
+    job1 = _completed_generation(db, kb, tmp_path, "v1")
+    _completed_generation(db, kb, tmp_path, "v2")
+    _completed_generation(db, kb, tmp_path, "v3")
+    _reference(db, job1)
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+    assert db.get(IngestionJob, job1.id) is not None
+
+    delete_for_run(db, "r1")  # what retention.purge_run does
+    db.commit()
+    ingestion._prune_old_ingestion_versions(db, kb.id, tmp_path)
+
+    assert db.get(IngestionJob, job1.id) is None
+
+
+def test_reusable_documents_looks_at_the_newest_two_completed_jobs(db, tmp_path):
+    # Restoring the previous upload stages the second-newest generation's
+    # files; for that to cost nothing its chunks have to be reusable too.
+    kb = _make_kb(db, name="two_jobs")
+    _completed_generation(db, kb, tmp_path, "v1", filename="old.txt")
+    job2 = _completed_generation(db, kb, tmp_path, "v2", filename="b.txt")
+    job3 = _completed_generation(db, kb, tmp_path, "v3", filename="c.txt")
+    new_job = IngestionJob(
+        kb_id=kb.id, org_id=1, version="v4", status="queued", file_count=2,
+        kb_type="local_folder", chunk_size=1000, chunk_overlap=100,
+    )
+    db.add(new_job)
+    db.commit()
+
+    reusable = ingestion._reusable_documents(db, kb.id, new_job)
+
+    assert set(reusable) == {("b.txt", f"hash-v2-b.txt"), ("c.txt", f"hash-v3-c.txt")}
+    assert reusable[("c.txt", "hash-v3-c.txt")][0].text == "text of v3"
+    assert reusable[("b.txt", "hash-v2-b.txt")][0].text == "text of v2"
+    # The third-newest job (audit-only, if it survives at all) is never a source.
+    assert ("old.txt", "hash-v1-old.txt") not in reusable
+    # A non-carryable job in the window contributes nothing.
+    job2.chunk_size = 500
+    db.commit()
+    assert set(ingestion._reusable_documents(db, kb.id, new_job)) == {("c.txt", "hash-v3-c.txt")}
+    del job3
+
+
+def test_deleting_kb_ingestion_data_drops_its_generation_references(db, tmp_path):
+    kb = _make_kb(db, name="deleted")
+    job1 = _completed_generation(db, kb, tmp_path, "v1")
+    _reference(db, job1)
+
+    ingestion.delete_kb_ingestion_data(db, kb.id)
+    db.commit()
+
+    assert db.query(RunKnowledgeGeneration).count() == 0
