@@ -7,7 +7,7 @@ semantically relevant chunk with zero keyword overlap) can still appear. See
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from ..exceptions import ConfigurationError
 from .embeddings import (
@@ -19,7 +19,10 @@ from .embeddings import (
 )
 from .knowledge_base import (
     KnowledgeBase,
+    RetrievalHit,
     _Chunk,
+    _generation_of,
+    _hit_from_candidate,
     _load_document_chunks,
     _query_variants,
     _rerank_candidates,
@@ -181,6 +184,7 @@ class HybridKnowledgeBase(KnowledgeBase):
         # a caller mutating the list it handed in must not reshape this KB's
         # index behind its (already-built) BM25 index and vector matrix.
         self._chunks = list(chunks)
+        self.ingestion_job_id = _generation_of(self._chunks)
         self._chunk_tokens = [tokenize(chunk.text) for chunk in self._chunks]
         self._chunk_terms = [significant_terms(tokens) for tokens in self._chunk_tokens]
         self._bm25 = BM25Okapi(self._chunk_tokens)
@@ -234,7 +238,7 @@ class HybridKnowledgeBase(KnowledgeBase):
 
         return [cache[key] for key in keys]
 
-    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[int]:
+    def _bm25_leg(self, query_text: str, fetch_k: int) -> List[Tuple[int, float]]:
         query_tokens = tokenize(query_text)
         query_terms = significant_terms(query_tokens)
         scores = self._bm25.get_scores(query_tokens)
@@ -245,9 +249,11 @@ class HybridKnowledgeBase(KnowledgeBase):
             if query_terms & chunk_terms
         ]
         matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-        return [idx for _overlap, _score, idx in matches[:fetch_k]]
+        return [(idx, float(score)) for _overlap, score, idx in matches[:fetch_k]]
 
-    def _vector_leg(self, query_text: str, fetch_k: int) -> List[int]:
+    def _vector_leg(self, query_text: str, fetch_k: int) -> List[Tuple[int, float]]:
+        """`(chunk index, cosine score)` pairs, best first, at most `fetch_k`,
+        minus any below `score_threshold`."""
         import numpy as np
 
         query_vec = np.array(self._embeddings.embed_query(query_text), dtype=np.float64)
@@ -263,16 +269,14 @@ class HybridKnowledgeBase(KnowledgeBase):
         indices = [int(i) for i in top_indices]
         if self.score_threshold is not None:
             indices = [i for i in indices if scores[i] >= self.score_threshold]
-        return indices
+        return [(i, float(scores[i])) for i in indices]
 
-    def search(self, query: str, top_k: Optional[int] = None) -> List[_Chunk]:
+    def search_hits(self, query: str, top_k: Optional[int] = None) -> List[RetrievalHit]:
         top_k = top_k or self.default_top_k
         variants = _query_variants(query, self.query_expansion_model, self.query_expansion_count)
         fetch_k = _rerank_fetch_k(top_k, self._candidate_k, self._reranker)
-        ranked_indices = _rrf_retrieve(variants, [self._bm25_leg, self._vector_leg], fetch_k)
-        # The score half of each tuple is a synthetic rank-derived placeholder,
-        # not a real retrieval score -- RRF has already re-ordered by fused
-        # rank, and _rerank_candidates only reads candidate order/chunk.text.
-        results = [(float(-i), self._chunks[idx]) for i, idx in enumerate(ranked_indices[:fetch_k])]
-        results = _rerank_candidates(query, results, self._reranker, top_k)
-        return [chunk for _score, chunk in results]
+        candidates = _rrf_retrieve(
+            variants, [("bm25", self._bm25_leg), ("vector", self._vector_leg)], fetch_k
+        )
+        hits = [_hit_from_candidate(self._chunks, candidate) for candidate in candidates[:fetch_k]]
+        return _rerank_candidates(query, hits, self._reranker, top_k)

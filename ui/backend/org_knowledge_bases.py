@@ -480,7 +480,7 @@ def search_own_knowledge_base(
 
     with tool_call_context() as ctx:
         try:
-            chunks = kb.search(req.query, req.top_k)
+            hits = kb.search_hits(req.query, req.top_k)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "Test search against knowledge base '%s' failed", item_name, exc_info=True
@@ -499,18 +499,28 @@ def search_own_knowledge_base(
             # loop follows when it drains `tool_ctx.usage`.
             _safe_record_search_usage(db, ctx.usage, org.id)
 
+    # The same identity and scores the agent's trace event records (see
+    # `make_knowledge_base_tool`), so a passage shown here can be tied to its
+    # chunk row and the ingestion job that wrote it. Scores, not model names:
+    # nothing here says which embedding or rerank model the collection uses.
     return {
         "query": req.query,
-        "hit_count": len(chunks),
+        "hit_count": len(hits),
+        "ingestion_job_id": getattr(kb, "ingestion_job_id", None),
         "results": [
             {
-                "citation": _citation(chunk),
-                "source": chunk.source,
-                "page": chunk.page,
-                "heading": chunk.heading,
-                "text": chunk.text[:_MAX_RESULT_TEXT_CHARS],
+                "citation": _citation(hit.chunk),
+                "source": hit.chunk.source,
+                "page": hit.chunk.page,
+                "heading": hit.chunk.heading,
+                "text": hit.chunk.text[:_MAX_RESULT_TEXT_CHARS],
+                "chunk_id": hit.chunk.chunk_id,
+                "document_id": hit.chunk.document_id,
+                "fused_score": round(hit.fused_score, 4),
+                "leg_scores": {name: round(score, 4) for name, score in hit.leg_scores.items()},
+                "rerank_score": None if hit.rerank_score is None else round(hit.rerank_score, 4),
             }
-            for chunk in chunks
+            for hit in hits
         ],
     }
 

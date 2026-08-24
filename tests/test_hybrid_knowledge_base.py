@@ -228,3 +228,28 @@ def test_init_raises_rank_bm25_missing_before_chunk_param_validation(tmp_path):
                 "kb", tmp_path, embedding_model="fake:8",
                 chunk_size=0, chunk_overlap=0
             )
+
+
+# ---------------------------------------------------------------------------
+# search_hits(): which leg found a chunk, and how it was fused
+# ---------------------------------------------------------------------------
+
+def test_hybrid_search_hits_names_the_leg_that_surfaced_each_chunk(tmp_path):
+    """"money back guarantee" shares no token with the query "refund", so only
+    the vector leg can surface it; "refund window is 30 days" is found by
+    both. The hit says so, per chunk."""
+    kb = _kb_with_docs(tmp_path, "refund window is 30 days", "money back guarantee", "shipping info", top_k=3)
+
+    hits = {hit.chunk.text: hit for hit in kb.search_hits("refund")}
+
+    both = hits["refund window is 30 days"]
+    assert set(both.leg_scores) == {"bm25", "vector"}
+    assert both.leg_scores["bm25"] > 0
+    assert both.leg_scores["vector"] == pytest.approx(1.0)
+    vector_only = hits["money back guarantee"]
+    assert set(vector_only.leg_scores) == {"vector"}
+    # Found by two legs beats found by one, under unweighted RRF.
+    assert both.fused_score > vector_only.fused_score
+    # No score_threshold, so the vector leg still returns its top-k: the
+    # unrelated chunk comes back, and the hit says exactly how weakly.
+    assert hits["shipping info"].leg_scores == {"vector": pytest.approx(0.0)}

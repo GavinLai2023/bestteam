@@ -1147,7 +1147,7 @@ def test_search_502s_and_still_meters_what_the_failed_search_spent(client, monke
     assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
 
     class _SpendsThenFails:
-        def search(self, query, top_k):
+        def search_hits(self, query, top_k):
             add_usage({
                 "model": "openai:gpt-4o-mini",
                 "input_tokens": 12,
@@ -1628,3 +1628,38 @@ def test_removing_a_document_matches_the_name_as_the_filesystem_does(client):
     job_id = resp.json()["job_id"]
     assert _wait_for_job_status(job_id) == "completed"
     assert set(_live_documents(job_id)) == {"other.txt"}
+
+
+def test_search_reports_the_generation_and_why_each_hit_ranked(client):
+    """The same identity and scores the agent's trace event carries, so a
+    customer (or the operator reading the JSON) can tie a passage back to
+    its chunk row and the ingestion job that produced it."""
+    from ui.backend.db.models import KnowledgeChunk, KnowledgeDocument
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        result = backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies",
+            [_upload_file(name="refunds.txt", content=b"The refund policy allows returns within 30 days."),
+             _upload_file(name="hours.txt", content=b"Office hours are 9am to 5pm on weekdays.")],
+        )
+    job_id = result["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund policy", "top_k": 3})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ingestion_job_id"] == job_id
+    (hit,) = body["results"]
+    with open_test_db() as db:
+        row = (
+            db.query(KnowledgeChunk)
+            .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+            .filter(KnowledgeDocument.ingestion_job_id == job_id, KnowledgeDocument.filename == "refunds.txt")
+            .one()
+        )
+        assert hit["chunk_id"] == row.id
+        assert hit["document_id"] == row.document_id
+    assert hit["fused_score"] > 0
+    assert set(hit["leg_scores"]) == {"bm25"}
+    assert hit["rerank_score"] is None

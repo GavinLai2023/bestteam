@@ -17,6 +17,7 @@ const response = (
 ): KnowledgeBaseSearchResponse => ({
   query: 'refund policy',
   hit_count: 1,
+  ingestion_job_id: 42,
   results: [
     {
       citation: 'handbook.pdf, p.3 § Refunds',
@@ -24,6 +25,11 @@ const response = (
       page: 3,
       heading: 'Refunds',
       text: 'Returns are accepted within 30 days.',
+      chunk_id: 911,
+      document_id: 37,
+      fused_score: 0.0164,
+      leg_scores: { bm25: 4.1 },
+      rerank_score: null,
     },
   ],
   ...overrides,
@@ -79,6 +85,11 @@ describe('KnowledgeBaseSearch', () => {
             page: null,
             heading: 'bpmn:process',
             text: '<bpmn:userTask id="Activity_1" name="The employee is based at Capalaba Library">',
+            chunk_id: 12,
+            document_id: 4,
+            fused_score: 0.0164,
+            leg_scores: { bm25: 2.2 },
+            rerank_score: null,
           },
         ],
       }),

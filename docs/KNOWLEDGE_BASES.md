@@ -446,18 +446,37 @@ answer text**:
   "summary": "2 result(s) for “refund window” — sources: handbook.pdf, p.3 § Refunds, policies.md",
   "query": "refund window",
   "hit_count": 2,
-  "sources": ["handbook.pdf, p.3 § Refunds", "policies.md"]
+  "sources": ["handbook.pdf, p.3 § Refunds", "policies.md"],
+  "ingestion_job_id": 42,
+  "hits": [
+    {"citation": "handbook.pdf, p.3 § Refunds", "chunk_id": 911, "document_id": 37,
+     "fused_score": 0.0328, "leg_scores": {"bm25": 4.1, "vector": 0.82}, "rerank_score": 2.7},
+    {"citation": "policies.md", "chunk_id": 904, "document_id": 35,
+     "fused_score": 0.0161, "leg_scores": {"vector": 0.61}, "rerank_score": -0.4}
+  ]
 }
 ```
 
 That is enough to answer the questions an operator actually asks — did the
 agent search at all, what did it search for, did anything match, which
-documents did it draw on — while the excerpts themselves stay out of the
-`trace_events` table, the monitoring dashboard and any log that renders one.
-A query longer than 200 characters is truncated, and at most 10 sources are
-listed. Nothing here is parsed out of the tool's return string: the tool
-reports these fields directly (`core/tool_context.py`), and the adapter knows
-not to fall back to summarising the result text for a knowledge base tool.
+documents did it draw on, **which generation of the collection answered, and
+why each hit ranked where it did** — while the excerpts themselves stay out
+of the `trace_events` table, the monitoring dashboard and any log that
+renders one. `ingestion_job_id` is the completed job whose chunk rows the
+collection was built from (`null` for a folder-built knowledge base), present
+even on a zero-hit search so the record still says what was searched. Each
+entry of `hits` names the `knowledge_chunks` row and its document, the
+reciprocal-rank-fusion score candidates were ordered by (`fused_score`), each
+retrieval leg's own raw score under the leg's name (`bm25`: Okapi; `vector`:
+cosine — its keys are *which legs found it*, kept at the best value across
+query-expansion variants), and the cross-encoder's `rerank_score` when a
+reranker ran (`null` when none is configured, or when scoring failed and
+retrieval order was kept). Scores are rounded to four decimals; no model
+names appear. A query longer than 200 characters is truncated, and at most 10
+sources and 10 hits are listed. Nothing here is parsed out of the tool's
+return string: the tool reports these fields directly
+(`core/tool_context.py`), and the adapter knows not to fall back to
+summarising the result text for a knowledge base tool.
 
 ## Managing knowledge bases through the backend API
 
@@ -614,7 +633,7 @@ collection and returns up to `top_k` of the passages an agent would rank
 first — the "Try a search" panel behind each row of the "My documents" list.
 Not quite the agent's own result set — the panel always sends `top_k=5`,
 whatever the collection's configured `top_k` is — but that is the only
-divergence: this is the same `search()` an agent's tool calls, so the
+divergence: this is the same `search_hits()` an agent's tool calls, so the
 collection's own query expansion and reranking run here too. Body:
 `{"query": "...", "top_k": 5}`, with `query` between 1 and 500 characters and
 `top_k` between 1 and 10; anything else is a `422`. Response:
@@ -623,13 +642,19 @@ collection's own query expansion and reranking run here too. Body:
 {
   "query": "refund policy",
   "hit_count": 2,
+  "ingestion_job_id": 42,
   "results": [
     {
       "citation": "handbook.pdf, p.3 § Refunds",
       "source": "handbook.pdf",
       "page": 3,
       "heading": "Refunds",
-      "text": "…at most 1500 characters of the passage…"
+      "text": "…at most 1500 characters of the passage…",
+      "chunk_id": 911,
+      "document_id": 37,
+      "fused_score": 0.0328,
+      "leg_scores": {"bm25": 4.1, "vector": 0.82},
+      "rerank_score": 2.7
     }
   ]
 }
@@ -638,7 +663,11 @@ collection's own query expansion and reranking run here too. Body:
 `citation` is exactly what an agent's own tool output cites (see "Citations"
 above), so the panel and the model name the same passage. `text` is capped at
 1,500 characters: enough to judge the retrieval by, and not a way to page a
-whole collection out through a search box.
+whole collection out through a search box. `ingestion_job_id`, `chunk_id`,
+`document_id` and the three score fields are the same identity and scores the
+agent's trace event records (see "What a search looks like in the trace") —
+the panel does not display them today, but the JSON lets an operator tie a
+passage to its row and generation. No model name is in the response.
 
 The other status codes: a name belonging to another org is a `404` (never a
 `403` — existence is never revealed); a collection that cannot answer yet is
@@ -925,10 +954,13 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   but this is still single-level chunking — no "small-to-big"/parent-child
   multi-resolution indexing, and overlap between chunks is a raw
   character-slice of the previous chunk's tail (not structure-aware).
-- **No external vector store.** `vector`/`hybrid` knowledge bases embed into
-  an in-memory numpy matrix plus an optional JSON file cache — no
+- **No external vector store.** `vector`/`hybrid` knowledge bases search an
+  in-memory numpy matrix — built per process from the persisted
+  `knowledge_chunks` rows on the upload path, or from an optional JSON file
+  cache on the SDK path — with a linear cosine scan and no ANN index. No
   Chroma/FAISS/Pinecone/Weaviate/pgvector, so this doesn't scale past a
-  single-process, small-to-medium corpus.
+  single-process, small-to-medium corpus (the per-collection document caps
+  are what keep it in range today).
 - **No DMS connectors.** None of the three types can ingest directly from
   SharePoint, Confluence, Google Drive, etc. — only a local folder of files.
 - **No OCR, and no image understanding at all.** A scanned PDF (or any
@@ -938,23 +970,31 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   quietly indexed as a header-only chunk, but the document still cannot be
   searched. The same gap as the email toolkit's attachment reading, which
   is deliberately text-only (`src/bestteam/tools/CLAUDE.md`).
-- **No re-embedding on document changes.** The embedding cache is
-  content-addressed (by chunk text) but there's no logic to detect "this
-  document changed, drop its stale chunks" beyond the chunk text itself
-  changing.
+- **Change detection is per whole document, by name + content hash.** On the
+  upload path an ingestion job reuses an unchanged document's chunks and
+  embeddings (see "Uploads are asynchronous") and re-chunks/re-embeds a
+  changed one in full — there is no chunk-level diff, so editing one
+  paragraph of a 50-page PDF re-embeds all 50 pages. A renamed file with
+  identical content is treated as new (the reuse key includes the filename),
+  and the SDK path (a path-constructed KB) has only the per-chunk-text JSON
+  cache, with no document-level reuse at all.
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
 - **Citations locate a chunk, but nothing links to it.** A returned chunk is
   tagged with its filename plus a page (PDF) or section heading (Markdown) —
   enough for a person to find the passage — but there is no chunk id in the
-  tag, no click-through to the document, and no "which version of which page"
-  audit trail: an upload rewrites a collection's chunk rows (carrying
-  unchanged documents' forward, but under the new job), so a
-  citation names a location in *today's* documents. Plain text still cites
-  its filename alone, and the Markdown heading, the spreadsheet/table one and
-  the XML ancestor one are all approximations — see "Chunk location
-  metadata" above.
+  *tag* the model quotes and no click-through to the document. The audit
+  trail lives beside the tag rather than in it: the run's `tool_completed`
+  event records the `ingestion_job_id` the collection was built from and each
+  hit's `chunk_id`/`document_id` (see "What a search looks like in the
+  trace"), so "which generation of which row did this answer draw on" is
+  answerable from the trace — but a pipeline version does **not** pin a
+  knowledge base generation: a run always searches the newest completed job,
+  so re-running an old pipeline version after a re-upload searches today's
+  documents. Plain text still cites its filename alone, and the Markdown
+  heading, the spreadsheet/table one and the XML ancestor one are all
+  approximations — see "Chunk location metadata" above.
 - **The wizard's self-service "Enhanced" toggle is all-or-nothing and
   operator-configured, not customer-tunable.** A customer can choose
   Standard vs. Enhanced, but not the embedding/rerank model, `chunk_size`,

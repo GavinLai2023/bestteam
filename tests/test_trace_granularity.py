@@ -582,3 +582,77 @@ def test_non_kb_tool_summary_unchanged():
     assert "query" not in data
     assert "hit_count" not in data
     assert "sources" not in data
+
+
+def test_kb_tool_completed_names_the_generation_and_scores_each_hit():
+    """The event answers "which generation of the collection was searched,
+    and why did each hit rank where it did" -- the identity from the chunk
+    rows, the RRF and rerank scores from retrieval -- without a word of the
+    chunk text. `ingestion_job_id` is present even for a KB built from a
+    folder (as None), so a reader never has to guess whether the field exists."""
+    from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk
+
+    kb = LocalFolderKnowledgeBase.from_chunks(
+        "policies",
+        [
+            _Chunk(source="refunds.md", text=f"Refunds within 30 days. {_CHUNK_SENTINEL}", heading="Refunds",
+                   chunk_id=11, document_id=5, ingestion_job_id=42),
+            _Chunk(source="hours.txt", text="Office hours are 9am to 5pm.",
+                   chunk_id=12, document_id=6, ingestion_job_id=42),
+        ],
+        top_k=2,
+    )
+    data = _kb_tool_completed(kb, "refunds")
+
+    assert data["ingestion_job_id"] == 42
+    assert data["hit_count"] == 1
+    assert data["sources"] == ["refunds.md § Refunds"]
+    (hit,) = data["hits"]
+    assert hit["citation"] == "refunds.md § Refunds"
+    assert hit["chunk_id"] == 11 and hit["document_id"] == 5
+    assert hit["fused_score"] > 0
+    # The raw BM25 score is recorded even when it is 0.0 -- which it is on a
+    # two-document corpus (idf of a term in one of two documents is ln 1 = 0;
+    # ranking then rests on the shared-term overlap, not this number). It is
+    # data, not a placeholder.
+    assert set(hit["leg_scores"]) == {"bm25"} and isinstance(hit["leg_scores"]["bm25"], float)
+    assert hit["rerank_score"] is None
+    assert _CHUNK_SENTINEL not in repr(data)
+
+
+def test_kb_tool_wraps_a_search_only_knowledge_base_and_reports_no_scores():
+    """A custom knowledge base that predates `search_hits()` -- one exposing
+    only `search()` -- still works as a tool: same results, same trace shape,
+    and `hits` empty rather than filled with made-up scores (Codex review)."""
+    from bestteam.core.knowledge_base import _Chunk
+
+    class _SearchOnly:
+        name = "legacy"
+        description = None
+
+        def search(self, query, top_k=None):
+            return [_Chunk(source="a.txt", text="alpha beta", heading="A")]
+
+    data = _kb_tool_completed(_SearchOnly(), "alpha")
+    assert data["hit_count"] == 1
+    assert data["sources"] == ["a.txt § A"]
+    assert data["hits"] == []
+    assert data["ingestion_job_id"] is None
+
+
+def test_kb_tool_completed_hits_are_bounded_and_present_when_empty():
+    from bestteam.core.knowledge_base import LocalFolderKnowledgeBase, _Chunk
+
+    kb = LocalFolderKnowledgeBase.from_chunks(
+        "policies",
+        [_Chunk(source=f"doc{i}.txt", text=f"refund policy number {i}", chunk_id=i, ingestion_job_id=7)
+         for i in range(15)],
+        top_k=15,
+    )
+    data = _kb_tool_completed(kb, "refund policy")
+    assert data["hit_count"] == 15
+    assert len(data["hits"]) == 10 == len(data["sources"])
+
+    empty = _kb_tool_completed(_policies_kb(), "quantum chromodynamics")
+    assert empty["hits"] == []
+    assert empty["ingestion_job_id"] is None

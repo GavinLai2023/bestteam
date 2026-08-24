@@ -96,10 +96,20 @@ mechanism with no `LangGraphAdapter` changes — `query()` returns the same
 formatted `"...results for: <query>\n\n1. [source: ...]\n<text>..."` / `"No
 results found..."` string shape regardless of type.
 
-**Retrieval and presentation are split** (P0-3). `KnowledgeBase.search(query,
-top_k) -> List[_Chunk]` is the abstract method each subclass implements;
-`query()` is **concrete on the base class** and is just
-`format_results(self.name, query, self.search(...))`. One formatter means the
+**Retrieval and presentation are split** (P0-3). `KnowledgeBase.search_hits(query,
+top_k) -> List[RetrievalHit]` is the abstract method each subclass implements;
+`search()` (`[hit.chunk for hit in search_hits(...)]`) and `query()`
+(`format_results(self.name, query, self.search(...))`) are **concrete on the
+base class**. A `RetrievalHit` is the chunk plus *why it ranked there*:
+`fused_score` (the RRF score candidates were ordered by), `leg_scores` (each
+retrieval leg's own raw score under its name — `bm25`/`vector` — best value
+across query-expansion variants, so the keys say which legs surfaced it) and
+`rerank_score` (the cross-encoder's score; `None` when no reranker is
+configured or it failed and retrieval order was kept — never faked). The
+internals carry these through: a leg is now a named
+`(name, fn(query_text, fetch_k) -> [(idx, raw_score)])`, `_rrf_retrieve`
+returns `(idx, fused, {leg: raw})` candidates, and `_rerank_candidates` takes
+and returns hits, filling `rerank_score` on success. One formatter means the
 citation tags cannot drift between types, and the split is the seam the
 retrieval trace (P0-5) and the eval harness (P0-7) were meant to
 build on — consuming chunks rather than re-parsing a formatted string. The
@@ -130,13 +140,22 @@ tool is named after its KB), and the adapter builds that call's
 the same channel's other half, and is now in use (P0-4): the tool loop drains
 it onto the calling agent's `agent_completed.usage` so a KB's query embedding
 and query-expansion calls are metered -- see "Metering a knowledge base's
-spend", below. A `_Chunk` carries `source`, `text`, and two optional location fields —
+spend", below. A `_Chunk` carries `source`, `text`, two optional location fields —
 `page` (PDF, chunked per page by `_chunk_document`, so `p.N` is exact) and
 `heading` (a Markdown *or Word* section, or a spreadsheet sheet / Word table, that a
 chunk opens under — an 80-char approximation) — which `_citation()` renders as
-`[source: handbook.pdf, p.3 § Refunds]`. Both default to `None`, so a
-two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep working
-and render byte-for-byte as before. All three types also take an
+`[source: handbook.pdf, p.3 § Refunds]`, and three optional **identity**
+fields — `chunk_id`, `document_id`, `ingestion_job_id` — that the backend's
+`from_chunks` path fills from the `knowledge_chunks` row and the SDK path
+leaves `None`. Identity is never part of the citation tag; it rides the hit
+and the trace. A KB built from chunks that all carry one `ingestion_job_id`
+exposes it as `kb.ingestion_job_id` (`_generation_of`; `None` for a folder or
+a mixed list), and the tool wrapper reports it on every search, hits or none,
+together with a bounded `hits` list (`_trace_hit`: citation, ids, rounded
+scores — no text), so a run's `tool_completed` says which *generation* of a
+collection it was answered from. All five optional fields default to `None`,
+so a two-field `_Chunk(source=, text=)` and every `from_chunks` caller keep
+working and render byte-for-byte as before. All three types also take an
 optional `description` (≤500 chars, `KnowledgeBaseSpec.description`) — one
 sentence about the documents, injected into the tool's own docstring so a
 model can tell an org's collections apart. See `docs/KNOWLEDGE_BASES.md`.

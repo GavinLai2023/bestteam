@@ -328,11 +328,21 @@ export interface KnowledgeBaseSearchResult {
   page: number | null
   heading: string | null
   text: string
+  // Identity and scores, the same ones a run's KB trace event carries. Not
+  // rendered by the panel today; here so the type matches the wire shape.
+  chunk_id: number | null
+  document_id: number | null
+  fused_score: number
+  leg_scores: Record<string, number>
+  rerank_score: number | null
 }
 
 export interface KnowledgeBaseSearchResponse {
   query: string
   hit_count: number
+  // The completed ingestion job the collection was built from; null for a
+  // collection that was not uploaded through the app.
+  ingestion_job_id: number | null
   results: KnowledgeBaseSearchResult[]
 }
 

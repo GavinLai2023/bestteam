@@ -564,7 +564,7 @@ pipeline:
 # _rerank_candidates
 # ---------------------------------------------------------------------------
 
-from bestteam.core.knowledge_base import _Chunk, _rerank_candidates
+from bestteam.core.knowledge_base import RetrievalHit, _Chunk, _rerank_candidates
 from bestteam.core.reranking import Reranker
 
 
@@ -582,7 +582,7 @@ class _BoomReranker(Reranker):
 
 
 def _candidates(*texts):
-    return [(1.0, _Chunk(source="s", text=t)) for t in texts]
+    return [RetrievalHit(_Chunk(source="s", text=t), fused_score=1.0, leg_scores={"bm25": 1.0}) for t in texts]
 
 
 def test_rerank_candidates_no_reranker_slices_to_top_k():
@@ -606,19 +606,23 @@ def test_rerank_candidates_empty_list_no_reranker_call():
 def test_rerank_candidates_reorders_by_score():
     candidates = _candidates("a", "bb", "ccc")  # retrieval order: a, bb, ccc
     result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=3)
-    assert [c.text for _s, c in result] == ["ccc", "bb", "a"]  # longest first
+    assert [hit.chunk.text for hit in result] == ["ccc", "bb", "a"]  # longest first
+    # Each hit now carries the cross-encoder's score; the fused score it
+    # arrived with is untouched.
+    assert [hit.rerank_score for hit in result] == [3.0, 2.0, 1.0]
+    assert all(hit.fused_score == 1.0 for hit in result)
 
 
 def test_rerank_candidates_truncates_to_top_k_after_reranking():
     candidates = _candidates("a", "bb", "ccc")
     result = _rerank_candidates("q", candidates, _ReverseLengthReranker(), top_k=1)
-    assert [c.text for _s, c in result] == ["ccc"]
+    assert [hit.chunk.text for hit in result] == ["ccc"]
 
 
 def test_rerank_candidates_falls_back_on_scoring_failure():
     candidates = _candidates("a", "bb", "ccc")
     result = _rerank_candidates("q", candidates, _BoomReranker(), top_k=2)
-    assert result == candidates[:2]  # pre-rerank order preserved
+    assert result == candidates[:2]  # pre-rerank order preserved, rerank_score still None
 
 
 def test_rerank_candidates_does_not_mutate_input():
@@ -635,24 +639,36 @@ def test_rerank_candidates_does_not_mutate_input():
 from bestteam.core.knowledge_base import _query_variants, _rrf_retrieve
 
 
+def _indices(candidates):
+    return [idx for idx, _fused, _legs in candidates]
+
+
 def test_rrf_retrieve_single_variant_single_leg_preserves_leg_order():
     def leg(query_text, fetch_k):
-        return [3, 1, 2][:fetch_k]
+        return [(3, 9.0), (1, 5.0), (2, 1.0)][:fetch_k]
 
-    result = _rrf_retrieve(["q"], [leg], fetch_k=3)
-    assert result == [3, 1, 2]
+    result = _rrf_retrieve(["q"], [("bm25", leg)], fetch_k=3)
+    assert _indices(result) == [3, 1, 2]
+    # Each candidate keeps its fused score (descending) and the leg's raw score.
+    idx, fused, legs = result[0]
+    assert fused == pytest.approx(1 / 61) and legs == {"bm25": 9.0}
+    assert [c[1] for c in result] == sorted(c[1] for c in result)[::-1]
 
 
 def test_rrf_retrieve_fuses_across_legs():
     def leg_a(query_text, fetch_k):
-        return [1, 2][:fetch_k]
+        return [(1, 0.9), (2, 0.5)][:fetch_k]
 
     def leg_b(query_text, fetch_k):
-        return [2, 1][:fetch_k]
+        return [(2, 7.0), (1, 3.0)][:fetch_k]
 
-    result = _rrf_retrieve(["q"], [leg_a, leg_b], fetch_k=2)
+    result = _rrf_retrieve(["q"], [("vector", leg_a), ("bm25", leg_b)], fetch_k=2)
     # Both indices appear at rank 1 once and rank 2 once -- tied, both present.
-    assert set(result) == {1, 2}
+    assert set(_indices(result)) == {1, 2}
+    legs_by_idx = {idx: legs for idx, _fused, legs in result}
+    # Each leg's own raw score, under the leg's name: which leg found it, and how strongly.
+    assert legs_by_idx[1] == {"vector": 0.9, "bm25": 3.0}
+    assert legs_by_idx[2] == {"vector": 0.5, "bm25": 7.0}
 
 
 def test_rrf_retrieve_fuses_across_variants():
@@ -660,15 +676,17 @@ def test_rrf_retrieve_fuses_across_variants():
 
     def leg(query_text, fetch_k):
         calls.append(query_text)
-        return {"q": [1], "alt": [2]}.get(query_text, [])
+        return {"q": [(1, 2.0)], "alt": [(2, 4.0), (1, 6.0)]}.get(query_text, [])
 
-    result = _rrf_retrieve(["q", "alt"], [leg], fetch_k=1)
+    result = _rrf_retrieve(["q", "alt"], [("bm25", leg)], fetch_k=2)
     assert calls == ["q", "alt"]
-    assert set(result) == {1, 2}
+    assert set(_indices(result)) == {1, 2}
+    # A chunk found under several variants keeps its best raw score per leg.
+    assert {idx: legs for idx, _f, legs in result}[1] == {"bm25": 6.0}
 
 
 def test_rrf_retrieve_empty_legs_returns_empty():
-    assert _rrf_retrieve(["q"], [lambda q, k: []], fetch_k=5) == []
+    assert _rrf_retrieve(["q"], [("bm25", lambda q, k: [])], fetch_k=5) == []
 
 
 def test_query_variants_no_expansion_model_returns_just_the_query():
@@ -1471,3 +1489,90 @@ def test_a_csv_with_only_a_header_line_contributes_nothing():
     # `_has_extractable_text` gates ingestion: a document that parses to its
     # own marker and nothing else must not become a content-free chunk.
     assert not _has_extractable_text("[CSV: empty.csv]\n")
+
+
+# ---------------------------------------------------------------------------
+# search_hits(): structured hits with scores and identity (pre-pilot item 2)
+# ---------------------------------------------------------------------------
+
+from bestteam.core.knowledge_base import RetrievalHit, _Chunk as _IdChunk
+
+
+def test_chunk_identity_fields_default_to_none_and_do_not_change_the_citation():
+    from bestteam.core.knowledge_base import _citation
+
+    plain = _IdChunk(source="a.md", text="t", heading="H")
+    identified = _IdChunk(source="a.md", text="t", heading="H", chunk_id=7, document_id=3, ingestion_job_id=2)
+    assert (plain.chunk_id, plain.document_id, plain.ingestion_job_id) == (None, None, None)
+    assert _citation(plain) == _citation(identified) == "a.md § H"
+
+
+def test_search_hits_carries_fused_and_leg_scores_and_search_is_its_chunks(tmp_path):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", "cars and trucks", "apples pie", top_k=3)
+
+    hits = kb.search_hits("apples")
+
+    assert hits and all(isinstance(hit, RetrievalHit) for hit in hits)
+    assert [hit.chunk for hit in hits] == kb.search("apples")
+    # RRF over one leg: best-first, every score positive, strictly ordered.
+    fused = [hit.fused_score for hit in hits]
+    assert fused == sorted(fused, reverse=True) and fused[0] > 0
+    # One retrieval leg, named, with its own raw BM25 score.
+    assert all(set(hit.leg_scores) == {"bm25"} for hit in hits)
+    assert all(hit.leg_scores["bm25"] > 0 for hit in hits)
+    # No reranker configured -> no rerank score, rather than a fake one.
+    assert all(hit.rerank_score is None for hit in hits)
+
+
+def test_search_hits_rerank_score_is_the_cross_encoder_score_and_none_on_fallback(tmp_path):
+    docs = ("fruit " * 1, "fruit " * 20, "banana orange grape melon")
+    reranked_dir = tmp_path / "reranked"
+    reranked_dir.mkdir()
+    reranked = _kb_with_docs(reranked_dir, *docs, top_k=2, candidate_k=2, rerank_model="fake:")
+
+    hits = reranked.search_hits("fruit")
+    assert len(hits) == 2
+    assert all(isinstance(hit.rerank_score, float) for hit in hits)
+    assert hits[0].rerank_score >= hits[1].rerank_score
+    # The fused (pre-rerank) score survives alongside, so "how much did the
+    # reranker move this?" can still be answered.
+    assert all(hit.fused_score > 0 for hit in hits)
+
+    # A reranker that raises falls back to retrieval order, and says so by
+    # leaving rerank_score unset rather than inventing one.
+    broken_dir = tmp_path / "broken"
+    broken_dir.mkdir()
+    broken = _kb_with_docs(broken_dir, *docs, top_k=2, candidate_k=2, rerank_model=_BoomReranker())
+    fallback = broken.search_hits("fruit")
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _kb_with_docs(plain_dir, *docs, top_k=2)
+    assert [hit.chunk for hit in fallback] == plain.search("fruit")
+    assert all(hit.rerank_score is None for hit in fallback)
+
+
+def test_from_chunks_records_the_generation_its_chunks_came_from():
+    chunks = [
+        _IdChunk(source="a.txt", text="alpha beta", chunk_id=1, document_id=1, ingestion_job_id=42),
+        _IdChunk(source="b.txt", text="gamma delta", chunk_id=2, document_id=2, ingestion_job_id=42),
+    ]
+    kb = LocalFolderKnowledgeBase.from_chunks("kb", chunks, top_k=2)
+    assert kb.ingestion_job_id == 42
+    # The hit hands the identity straight back, so a caller can say which
+    # row (and which generation) a citation points at.
+    hit = kb.search_hits("alpha")[0]
+    assert (hit.chunk.chunk_id, hit.chunk.document_id, hit.chunk.ingestion_job_id) == (1, 1, 42)
+
+
+def test_path_built_kb_has_no_generation(tmp_path):
+    kb = _kb_with_docs(tmp_path, "apples and oranges", top_k=1)
+    assert kb.ingestion_job_id is None
+    assert kb.search_hits("apples")[0].chunk.chunk_id is None
+
+
+def test_from_chunks_with_mixed_generations_records_none():
+    chunks = [
+        _IdChunk(source="a.txt", text="alpha beta", ingestion_job_id=1),
+        _IdChunk(source="b.txt", text="gamma delta", ingestion_job_id=2),
+    ]
+    assert LocalFolderKnowledgeBase.from_chunks("kb", chunks, top_k=2).ingestion_job_id is None

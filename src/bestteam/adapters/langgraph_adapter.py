@@ -453,6 +453,11 @@ def _kb_tool_trace_data(trace: Dict[str, Any]) -> Dict[str, Any]:
         "query": trace.get("query", ""),
         "hit_count": trace.get("hit_count", 0),
         "sources": list(trace.get("sources") or []),
+        # Which ingestion generation answered (None for a folder-built KB),
+        # and per hit the chunk/document row and the scores behind its rank
+        # -- the tool bounds the list and never puts chunk text in it.
+        "ingestion_job_id": trace.get("ingestion_job_id"),
+        "hits": list(trace.get("hits") or []),
     }
 
 
