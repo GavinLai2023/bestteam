@@ -175,6 +175,7 @@ export const zhCN: Resources = {
       generate: '生成摘要',
       generating: '正在生成…',
       clarifyHeading: '还有几个小问题：',
+      clarifyHint: '按下"更新团队"后，你的回答会被一并采纳。',
       summaryLabel: '摘要',
       painPoints: '痛点',
       painPointsPlaceholder: '例如：回复太慢',
@@ -189,10 +190,21 @@ export const zhCN: Resources = {
     },
     steps: {
       intent: '你的诉求',
+      questions: '补充几个问题',
       documents: '你的文档',
       preview: '认识你的团队',
       confirm: '确认',
       deploy: '正式启用',
+    },
+    questions: {
+      title: '几个简短的问题',
+      subtitle:
+        '你的回答能帮我们设计更合适的团队。任何问题都可以跳过——留空的问题我们会替你做一个合理的假设，你可以在摘要中查看。',
+      answerPlaceholder: '输入你的回答（可选）',
+      skip: '跳过这些问题',
+      updating: '正在更新我们的理解…',
+      updatingNotice: '正在把你的回答融入我们对你业务的理解——请稍等片刻。',
+      noQuestions: '没有待回答的问题——你的描述已经足够清楚。',
     },
     intent: {
       title: '说说你想解决什么问题',

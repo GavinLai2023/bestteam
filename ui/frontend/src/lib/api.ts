@@ -7,7 +7,7 @@ import type {
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
   DiagnoseRunResult,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
-  Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  QuestionAnswer, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
   UsageRecord, PipelineAnalyticsDetail, PipelineAnalyticsSummary,
 } from './types'
 
@@ -576,7 +576,10 @@ export const api = {
   getSession: (id: string) => request<BuilderSession>(`/api/builder/sessions/${id}`),
   listSessions: () => request<{ sessions: BuilderSession[] }>('/api/builder/sessions'),
   deleteSession: (id: string) => request<void>(`/api/builder/sessions/${id}`, { method: 'DELETE' }),
-  submitRequirements: (id: string, payload: { model?: string; feedback?: string; requirements?: Requirements }) =>
+  submitRequirements: (
+    id: string,
+    payload: { model?: string; feedback?: string; requirements?: Requirements; answers?: QuestionAnswer[] },
+  ) =>
     request<BuilderSession>(`/api/builder/sessions/${id}/requirements`, {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -593,7 +596,10 @@ export const api = {
     }),
   // The Confirm page's one action: the customer's edited understanding and
   // whatever they described in words, updating both halves together.
-  refineTeam: (id: string, payload: { requirements?: Requirements; feedback: string; model: string }) =>
+  refineTeam: (
+    id: string,
+    payload: { requirements?: Requirements; feedback: string; model: string; answers?: QuestionAnswer[] },
+  ) =>
     request<BuilderSession>(`/api/builder/sessions/${id}/refine`, {
       method: 'POST',
       body: JSON.stringify(payload),

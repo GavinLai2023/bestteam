@@ -16,7 +16,7 @@ interface WizardProgressProps {
 // Stage order only. The labels live in the locale files and are
 // resolved per render -- a module-level t() would be evaluated once,
 // before i18n is ready, and would never follow a language switch.
-const STEPS = ['intent', 'documents', 'preview', 'confirm', 'deploy'] as const
+const STEPS = ['intent', 'questions', 'documents', 'preview', 'confirm', 'deploy'] as const
 
 type Step = (typeof STEPS)[number]
 
@@ -40,6 +40,8 @@ export default function WizardProgress({ session, busy }: WizardProgressProps) {
     switch (stage) {
       case 'intent':
         return t('wizard.steps.intent')
+      case 'questions':
+        return t('wizard.steps.questions')
       case 'documents':
         return t('wizard.steps.documents')
       case 'preview':
@@ -53,6 +55,7 @@ export default function WizardProgress({ session, busy }: WizardProgressProps) {
 
   const unlocked: Record<string, boolean> = {
     intent: true,
+    questions: Boolean(session),
     documents: Boolean(session),
     preview: Boolean(session?.specification_json),
     confirm: Boolean(session?.specification_json),

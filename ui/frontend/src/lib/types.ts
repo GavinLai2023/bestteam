@@ -54,6 +54,11 @@ export interface Requirements {
   clarifying_questions: string[]
 }
 
+export interface QuestionAnswer {
+  question: string
+  answer: string
+}
+
 export interface FeedbackHistoryEntry {
   stage: string
   note: string

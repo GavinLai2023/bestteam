@@ -26,6 +26,36 @@ describe('WizardProgress', () => {
     expect(screen.getByText('Go live').closest('a')).not.toBeNull()
   })
 
+  it('shows six steps with the interview between challenge and documents', () => {
+    renderBar()
+
+    const labels = screen.getAllByText(/./, { selector: '.wizard-step-label' }).map((el) => el.textContent)
+    expect(labels).toEqual([
+      'Your challenge',
+      'A few questions',
+      'Your documents',
+      'Meet your team',
+      'Confirm',
+      'Go live',
+    ])
+  })
+
+  it('links the questions step once a session exists', () => {
+    renderBar()
+
+    expect(screen.getByText('A few questions').closest('a')).not.toBeNull()
+  })
+
+  it('locks the questions step without a session', () => {
+    render(
+      <MemoryRouter initialEntries={['/wizard']}>
+        <WizardProgress session={null} />
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByText('A few questions').closest('a')).toBeNull()
+  })
+
   // Leaving mid-update is how a customer publishes a team they have not seen:
   // "Go live" unlocks on the spec existing, so it stays lit while the
   // Architect is redesigning that very spec.
