@@ -1663,3 +1663,158 @@ def test_search_reports_the_generation_and_why_each_hit_ranked(client):
     assert hit["fused_score"] > 0
     assert set(hit["leg_scores"]) == {"bm25"}
     assert hit["rerank_score"] is None
+
+
+# --- Restoring the previous upload --------------------------------------------
+#
+# A customer who uploaded the wrong file gets the previous generation back:
+# a new generation staged from the previous one's files under the previous
+# job's shape, so every chunk and vector is reused and nothing is billed. It
+# reaches back exactly one generation -- the only one whose files are still
+# on disk.
+
+
+def _upload(client, *names, mode=None, smart=False):
+    data = {}
+    if mode:
+        data["mode"] = mode
+    if smart:
+        data["smart_search"] = "true"
+    resp = client.post("/api/org/knowledge-bases/policies/upload", data=data, files=_named_files(*names))
+    assert resp.status_code == 200, resp.text
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+    return job_id
+
+
+def test_restoring_brings_back_the_previous_documents_and_embeds_nothing(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+    first = _upload(client, "a.txt", "b.txt", smart=True)
+    # Captured now, not after the restore completes: the restore job becomes
+    # the 3rd completed generation, and pruning (`_KEEP_COMPLETED_GENERATIONS
+    # = 2`, Task 3) deletes the oldest completed job's row once a 3rd exists
+    # -- `first`'s own row would otherwise be gone by the time this test reads it.
+    with open_test_db() as db:
+        first_job = db.get(IngestionJob, first)
+        first_shape = (first_job.kb_type, first_job.embedding_model, first_job.chunk_size, first_job.chunk_overlap)
+    second = _upload(client, "wrong.txt", mode="replace", smart=True)  # replace -- the mistake
+
+    embed_calls = []
+    original = backend_ingestion.embed_documents_in_batches
+
+    def counting(embeddings, texts):
+        embed_calls.append(list(texts))
+        return original(embeddings, texts)
+
+    monkeypatch.setattr(backend_ingestion, "embed_documents_in_batches", counting)
+
+    resp = client.post("/api/org/knowledge-bases/policies/restore")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["name"] == "policies" and body["status"] == "queued"
+    job_id = body["job_id"]
+    assert job_id not in (first, second)
+    assert _wait_for_job_status(job_id) == "completed"
+
+    assert set(_live_documents(job_id)) == {"a.txt", "b.txt"}
+    assert embed_calls == []
+    with open_test_db() as db:
+        restored = db.get(IngestionJob, job_id)
+        assert (restored.kb_type, restored.embedding_model, restored.chunk_size, restored.chunk_overlap) == first_shape
+        for doc in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id):
+            chunks = db.query(KnowledgeChunk).filter_by(document_id=doc.id).all()
+            assert chunks and all(c.embedding_json for c in chunks)
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    assert [d["filename"] for d in summary["documents"]] == ["a.txt", "b.txt"]
+    # Restoring again undoes the restore: symmetric by construction.
+    assert summary["previous_generation"]["filenames"] == ["wrong.txt"]
+
+
+def test_restore_keeps_the_config_and_serves_under_the_previous_jobs_type(client, monkeypatch):
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+    _upload(client, "a.txt")                       # local_folder
+    _upload(client, "b.txt", mode="replace", smart=True)  # hybrid -- config now says hybrid
+
+    resp = client.post("/api/org/knowledge-bases/policies/restore")
+    assert resp.status_code == 202
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    assert summary["type"] == "local_folder"      # what serves today
+    with open_test_db() as db:
+        record = db.query(KnowledgeBaseRecord).filter_by(name="policies").one()
+        assert record.config["type"] == "hybrid"  # what the next upload builds
+
+
+def test_summary_previous_generation_is_null_until_a_second_upload_completes(client):
+    _upload(client, "a.txt")
+    assert client.get("/api/org/knowledge-bases/policies").json()["previous_generation"] is None
+
+    _upload(client, "b.txt", mode="add")
+    previous = client.get("/api/org/knowledge-bases/policies").json()["previous_generation"]
+    assert previous["filenames"] == ["a.txt"]
+    assert previous["completed_at"].endswith("+00:00")
+
+
+def test_restore_is_refused_with_nothing_to_go_back_to(client):
+    _upload(client, "a.txt")
+    resp = client.post("/api/org/knowledge-bases/policies/restore")
+    assert resp.status_code == 409
+    assert "earlier upload" in resp.json()["detail"]
+
+
+def test_restore_is_refused_while_an_upload_is_processing(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    _upload(client, "a.txt")
+    _upload(client, "b.txt", mode="replace")
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", data={"mode": "replace"}, files=_named_files("c.txt")
+    ).status_code == 200
+
+    resp = client.post("/api/org/knowledge-bases/policies/restore")
+    assert resp.status_code == 409
+    assert "still processing" in resp.json()["detail"]
+
+
+def test_restore_is_refused_when_the_previous_files_are_gone(client):
+    import shutil
+
+    first = _upload(client, "a.txt")
+    _upload(client, "b.txt", mode="replace")
+    with open_test_db() as db:
+        job = db.get(IngestionJob, first)
+        version, org_id = job.version, job.org_id
+    shutil.rmtree(backend_knowledge_bases._KB_UPLOADS_DIR / str(org_id) / "policies" / version)
+
+    assert client.get("/api/org/knowledge-bases/policies").json()["previous_generation"] is None
+    resp = client.post("/api/org/knowledge-bases/policies/restore")
+    assert resp.status_code == 409
+    assert "no longer on the server" in resp.json()["detail"]
+
+
+def test_restore_of_another_orgs_collection_is_404(client):
+    _upload(client, "a.txt")
+    _upload(client, "b.txt", mode="replace")
+    with open_test_db() as db:
+        other = get_or_create_org(db, "other")
+        db.commit()
+        other_id = other.id
+    token = create_user_and_login(client, username="stranger", org="other")
+
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/restore",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+    del other_id

@@ -51,7 +51,7 @@ from bestteam.core.tool_context import tool_call_context
 from .auth_api import get_current_org, get_current_user
 from .db import model_catalog
 from .db.dependencies import pipelines_referencing
-from .db.models import IngestionJob, KnowledgeBaseRecord, Organization, User, iso_utc
+from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeDocument, Organization, User, iso_utc
 from .db.usage import record_usage
 from .db_session import get_db
 from .ingestion import job_status_payload
@@ -60,6 +60,8 @@ from .knowledge_bases import (
     _kb_upload_lock,
     live_documents,
     remove_knowledge_base_document,
+    restorable_generation,
+    restore_previous_generation,
     delete_knowledge_base,
     resolve_knowledge_base,
     upload_knowledge_base,
@@ -146,7 +148,7 @@ def _live_kb_type(db: Session, record: KnowledgeBaseRecord) -> str:
     return (record.config or {}).get("type", "local_folder")
 
 
-def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
+def _kb_summary(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord) -> Dict[str, Any]:
     """One knowledge base as the customer's own "My documents" panel sees it.
 
     `latest_job` is the newest ingestion attempt of any status (ordered by
@@ -171,6 +173,7 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
         latest_job = job_status_payload(db, latest)
         latest_job.pop("config", None)
     live = _latest_completed_job(db, record)
+    previous = restorable_generation(db, org_id, record)
     config = record.config or {}
     return {
         "name": record.name,
@@ -194,6 +197,18 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
             {"filename": doc.filename, "status": doc.status, "size_bytes": doc.size_bytes}
             for doc in live_documents(db, record)
         ],
+        # What "Restore previous upload" would bring back, or null when there
+        # is nothing to go back to (one upload so far, or the files are gone).
+        # Filenames rather than a date: the customer should see what they get.
+        "previous_generation": None if previous is None else {
+            "completed_at": iso_utc(previous.completed_at) if previous.completed_at else None,
+            "filenames": [
+                doc.filename
+                for doc in db.query(KnowledgeDocument)
+                .filter_by(ingestion_job_id=previous.id)
+                .order_by(KnowledgeDocument.filename)
+            ],
+        },
     }
 
 
@@ -215,7 +230,7 @@ def list_own_knowledge_bases(
         .order_by(KnowledgeBaseRecord.name)
         .all()
     )
-    return [_kb_summary(db, record) for record in records]
+    return [_kb_summary(db, org.id, record) for record in records]
 
 
 @router.get("/knowledge-bases/capabilities")
@@ -370,7 +385,7 @@ def get_own_knowledge_base(
     db: Session = Depends(get_db),
     org: Organization = Depends(get_current_org),
 ) -> Dict[str, Any]:
-    return _kb_summary(db, _own_kb_or_404(db, org.id, item_name))
+    return _kb_summary(db, org.id, _own_kb_or_404(db, org.id, item_name))
 
 
 class KnowledgeBaseSearchRequest(BaseModel):
@@ -543,6 +558,21 @@ def remove_own_knowledge_base_document(
     return remove_knowledge_base_document(
         db, org.id, item_name, filename, created_by=user.username
     )
+
+
+@router.post("/knowledge-bases/{item_name}/restore", status_code=202)
+def restore_own_knowledge_base(
+    item_name: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Make the previous upload the live set again. A `202` with the job to
+    poll, like an upload: the collection keeps answering from its current
+    documents until the restored generation is ready. Nothing is re-embedded.
+    Refused while an upload is processing, with no earlier upload, or when
+    the previous files are gone; see `knowledge_bases.restore_previous_generation`."""
+    return restore_previous_generation(db, org.id, item_name, created_by=user.username)
 
 
 @router.delete("/knowledge-bases/{item_name}", status_code=204)

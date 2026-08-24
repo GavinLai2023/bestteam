@@ -163,6 +163,7 @@ def _stage_previous_generation(
     superseded: Set[str],
     max_documents: int,
     exact: bool = False,
+    source: Optional[IngestionJob] = None,
 ) -> None:
     """Copy the live generation's files into `version_dir` beside the new ones.
 
@@ -188,17 +189,25 @@ def _stage_previous_generation(
     collection lists it, and on a case-sensitive filesystem (where
     `Policy.txt` and `policy.txt` can both be live) dropping the variant too
     would remove a document the customer never named (Codex review).
+
+    `source` names the generation to stage from; the default is the live
+    (newest completed) job. Restoring the previous upload passes the one
+    before it: its files are still on disk (it is the grace-window
+    generation), and staging them with nothing superseded is exactly a
+    re-upload of that set.
     """
     record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
     if record is None:
         return
-    previous = (
-        db.query(IngestionJob)
-        .filter_by(kb_id=record.id, status="completed")
-        # `id`, not `completed_at` -- see `resolve_knowledge_base`.
-        .order_by(IngestionJob.id.desc())
-        .first()
-    )
+    previous = source
+    if previous is None:
+        previous = (
+            db.query(IngestionJob)
+            .filter_by(kb_id=record.id, status="completed")
+            # `id`, not `completed_at` -- see `resolve_knowledge_base`.
+            .order_by(IngestionJob.id.desc())
+            .first()
+        )
     if previous is None:
         return
     previous_dir = kb_root / previous.version
@@ -654,6 +663,145 @@ def remove_knowledge_base_document(
             _stage_previous_generation(
                 db, org_id, item_name, kb_root, version_dir,
                 superseded={filename}, max_documents=_MAX_DOCUMENTS_PER_KB, exact=True,
+            )
+            job = IngestionJob(
+                kb_id=record.id,
+                org_id=org_id,
+                version=version,
+                kb_type=kb_type,
+                embedding_model=embedding_model,
+                status="queued",
+                file_count=sum(1 for p in version_dir.rglob("*") if p.is_file()),
+                created_by=created_by,
+            )
+            db.add(job)
+            db.commit()
+        except Exception:
+            db.rollback()
+            shutil.rmtree(version_dir, ignore_errors=True)
+            raise
+
+        _dispatch_ingestion_job(
+            db, job, record.id, org_id, version_dir,
+            kb_type=kb_type, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model,
+        )
+        return {"name": item_name, "job_id": job.id, "status": "queued"}
+
+
+def restorable_generation(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord) -> Optional[IngestionJob]:
+    """The generation "restore the previous upload" would bring back, or None.
+
+    The second-newest completed job, provided its version directory is still
+    on disk -- it is the grace-window generation, so normally it is; an
+    operator who removed the files leaves nothing to stage from. One
+    generation back only: anything older has lost its files to pruning.
+    """
+    completed = (
+        db.query(IngestionJob)
+        .filter_by(kb_id=record.id, status="completed")
+        .order_by(IngestionJob.id.desc())
+        .limit(2)
+        .all()
+    )
+    if len(completed) < 2:
+        return None
+    previous = completed[1]
+    kb_root = _KB_UPLOADS_DIR / str(org_id) / record.name
+    if not (kb_root / previous.version).is_dir():
+        return None
+    return previous
+
+
+def restore_previous_generation(
+    db: Session,
+    org_id: Optional[int],
+    item_name: str,
+    *,
+    created_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Make the previous upload the live set again. Returns `{"name",
+    "job_id", "status": "queued"}`, exactly like an upload or a removal.
+
+    A restore is `remove_knowledge_base_document` with a different source: the
+    generation before the live one is staged into a fresh version directory
+    with nothing superseded, and a new job ingests it under THAT job's shape
+    and chunk parameters (not the live job's), so every document is
+    `ingestion._carryable` from it and -- `_reusable_documents` looking at the
+    newest two completed jobs -- nothing is re-parsed, re-embedded or metered.
+    The status flip is still the atomic swap; afterwards the keep window is
+    {restored, undone}, so restoring again undoes the restore.
+
+    `record.config` is not touched: if the undone upload changed the
+    collection's type, the restored generation serves under the previous type
+    while `config` keeps the new one -- the existing "config is the next
+    upload's shape, the job is the serving shape" split, reported by
+    `_live_kb_type`.
+
+    Refused (409) while a `queued`/`running` job exists, when there is no
+    earlier completed upload, and when the previous generation's files are no
+    longer on the server. Allowed while teams use the collection, as `add`
+    and removal are.
+    """
+    record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+
+    kb_root = _KB_UPLOADS_DIR / str(org_id) / item_name
+    version = f"v_{uuid.uuid4().hex[:12]}"
+    version_dir = kb_root / version
+    with _kb_upload_lock(f"{org_id}/{item_name}"):
+        in_flight = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.kb_id == record.id, IngestionJob.status.in_(("queued", "running")))
+            .first()
+        )
+        if in_flight is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{item_name}' is still processing an upload. Wait for it "
+                    "to finish, then restore the previous upload."
+                ),
+            )
+        completed = (
+            db.query(IngestionJob)
+            .filter_by(kb_id=record.id, status="completed")
+            .order_by(IngestionJob.id.desc())
+            .limit(2)
+            .all()
+        )
+        if len(completed) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{item_name}' has no earlier upload to restore.",
+            )
+        previous = completed[1]
+        if not (kb_root / previous.version).is_dir():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The files for '{item_name}' are no longer on the server. "
+                    "Upload the documents you want, replacing the collection."
+                ),
+            )
+
+        # The previous job's own shape and chunk parameters -- what makes its
+        # every document reusable. A job written before those columns existed
+        # re-chunks once under the record's config, as a removal does.
+        config = record.config or {}
+        kb_type = previous.kb_type or config.get("type", "local_folder")
+        chunk_size = previous.chunk_size if previous.chunk_size is not None else config.get("chunk_size", 1000)
+        chunk_overlap = (
+            previous.chunk_overlap if previous.chunk_overlap is not None else config.get("chunk_overlap", 100)
+        )
+        embedding_model = previous.embedding_model if kb_type in ("vector", "hybrid") else None
+
+        version_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _stage_previous_generation(
+                db, org_id, item_name, kb_root, version_dir,
+                superseded=set(), max_documents=_MAX_DOCUMENTS_PER_KB, source=previous,
             )
             job = IngestionJob(
                 kb_id=record.id,
