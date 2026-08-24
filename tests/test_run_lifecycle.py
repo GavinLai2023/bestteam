@@ -578,6 +578,130 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
     assert delegate_events[0]["data"] == runtime._PM_TRACE_REDACTED
 
 
+def test_pm_contract_run_empties_unverified_grounding_labels_but_keeps_counts(tmp_path, monkeypatch):
+    """`grounding_checked.unverified` is model-written text lifted verbatim
+    from a knowledge-base agent's final answer -- a [source: ...] citation
+    label the model wrote, which for a property-maintenance run can carry
+    customer-email-derived content the same way agent_completed's raw text
+    does. It isn't covered by _PM_REDACTED_EVENT_TYPES's wholesale
+    replacement, so it must be scrubbed on its own: the four integer counts
+    survive (they can't carry content, and they're the whole point of the
+    event for an operator watching automated replies), but `unverified` is
+    emptied (Codex review finding)."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
+    from ui.backend import runtime
+    from ui.backend.db import init_db, session_factory
+    from ui.backend.db.models import Run, TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    envelope = json.dumps({
+        "schema_version": 1,
+        "result_type": "property_maintenance_email_batch",
+        "items": [{
+            "message_id": "42", "classification": "maintenance_request", "category": "plumbing",
+            "priority": "routine", "status": "processed",
+            "summary": "ok", "extracted": {}, "missing_information": [], "risk_reasons": [],
+            "action": {"draft_created": False, "draft_type": None},
+            "needs_human": False, "human_reason": "",
+        }],
+    })
+
+    class _GroundedPipeline:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", pipeline="wf", data=None)
+            yield _TE(
+                type="grounding_checked", pipeline="wf", agent="responder",
+                data={
+                    "searches": 1, "hit_count": 3, "cited": 2, "verified": 1,
+                    "unverified": ["tenant's lease at 42 Elm St, p.99"],
+                },
+            )
+            yield _TE(type="run_completed", pipeline="wf", data=envelope)
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="email-trigger")
+    with Session() as s:
+        s.add(Run(
+            id=run.id, pipeline="wf", input="in", status="running", org_id=1, username="email-trigger",
+            trigger_context=_triggered_run_context([42]),
+        ))
+        s.commit()
+
+    run_in_background(run.id, _GroundedPipeline(), "in", engine=engine, org_id=1, username="email-trigger")
+
+    expected = {"searches": 1, "hit_count": 3, "cited": 2, "verified": 1, "unverified": []}
+
+    with Session() as s:
+        row = (
+            s.query(TraceEventRecord)
+            .filter_by(run_id=run.id, type="grounding_checked")
+            .one()
+        )
+        assert json.loads(row.data) == expected
+
+    live_events = [e for e in registry.get(run.id).events if e["type"] == "grounding_checked"]
+    assert len(live_events) == 1
+    assert live_events[0]["data"] == expected
+
+
+def test_non_pm_run_keeps_grounding_checked_labels_intact(tmp_path):
+    """The scrubbing above is scoped to a property-maintenance run only --
+    an ordinary run (no trigger_context, or a trigger_context without the
+    maintenance result_contract marker) must see `unverified` unchanged,
+    same as every other PM redaction branch."""
+    import json
+
+    from bestteam.core.trace import TraceEvent as _TE
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
+    from ui.backend.db.models import TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    class _GroundedPipeline:
+        name = "wf"
+
+        def stream(self, *args, **kwargs):
+            yield _TE(type="run_started", pipeline="wf", data=None)
+            yield _TE(
+                type="grounding_checked", pipeline="wf", agent="responder",
+                data={
+                    "searches": 1, "hit_count": 3, "cited": 2, "verified": 1,
+                    "unverified": ["handbook.pdf, p.99"],
+                },
+            )
+            yield _TE(type="run_completed", pipeline="wf", data="all done")
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    Session = session_factory(engine)
+
+    run = registry.create("wf", "in", org_id=1, username="alice")
+
+    run_in_background(run.id, _GroundedPipeline(), "in", engine=engine, org_id=1, username="alice")
+
+    expected = {"searches": 1, "hit_count": 3, "cited": 2, "verified": 1, "unverified": ["handbook.pdf, p.99"]}
+
+    with Session() as s:
+        row = (
+            s.query(TraceEventRecord)
+            .filter_by(run_id=run.id, type="grounding_checked")
+            .one()
+        )
+        assert json.loads(row.data) == expected
+
+    live_events = [e for e in registry.get(run.id).events if e["type"] == "grounding_checked"]
+    assert len(live_events) == 1
+    assert live_events[0]["data"] == expected
+
+
 def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_event(tmp_path, monkeypatch):
     """Same ordering guarantee as the normal terminal path
     (test_normalize_run_result_commits_before_the_terminal_event_is_published

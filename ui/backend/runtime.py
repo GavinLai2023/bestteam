@@ -874,6 +874,22 @@ def run_in_background(
                     if event.type == "run_completed":
                         raw_run_completed_output = event.data
                     event.data = _PM_TRACE_REDACTED
+                if is_pm_contract_run and event.type == "grounding_checked" and isinstance(event.data, dict):
+                    # `unverified` is model-written text lifted verbatim from the
+                    # agent's final answer (a [source: ...] citation label, up to
+                    # MAX_LABEL_CHARS of it) -- the same customer-email-derived
+                    # trust boundary the branch above redacts, so a sender can
+                    # otherwise induce a citation tag carrying email content and
+                    # have it broadcast/persisted here even though agent_completed
+                    # itself is redacted. The four counts (searches/hit_count/
+                    # cited/verified) are plain integers that cannot carry content
+                    # and are the whole point of this event for an operator
+                    # watching automated replies, so only `unverified` is emptied
+                    # -- deliberately NOT added to _PM_REDACTED_EVENT_TYPES, which
+                    # means "replace `data` wholesale" and is also consulted by the
+                    # buffered-cancellation logic's sibling set above (Codex review
+                    # finding).
+                    event.data = {**event.data, "unverified": []}
                 payload = dataclasses.asdict(event)
                 if (
                     event.type == "tool_completed"
