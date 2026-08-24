@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
+from ..core.grounding import check_grounding
 from ..core.team import CollaborationMode, Team
 from ..core.tool_context import tool_call_context
 from ..core.trace import TraceEvent
@@ -461,6 +462,14 @@ def _kb_tool_trace_data(trace: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _has_knowledge_base_tool(agent: Agent) -> bool:
+    """True when one of the agent's own tools is a knowledge base (the marker
+    `make_knowledge_base_tool` sets). Decides two things for the agent's turn:
+    its first model call is forced to use a tool, and its final text gets a
+    grounding check (core/grounding.py)."""
+    return any(getattr(fn, "__bestteam_tool_kind__", None) == "knowledge_base" for fn in agent.tools)
+
+
 def _record_usage(agent: Agent, response: Any, usage_sink: Optional[List[Dict[str, Any]]]) -> None:
     """Append `response.usage_metadata` (if any) to `usage_sink`, tagged with `agent`'s model spec."""
     if usage_sink is None:
@@ -512,8 +521,9 @@ def _run_agent(
     `tool_choice="required"` -- a real model can otherwise just ignore prompt
     text and answer directly, so `_hierarchical_node` uses this to make a
     manager's first turn always delegate rather than merely suggesting it
-    should. Later iterations in this same call always use the unforced
-    binding, so the agent can still settle on a final text answer once it has
+    should. `_agent_node` uses it for an agent that carries a knowledge-base
+    tool, for the same reason. Later iterations in this same call always use
+    the unforced binding, so the agent can still settle on a final text answer once it has
     gathered what it needs. A model that refuses the forcing outright (see
     `_first_call`) falls back to the unforced binding rather than failing. If `usage_sink` is given, each model invocation's
     `usage_metadata` (when reported) is appended to it for usage metering.
@@ -542,6 +552,12 @@ def _run_agent(
     raw_model = model
     all_tools = [*agent.tools, *extra_tools]
     tools_by_name = {fn.__name__: fn for fn in all_tools}
+    # Grounding-lite (core/grounding.py): what this turn's knowledge-base
+    # searches returned, so the final text's [source: …] tags can be checked
+    # against them. Only ever read when the agent has a knowledge-base tool.
+    kb_searches = 0
+    kb_hit_count = 0
+    kb_citations: List[str] = []
     first_call_model = model
     forced_first_call = False
     if all_tools:
@@ -738,6 +754,9 @@ def _run_agent(
                         extra_data = _redacted_email_tool_data(call["name"], call["args"], result)
                     elif getattr(tool_fn, "__bestteam_tool_kind__", None) == "knowledge_base":
                         extra_data = _kb_tool_trace_data(tool_ctx.trace)
+                        kb_searches += 1
+                        kb_hit_count += int(tool_ctx.trace.get("hit_count") or 0)
+                        kb_citations.extend(tool_ctx.trace.get("citations") or ())
                     else:
                         extra_data = {"summary": _summarize(result)}
                     if reveal:
@@ -778,7 +797,17 @@ def _run_agent(
         # The loop ran out while the model was still asking for tools, so it
         # never produced a text answer -- `response.content` is empty here.
         return _tool_loop_exhausted_notice(agent.name)
-    return response.content if hasattr(response, "content") else str(response)
+    text = response.content if hasattr(response, "content") else str(response)
+    if _has_knowledge_base_tool(agent):
+        # Grounding-lite: record how the answer's citations compare with what
+        # this turn's searches returned. Recorded, never acted on -- the text
+        # is returned unchanged. Not emitted on the early returns above (a
+        # stop, an exhausted loop): those turns produced no answer to check.
+        _emit(
+            "grounding_checked",
+            check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count).as_trace_data(),
+        )
+    return text
 
 
 def _make_delegate_tool(
@@ -882,6 +911,13 @@ def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False)
     `streams` marks the one agent per pipeline whose text IS the run's output,
     so its model calls are streamed token by token when the run supplies a
     sink (see `_run_agent` and `LangGraphAdapter.compile`).
+
+    An agent with a knowledge-base tool has its first model call forced to
+    use a tool (`require_tool_use_on_first_call`), the same insurance the
+    hierarchical paths carry: the tool's docstring asks the model to search
+    before answering, and a real model can ignore that. Any other tool set
+    keeps the unforced first call. The forcing has `_first_call`'s fallback
+    for a provider that rejects it.
     """
     if agent.model is None:
         raise ConfigurationError(f"Agent '{agent.name}' has no model configured")
@@ -893,6 +929,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False)
             agent,
             state["context"] or state["input"],
             extra_system_prompt=state.get("memory_preamble", ""),
+            require_tool_use_on_first_call=_has_knowledge_base_tool(agent),
             usage_sink=usage_sink,
             on_event=sub_events.append,
             diagnostic=state.get("diagnostic", False),
