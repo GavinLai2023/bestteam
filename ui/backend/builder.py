@@ -499,6 +499,16 @@ def submit_requirements(
         if session.requirements_json is None:
             raise HTTPException(status_code=400, detail="There are no clarifying questions to answer yet")
         current = Requirements.model_validate(session.requirements_json)
+        if not current.clarifying_questions:
+            raise HTTPException(status_code=400, detail="There are no clarifying questions to answer yet")
+        # The contract is the full paired batch: an empty, partial, stale or
+        # unrelated list would let the history record a "skip" that never
+        # showed the analyst any question (Codex review finding).
+        if sorted(qa.question for qa in req.answers) != sorted(current.clarifying_questions):
+            raise HTTPException(
+                status_code=400,
+                detail="Answers must cover exactly the current clarifying questions",
+            )
         chat_model = _call_model(_resolve_model, req.model)
         requirements = _call_model(
             generate_requirements,
