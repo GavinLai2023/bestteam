@@ -15,6 +15,15 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ## [Unreleased]
 
+## [0.1.0b2] — 2026-08-24
+
+Second beta build. Named from a green `main` (`9afba75`) — all seven CI jobs,
+including the `backend-full` and `e2e-full` suites that run only on `main`.
+
+Upgrading from `0.1.0b1`: run `alembic upgrade head` (one migration,
+`s6t7u8v9w0x1`). Nothing is backfilled and no configuration changes.
+`docs/BETA_NOTES.md` is still the one page to hand a beta customer.
+
 ### Added
 
 - **A knowledge-base agent searches before it answers, and its citations
@@ -135,5 +144,6 @@ reasoning is in `docs/STATUS.md`; the customer-facing subset is in
   in flight is swept to `failed` at startup rather than showing as running
   forever.
 
-[Unreleased]: https://github.com/GavinLai2023/bestteam/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/GavinLai2023/bestteam/compare/v0.1.0-beta.2...HEAD
+[0.1.0b2]: https://github.com/GavinLai2023/bestteam/releases/tag/v0.1.0-beta.2
 [0.1.0b1]: https://github.com/GavinLai2023/bestteam/releases/tag/v0.1.0-beta.1
