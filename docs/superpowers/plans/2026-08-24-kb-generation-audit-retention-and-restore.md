@@ -1023,14 +1023,15 @@ def test_restore_is_refused_while_an_upload_is_processing(client, monkeypatch):
     assert "still processing" in resp.json()["detail"]
 
 
-def test_restore_is_refused_when_the_previous_files_are_gone(client, tmp_path):
+def test_restore_is_refused_when_the_previous_files_are_gone(client):
     import shutil
 
     first = _upload(client, "a.txt")
     _upload(client, "b.txt")
     with open_test_db() as db:
-        version = db.get(IngestionJob, first).version
-    shutil.rmtree(tmp_path / "knowledge_base_uploads" / "1" / "policies" / version)
+        job = db.get(IngestionJob, first)
+        version, org_id = job.version, job.org_id
+    shutil.rmtree(backend_knowledge_bases._KB_UPLOADS_DIR / str(org_id) / "policies" / version)
 
     assert client.get("/api/org/knowledge-bases/policies").json()["previous_generation"] is None
     resp = client.post("/api/org/knowledge-bases/policies/restore")
@@ -1055,7 +1056,7 @@ def test_restore_of_another_orgs_collection_is_404(client):
     del other_id
 ```
 
-Check the org-id path segment used in `test_restore_is_refused_when_the_previous_files_are_gone`: the `default` org's id is `1` in this fixture (every other test in the file that inspects `_KB_UPLOADS_DIR` uses `tmp_path / "knowledge_base_uploads" / "1" / ...`); if the file's existing tests read it differently, copy their expression.
+(`backend_knowledge_bases._KB_UPLOADS_DIR` is already monkeypatched by the `client` fixture to `tmp_path / "knowledge_base_uploads"`, and the KB's `org_id` is read off the job row rather than assumed.)
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1259,7 +1260,7 @@ In `_kb_summary`, after `live = _latest_completed_job(db, record)`:
     previous = restorable_generation(db, org_id, record)
 ```
 
-`_kb_summary` needs `org_id`: change its signature to `def _kb_summary(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord)` and update its call sites in this file (grep `_kb_summary(` — the list route and the single-item route; pass `org.id`). Add to the returned dict, after `"documents"`:
+`_kb_summary` needs `org_id`: change its signature to `def _kb_summary(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord)` and update its two call sites in this file — line 218 `return [_kb_summary(db, org.id, record) for record in records]` and line 373 `return _kb_summary(db, org.id, _own_kb_or_404(db, org.id, item_name))`. Add to the returned dict, after `"documents"`:
 
 ```python
         # What "Restore previous upload" would bring back, or null when there
