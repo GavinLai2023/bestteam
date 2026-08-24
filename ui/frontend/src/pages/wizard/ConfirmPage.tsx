@@ -48,11 +48,16 @@ export default function ConfirmPage() {
   const [reqDraft, setReqDraft] = useState<Requirements>(EMPTY_REQUIREMENTS)
   const [reqBusy, setReqBusy] = useState(false)
   const [reqError, setReqError] = useState<string | null>(null)
+  // Drafted answers to the open clarifying questions, keyed by question
+  // index. Reset whenever the requirements regenerate: that round retires or
+  // replaces questions, so a stale answer must not survive it.
+  const [answerDraft, setAnswerDraft] = useState<Record<number, string>>({})
 
   useEffect(() => {
     if (session?.requirements_json) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- sync editable draft when AI (re)generates requirements
       setReqDraft({ ...EMPTY_REQUIREMENTS, ...session.requirements_json })
+      setAnswerDraft({})
     }
   }, [session?.requirements_json])
 
@@ -91,11 +96,17 @@ export default function ConfirmPage() {
     // Architect is in the middle of replacing.
     setNavBusy(true)
     setError(null)
+    // Answers travel only when typed: a blank answer here is not a skip (no
+    // skip button on Confirm) -- the question simply stays open.
+    const answered = reqDraft.clarifying_questions
+      .map((question, i) => ({ question, answer: (answerDraft[i] ?? '').trim() }))
+      .filter((qa) => qa.answer)
     try {
       const updated = await api.refineTeam(sessionId!, {
         // Only when there is a summary to edit -- an empty draft would
         // otherwise overwrite a session whose Requirements call failed.
         ...(session.requirements_json ? { requirements: reqDraft } : {}),
+        ...(answered.length ? { answers: answered } : {}),
         feedback: feedback.trim(),
         model: pickDefaultModel(catalogEntries),
       })
@@ -171,11 +182,20 @@ export default function ConfirmPage() {
               {reqDraft.clarifying_questions.length > 0 && (
                 <div className="banner banner-info">
                   <strong>{t('wizard.confirm.clarifyHeading')}</strong>
-                  <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
-                    {reqDraft.clarifying_questions.map((q, i) => (
-                      <li key={i}>{q}</li>
-                    ))}
-                  </ul>
+                  {reqDraft.clarifying_questions.map((q, i) => (
+                    <div className="field" key={i} style={{ marginTop: 8 }}>
+                      <label htmlFor={`clarify-${i}`}>{q}</label>
+                      <textarea
+                        id={`clarify-${i}`}
+                        rows={2}
+                        value={answerDraft[i] ?? ''}
+                        onChange={(e) => setAnswerDraft((prev) => ({ ...prev, [i]: e.target.value }))}
+                        placeholder={t('wizard.questions.answerPlaceholder')}
+                        disabled={busy}
+                      />
+                    </div>
+                  ))}
+                  <p className="hint">{t('wizard.confirm.clarifyHint')}</p>
                 </div>
               )}
 
