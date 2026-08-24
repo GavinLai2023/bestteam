@@ -424,6 +424,13 @@ export const api = {
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
       { method: 'DELETE' },
     ),
+  // Makes the previous upload the live set again; a 202 with the job to
+  // poll, like an upload. Nothing is re-embedded.
+  restoreOwnKnowledgeBase: (name: string) =>
+    request<{ name: string; job_id: number; status: string }>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/restore`,
+      { method: 'POST' },
+    ),
   // "Try a search": one query against the org's own collection, returning the
   // passages an agent would have retrieved. A collection that can't answer
   // yet (still processing, last upload failed, or never uploaded through the

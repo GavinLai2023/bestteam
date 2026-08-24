@@ -14,6 +14,7 @@ vi.mock('../lib/api', () => ({
     deleteOwnKnowledgeBase: vi.fn(),
     searchOwnKnowledgeBase: vi.fn(),
     removeOwnKnowledgeBaseDocument: vi.fn(),
+    restoreOwnKnowledgeBase: vi.fn(),
   },
 }))
 
@@ -36,6 +37,7 @@ const kb = (overrides: Partial<OrgKnowledgeBase> = {}): OrgKnowledgeBase => ({
     errors: [],
   },
   documents: [],
+  previous_generation: null,
   ...overrides,
 })
 
@@ -434,5 +436,78 @@ describe('KnowledgeBasesPanel', () => {
     mockedApi.listOwnKnowledgeBases.mockRejectedValue(new Error('Not authenticated'))
     render(<KnowledgeBasesPanel />)
     expect(await screen.findByText('Not authenticated')).toBeInTheDocument()
+  })
+
+  it('restores the previous upload once confirmed, naming what comes back', async () => {
+    const restored = kb({
+      documents: [threeDocuments[0]],
+      used_by: ['support_team'],
+      previous_generation: { completed_at: '2026-08-20T00:00:00Z', filenames: ['a.txt', 'b.txt'] },
+    })
+    mockedApi.listOwnKnowledgeBases.mockResolvedValueOnce([restored])
+    // The re-fetch after restoring sees the row it just marked processing --
+    // otherwise a static mock would make the refresh overwrite the optimistic
+    // "Processing…" state with the pre-restore "Ready" one instantly.
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      { ...restored, latest_job: { ...restored.latest_job!, job_id: 9, status: 'queued' } },
+    ])
+    mockedApi.restoreOwnKnowledgeBase.mockResolvedValue({ name: 'policies', job_id: 9, status: 'queued' })
+    render(<KnowledgeBasesPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore previous upload' }))
+    expect(screen.getByText(/Restore the previous upload to "policies"\?/)).toBeInTheDocument()
+    expect(screen.getByText(/a\.txt, b\.txt/)).toBeInTheDocument()
+    expect(screen.getByText(/Teams using "policies": support_team/)).toBeInTheDocument()
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(mockedApi.restoreOwnKnowledgeBase).toHaveBeenCalledWith('policies')
+    expect(await screen.findByText('Processing…')).toBeInTheDocument()
+    await waitFor(() => expect(mockedApi.listOwnKnowledgeBases).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not restore if the reader cancels', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({ previous_generation: { completed_at: null, filenames: ['a.txt'] } }),
+    ])
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore previous upload' }))
+    await act(async () => {
+      await answerConfirm(false)
+    })
+    expect(mockedApi.restoreOwnKnowledgeBase).not.toHaveBeenCalled()
+  })
+
+  it('disables Restore with nothing to go back to, and while an upload is processing', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({ name: 'one_upload', previous_generation: null }),
+      kb({
+        name: 'busy',
+        previous_generation: { completed_at: null, filenames: ['a.txt'] },
+        latest_job: { job_id: 2, status: 'running', file_count: 1, documents_succeeded: 0, documents_failed: 0, chunk_count: 0, errors: [] },
+      }),
+    ])
+    render(<KnowledgeBasesPanel />)
+    const buttons = await screen.findAllByRole('button', { name: 'Restore previous upload' })
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0]).toBeDisabled()
+    expect(buttons[0]).toHaveAttribute('title', expect.stringMatching(/no earlier upload/i))
+    expect(buttons[1]).toBeDisabled()
+    expect(buttons[1]).toHaveAttribute('title', expect.stringMatching(/still processing/i))
+  })
+
+  it("shows a refused restore's message on the row", async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({ previous_generation: { completed_at: null, filenames: ['a.txt'] } }),
+    ])
+    mockedApi.restoreOwnKnowledgeBase.mockRejectedValue(
+      new Error("The files for 'policies' are no longer on the server. Upload the documents you want, replacing the collection."),
+    )
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore previous upload' }))
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(await screen.findByText(/no longer on the server/)).toBeInTheDocument()
   })
 })
