@@ -179,3 +179,31 @@ def test_t4_6_revisit_documents_after_deploy_refines_not_regenerates(page):
 
     history_text = page.locator(".banner-info").inner_text()
     assert "sign off" in history_text.lower() or "Best, the Support Team" in history_text
+
+
+def test_t4_7_clarifying_questions_answer_and_skip(page):
+    """The interview step: the analyst's questions appear after Intent; one
+    answered, one left blank -> the folded answer and the recorded assumption
+    both surface as constraints on the Confirm page. `[interview me]` is the
+    fake-architect's deterministic trigger (see langgraph_adapter.py)."""
+    _login(page)
+    page.goto(BASE_URL + "/wizard")
+    page.wait_for_selector("#intent", timeout=8000)
+    page.fill("#intent", "We handle customer support emails. [interview me]")
+    page.click("button:has-text('Start building my team')")
+    page.wait_for_url("**/questions", timeout=15000)
+
+    page.fill("#question-0", "About 40 a day")
+    page.click("button:has-text('Continue')")
+    page.wait_for_url("**/documents", timeout=20000)
+    page.click("button:has-text('Skip for now')")
+    page.wait_for_url("**/preview", timeout=20000)
+    page.wait_for_selector(".team-flow, .employee-card", timeout=8000)
+    page.click("button:has-text('Continue')")
+    page.wait_for_url("**/confirm", timeout=8000)
+
+    # Constraints render as BulletEditor <input> rows -- match displayed value.
+    pw_expect(page.get_by_display_value("The customer clarified: About 40 a day")).to_be_visible()
+    pw_expect(
+        page.get_by_display_value("Assumed: replies can go out within one business day.")
+    ).to_be_visible()

@@ -6,6 +6,34 @@
 
 ## Done
 
+- **The platform asks the customer questions** (2026-08-24, spec
+  `docs/superpowers/specs/2026-08-24-clarifying-questions-design.md`). The
+  roadmap's "clarifying questions are inert" item, in the decided 2026-08-23
+  shape. The wizard is now **six steps**: a `questions` step between Intent
+  and Documents shows the analyst's `clarifying_questions` (the prompt now
+  asks for up to 4 that would most change the team design, instead of 1-2
+  only when "too vague"), one textarea each, with Continue (needs ≥1
+  non-blank answer) and "Skip these questions". Both send the full paired
+  batch to `POST /requirements` (new `answers` field); a blank answer makes
+  the analyst record the assumption it made instead into `constraints`
+  prefixed `Assumed:` and retire the question (`generate_requirements(...,
+  answers=)`, `QuestionAnswer`, rendered after `current`, before
+  `feedback`). Answers are stored paired in `feedback_history`
+  (`{stage: "clarifying", answers, skipped}`). No `Requirements` schema
+  change — `clarifying_questions` stays `List[str]`, old sessions validate
+  untouched. On Confirm the read-only banner became per-question inputs
+  whose non-blank answers ride the page's one "Update the team" action
+  (`/refine` gains `answers`; blanks there stay open — no skip button, no
+  forced assumption). IntentPage forks: questions → `/questions`, none or a
+  failed requirements call → Documents as before, so `fake:` catalogs and
+  the existing e2e flows are unchanged. `fake-architect:` asks two canned
+  questions only when the intent contains `[interview me]` and folds
+  answer blocks deterministically (`The customer clarified: …` /
+  `Assumed: replies can go out within one business day.`), giving T4-7 its
+  e2e coverage. Deliberately not done: architect-stage questions (would
+  need a `Specification` schema change — refused in the ruling), a
+  deploy-time gate on open questions, rendering "clarifying" history
+  entries in the UI.
 - **Grounding-lite** (2026-08-24, spec
   `docs/superpowers/specs/2026-08-24-grounding-lite-design.md`). The
   2026-08-24 external review's second P0: a SEQUENTIAL/PARALLEL agent was
@@ -2394,24 +2422,6 @@
 
 ## Next steps / roadmap
 
-- **The platform should ask the customer questions** (decided 2026-08-23, not
-  started). `Requirements.clarifying_questions` already exists, the analyst
-  prompt already generates it, and `ConfirmPage` already renders it — but it
-  is inert in four ways: the prompt only asks when the description is "too
-  vague", capped at 1-2 questions; `IntentPage` generates requirements and
-  goes straight to Documents, so the questions first appear on Confirm, after
-  the team has been designed; the banner is read-only, so answers arrive as
-  free text with no link to the question they answer; and each regeneration
-  overwrites the list, so an unanswered question can vanish or be re-asked
-  forever. Decided shape: **a batch of questions, one input each, answers
-  stored paired with their question, skippable as a batch**; asked **after
-  Intent, before the team is designed**, and again **on Confirm when a change
-  is requested**. The architect deliberately does *not* get to ask (it would
-  mean a `Specification` schema change, the largest part). The governing
-  constraint: the platform promises "intent in, best AI team out", so asking
-  is pushing work back onto the customer — skipping must always be possible,
-  and a skipped question must make the analyst **write down the assumption it
-  made instead**, into `constraints`, where the customer can see it.
 - **Should the wizard still pin every agent to one model?**
   `submit_solution_feedback` pins each agent's `model` to the request's
   `model`, and `/refine` copies that so the Confirm page's behaviour did not
