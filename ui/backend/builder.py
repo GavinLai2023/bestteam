@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from bestteam import Specification, generate_requirements, generate_specification, validate_specification
 from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.knowledge_base import make_knowledge_base_tool
-from bestteam.core.requirements import Requirements
+from bestteam.core.requirements import QuestionAnswer, Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
@@ -290,6 +290,9 @@ class RequirementsRequest(BaseModel):
     requirements: Optional[Dict[str, Any]] = None
     model: Optional[str] = None
     feedback: Optional[str] = None
+    # Answers to the stored requirements' clarifying_questions, paired.
+    # Blank answers are deliberate ("skip"): the analyst records assumptions.
+    answers: Optional[List[QuestionAnswer]] = None
 
 
 class SpecificationRequest(BaseModel):
@@ -482,7 +485,36 @@ def submit_requirements(
     a structured requirements summary."""
     session = _get_session_or_404(db, session_id, org.id)
 
-    if req.requirements is not None:
+    if req.answers is not None:
+        # The Questions step: fold the paired answers into the stored
+        # understanding. A blank answer is a deliberate skip -- the analyst
+        # records the assumption it made instead (see core/requirements.py).
+        if req.requirements is not None:
+            raise HTTPException(status_code=400, detail="Provide either 'answers' or 'requirements', not both")
+        if req.model is None:
+            raise HTTPException(status_code=400, detail="Answering clarifying questions needs a 'model'")
+        if session.requirements_json is None:
+            raise HTTPException(status_code=400, detail="There are no clarifying questions to answer yet")
+        current = Requirements.model_validate(session.requirements_json)
+        chat_model = _call_model(_resolve_model, req.model)
+        requirements = _call_model(
+            generate_requirements,
+            chat_model,
+            session.intent_text,
+            session.as_is_text,
+            current=current,
+            answers=req.answers,
+        )
+        append_feedback(
+            db,
+            session_id,
+            {
+                "stage": "clarifying",
+                "answers": [qa.model_dump() for qa in req.answers],
+                "skipped": all(not qa.answer.strip() for qa in req.answers),
+            },
+        )
+    elif req.requirements is not None:
         try:
             requirements = Requirements.model_validate(req.requirements)
         except ValidationError as exc:

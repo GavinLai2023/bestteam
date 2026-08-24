@@ -559,6 +559,106 @@ def test_submit_requirements_requires_payload_or_model(client):
     assert resp.status_code == 400
 
 
+_REQUIREMENTS_WITH_QUESTIONS = {
+    "summary": "Faster support",
+    "pain_points": ["slow replies"],
+    "goals": ["reply within an hour"],
+    "success_criteria": [],
+    "constraints": [],
+    "clarifying_questions": [
+        "How many emails do you receive per day?",
+        "Which mailbox provider do you use?",
+    ],
+}
+
+
+def _session_with_requirements(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"requirements": _REQUIREMENTS_WITH_QUESTIONS},
+    )
+    assert resp.status_code == 200, resp.text
+    return session_id
+
+
+def test_answers_require_stored_requirements(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"model": "fake-architect:x", "answers": [{"question": "Q?", "answer": "A"}]},
+    )
+
+    assert resp.status_code == 400
+    assert "clarifying questions" in resp.json()["detail"]
+
+
+def test_answers_and_requirements_together_rejected(client):
+    session_id = _session_with_requirements(client)
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={
+            "requirements": {"summary": "s"},
+            "answers": [{"question": "Q?", "answer": "A"}],
+        },
+    )
+
+    assert resp.status_code == 400
+
+
+def test_answers_without_model_rejected(client):
+    session_id = _session_with_requirements(client)
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"answers": [{"question": "Q?", "answer": "A"}]},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_answers_rerun_analyst_and_record_paired_history(client):
+    session_id = _session_with_requirements(client)
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={
+            "model": "fake-architect:x",
+            "answers": [
+                {"question": "How many emails do you receive per day?", "answer": "About 40"},
+                {"question": "Which mailbox provider do you use?", "answer": ""},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    constraints = body["requirements_json"]["constraints"]
+    assert "The customer clarified: About 40" in constraints
+    assert "Assumed: replies can go out within one business day." in constraints
+    entry = [e for e in body["feedback_history"] if e["stage"] == "clarifying"][-1]
+    assert entry["answers"][0] == {"question": "How many emails do you receive per day?", "answer": "About 40"}
+    assert entry["skipped"] is False
+
+
+def test_all_blank_answers_record_a_skip(client):
+    session_id = _session_with_requirements(client)
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={
+            "model": "fake-architect:x",
+            "answers": [{"question": "Which mailbox provider do you use?", "answer": " "}],
+        },
+    )
+
+    assert resp.status_code == 200
+    entry = [e for e in resp.json()["feedback_history"] if e["stage"] == "clarifying"][-1]
+    assert entry["skipped"] is True
+
+
 def test_submit_specification_with_valid_payload(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
 
