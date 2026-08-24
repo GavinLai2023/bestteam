@@ -17,6 +17,13 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ### Added
 
+- **A knowledge-base agent searches before it answers, and its citations
+  are checked** — an agent that has a knowledge base is now made to use a
+  tool on its first model call (as a team manager already was), and each of
+  its turns ends with a `grounding_checked` trace event: how many
+  `[source: …]` tags the answer carries, how many name a passage the agent
+  actually retrieved, and which do not. Nothing is retried or refused; the
+  event is there to be read. No configuration, no migration.
 - **Restore the previous upload** — "Restore previous upload" on "My
   documents" (`POST /api/org/knowledge-bases/{name}/restore`) makes the
   upload before the current one live again, reusing every chunk and embedding

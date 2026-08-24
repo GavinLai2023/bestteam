@@ -432,6 +432,39 @@ tool. At runtime, `adapters/langgraph_adapter.py`'s tool-calling loop binds
 all of an agent's tools to the model and dispatches by name when the model
 calls one.
 
+Two things hold the agent to the knowledge base rather than merely offering
+it (grounding-lite, 2026-08-24). First, an agent that carries a knowledge-base
+tool makes its **first model call with `tool_choice="required"`** on every
+team mode — the same insurance a hierarchical manager and a delegated
+specialist already had — so the model searches before it answers instead of
+answering from what it remembers. A provider that rejects a forced
+`tool_choice` (DeepSeek's thinking mode does) gets the unforced call instead,
+so the worst case is today's behaviour, never a failed run. An agent whose
+only tools are `web_search`, `calculator` and the like is not forced. Second,
+when the turn ends, the `[source: …]` tags in the agent's final text are
+**checked against the citations its own searches returned** and the result is
+recorded as one `grounding_checked` trace event:
+
+```json
+{
+  "searches": 1,
+  "hit_count": 3,
+  "cited": 2,
+  "verified": 1,
+  "unverified": ["handbook.pdf, p.99"]
+}
+```
+
+A tag is verified when it equals a returned citation (whitespace aside), or
+when it names only a filename and that document was among the hits. A tag
+with a page or heading the search never returned is unverified — a fabricated
+locator is exactly what this shows. The event carries counts and citation
+labels only (at most ten unverified labels, each at most 200 characters), and
+it **records rather than acts**: the answer is returned unchanged, nothing is
+retried or refused. A knowledge-base agent that never searched (`searches:
+0`) has every tag unverified. A hierarchical manager without a knowledge base
+of its own is not checked — its specialists are.
+
 ### What a search looks like in the trace
 
 Every knowledge base search shows up in the run's trace as a `tool_completed`
@@ -1026,6 +1059,11 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   `src/bestteam/core/CLAUDE.md`. Memory is not wired into knowledge base
   retrieval, or vice versa — recalling a user's memory and querying a
   knowledge base remain two independent tools.
+- **Grounding is checked, not enforced.** `grounding_checked` says whether an
+  answer's citations name passages that were retrieved; it does not say the
+  passage supports the claim, and an unverified citation changes nothing
+  about the run. Regenerating or refusing an ungrounded answer, and any
+  answer-level evaluation, are not built.
 
 ## File reference
 

@@ -91,10 +91,19 @@ alongside its own `tools` and run through the same tool-calling loop as
 SEQUENTIAL/PARALLEL agents — see `_hierarchical_node` in
 `adapters/langgraph_adapter.py`.
 
-Both hierarchical paths force `tool_choice="required"` on an agent's **first**
-call — a manager's, so it delegates rather than answering from its own
-guesswork, and a tool-carrying subordinate's, so it actually consults the tool
-it was delegated to use. That forcing is insurance, not a requirement:
+Three paths force `tool_choice="required"` on an agent's **first** call — a
+hierarchical manager's, so it delegates rather than answering from its own
+guesswork; a tool-carrying subordinate's, so it actually consults the tool it
+was delegated to use; and, on every mode, an agent that carries a
+knowledge-base tool (`_has_knowledge_base_tool`, keyed on the
+`__bestteam_tool_kind__ == "knowledge_base"` marker), so it searches before it
+answers. The same turn ends with a `grounding_checked` event from
+`core/grounding.py`: the final text's `[source: …]` tags compared with the
+citation labels the turn's own searches returned (the tool reports them in
+full through `report_trace(citations=…)`; the trace event keeps only the
+bounded `sources`). Recorded, never acted on.
+
+That forcing is insurance, not a requirement:
 `_first_call` catches a provider that rejects it (DeepSeek's thinking mode
 returns `400 Thinking mode does not support this tool_choice`, which arrives at
 call time, not at bind time) and retries once on the unforced binding. Without
