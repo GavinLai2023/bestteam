@@ -17,6 +17,16 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ### Added
 
+- **Restore the previous upload** — "Restore previous upload" on "My
+  documents" (`POST /api/org/knowledge-bases/{name}/restore`) makes the
+  upload before the current one live again, reusing every chunk and embedding
+  (nothing re-embedded or billed). One upload back; restoring again undoes it.
+- **Search evidence in a run's trace keeps resolving** — a knowledge-base
+  generation that some run's trace references is no longer deleted when newer
+  uploads push it out of the keep window: its text rows are kept (vectors
+  and files are not) until the run's content is purged by retention.
+  Migration `s6t7u8v9w0x1` adds `run_knowledge_generations`; run
+  `alembic upgrade head`. Nothing is backfilled.
 - **Remove one document from a collection** — each row of "My documents"
   lists its documents (name, size, whether it could be read) with a Remove
   per document; `DELETE /api/org/knowledge-bases/{name}/documents/{filename}`

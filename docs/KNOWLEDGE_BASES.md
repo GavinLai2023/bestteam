@@ -828,12 +828,28 @@ refusal lasts only as long as the upload: jobs left `queued`/`running` by a
 killed process are marked `failed` at the next startup, so a crash can never
 leave a knowledge base permanently undeletable.
 
-Older completed ingestion generations are pruned automatically (keeping the
-current one plus one grace-window generation) once a new job completes. A
-`failed` job's on-disk version directory is reclaimed the same way — every
-failed job except the most recent one loses its directory (its rows stay, as
-the customer-visible error record), so repeatedly retrying an upload that
-can't be parsed doesn't accumulate storage.
+Older completed ingestion generations are pruned automatically once a new job
+completes: the current generation and the one before it are kept intact, and
+an older one loses its files. Its rows go too — unless a run's trace still
+references it. Every knowledge-base search leaves the generation's id and each
+hit's chunk id in the run's trace, and those ids keep resolving for as long as
+the trace exists: a referenced generation keeps its document and chunk rows
+with the vectors dropped (text, page, heading and filename are what an audit
+needs), and is reclaimed at the collection's next completed upload after the
+run's content is purged by retention. A `failed` job's on-disk version
+directory is reclaimed the same way — every failed job except the most recent
+one loses its directory (its rows stay, as the customer-visible error record),
+so repeatedly retrying an upload that can't be parsed doesn't accumulate
+storage.
+
+**Restoring the previous upload.** "Restore previous upload" on the "My
+documents" panel (`POST /api/org/knowledge-bases/{name}/restore`) makes the
+generation before the live one the live set again: its files are staged into
+a new generation under its own settings, every chunk and embedding is reused,
+and nothing is billed. It reaches back one upload only — the one whose files
+are still on the server — and restoring again undoes the restore. Refused
+while an upload is processing, when there is no earlier upload, and when the
+previous files are gone.
 
 See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.

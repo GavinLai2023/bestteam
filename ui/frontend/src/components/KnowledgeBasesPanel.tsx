@@ -54,6 +54,14 @@ function removeBlockedReason(kb: OrgKnowledgeBase): string | null {
   return null
 }
 
+// Why restoring the previous upload is refused, in the reader's own terms, or
+// null when it's allowed. The backend refuses both with a 409 regardless.
+function restoreBlockedReason(kb: OrgKnowledgeBase): string | null {
+  if (isProcessing(kb)) return 'This upload is still processing. Wait for it to finish, then restore the previous upload.'
+  if (!kb.previous_generation) return 'There is no earlier upload to go back to.'
+  return null
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
@@ -86,6 +94,8 @@ export default function KnowledgeBasesPanel() {
   // The collection whose removal is in flight: its Remove buttons are
   // disabled until the request returns, so one click is one removal.
   const [removing, setRemoving] = useState<string | null>(null)
+  // The collection whose restore is in flight, so one click is one restore.
+  const [restoring, setRestoring] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -162,6 +172,42 @@ export default function KnowledgeBasesPanel() {
     }
   }
 
+  const handleRestore = async (kb: OrgKnowledgeBase) => {
+    const previous = kb.previous_generation
+    if (!previous) return
+    const usedBy = kb.used_by.length > 0 ? ` Teams using "${kb.name}": ${kb.used_by.join(', ')}.` : ''
+    const ok = await confirm({
+      title: `Restore the previous upload to "${kb.name}"?`,
+      body: `The collection goes back to: ${previous.filenames.join(', ')}. Its current documents are replaced.${usedBy}`,
+      confirmLabel: 'Restore',
+      destructive: true,
+    })
+    if (!ok) return
+    setRestoring(kb.name)
+    try {
+      const job = await api.restoreOwnKnowledgeBase(kb.name)
+      setRowErrors((prev) => {
+        const next = { ...prev }
+        delete next[kb.name]
+        return next
+      })
+      // Mark the row processing from the 202 itself (same reasoning as a
+      // removal): the poll keys off this even if the refresh below fails.
+      setItems((prev) =>
+        prev.map((i) =>
+          i.name === kb.name && i.latest_job
+            ? { ...i, latest_job: { ...i.latest_job, job_id: job.job_id, status: 'queued' } }
+            : i,
+        ),
+      )
+      await refresh()
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
+    } finally {
+      setRestoring(null)
+    }
+  }
+
   if (items.length === 0 && !error) return null
 
   return (
@@ -189,6 +235,7 @@ export default function KnowledgeBasesPanel() {
           const blocked = deleteBlockedReason(kb)
           const searchBlocked = searchBlockedReason(kb)
           const removeBlocked = removeBlockedReason(kb)
+          const restoreBlocked = restoreBlockedReason(kb)
           const docCount = kb.documents.length
           return (
             <li key={kb.name} className="session-item kb-card">
@@ -258,6 +305,15 @@ export default function KnowledgeBasesPanel() {
                 onClick={() => setOpenSearch((n) => (n === kb.name ? null : kb.name))}
               >
                 Try a search
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={restoreBlocked !== null || restoring === kb.name}
+                title={restoreBlocked ?? 'Restore previous upload'}
+                onClick={() => void handleRestore(kb)}
+              >
+                Restore previous upload
               </button>
               <button
                 type="button"

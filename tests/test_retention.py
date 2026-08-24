@@ -331,3 +331,30 @@ def test_no_default_leaves_a_new_org_keeping_everything(db, monkeypatch):
     org = create_org(db, "acme")
 
     assert get_retention_settings(db, org.id) is None
+
+
+def test_purge_releases_the_runs_knowledge_generation_references(db):
+    """The link row exists only to keep rows a trace points at; when the
+    trace goes, so does the reference -- and it is NOT a purged *field*: it
+    is derived from an `ingestion_job_id` inside a trace event the export
+    already emits, so `PURGED_FIELDS` and the export are unchanged."""
+    from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, RunKnowledgeGeneration
+    from ui.backend.db.run_knowledge_generations import record as record_generation
+    from ui.backend.retention import PURGED_FIELDS
+
+    org = create_org(db, "acme")
+    run = _run(db, org.id)
+    kb = KnowledgeBaseRecord(name="policies", org_id=org.id, config={"name": "policies", "type": "local_folder", "path": "x"})
+    db.add(kb)
+    db.flush()
+    job = IngestionJob(kb_id=kb.id, org_id=org.id, version="v1", status="completed", file_count=1)
+    db.add(job)
+    db.flush()
+    record_generation(db, run.id, job.id)
+    db.commit()
+
+    assert purge_run(db, run) is True
+    db.commit()
+
+    assert db.query(RunKnowledgeGeneration).filter_by(run_id=run.id).count() == 0
+    assert "run_knowledge_generations" not in PURGED_FIELDS

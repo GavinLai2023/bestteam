@@ -41,6 +41,7 @@ from bestteam.core.knowledge_base import (
 from bestteam.tools import parse_file
 
 from .db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
+from .db.run_knowledge_generations import delete_for_jobs, referenced_job_ids
 from .db.usage import record_usage
 
 _logger = logging.getLogger(__name__)
@@ -349,12 +350,15 @@ def _reusable_documents(
     nine -- and `content_hash`, computed and stored since the schema was
     written, was never read. This is what reads it.
 
-    Only the most recent **completed** job is a candidate: that is the
-    collection's live document set by definition, and a failed job's rows are
-    a diagnostic record of something that was never served. Returns nothing
-    unless that job's shape matches this one's (`_carryable`).
+    The newest `_KEEP_COMPLETED_GENERATIONS` completed jobs are candidates,
+    newest first: the live set and the generation before it -- exactly the
+    window pruning keeps intact, so an audit-only generation (rows kept for a
+    trace, vectors nulled) is never a source. Two rather than one so that
+    restoring the previous upload re-embeds nothing. A failed job's rows are
+    a diagnostic record of something that was never served. A candidate
+    contributes nothing unless its shape matches this job's (`_carryable`).
     """
-    previous = (
+    candidates = (
         db.query(IngestionJob)
         .filter(
             IngestionJob.kb_id == kb_id,
@@ -365,35 +369,43 @@ def _reusable_documents(
         # functions below spell out: completion order is not guaranteed to
         # match submission order.
         .order_by(IngestionJob.id.desc())
-        .first()
-    )
-    if previous is None or not _carryable(previous, job):
-        return {}
-    documents = (
-        db.query(KnowledgeDocument)
-        .filter_by(ingestion_job_id=previous.id, status="chunked")
+        # The keep window (the live generation and the one before it) -- the
+        # only completed jobs whose chunks still carry vectors; an audit-only
+        # generation outside it has had them nulled (`_prune_old_ingestion_versions`).
+        # Looking at both is what makes restoring the previous upload free:
+        # its files are staged again, and its chunks are found here.
+        .limit(_KEEP_COMPLETED_GENERATIONS)
         .all()
     )
-    if not documents:
-        return {}
-    # One query for every chunk of every candidate document, rather than a
-    # lazy load per document: a collection of thirty documents would
-    # otherwise be thirty round-trips on the worker thread before any of the
-    # work starts.
-    by_document: Dict[int, List[KnowledgeChunk]] = {}
-    chunks = (
-        db.query(KnowledgeChunk)
-        .filter(KnowledgeChunk.document_id.in_([doc.id for doc in documents]))
-        .order_by(KnowledgeChunk.chunk_index)
-        .all()
-    )
-    for chunk in chunks:
-        by_document.setdefault(chunk.document_id, []).append(chunk)
-    return {
-        (doc.filename, doc.content_hash): by_document[doc.id]
-        for doc in documents
-        if doc.id in by_document
-    }
+    result: Dict[Tuple[str, str], List[KnowledgeChunk]] = {}
+    for previous in candidates:  # newest first, so the live job's copy wins
+        if not _carryable(previous, job):
+            continue
+        documents = (
+            db.query(KnowledgeDocument)
+            .filter_by(ingestion_job_id=previous.id, status="chunked")
+            .all()
+        )
+        if not documents:
+            continue
+        # One query for every chunk of every candidate document, rather than a
+        # lazy load per document: a collection of thirty documents would
+        # otherwise be thirty round-trips on the worker thread before any of the
+        # work starts.
+        by_document: Dict[int, List[KnowledgeChunk]] = {}
+        chunks = (
+            db.query(KnowledgeChunk)
+            .filter(KnowledgeChunk.document_id.in_([doc.id for doc in documents]))
+            .order_by(KnowledgeChunk.chunk_index)
+            .all()
+        )
+        for chunk in chunks:
+            by_document.setdefault(chunk.document_id, []).append(chunk)
+        for doc in documents:
+            key = (doc.filename, doc.content_hash)
+            if key not in result and doc.id in by_document:
+                result[key] = by_document[doc.id]
+    return result
 
 
 def _carryable(previous: IngestionJob, job: IngestionJob) -> bool:
@@ -471,9 +483,8 @@ def _now():
 
 
 def _prune_old_ingestion_versions(db: Session, kb_id: int, kb_root: Path) -> None:
-    """Keep only the `_KEEP_COMPLETED_GENERATIONS` most recent completed
-    jobs for this KB; delete every older completed job's rows and on-disk
-    version directory. A failed/queued/running job is never pruned here --
+    """Keep the `_KEEP_COMPLETED_GENERATIONS` most recent completed jobs for this KB intact; every older completed job loses its on-disk version directory and, unless a run's trace still references it, its rows.
+    A failed/queued/running job is never pruned here --
     only completed jobs count as "old versions" (a still-failed job's rows
     are its own diagnostic record, left for the operator/customer to see).
     Reclaiming a failed job's on-disk directory is
@@ -491,18 +502,32 @@ def _prune_old_ingestion_versions(db: Session, kb_id: int, kb_root: Path) -> Non
         .order_by(IngestionJob.id.desc())
         .all()
     )
-    for old_job in completed[_KEEP_COMPLETED_GENERATIONS:]:
-        db.query(KnowledgeChunk).filter(
-            KnowledgeChunk.document_id.in_(
-                db.query(KnowledgeDocument.id).filter_by(ingestion_job_id=old_job.id)
-            )
-        ).delete(synchronize_session=False)
-        db.query(KnowledgeDocument).filter_by(ingestion_job_id=old_job.id).delete(synchronize_session=False)
+    old = completed[_KEEP_COMPLETED_GENERATIONS:]
+    # A generation some un-purged run's trace names keeps its rows: the trace
+    # carries chunk ids, and an audit has to be able to resolve them to text,
+    # page, heading and filename. It loses its files and its vectors -- the
+    # bulk of the storage, and nothing an audit needs. Released when
+    # `retention.purge_run` deletes the trace (or the KB is deleted), after
+    # which the next prune here takes the rows too. Idempotent: an audit-only
+    # generation is seen again on every later prune.
+    referenced = referenced_job_ids(db, [job.id for job in old])
+    for old_job in old:
         version_dir = kb_root / old_job.version
         if version_dir.is_dir():
             shutil.rmtree(version_dir, ignore_errors=True)
+        document_ids = db.query(KnowledgeDocument.id).filter_by(ingestion_job_id=old_job.id)
+        if old_job.id in referenced:
+            db.query(KnowledgeChunk).filter(
+                KnowledgeChunk.document_id.in_(document_ids),
+                KnowledgeChunk.embedding_json.isnot(None),
+            ).update({"embedding_json": None}, synchronize_session=False)
+            continue
+        db.query(KnowledgeChunk).filter(
+            KnowledgeChunk.document_id.in_(document_ids)
+        ).delete(synchronize_session=False)
+        db.query(KnowledgeDocument).filter_by(ingestion_job_id=old_job.id).delete(synchronize_session=False)
         db.delete(old_job)
-    if completed[_KEEP_COMPLETED_GENERATIONS:]:
+    if old:
         db.commit()
 
 
@@ -558,6 +583,7 @@ def delete_kb_ingestion_data(db: Session, kb_id: int) -> None:
     for a KB. Does NOT commit -- called from crud.py's delete route inside
     its own existing delete+commit+rmtree transaction, so this participates
     in that same commit rather than creating a separate one."""
+    delete_for_jobs(db, [job_id for (job_id,) in db.query(IngestionJob.id).filter_by(kb_id=kb_id)])
     db.query(KnowledgeChunk).filter_by(kb_id=kb_id).delete(synchronize_session=False)
     db.query(KnowledgeDocument).filter_by(kb_id=kb_id).delete(synchronize_session=False)
     db.query(IngestionJob).filter_by(kb_id=kb_id).delete(synchronize_session=False)

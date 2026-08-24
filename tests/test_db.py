@@ -43,6 +43,7 @@ def test_init_db_creates_all_tables():
         "knowledge_ingestion_jobs",
         "knowledge_documents",
         "knowledge_chunks",
+        "run_knowledge_generations",
         "skills",
         "skill_versions",
         "pipelines",

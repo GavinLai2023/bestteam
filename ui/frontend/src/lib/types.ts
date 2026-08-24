@@ -309,6 +309,9 @@ export interface OrgKnowledgeBase {
   // completes. A `failed` one could not be read but is still in the
   // collection's files, so it can be removed like any other.
   documents: OrgKnowledgeBaseDocument[]
+  // What "Restore previous upload" brings back, or null when there is
+  // nothing to go back to (one upload so far, or its files are gone).
+  previous_generation: { completed_at: string | null; filenames: string[] } | null
 }
 
 export interface OrgKnowledgeBaseDocument {

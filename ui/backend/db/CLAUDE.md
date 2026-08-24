@@ -155,6 +155,20 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   to delete all three of these tables' rows for it
   (`ingestion.delete_kb_ingestion_data`). See
   `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`.
+- `run_knowledge_generations` (`RunKnowledgeGeneration`) — one row per (run,
+  ingestion job): *this run's trace names chunk/document ids from this
+  generation*. Written by `runtime.run_in_background` from a KB tool's
+  `tool_completed` event the moment it arrives (a cancelled run has still
+  read the generation), one row per generation per run. Read by
+  `ingestion._prune_old_ingestion_versions`: a completed job outside the
+  newest-two window that some run references keeps its job/document/chunk
+  rows with `embedding_json` set NULL and its version directory deleted — an
+  audit resolves a chunk id to text, page, heading and filename, never a
+  vector. Released by `retention.purge_run` (with the trace; deliberately
+  **not** in `PURGED_FIELDS`, being an index over exported content) and by
+  `ingestion.delete_kb_ingestion_data`. No backfill (migration
+  `s6t7u8v9w0x1`). See
+  `docs/superpowers/specs/2026-08-24-kb-generation-audit-retention-and-restore-design.md`.
 - `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
   read them and their `/api/config` routes had already been removed: a
   pipeline carries its agents/teams inline in its own `config`, and
