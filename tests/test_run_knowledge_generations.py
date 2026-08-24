@@ -93,3 +93,81 @@ def test_delete_for_jobs_drops_every_reference_to_those_jobs(db):
 
     assert {r.ingestion_job_id for r in db.query(RunKnowledgeGeneration)} == {job2.id}
     delete_for_jobs(db, [])  # no-op, must not raise
+
+
+# --- runtime writes the reference ----------------------------------------------
+
+from bestteam.core.trace import TraceEvent
+from helpers import make_concurrent_safe_engine
+from ui.backend import runtime
+from ui.backend.runtime import registry, run_in_background
+
+
+def _kb_search_event(job_id):
+    return TraceEvent(
+        type="tool_completed", pipeline="wf", agent="a",
+        data={"tool": "policies", "success": True, "summary": "1 result",
+              "query": "refunds", "hit_count": 1, "sources": ["a.txt"],
+              "ingestion_job_id": job_id, "hits": []},
+    )
+
+
+class _SearchesTwicePipeline:
+    name = "wf"
+
+    def __init__(self, job_id):
+        self.job_id = job_id
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(type="run_started", pipeline="wf", data=None)
+        yield _kb_search_event(self.job_id)
+        yield _kb_search_event(self.job_id)
+        # A folder-built collection reports no generation.
+        yield _kb_search_event(None)
+        yield TraceEvent(type="run_completed", pipeline="wf", data="done")
+
+
+@pytest.fixture
+def file_engine(tmp_path):
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    return engine
+
+
+def _seed_job(engine):
+    with session_factory(engine)() as db:
+        kb = KnowledgeBaseRecord(name="policies", org_id=1, config={"name": "policies", "type": "local_folder", "path": "x"})
+        db.add(kb)
+        db.flush()
+        job = IngestionJob(kb_id=kb.id, org_id=1, version="v1", status="completed", file_count=1)
+        db.add(job)
+        db.commit()
+        return job.id
+
+
+def test_run_in_background_records_each_generation_once(file_engine):
+    job_id = _seed_job(file_engine)
+    run = registry.create("wf", "in", org_id=1)
+
+    run_in_background(run.id, _SearchesTwicePipeline(job_id), "in", file_engine, org_id=1)
+
+    with session_factory(file_engine)() as db:
+        rows = db.query(RunKnowledgeGeneration).filter_by(run_id=run.id).all()
+    assert [r.ingestion_job_id for r in rows] == [job_id]
+    assert registry.get(run.id).status == "completed"
+
+
+def test_a_failed_reference_write_never_fails_the_run(file_engine, monkeypatch):
+    job_id = _seed_job(file_engine)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(runtime, "record_knowledge_generation", _boom)
+    run = registry.create("wf", "in", org_id=1)
+
+    run_in_background(run.id, _SearchesTwicePipeline(job_id), "in", file_engine, org_id=1)
+
+    assert registry.get(run.id).status == "completed"
+    with session_factory(file_engine)() as db:
+        assert db.query(RunKnowledgeGeneration).count() == 0

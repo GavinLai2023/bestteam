@@ -37,6 +37,7 @@ from .db.inbox_events import (
     release_events,
 )
 from .db.models import InboxEvent, Run, TraceEventRecord
+from .db.run_knowledge_generations import record as record_knowledge_generation
 from .db.usage import record_usage
 from .registry import RunRegistry
 from .share_transcript import record_share_reply
@@ -462,6 +463,27 @@ def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: Trace
             pass
 
 
+def _safe_record_knowledge_generation(db: Session, *, run_id: str, ingestion_job_id: int) -> None:
+    """Persist "this run's trace names KB generation `ingestion_job_id`" --
+    what stops `ingestion._prune_old_ingestion_versions` deleting the rows the
+    trace's chunk ids point at. Written the moment the search event arrives,
+    not at the terminal event: a run cancelled or crashed afterwards has still
+    read that generation. Isolated like `_safe_record_usage` -- an audit record
+    failing must never fail the run."""
+    try:
+        record_knowledge_generation(db, run_id, ingestion_job_id)
+        db.commit()
+    except Exception:  # noqa: BLE001 -- bookkeeping must never break a run
+        _logger.warning(
+            "Knowledge generation reference failed for run %s; run unaffected",
+            run_id, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 _SHARE_REPLY_MAX_ATTEMPTS = 3
 _SHARE_REPLY_RETRY_DELAY_SECONDS = 0.05
 
@@ -688,6 +710,9 @@ def run_in_background(
     # happened before a single tool_completed event was ever yielded.
     confirmed_draft_message_ids: set[str] = set()
     failed_tool_message_ids: set[str] = set()
+    # Generations already referenced by this run, so one row per collection
+    # searched however many times the agent searched it.
+    referenced_generation_ids: set[int] = set()
 
     def _maybe_normalize(raw_output_override: Optional[str] = None) -> None:
         # Property Maintenance Inbox (and any future vertical using the same
@@ -878,6 +903,21 @@ def run_in_background(
                     message_id = event.data.get("message_id")
                     if message_id:
                         failed_tool_message_ids.add(message_id)
+                if (
+                    db is not None
+                    and event.type == "tool_completed"
+                    and isinstance(event.data, dict)
+                    and event.data.get("ingestion_job_id") is not None
+                    and event.data["ingestion_job_id"] not in referenced_generation_ids
+                ):
+                    # A knowledge-base search: its trace carries chunk ids from
+                    # this generation, so record the reference that keeps those
+                    # rows alive (see db/run_knowledge_generations.py). A
+                    # folder-built collection reports None and needs nothing.
+                    referenced_generation_ids.add(event.data["ingestion_job_id"])
+                    _safe_record_knowledge_generation(
+                        db, run_id=run_id, ingestion_job_id=event.data["ingestion_job_id"]
+                    )
                 if event.type in ("run_completed", "run_failed"):
                     if event.type == "run_failed":
                         # The pipeline failed without raising (a provider or
