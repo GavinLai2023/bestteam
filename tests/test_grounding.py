@@ -127,6 +127,16 @@ def test_unverified_is_capped_and_each_label_truncated():
     assert MAX_LABEL_CHARS == 200
 
 
+def test_non_string_content_is_treated_as_no_text_not_an_exception():
+    # Some providers hand back response.content as a list of content blocks
+    # instead of a plain str. `text or ""` would not catch this (a non-empty
+    # list is truthy), so check_grounding must guard the type explicitly
+    # rather than let re.findall raise TypeError and fail the whole run.
+    blocks = [{"type": "text", "text": "See [source: handbook.pdf]."}]
+    result = check_grounding(blocks, ["handbook.pdf, p.3"], searches=1, hit_count=1)
+    assert result == GroundingResult(searches=1, hit_count=1, cited=0, verified=0, unverified=[])
+
+
 def test_as_trace_data_shape():
     result = check_grounding("[source: a.md] [source: z.md]", ["a.md"], searches=2, hit_count=5)
     assert result.as_trace_data() == {

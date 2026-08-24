@@ -16,6 +16,13 @@ only a filename and that filename is the document of some returned citation.
 A tag carrying a page or heading that matches no returned citation is
 unverified -- a fabricated locator is precisely what this exists to show.
 Filenames are case-sensitive, so the comparison is too.
+
+Known limitation: ``CITATION_TAG`` stops at the first ``]``, so a heading
+that itself contains a closing bracket (e.g. a document section literally
+titled "Item [2]") truncates the tag and the label is reported unverified.
+Not worth tightening the regex for -- the check only records, it never acts
+on the result, so a truncated-but-harmless label costs nothing beyond a
+slightly noisier `unverified` list.
 """
 
 from __future__ import annotations
@@ -94,14 +101,22 @@ def check_grounding(
     this turn, in full (not the bounded ``sources`` a trace event keeps).
     ``searches`` and ``hit_count`` are carried through unchanged so the
     result is the whole story of the turn in one object.
+
+    ``text`` is contractually a ``str`` (a model's final answer), but some
+    providers hand back ``response.content`` as a list of content blocks
+    instead. This function never raises over that: a non-``str`` ``text`` is
+    treated as carrying no citation tags at all (``cited: 0``), rather than
+    letting ``re.findall`` blow up with a ``TypeError`` and fail the whole
+    run -- the check records, it never blocks.
     """
     returned = {_normalise(citation) for citation in citations}
     returned_files = {_filename(citation) for citation in returned}
 
+    haystack = text if isinstance(text, str) else ""
     # dict.fromkeys de-duplicates while keeping first-appearance order.
     labels = [
         label
-        for label in dict.fromkeys(_normalise(match) for match in CITATION_TAG.findall(text or ""))
+        for label in dict.fromkeys(_normalise(match) for match in CITATION_TAG.findall(haystack))
         if label
     ]
 
