@@ -270,6 +270,7 @@ _BUFFERED_NODE_EVENT_TYPES = frozenset(
         "delegation_completed",
         "subagent_started",
         "subagent_completed",
+        "grounding_checked",
     }
 )
 
