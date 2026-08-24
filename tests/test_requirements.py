@@ -289,6 +289,37 @@ def test_generate_requirements_puts_answers_between_current_and_feedback():
     assert content.index("Q: Which tone?") < content.index("Also cover refunds.")
 
 
+def test_question_answer_defaults_to_unanswered():
+    from bestteam import QuestionAnswer
+
+    assert QuestionAnswer(question="Q?").answer == ""
+
+
+def test_generate_requirements_restates_still_open_questions_from_current():
+    """to_prompt() omits clarifying_questions (it also feeds the architect),
+    so a partially-answered Confirm round must restate the unanswered ones
+    explicitly or the analyst silently drops them (Codex review finding)."""
+    from bestteam import QuestionAnswer
+
+    seen_messages = []
+    model = _recording_model(seen_messages)
+    current = Requirements(
+        clarifying_questions=["How many emails per day?", "Which mailbox provider?"]
+    )
+
+    generate_requirements(
+        model,
+        "Help with support.",
+        "",
+        current=current,
+        answers=[QuestionAnswer(question="How many emails per day?", answer="About 40")],
+    )
+
+    content = seen_messages[0][1].content
+    assert "Still-open clarifying questions" in content
+    assert "- Which mailbox provider?" in content
+
+
 def test_analyst_prompt_carries_the_asking_and_folding_policy():
     from bestteam.core.requirements import _ANALYST_SYSTEM_PROMPT
 

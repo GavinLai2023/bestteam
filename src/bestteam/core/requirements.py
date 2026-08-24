@@ -138,6 +138,14 @@ def generate_requirements(
     content = f"Intent/Challenge:\n{intent_text}\n\nCurrent process (as-is):\n{as_is_text or '(not described)'}"
     if current is not None and (current_text := current.to_prompt()):
         content += f"\n\nThe current understanding, as the customer has edited it:\n{current_text}"
+    if current is not None and current.clarifying_questions:
+        # to_prompt() deliberately omits the open questions (it also feeds the
+        # Solution Architect, which must never ask) -- restate them here so
+        # the analyst keeps a still-unanswered question open instead of
+        # silently dropping it on a partially-answered round.
+        content += "\n\nStill-open clarifying questions (keep each one unless it is answered or assumed below):\n" + "\n".join(
+            f"- {question}" for question in current.clarifying_questions
+        )
     if answers:
         # Each pair rides the prompt verbatim; a blank answer carries the
         # skip contract (assume, record "Assumed:" in constraints, retire the

@@ -145,6 +145,30 @@ describe('QuestionsPage', () => {
     expect(mockContext.setNavBusy).toHaveBeenLastCalledWith(false)
   })
 
+  it('retrying a failed Skip stays a Skip, even with a typed answer on screen', async () => {
+    mockedApi.submitRequirements
+      .mockRejectedValueOnce(new Error('analyst down'))
+      .mockResolvedValueOnce(sessionWithQuestions([]))
+    renderPage()
+
+    fireEvent.change(screen.getByLabelText(QUESTIONS[0]), { target: { value: 'About 40' } })
+    const skip = screen.getByText('Skip these questions').closest('button')!
+    await waitFor(() => expect(skip).toBeEnabled())
+    fireEvent.click(skip)
+
+    fireEvent.click(await screen.findByText('Try again'))
+
+    await waitFor(() => expect(mockedApi.submitRequirements).toHaveBeenCalledTimes(2))
+    const blankBatch = {
+      model: 'deepseek:friendly-assistant',
+      answers: [
+        { question: QUESTIONS[0], answer: '' },
+        { question: QUESTIONS[1], answer: '' },
+      ],
+    }
+    expect(mockedApi.submitRequirements).toHaveBeenNthCalledWith(2, 's1', blankBatch)
+  })
+
   it('with no open questions, offers Continue without calling the API', async () => {
     mockContext.session = sessionWithQuestions([])
     renderPage()

@@ -650,13 +650,54 @@ def test_all_blank_answers_record_a_skip(client):
         f"/api/builder/sessions/{session_id}/requirements",
         json={
             "model": "fake-architect:x",
-            "answers": [{"question": "Which mailbox provider do you use?", "answer": " "}],
+            "answers": [
+                {"question": "How many emails do you receive per day?", "answer": " "},
+                {"question": "Which mailbox provider do you use?", "answer": " "},
+            ],
         },
     )
 
     assert resp.status_code == 200
     entry = [e for e in resp.json()["feedback_history"] if e["stage"] == "clarifying"][-1]
     assert entry["skipped"] is True
+
+
+def test_answers_must_cover_the_current_questions_exactly(client):
+    """An empty, partial or stale batch is refused: it would let the history
+    record a skip that never showed the analyst any question (Codex review
+    finding)."""
+    session_id = _session_with_requirements(client)
+
+    for answers in (
+        [],
+        [{"question": "Which mailbox provider do you use?", "answer": ""}],  # partial
+        [
+            {"question": "How many emails do you receive per day?", "answer": "40"},
+            {"question": "A question from an older round?", "answer": ""},  # stale
+        ],
+    ):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/requirements",
+            json={"model": "fake-architect:x", "answers": answers},
+        )
+        assert resp.status_code == 400, answers
+        assert "cover exactly" in resp.json()["detail"]
+
+
+def test_answers_rejected_when_no_questions_are_open(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "x"}).json()["id"]
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"requirements": {**_REQUIREMENTS_WITH_QUESTIONS, "clarifying_questions": []}},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        f"/api/builder/sessions/{session_id}/requirements",
+        json={"model": "fake-architect:x", "answers": [{"question": "Q?", "answer": "A"}]},
+    )
+    assert resp.status_code == 400
+    assert "clarifying questions" in resp.json()["detail"]
 
 
 def test_submit_specification_with_valid_payload(client):

@@ -122,12 +122,28 @@ def _fake_architect_requirements(prompt_text: str) -> "Requirements":
     if _FAKE_ANSWERS_HEADER in prompt_text:
         # Deterministic "folding": each answered pair lands in constraints
         # verbatim, each unanswered one becomes a fixed assumption -- so an
-        # E2E test can assert the round-trip on the Confirm page.
-        for line in prompt_text.splitlines():
-            if line.startswith("A: (not answered"):
-                base.constraints.append("Assumed: replies can go out within one business day.")
+        # E2E test can assert the round-trip on the Confirm page. Answers come
+        # from a textarea, so an "A: " line runs until the next "Q: " line (or
+        # the end of the answers block), not just to its own line break.
+        block = prompt_text.split(_FAKE_ANSWERS_HEADER, 1)[1].split("\n\n", 1)[0]
+        collected: list[str] = []
+        answer_lines: Any = None
+        for line in block.splitlines():
+            if line.startswith("Q: "):
+                if answer_lines is not None:
+                    collected.append("\n".join(answer_lines))
+                answer_lines = None
             elif line.startswith("A: "):
-                base.constraints.append(f"The customer clarified: {line[len('A: '):]}")
+                answer_lines = [line[len("A: "):]]
+            elif answer_lines is not None:
+                answer_lines.append(line)
+        if answer_lines is not None:
+            collected.append("\n".join(answer_lines))
+        for text in collected:
+            if text.startswith("(not answered"):
+                base.constraints.append("Assumed: replies can go out within one business day.")
+            else:
+                base.constraints.append(f"The customer clarified: {text}")
         return base
     if _FAKE_INTERVIEW_MARKER in prompt_text:
         base.clarifying_questions = [

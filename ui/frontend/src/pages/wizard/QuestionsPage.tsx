@@ -21,6 +21,9 @@ export default function QuestionsPage() {
   const [answers, setAnswers] = useState<Record<number, string>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Which action failed, so "Try again" repeats it: retrying a failed Skip
+  // must not quietly turn typed-but-skipped answers into a Continue.
+  const [lastSkip, setLastSkip] = useState(false)
 
   if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
@@ -48,6 +51,7 @@ export default function QuestionsPage() {
   // blank, and the analyst records the assumptions it made instead.
   const submit = async (skip: boolean) => {
     if (busy || catalogLoading || catalogUnavailable) return
+    setLastSkip(skip)
     setBusy(true)
     // The analyst call is long enough for the customer to wander; suspend the
     // step bar like the Confirm page does while its one action is in flight.
@@ -91,7 +95,7 @@ export default function QuestionsPage() {
         <div className="banner banner-error">
           {error}
           <div className="wizard-actions" style={{ marginTop: 8 }}>
-            <button className="btn btn-secondary" onClick={() => submit(false)} disabled={busy}>
+            <button className="btn btn-secondary" onClick={() => submit(lastSkip)} disabled={busy}>
               {t('common.tryAgain')}
             </button>
           </div>

@@ -66,6 +66,25 @@ def test_fake_architect_requirements_folds_answers_and_assumes_blanks():
     assert "Assumed: replies can go out within one business day." in result.constraints
 
 
+def test_fake_architect_folds_a_multiline_answer_whole():
+    """Answers come from a textarea; a continuation line must stay part of
+    its answer, not be dropped or misread (Codex review finding)."""
+    from bestteam.core.requirements import QuestionAnswer, generate_requirements
+
+    model = _resolve_model("fake-architect:e2e")
+    result = generate_requirements(
+        model,
+        "We handle support emails.",
+        answers=[
+            QuestionAnswer(
+                question="How many emails do you receive per day?",
+                answer="About 40 a day.\nMore on Mondays.",
+            ),
+        ],
+    )
+    assert "The customer clarified: About 40 a day.\nMore on Mondays." in result.constraints
+
+
 def test_fake_architect_rejects_unknown_schema():
     model = _resolve_model("fake-architect:e2e")
 
