@@ -314,6 +314,9 @@ class RefineRequest(BaseModel):
     requirements: Optional[Dict[str, Any]] = None
     feedback: str = ""
     model: str
+    # Non-blank answers to open clarifying questions; blanks are filtered out
+    # here (no skip button on Confirm -- an unanswered question stays open).
+    answers: Optional[List[QuestionAnswer]] = None
 
 
 class TestRunRequest(BaseModel):
@@ -676,7 +679,8 @@ def refine_team(
 
     chat_model = _call_model(_resolve_model, req.model)
 
-    if req.feedback.strip():
+    answered = [qa for qa in (req.answers or []) if qa.answer.strip()]
+    if req.feedback.strip() or answered:
         # `current` is the customer's edited draft, not the stored copy --
         # otherwise the round their edit triggered overwrites that edit.
         requirements = _call_model(
@@ -685,6 +689,7 @@ def refine_team(
             session.intent_text,
             session.as_is_text,
             current=requirements,
+            answers=answered or None,
             feedback=req.feedback,
         )
 
@@ -708,6 +713,16 @@ def refine_team(
 
     if req.feedback.strip():
         append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    if answered:
+        append_feedback(
+            db,
+            session_id,
+            {
+                "stage": "clarifying",
+                "answers": [qa.model_dump() for qa in answered],
+                "skipped": False,
+            },
+        )
     fields: Dict[str, Any] = {"specification_json": spec.model_dump(), "status": "solution"}
     if requirements is not None:
         fields["requirements_json"] = requirements.model_dump()
