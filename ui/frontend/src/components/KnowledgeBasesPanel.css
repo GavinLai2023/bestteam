@@ -29,3 +29,27 @@
   margin-top: 8px;
   margin-right: 8px;
 }
+
+/* One line per document: name, size/status, and its own Remove. */
+.kb-documents {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+}
+
+.kb-document {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+
+.kb-document-name {
+  overflow-wrap: anywhere;
+}
+
+.kb-document-remove {
+  margin-left: auto;
+}

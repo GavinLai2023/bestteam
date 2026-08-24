@@ -2261,9 +2261,8 @@
   file limit and only genuinely new documents are embedded and billed. What
   that leaves: **a collection is capped at 30 documents** for a self-service
   org (200 for an admin), a bound on disk and on embedding spend rather than a
-  technical limit; **there is no way to remove one document** from a
-  collection short of replacing it with an upload of the ones to keep; and
-  **restaging copies the previous generation's files on disk**, so a
+  technical limit; and **restaging copies the previous generation's files on
+  disk**, so a
   collection costs its own size once per retained generation. See
   `src/bestteam/core/CLAUDE.md` and `ui/backend/CLAUDE.md`.
 - **Per-user memory recall *started* as single-stage BM25** — it is still BM25

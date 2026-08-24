@@ -58,6 +58,8 @@ from .ingestion import job_status_payload
 from .knowledge_bases import (
     KnowledgeBaseNotReady,
     _kb_upload_lock,
+    live_documents,
+    remove_knowledge_base_document,
     delete_knowledge_base,
     resolve_knowledge_base,
     upload_knowledge_base,
@@ -185,6 +187,13 @@ def _kb_summary(db: Session, record: KnowledgeBaseRecord) -> Dict[str, Any]:
         "used_by": pipelines_referencing(db, kind="knowledge_base", resource_id=record.id),
         "servable": live is not None or latest is None,
         "latest_job": latest_job,
+        # The live generation's documents, by name, each with the status the
+        # ingester gave it -- what the panel lists, and what a customer can
+        # remove one at a time. Empty until a first upload completes.
+        "documents": [
+            {"filename": doc.filename, "status": doc.status, "size_bytes": doc.size_bytes}
+            for doc in live_documents(db, record)
+        ],
     }
 
 
@@ -514,6 +523,26 @@ def search_own_knowledge_base(
             for hit in hits
         ],
     }
+
+
+@router.delete("/knowledge-bases/{item_name}/documents/{filename}", status_code=202)
+def remove_own_knowledge_base_document(
+    item_name: str,
+    filename: str,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Remove one document from the org's own collection. A `202` with the
+    job to poll, like an upload: the collection keeps answering from its
+    current documents until the new generation is ready. Allowed while teams
+    use the collection -- an `add` is too, and the panel names them in its
+    confirmation -- refused while an upload is still processing, for the last
+    document (delete the collection instead), and for a name that is not
+    there; see `knowledge_bases.remove_knowledge_base_document`."""
+    return remove_knowledge_base_document(
+        db, org.id, item_name, filename, created_by=user.username
+    )
 
 
 @router.delete("/knowledge-bases/{item_name}", status_code=204)

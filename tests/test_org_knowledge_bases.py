@@ -1358,6 +1358,278 @@ def test_an_unknown_mode_is_refused(client):
     assert resp.status_code == 400
 
 
+# --- Removing one document from a collection -------------------------------
+#
+# Until this existed the only way to drop one document was `mode=replace`
+# with "the whole set you want to keep" re-uploaded. A removal is a new
+# generation built from the live one minus the named file, so every
+# invariant built on "one completed job is the live set" holds, and every
+# remaining document reuses its chunks and embeddings.
+
+
+def _live_documents(job_id):
+    with open_test_db() as db:
+        return {
+            d.filename: d
+            for d in db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id)
+        }
+
+
+def test_removing_a_document_leaves_the_rest_and_re_embeds_nothing(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"smart_search": "true"},
+        files=[
+            ("files", ("refunds.txt", b"The refund policy allows returns within 30 days.", "text/plain")),
+            ("files", ("shipping.txt", b"Shipping is free on orders over fifty dollars.", "text/plain")),
+        ],
+    )
+    assert resp.status_code == 200
+    first_job = resp.json()["job_id"]
+    assert _wait_for_job_status(first_job) == "completed"
+
+    embed_calls = []
+    original = backend_ingestion.embed_documents_in_batches
+
+    def counting(embeddings, texts):
+        embed_calls.append(list(texts))
+        return original(embeddings, texts)
+
+    monkeypatch.setattr(backend_ingestion, "embed_documents_in_batches", counting)
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/shipping.txt")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["name"] == "policies" and body["status"] == "queued"
+    job_id = body["job_id"]
+    assert job_id != first_job
+    assert _wait_for_job_status(job_id) == "completed"
+
+    docs = _live_documents(job_id)
+    assert set(docs) == {"refunds.txt"}
+    # The surviving document's chunks and vectors were carried, not re-made.
+    assert embed_calls == []
+    with open_test_db() as db:
+        chunks = db.query(KnowledgeChunk).filter_by(document_id=docs["refunds.txt"].id).all()
+    assert chunks and all(c.embedding_json for c in chunks)
+
+    # The collection now answers from the survivor only.
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "shipping orders"})
+    assert resp.status_code == 200
+    assert all("Shipping is free" not in r["text"] for r in resp.json()["results"])
+    resp = client.post("/api/org/knowledge-bases/policies/search", json={"query": "refund policy"})
+    assert resp.json()["hit_count"] == 1
+
+    # And the panel's summary says so.
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    assert [d["filename"] for d in summary["documents"]] == ["refunds.txt"]
+    assert summary["latest_job"]["status"] == "completed"
+
+
+def test_summary_lists_the_live_documents_with_their_status(client):
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[
+            ("files", ("b.txt", b"Refunds within 30 days.", "text/plain")),
+            ("files", ("a.txt", b"Shipping is free.", "text/plain")),
+            ("files", ("blank.txt", b"   \n  ", "text/plain")),
+        ],
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    docs = summary["documents"]
+    # Sorted by name, and a document that could not be read is listed too --
+    # it is in the collection's files, so it can be removed like any other.
+    assert [d["filename"] for d in docs] == ["a.txt", "b.txt", "blank.txt"]
+    assert {d["filename"]: d["status"] for d in docs} == {
+        "a.txt": "chunked", "b.txt": "chunked", "blank.txt": "failed",
+    }
+    assert all(isinstance(d["size_bytes"], int) for d in docs)
+    # The list endpoint carries the same field.
+    listed = {kb["name"]: kb for kb in client.get("/api/org/knowledge-bases").json()}
+    assert [d["filename"] for d in listed["policies"]["documents"]] == ["a.txt", "b.txt", "blank.txt"]
+
+
+def test_summary_documents_is_empty_before_any_upload_completes(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    assert client.post("/api/org/knowledge-bases/policies/upload", files=_files()).status_code == 200
+    assert client.get("/api/org/knowledge-bases/policies").json()["documents"] == []
+
+
+def test_removing_a_failed_document_works_too(client):
+    # An unreadable file is carried by every `add` and re-reported as skipped
+    # each time; removing it is the way to stop that.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[
+            ("files", ("a.txt", b"Refunds within 30 days.", "text/plain")),
+            ("files", ("blank.txt", b"   \n  ", "text/plain")),
+        ],
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/blank.txt")
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+    assert set(_live_documents(job_id)) == {"a.txt"}
+    assert client.get("/api/org/knowledge-bases/policies").json()["latest_job"]["documents_failed"] == 0
+
+
+def test_removing_an_unknown_document_is_404_and_names_it(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt", "b.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/c.txt")
+    assert resp.status_code == 404
+    assert "c.txt" in resp.json()["detail"]
+    # Nothing was dispatched: the live job is still the upload.
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    assert summary["latest_job"]["status"] == "completed"
+    assert [d["filename"] for d in summary["documents"]] == ["a.txt", "b.txt"]
+
+
+def test_removing_the_last_document_is_refused(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("only.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/only.txt")
+    assert resp.status_code == 409
+    assert "delete the collection" in resp.json()["detail"].lower()
+
+
+def test_removing_the_last_readable_document_is_refused_even_if_a_failed_one_remains(client):
+    # Codex review: the guard used to count every document, so removing the
+    # only readable one beside an unreadable one returned 202 and queued a job
+    # that could only fail -- leaving the "removed" document live.
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=[
+            ("files", ("valid.txt", b"Refunds within 30 days.", "text/plain")),
+            ("files", ("blank.txt", b"   \n  ", "text/plain")),
+        ],
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/valid.txt")
+    assert resp.status_code == 409
+    assert "could be read" in resp.json()["detail"]
+    # Nothing was queued: the collection still answers.
+    assert client.post("/api/org/knowledge-bases/policies/search", json={"query": "refunds"}).json()["hit_count"] == 1
+
+
+def test_removal_staging_matches_the_name_exactly(client, tmp_path):
+    """The carry's case-insensitive match is right for an upload (the
+    filesystem may fold case) and wrong for a removal on a case-sensitive
+    one, where `Policy.txt` and `policy.txt` can both be live: naming one
+    must not drop the other (Codex review). Exercised at the staging helper,
+    since a Windows checkout cannot hold both files at once."""
+    from ui.backend.knowledge_bases import _stage_previous_generation
+
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        record = KnowledgeBaseRecord(name="casey", org_id=org_id, config={"name": "casey", "type": "local_folder", "path": str(tmp_path)})
+        db.add(record)
+        db.flush()
+        job = IngestionJob(kb_id=record.id, org_id=org_id, version="v_live", kb_type="local_folder", status="completed", file_count=2)
+        db.add(job)
+        db.commit()
+        (tmp_path / "v_live").mkdir()
+        (tmp_path / "v_live" / "policy.txt").write_text("lower")
+        (tmp_path / "v_live" / "other.txt").write_text("other")
+
+        staged = tmp_path / "v_new"
+        staged.mkdir()
+        _stage_previous_generation(
+            db, org_id, "casey", tmp_path, staged, superseded={"Policy.txt"}, max_documents=30, exact=True,
+        )
+        assert sorted(p.name for p in staged.iterdir()) == ["other.txt", "policy.txt"]
+
+        folded = tmp_path / "v_fold"
+        folded.mkdir()
+        _stage_previous_generation(
+            db, org_id, "casey", tmp_path, folded, superseded={"Policy.txt"}, max_documents=30,
+        )
+        assert sorted(p.name for p in folded.iterdir()) == ["other.txt"]
+
+
+def test_removing_while_an_upload_is_processing_is_409(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt", "b.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+
+    submitted = []
+    real_submit = backend_ingestion._executor.submit
+    monkeypatch.setattr(
+        backend_ingestion._executor, "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+    assert client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_named_files("c.txt"), data={"mode": "add"}
+    ).status_code == 200
+
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/a.txt")
+    assert resp.status_code == 409
+    assert "processing" in resp.json()["detail"].lower()
+
+    # Once it finishes, the removal goes through. (Only the submit stub is
+    # lifted -- `monkeypatch.undo()` would also revert the client fixture's
+    # upload directory, under which this collection's files live.)
+    args, kwargs = submitted[0]
+    args[0](*args[1:], **kwargs)
+    monkeypatch.setattr(backend_ingestion._executor, "submit", real_submit)
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/a.txt")
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+    assert set(_live_documents(job_id)) == {"b.txt", "c.txt"}
+
+
+def test_removing_from_a_collection_with_no_finished_upload_is_409(client):
+    resp = client.post(
+        "/api/org/knowledge-bases/broken/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    )
+    assert _wait_for_job_status(resp.json()["job_id"]) == "failed"
+    resp = client.delete("/api/org/knowledge-bases/broken/documents/blank.txt")
+    assert resp.status_code == 409
+
+
+def test_removing_a_document_from_another_orgs_collection_is_404(client):
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt", "b.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    other = create_user_and_login(client, username="bob", org="org_b")
+    resp = client.delete(
+        "/api/org/knowledge-bases/policies/documents/a.txt",
+        headers={"Authorization": f"Bearer {other}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_removing_a_document_matches_the_name_as_the_filesystem_does(client):
+    # The carry skips a superseded name case-insensitively (Windows/macOS
+    # would treat `Policy.txt` and `policy.txt` as one path); a removal names
+    # a document the way the collection lists it, so an exact match is
+    # required to say "removed", but the file leaves the staged set either way.
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("Policy.txt", "other.txt"))
+    assert _wait_for_job_status(resp.json()["job_id"]) == "completed"
+    assert client.delete("/api/org/knowledge-bases/policies/documents/policy.txt").status_code == 404
+    resp = client.delete("/api/org/knowledge-bases/policies/documents/Policy.txt")
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "completed"
+    assert set(_live_documents(job_id)) == {"other.txt"}
+
+
 def test_search_reports_the_generation_and_why_each_hit_ranked(client):
     """The same identity and scores the agent's trace event carries, so a
     customer (or the operator reading the JSON) can tie a passage back to

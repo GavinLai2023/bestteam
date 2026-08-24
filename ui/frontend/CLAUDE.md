@@ -345,6 +345,20 @@ collection's teams. It polls every 3s **only while some row is processing**
 the org has no knowledge bases, so it costs an org that never uploaded
 anything one request.
 
+Each row also lists its documents behind a **"Show N documents"** toggle
+(`kb.documents` from the summary: name, size, and "couldn't be read" for a
+`failed` one), each with its own **Remove** — `DELETE
+/api/org/knowledge-bases/{name}/documents/{filename}` behind a confirm that
+names the teams using the collection (removal is allowed while they do, as
+adding is; the reader should know whose answers change). Remove is disabled
+with the reason in its `title` while an upload is processing and for the only
+document (delete the collection instead — the backend 409s both). A success
+re-fetches the list so the row shows "Processing…" and the existing poll picks
+up the new generation; a refusal's message renders on the row, like a refused
+delete's. The mock factory in `KnowledgeBasesPanel.test.tsx` lists
+`removeOwnKnowledgeBaseDocument` for the same reason it lists
+`searchOwnKnowledgeBase`.
+
 Each row also carries a **"Try a search"** toggle beside Delete, opening
 `components/KnowledgeBaseSearch.tsx` underneath it: one query box, and the
 passages `POST /api/org/knowledge-bases/{name}/search` returns, each under the

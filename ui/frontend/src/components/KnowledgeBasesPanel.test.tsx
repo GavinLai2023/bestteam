@@ -13,6 +13,7 @@ vi.mock('../lib/api', () => ({
     listOwnKnowledgeBases: vi.fn(),
     deleteOwnKnowledgeBase: vi.fn(),
     searchOwnKnowledgeBase: vi.fn(),
+    removeOwnKnowledgeBaseDocument: vi.fn(),
   },
 }))
 
@@ -34,8 +35,15 @@ const kb = (overrides: Partial<OrgKnowledgeBase> = {}): OrgKnowledgeBase => ({
     chunk_count: 12,
     errors: [],
   },
+  documents: [],
   ...overrides,
 })
+
+const threeDocuments = [
+  { filename: 'handbook.pdf', status: 'chunked', size_bytes: 204800 },
+  { filename: 'hours.txt', status: 'chunked', size_bytes: 120 },
+  { filename: 'scan.pdf', status: 'failed', size_bytes: 3 * 1024 * 1024 },
+]
 
 describe('KnowledgeBasesPanel', () => {
   beforeEach(() => {
@@ -329,6 +337,97 @@ describe('KnowledgeBasesPanel', () => {
       fireEvent.click(toggle)
     })
     expect(screen.queryByLabelText(/search/i)).not.toBeInTheDocument()
+  })
+
+  it('lists the documents behind a toggle, with size and whether each could be read', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([kb({ documents: threeDocuments })])
+    render(<KnowledgeBasesPanel />)
+
+    const toggle = await screen.findByRole('button', { name: /show 3 documents/i })
+    expect(screen.queryByText('handbook.pdf')).not.toBeInTheDocument()
+    fireEvent.click(toggle)
+    expect(screen.getByText('handbook.pdf')).toBeInTheDocument()
+    expect(screen.getByText(/200 KB/)).toBeInTheDocument()
+    expect(screen.getByText(/3\.0 MB · couldn't be read/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /hide documents/i }))
+    expect(screen.queryByText('handbook.pdf')).not.toBeInTheDocument()
+  })
+
+  it('removes one document once confirmed, naming the teams whose answers change', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({ documents: threeDocuments, used_by: ['support_team'] }),
+    ])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockResolvedValue({ name: 'policies', job_id: 9, status: 'queued' })
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 3 documents/i }))
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove hours.txt' }))
+    })
+    expect(screen.getByText(/Remove "hours.txt"\?/)).toBeInTheDocument()
+    expect(screen.getByText(/Teams using "policies": support_team/)).toBeInTheDocument()
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(mockedApi.removeOwnKnowledgeBaseDocument).toHaveBeenCalledWith('policies', 'hours.txt')
+    // The list is re-fetched so the row shows the new generation processing.
+    await waitFor(() => expect(mockedApi.listOwnKnowledgeBases).toHaveBeenCalledTimes(2))
+  })
+
+  it('shows the row as processing from the 202 itself, even if the re-fetch fails', async () => {
+    // Codex review: a failed (or out-of-order) refresh after a removal must
+    // not leave the row looking idle with polling stopped.
+    mockedApi.listOwnKnowledgeBases.mockResolvedValueOnce([kb({ documents: threeDocuments })])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockResolvedValue({ name: 'policies', job_id: 9, status: 'queued' })
+    mockedApi.listOwnKnowledgeBases.mockRejectedValueOnce(new Error('network down'))
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 3 documents/i }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove hours.txt' }))
+    })
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(await screen.findByText('Processing…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove handbook.pdf' })).toBeDisabled()
+  })
+
+  it('does not remove a document if the reader cancels', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([kb({ documents: threeDocuments })])
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 3 documents/i }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove hours.txt' }))
+    })
+    await act(async () => {
+      await answerConfirm(false)
+    })
+    expect(mockedApi.removeOwnKnowledgeBaseDocument).not.toHaveBeenCalled()
+  })
+
+  it('disables Remove for the only document, and while an upload is processing', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([kb({ documents: [threeDocuments[0]] })])
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 1 document$/i }))
+    const only = screen.getByRole('button', { name: 'Remove handbook.pdf' })
+    expect(only).toBeDisabled()
+    expect(only).toHaveAttribute('title', expect.stringMatching(/only document/i))
+  })
+
+  it("shows a refused removal's message on the row", async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([kb({ documents: threeDocuments })])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockRejectedValue(
+      new Error("'policies' is still processing an upload. Wait for it to finish, then remove the document."),
+    )
+    render(<KnowledgeBasesPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /show 3 documents/i }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove hours.txt' }))
+    })
+    await act(async () => {
+      await answerConfirm(true)
+    })
+    expect(await screen.findByText(/still processing an upload/)).toBeInTheDocument()
   })
 
   it('shows a banner when the list itself cannot be loaded', async () => {

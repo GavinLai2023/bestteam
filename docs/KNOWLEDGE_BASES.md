@@ -567,14 +567,34 @@ described above. A job created before this feature existed records no chunk
 parameters and is never reused: the first upload after that upgrade re-embeds
 once.
 
-What this does **not** give you: a way to remove a single document. Dropping
-one still means a `replace` upload containing the documents to keep.
+**Removing one document** (`DELETE /api/org/knowledge-bases/{name}/documents/{filename}`,
+self-service) is the same pipeline with no new files: the live generation is
+staged into a fresh version directory minus the named file and a new job
+ingests the staged set under the live job's own shape and chunk parameters,
+so every remaining document reuses its chunks and embeddings and nothing is
+re-parsed, re-embedded or metered. It answers `202 {"name", "job_id",
+"status": "queued"}` like an upload — poll the job the same way; the
+collection keeps answering from its current documents until the new
+generation completes. The name must match the document's exactly (as the
+summary lists it — see `documents` below). Refusals: `404` for a name that is
+not in the collection (naming it), `409` while an upload is still processing
+(whichever job finished last would otherwise become live, and a removal built
+from the previous generation could silently undo the upload), `409` for the
+last document (an empty collection cannot be built; delete the collection
+instead), and `409` when the live generation's files are no longer on disk.
+Removing is allowed while teams search the collection — so is adding — and
+the panel names those teams in its confirmation. A `failed` document (one the
+ingester could not read) can be removed too: its file is otherwise carried by
+every `add` and reported as skipped each time. There is no admin route for
+this yet; an operator uses the org's own route or a `replace` upload.
 
 **Org self-service listing and deletion** (`GET /api/org/knowledge-bases`,
 `GET`/`DELETE /api/org/knowledge-bases/{name}`) is the same org member's view
 of what they uploaded, without an admin having to be involved. Each entry
 carries `name`, `description`, `type`, `updated_at`, `used_by` (the deployed
-teams whose current version depends on it), `servable`, and `latest_job` --
+teams whose current version depends on it), `servable`, `documents` (the live
+generation's documents, sorted by name: `{"filename", "status", "size_bytes"}`
+each, every status — empty until a first upload completes), and `latest_job` --
 the newest ingestion attempt of any status, so a *failed* upload's error text
 reaches the person who made it. `latest_job` deliberately omits the `config`
 the per-job route returns: it carries the server's absolute upload path, and

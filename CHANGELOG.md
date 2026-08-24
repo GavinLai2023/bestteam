@@ -15,6 +15,36 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ## [Unreleased]
 
+### Added
+
+- **Remove one document from a collection** — each row of "My documents"
+  lists its documents (name, size, whether it could be read) with a Remove
+  per document; `DELETE /api/org/knowledge-bases/{name}/documents/{filename}`
+  builds a new generation from the live one minus that file, reusing every
+  other document's chunks and embeddings (nothing re-embedded or billed).
+  Refused while an upload is processing and for the last document (delete
+  the collection instead). Dropping one document no longer means a `replace`
+  upload of everything to keep.
+- **Retrieval hits carry their scores and identity** — `search_hits()`
+  returns each chunk with its RRF score, each retrieval leg's raw score
+  (which leg found it) and the rerank score; chunks from an uploaded
+  collection carry `chunk_id` / `document_id` / `ingestion_job_id`. A run's
+  knowledge-base `tool_completed` event now records the **ingestion job the
+  collection was built from** and a bounded per-hit list of ids and scores
+  (never text), so a trace says which generation of a collection answered
+  and why each hit ranked where it did. "Try a search" returns the same.
+
+### Changed
+
+- `KnowledgeBase.search_hits()` is the abstract method subclasses implement;
+  `search()` and `query()` derive from it. A custom knowledge base exposing
+  only `search()` still works as an agent tool (its trace reports no scores).
+
+### Fixed
+
+- `AGENTS.md` was a stale fork of `CLAUDE.md` and `docs/KNOWLEDGE_BASES.md`
+  contradicted itself about re-embedding on document changes; both corrected.
+
 ## [0.1.0b1] — 2026-08-22
 
 First beta build. Named from a green `main` — all six CI jobs, including the
