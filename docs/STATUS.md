@@ -2446,8 +2446,17 @@
   named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.2`
   (`9afba75`, 2026-08-24), each from a `main` run with `backend-full` and
   `e2e-full` green. Still open: rehearse `scripts/restore.sh` once against a
-  throwaway stack -- it needs Docker, so it happens on the target VPS, not on
-  a developer workstation. Stage 1 of the review (ruff/mypy,
+  throwaway stack -- it needs Docker, so it happens on the target VPS (being
+  provisioned as of 2026-08-24), not on a developer workstation. A desk check
+  of the script on 2026-08-24 cleared the one interaction that could be read
+  statically: `docker-entrypoint.sh` gates `alembic upgrade head` on
+  `$1 = "uvicorn"`, so restore's two `docker compose run` calls do not
+  migrate, while the closing `docker compose start backend` does -- the right
+  order for an older backup. Two things only the rehearsal can settle: that
+  `docker compose cp` into a *stopped* container writes through to the data
+  volume, and that a files archive restores usefully even though `tar xzf` is
+  additive (upload directories created after the backup survive it, orphaned
+  from a database that no longer references them). Stage 1 of the review (ruff/mypy,
   `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,
   `_resolve_model` move, `STATUS.md` → `CHANGELOG.md` split, unified
   settings) runs in parallel with the beta. The "single process + SQLite"
