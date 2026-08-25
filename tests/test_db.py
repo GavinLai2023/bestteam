@@ -66,6 +66,7 @@ def test_init_db_creates_all_tables():
         "org_retention_settings",
         "org_email_filter_settings",
         "org_email_budget_settings",
+        "feedback",
     }
 
 

@@ -547,7 +547,7 @@ an org member see disjoint UIs, partitioned by two symmetric `App.tsx` guards
 that both read `lib/useMe.ts` (one `GET /api/auth/me` → `{username, is_admin,
 org}`) and render `null` while it loads:
 
-- `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory` + `/trace`; non-admins are sent to `/`.
+- `RequireAdmin` wraps `/accounts` + `/advanced` + `/memory` + `/trace` + `/feedback`; non-admins are sent to `/`.
   On `/trace` (`pages/TracePage.tsx`), `components/AdminRunDetail.tsx` offers
   **"Diagnose this run"** on a finished, non-diagnostic run
   (`api.diagnoseRun` → `POST /api/runs/{id}/diagnose`, see
@@ -566,15 +566,24 @@ org}`) and render `null` while it loads:
 
 Because `is_admin` and org membership are mutually exclusive (CR-030), the two
 guards can't bounce a user between them — each redirect terminates in one hop.
-`Layout.tsx` mirrors this: the **Accounts**/**Advanced**/**Memory**/**Trace**
-links show only when `isAdmin`, the **Dashboard**/**Build a team**/
+`Layout.tsx` mirrors this: the **Accounts**/**Advanced**/**Memory**/**Trace**/
+**Feedback** links show only when `isAdmin`, the **Dashboard**/**Build a team**/
 **My teams**/**Run a team** links only when `!isAdmin`. `pages/AccountsPage.tsx` is the admin org/user
 manager (create orgs, deactivate/reactivate them, and create/reset-password/
 move/delete each org's member; platform accounts are shown read-only — the
 `/api/admin` surface keeps promote/demote and platform-account lifecycle in the
 CLI). `pages/MemoryPage.tsx` is the admin per-user memory manager
 (user list with counts + search/type-filter + per-record delete + clear-all,
-and a "memory not enabled" state). All of this gating is cosmetic — the backend
+and a "memory not enabled" state). `pages/FeedbackPage.tsx` is the admin
+feedback triage list (status/kind filters, expandable rows, status + note
+saved via `api.patchFeedback`); bodies render as plain text only — visitor
+text is untrusted. The submit side is `components/FeedbackModal.tsx`, one
+bilingual `<dialog>` shared by two entry points that own their own POST:
+the `Layout` nav button (org members only — an admin's nav has the triage
+NavLink under the same `nav.feedback` label instead) posting
+`api.submitFeedback` with `{page, locale}` context, and the share-chat
+header (`ShareChatPage`) posting `shareChatApi.sendFeedback` with the last
+dispatched `run_id` added. All of this gating is cosmetic — the backend
 enforces admin on every `/api/config` and `/api/memory` call and org scoping on
 every customer surface, so a tampered client still gets 403.
 `API_BASE`/`WS_BASE` are configurable via `VITE_API_BASE`/`VITE_WS_BASE`

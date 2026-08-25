@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db.models import Organization, Run, ShareLink, ShareSession, PipelineRecord
+from .db.feedback import count_session_feedback_today, create_feedback
 from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
 from .db.share_sessions import create_share_session, get_share_session_by_token, try_consume_turn
@@ -612,3 +613,52 @@ async def stream_share_run(
         pass
     finally:
         registry.unsubscribe(run_id, subscriber_queue)
+
+
+# --- visitor feedback --------------------------------------------------------
+
+# Local import target, not a circular one: feedback_api imports nothing from
+# this module.
+from .feedback_api import FeedbackCreate, sanitize_context  # noqa: E402
+
+FEEDBACK_DAILY_CAP = 5
+_SHARE_CONTEXT_KEYS = frozenset({"page", "locale", "run_id"})
+_NO_SESSION_MESSAGE = "Open the chat before sending feedback"
+
+
+@router.post("/{token}/feedback", status_code=201)
+def submit_share_feedback(
+    token: str,
+    payload: FeedbackCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Visitor feedback (defect/suggestion), routed to the platform operator.
+
+    Deliberately does NOT mint a session (unlike a message send): a visitor
+    with no cookie has never opened the chat, and feedback alone must not
+    grow share_sessions unboundedly -- 403 instead. The cap is a plain
+    count-per-UTC-day (see db/feedback.py) because nothing is billed per
+    submission.
+    """
+    link = _resolve_active_link(db, token)
+    session = _resolve_session_from_cookie(request, db, link)
+    if session is None:
+        raise HTTPException(status_code=403, detail=_NO_SESSION_MESSAGE)
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(status_code=422, detail="Feedback body is empty")
+    if count_session_feedback_today(db, session.id) >= FEEDBACK_DAILY_CAP:
+        raise HTTPException(status_code=429, detail=_RATE_LIMITED_MESSAGE)
+    context = sanitize_context(payload.context, _SHARE_CONTEXT_KEYS) or {}
+    context["share_link_id"] = link.id
+    row = create_feedback(
+        db,
+        kind=payload.kind,
+        body=body,
+        org_id=link.org_id,
+        share_session_id=session.id,
+        context=context,
+    )
+    db.commit()
+    return {"id": row.id}

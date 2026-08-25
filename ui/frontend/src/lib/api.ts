@@ -1,7 +1,7 @@
 import type {
   ActivityOverview,
   AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
-  EmailFilterSettings, EmailTrigger, FilteredMessage,
+  EmailFilterSettings, EmailTrigger, FeedbackItem, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
   Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,
   ModelCatalogEntry, NotificationList, NotificationSettings, NotificationSettingsPayload,
@@ -188,6 +188,22 @@ export const api = {
     request<{ access_token: string }>('/api/auth/password', {
       method: 'POST',
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
+
+  // Feedback (any authenticated principal; read side is admin-only)
+  submitFeedback: (payload: { kind: string; body: string; context?: Record<string, string> }) =>
+    request<{ id: number }>('/api/feedback', { method: 'POST', body: JSON.stringify(payload) }),
+  adminFeedback: (opts: { status?: string; kind?: string } = {}) => {
+    const params = new URLSearchParams()
+    if (opts.status) params.set('status', opts.status)
+    if (opts.kind) params.set('kind', opts.kind)
+    const qs = params.toString()
+    return request<{ feedback: FeedbackItem[] }>(`/api/admin/feedback${qs ? `?${qs}` : ''}`)
+  },
+  patchFeedback: (id: number, patch: { status?: string; admin_note?: string }) =>
+    request<{ ok: boolean }>(`/api/admin/feedback/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     }),
 
   // Admin: per-user memory management

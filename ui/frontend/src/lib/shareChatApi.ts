@@ -41,6 +41,14 @@ export const shareChatApi = {
   getMessages: (token: string) =>
     shareRequest<{ messages: ShareMessage[] }>(`/api/share/${encodeURIComponent(token)}/messages`),
   getTeam: (token: string) => shareRequest<ShareTeamInfo>(`/api/share/${encodeURIComponent(token)}/team`),
+  sendFeedback: (
+    token: string,
+    payload: { kind: string; body: string; context?: Record<string, string> },
+  ) =>
+    shareRequest<{ id: number }>(`/api/share/${encodeURIComponent(token)}/feedback`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   cancelRun: (token: string, runId: string) =>
     shareRequest<{ cancelled: boolean }>(
       `/api/share/${encodeURIComponent(token)}/runs/${encodeURIComponent(runId)}/cancel`,

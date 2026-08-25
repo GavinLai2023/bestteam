@@ -1,6 +1,7 @@
 import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import FeedbackModal from '../components/FeedbackModal'
 import LanguageSelect from '../components/LanguageSelect'
 import MarkdownText from '../components/MarkdownText'
 import ShareProgress from '../components/ShareProgress'
@@ -30,7 +31,7 @@ interface Notice {
 // 2026-08-14-team-sharing-continuous-chat-design.md and, for this page's
 // bilingual/mobile pass, 2026-08-22-share-chat-beta-patch-design.md.
 export default function ShareChatPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { token = '' } = useParams<{ token: string }>()
   const [messages, setMessages] = useState<ShareMessage[]>([])
   const [draft, setDraft] = useState('')
@@ -50,6 +51,11 @@ export default function ShareChatPage() {
   // every terminal path, so Stop can never target the previous turn.
   const [runId, setRunId] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState(false)
+  // Unlike `runId` (cleared on every terminal path so Stop can't target the
+  // previous turn), this survives turn completion: feedback usually arrives
+  // AFTER the reply the visitor is reacting to.
+  const lastRunIdRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // Set inside onmessage's own terminal-event branches; onclose checks it to
@@ -142,6 +148,7 @@ export default function ShareChatPage() {
     try {
       const { run_id: dispatchedRunId } = await shareChatApi.sendMessage(token, content)
       setRunId(dispatchedRunId)
+      lastRunIdRef.current = dispatchedRunId
       const ws = new WebSocket(shareChatApi.streamUrl(token, dispatchedRunId))
       wsRef.current = ws
       ws.onmessage = (msg: MessageEvent<string>) => {
@@ -297,8 +304,29 @@ export default function ShareChatPage() {
   const header = (
     <header className="share-chat-header">
       <span className="share-chat-brand">{team?.name ?? t('nav.brand')}</span>
+      <button type="button" className="btn-link" onClick={() => setSendingFeedback(true)}>
+        {t('nav.feedback')}
+      </button>
       <LanguageSelect />
     </header>
+  )
+
+  const feedbackModal = (
+    <FeedbackModal
+      open={sendingFeedback}
+      onClose={() => setSendingFeedback(false)}
+      onSubmit={async (kind, body) => {
+        await shareChatApi.sendFeedback(token, {
+          kind,
+          body,
+          context: {
+            page: '/share',
+            locale: i18n.language,
+            ...(lastRunIdRef.current ? { run_id: lastRunIdRef.current } : {}),
+          },
+        })
+      }}
+    />
   )
 
   if (unavailableKey) {
@@ -306,6 +334,7 @@ export default function ShareChatPage() {
       <div className="share-chat">
         {header}
         <p className="share-chat-unavailable">{t(unavailableKey)}</p>
+        {feedbackModal}
       </div>
     )
   }
@@ -390,6 +419,7 @@ export default function ShareChatPage() {
       <p id="share-chat-hint" className="hint share-chat-hint">
         {t('share.sendHint')}
       </p>
+      {feedbackModal}
     </div>
   )
 }

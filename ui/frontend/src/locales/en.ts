@@ -24,6 +24,7 @@ export const en = {
     advanced: 'Advanced',
     memory: 'Memory',
     trace: 'Trace',
+    feedback: 'Feedback',
     changePassword: 'Change password',
     logOut: 'Log out',
     // The language switcher labels each option in its OWN language, never
@@ -80,6 +81,18 @@ export const en = {
     submitting: 'Changing…',
     done: 'Done',
     success: 'Your password has been changed. Any other device has been signed out.',
+  },
+  feedback: {
+    title: 'Send feedback',
+    kindDefect: 'Report a problem',
+    kindSuggestion: 'Make a suggestion',
+    bodyLabel: 'Your feedback',
+    placeholder: 'Tell us what went wrong, or what you would like to see…',
+    submit: 'Send',
+    sending: 'Sending…',
+    thanks: 'Thank you — your feedback has been recorded.',
+    tooMany: 'Feedback limit reached for today — please try again tomorrow.',
+    failed: "Couldn't send your feedback. Please try again.",
   },
   runStatus: {
     running: 'Running',
