@@ -643,7 +643,7 @@ def test_fail_interrupted_jobs_marks_queued_and_running_failed_and_leaves_termin
         assert job.status == "failed"
         assert job.error == (
             "Processing was interrupted by a server restart. "
-            "Please upload the documents again."
+            "Use Retry, or upload the documents again."
         )
         assert job.completed_at is not None
     # A terminal job is never rewritten -- least of all a failed one, whose

@@ -1813,3 +1813,270 @@ def test_restore_of_another_orgs_collection_is_404(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 404
+
+
+# --- Retrying a failed upload -------------------------------------------------
+#
+# A failed or interrupted ingestion job is re-run in place: the same job row,
+# the same staged files, nothing re-uploaded. The transient failures this
+# exists for -- a server restart mid-job, an embedding-provider outage --
+# leave the version directory on disk, so the customer clicks Retry instead
+# of re-uploading documents the server already has.
+
+
+def _retry(client, job_id, name="policies", token=None):
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return client.post(
+        f"/api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}/retry",
+        headers=headers,
+    )
+
+
+def test_retry_reruns_an_interrupted_job_on_the_same_row(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    # The upload dispatches nothing -- the job sits queued, as it would if
+    # the process died before the worker ran; `fail_interrupted_jobs` is what
+    # the next startup does with it.
+    original_submit = backend_ingestion._executor.submit
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt", "b.txt")
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    with open_test_db() as db:
+        # The dispatching request is gone after a restart, so the job row
+        # itself must carry the parameters a retry re-dispatches with.
+        job = db.get(IngestionJob, job_id)
+        assert job.chunk_size is not None and job.chunk_overlap is not None
+        assert backend_ingestion.fail_interrupted_jobs(db.get_bind()) == 1
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", original_submit)
+    resp = _retry(client, job_id)
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {"name": "policies", "job_id": job_id, "status": "queued"}
+    assert _wait_for_job_status(job_id) == "completed"
+
+    assert set(_live_documents(job_id)) == {"a.txt", "b.txt"}
+    summary = client.get("/api/org/knowledge-bases/policies").json()
+    assert summary["servable"] is True
+    assert [d["filename"] for d in summary["documents"]] == ["a.txt", "b.txt"]
+
+
+def test_retry_replaces_the_failed_attempts_diagnostic_rows(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+
+    broken = {"on": True}
+    original = backend_ingestion.parse_file
+
+    def flaky(path):
+        if broken["on"]:
+            raise ValueError("parser outage")
+        return original(path)
+
+    monkeypatch.setattr(backend_ingestion, "parse_file", flaky)
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt", "b.txt")
+    )
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "failed"
+    with open_test_db() as db:
+        job = db.get(IngestionJob, job_id)
+        assert job.documents_failed == 2
+        assert db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id).count() == 2
+
+    broken["on"] = False
+    assert _retry(client, job_id).status_code == 202
+    assert _wait_for_job_status(job_id) == "completed"
+    with open_test_db() as db:
+        job = db.get(IngestionJob, job_id)
+        assert job.error is None
+        assert job.documents_failed == 0 and job.documents_succeeded == 2
+        docs = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id).all()
+        assert {d.filename for d in docs} == {"a.txt", "b.txt"}
+        assert all(d.status == "chunked" for d in docs)
+
+
+def test_retry_after_an_embedding_outage_embeds_on_the_second_attempt(client, monkeypatch):
+    from ui.backend import ingestion as backend_ingestion
+    from ui.backend.db.model_catalog import seed_default_catalog
+
+    monkeypatch.setenv("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "fake:16")
+    with open_test_db() as db:
+        seed_default_catalog(db)
+
+    outage = {"on": True}
+    original = backend_ingestion.embed_documents_in_batches
+
+    def flaky(embeddings, texts):
+        if outage["on"]:
+            raise RuntimeError("provider down")
+        return original(embeddings, texts)
+
+    monkeypatch.setattr(backend_ingestion, "embed_documents_in_batches", flaky)
+    resp = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        data={"smart_search": "true"},
+        files=_named_files("a.txt"),
+    )
+    job_id = resp.json()["job_id"]
+    assert _wait_for_job_status(job_id) == "failed"
+
+    outage["on"] = False
+    assert _retry(client, job_id).status_code == 202
+    assert _wait_for_job_status(job_id) == "completed"
+    with open_test_db() as db:
+        docs = db.query(KnowledgeDocument).filter_by(ingestion_job_id=job_id).all()
+        assert docs
+        for doc in docs:
+            chunks = db.query(KnowledgeChunk).filter_by(document_id=doc.id).all()
+            assert chunks and all(c.embedding_json for c in chunks)
+
+
+def test_retry_is_refused_for_a_job_that_is_not_failed(client):
+    job_id = _upload(client, "a.txt")
+    resp = _retry(client, job_id)
+    assert resp.status_code == 409
+    assert "failed" in resp.json()["detail"]
+
+
+def test_retry_is_refused_when_a_newer_upload_exists(client):
+    failed = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    ).json()["job_id"]
+    assert _wait_for_job_status(failed) == "failed"
+    _upload(client, "good.txt", mode="replace")
+
+    assert _retry(client, failed).status_code == 409
+
+
+def test_retry_is_refused_while_an_older_job_is_still_processing(client, monkeypatch):
+    # The admin upload path has no in-flight guard, so a newer job can fail
+    # fast while an older one is still queued/running -- retrying the failed
+    # one must not put a second worker on the same collection.
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="a.txt")]
+        )
+
+    def boom(*a, **k):
+        raise RuntimeError("executor shutting down")
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", boom)
+    with open_test_db() as db:
+        with pytest.raises(fastapi.HTTPException):
+            backend_knowledge_bases.upload_knowledge_base(
+                db, org_id, "policies", [_upload_file(name="b.txt")], mode="replace"
+            )
+        failed = (
+            db.query(IngestionJob)
+            .filter_by(status="failed")
+            .order_by(IngestionJob.id.desc())
+            .first()
+        )
+        failed_id = failed.id
+
+    resp = _retry(client, failed_id)
+    assert resp.status_code == 409
+    assert "still processing" in resp.json()["detail"]
+
+
+def test_retry_records_who_retried(client, monkeypatch):
+    # An org has one member, so the discriminating pair is a job created with
+    # no actor at all (the direct-call/admin shape) retried by the org user.
+    from ui.backend import ingestion as backend_ingestion
+
+    broken = {"on": True}
+    original = backend_ingestion.parse_file
+
+    def flaky(path):
+        if broken["on"]:
+            raise ValueError("parser outage")
+        return original(path)
+
+    monkeypatch.setattr(backend_ingestion, "parse_file", flaky)
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        job_id = backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="a.txt")]
+        )["job_id"]
+    assert _wait_for_job_status(job_id) == "failed"
+    with open_test_db() as db:
+        assert db.get(IngestionJob, job_id).created_by is None
+
+    broken["on"] = False
+    assert _retry(client, job_id).status_code == 202
+    assert _wait_for_job_status(job_id) == "completed"
+    with open_test_db() as db:
+        assert db.get(IngestionJob, job_id).created_by == "test"
+
+
+def test_retry_is_refused_when_the_files_are_gone(client, monkeypatch):
+    import shutil
+
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    job_id = client.post(
+        "/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt")
+    ).json()["job_id"]
+    with open_test_db() as db:
+        assert backend_ingestion.fail_interrupted_jobs(db.get_bind()) == 1
+        job = db.get(IngestionJob, job_id)
+        version, org_id = job.version, job.org_id
+    shutil.rmtree(backend_knowledge_bases._KB_UPLOADS_DIR / str(org_id) / "policies" / version)
+
+    resp = _retry(client, job_id)
+    assert resp.status_code == 409
+    assert "no longer on the server" in resp.json()["detail"]
+
+
+def test_retry_of_another_orgs_job_is_404_and_so_is_an_unknown_one(client):
+    failed = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    ).json()["job_id"]
+    assert _wait_for_job_status(failed) == "failed"
+    token = create_user_and_login(client, username="rival", org="org_r")
+
+    assert _retry(client, failed, token=token).status_code == 404
+    assert _retry(client, 999999).status_code == 404
+
+
+def test_retry_of_an_unknown_job_is_404_even_while_an_upload_is_in_flight(client, monkeypatch):
+    # The in-flight 409 must not answer for a job id the org doesn't own:
+    # an explicit unknown or cross-org id is a 404 whatever the collection
+    # is doing (Codex review finding).
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt"))
+    assert resp.status_code == 200
+
+    assert _retry(client, 999999).status_code == 404
+
+
+def test_summary_reports_whether_the_latest_job_can_be_retried(client):
+    import shutil
+
+    failed = client.post(
+        "/api/org/knowledge-bases/policies/upload",
+        files=_files(name="blank.txt", content=b"   \n  "),
+    ).json()["job_id"]
+    assert _wait_for_job_status(failed) == "failed"
+    assert client.get("/api/org/knowledge-bases/policies").json()["latest_job"]["retryable"] is True
+
+    with open_test_db() as db:
+        job = db.get(IngestionJob, failed)
+        version, org_id = job.version, job.org_id
+    shutil.rmtree(backend_knowledge_bases._KB_UPLOADS_DIR / str(org_id) / "policies" / version)
+    assert client.get("/api/org/knowledge-bases/policies").json()["latest_job"]["retryable"] is False
+
+    _upload(client, "good.txt", mode="replace")
+    assert client.get("/api/org/knowledge-bases/policies").json()["latest_job"]["retryable"] is False

@@ -385,6 +385,15 @@ like a removal; a refusal's message renders on the row. The mock factory lists
 `restoreOwnKnowledgeBase`. The panel's copy is still English-only literals
 (the F1 long tail).
 
+A row whose latest job **failed** also shows a **"Retry"** button —
+`POST /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}/retry`, no
+confirm (re-running the same staged files destroys nothing). Enabled only
+when the summary's `latest_job.retryable` is true (the staged files are still
+on the server); disabled otherwise with the reason in its `title`. A success
+marks the row `queued` from the 202 (the retry keeps the same job id) and
+re-fetches; a refusal's message renders on the row. The mock factory lists
+`retryOwnKnowledgeBaseIngestion`.
+
 Each row also carries a **"Try a search"** toggle beside Delete, opening
 `components/KnowledgeBaseSearch.tsx` underneath it: one query box, and the
 passages `POST /api/org/knowledge-bases/{name}/search` returns, each under the

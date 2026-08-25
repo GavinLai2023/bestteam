@@ -10,7 +10,7 @@ import shutil
 import threading
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -451,6 +451,12 @@ def upload_knowledge_base(
                 # the record (see `_build_knowledge_base_from_job`).
                 kb_type=kb_type,
                 embedding_model=spec.embedding_model,
+                # The chunk parameters too, not only at the top of
+                # `run_ingestion_job`: a job interrupted while still `queued`
+                # never reaches the worker's own write, and a retry after the
+                # restart has only this row to re-dispatch from.
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
                 status="queued",
                 # The whole staged set, not this request's files: in "add"
                 # mode the job really is going to process the carried
@@ -513,12 +519,16 @@ def _dispatch_ingestion_job(
         )
     except Exception as exc:  # noqa: BLE001
         job.status = "failed"
-        job.error = "Could not start processing these documents. Please try uploading again."
+        # The staged files survive this failure, so the job is retryable --
+        # the copy must not send the customer back to re-uploading (and for a
+        # retry whose diagnostic rows were already replaced, this is the only
+        # error left on the row).
+        job.error = "Could not start processing these documents. Use Retry, or try uploading again."
         job.completed_at = ingestion._now()
         db.commit()
         raise HTTPException(
             status_code=503,
-            detail="Could not start processing these documents. Please try uploading again.",
+            detail="Could not start processing these documents. Use Retry, or try uploading again.",
         ) from exc
 
 
@@ -637,7 +647,7 @@ def remove_knowledge_base_document(
                     "collection instead."
                 ),
             )
-        if not (kb_root / live.version).is_dir():
+        if not _kb_version_dir(org_id, item_name, live.version).is_dir():
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -647,16 +657,8 @@ def remove_knowledge_base_document(
             )
 
         # The live job's own shape and chunk parameters, so every remaining
-        # document is reusable (`ingestion._carryable`). A job written before
-        # those columns existed re-chunks once under the record's config --
-        # the same one-time cost the first `add` after an upgrade pays.
-        config = record.config or {}
-        kb_type = live.kb_type or config.get("type", "local_folder")
-        chunk_size = live.chunk_size if live.chunk_size is not None else config.get("chunk_size", 1000)
-        chunk_overlap = (
-            live.chunk_overlap if live.chunk_overlap is not None else config.get("chunk_overlap", 100)
-        )
-        embedding_model = live.embedding_model if kb_type in ("vector", "hybrid") else None
+        # document is reusable (`ingestion._carryable`).
+        kb_type, chunk_size, chunk_overlap, embedding_model = _job_shape(live, record.config or {})
 
         version_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -670,6 +672,8 @@ def remove_knowledge_base_document(
                 version=version,
                 kb_type=kb_type,
                 embedding_model=embedding_model,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
                 status="queued",
                 file_count=sum(1 for p in version_dir.rglob("*") if p.is_file()),
                 created_by=created_by,
@@ -687,6 +691,30 @@ def remove_knowledge_base_document(
             embedding_model=embedding_model,
         )
         return {"name": item_name, "job_id": job.id, "status": "queued"}
+
+
+def _kb_version_dir(org_id: Optional[int], item_name: str, version: str) -> Path:
+    """The on-disk directory holding one ingestion job's staged files. One
+    definition on purpose: `job_is_retryable` (which drives the panel's Retry
+    button) and `retry_ingestion_job` (the endpoint's own gate) must compute
+    the identical path, or the UI enables a retry the endpoint refuses."""
+    return _KB_UPLOADS_DIR / str(org_id) / item_name / version
+
+
+def _job_shape(job: IngestionJob, config: Dict[str, Any]) -> Tuple[str, int, int, Optional[str]]:
+    """`(kb_type, chunk_size, chunk_overlap, embedding_model)` -- the shape a
+    job's chunks were actually cut with, falling back to the record's config
+    for a row written before those columns were filled at creation (which
+    re-chunks once under today's config, the same one-time cost the first
+    `add` after an upgrade pays). Shared by removal, restore and retry so
+    the three fallbacks cannot drift."""
+    kb_type = job.kb_type or config.get("type", "local_folder")
+    chunk_size = job.chunk_size if job.chunk_size is not None else config.get("chunk_size", 1000)
+    chunk_overlap = (
+        job.chunk_overlap if job.chunk_overlap is not None else config.get("chunk_overlap", 100)
+    )
+    embedding_model = job.embedding_model if kb_type in ("vector", "hybrid") else None
+    return kb_type, chunk_size, chunk_overlap, embedding_model
 
 
 def restorable_generation(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord) -> Optional[IngestionJob]:
@@ -707,8 +735,7 @@ def restorable_generation(db: Session, org_id: Optional[int], record: KnowledgeB
     if len(completed) < 2:
         return None
     previous = completed[1]
-    kb_root = _KB_UPLOADS_DIR / str(org_id) / record.name
-    if not (kb_root / previous.version).is_dir():
+    if not _kb_version_dir(org_id, record.name, previous.version).is_dir():
         return None
     return previous
 
@@ -777,7 +804,7 @@ def restore_previous_generation(
                 detail=f"'{item_name}' has no earlier upload to restore.",
             )
         previous = completed[1]
-        if not (kb_root / previous.version).is_dir():
+        if not _kb_version_dir(org_id, item_name, previous.version).is_dir():
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -787,15 +814,8 @@ def restore_previous_generation(
             )
 
         # The previous job's own shape and chunk parameters -- what makes its
-        # every document reusable. A job written before those columns existed
-        # re-chunks once under the record's config, as a removal does.
-        config = record.config or {}
-        kb_type = previous.kb_type or config.get("type", "local_folder")
-        chunk_size = previous.chunk_size if previous.chunk_size is not None else config.get("chunk_size", 1000)
-        chunk_overlap = (
-            previous.chunk_overlap if previous.chunk_overlap is not None else config.get("chunk_overlap", 100)
-        )
-        embedding_model = previous.embedding_model if kb_type in ("vector", "hybrid") else None
+        # every document reusable.
+        kb_type, chunk_size, chunk_overlap, embedding_model = _job_shape(previous, record.config or {})
 
         version_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -809,6 +829,8 @@ def restore_previous_generation(
                 version=version,
                 kb_type=kb_type,
                 embedding_model=embedding_model,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
                 status="queued",
                 file_count=sum(1 for p in version_dir.rglob("*") if p.is_file()),
                 created_by=created_by,
@@ -819,6 +841,142 @@ def restore_previous_generation(
             db.rollback()
             shutil.rmtree(version_dir, ignore_errors=True)
             raise
+
+        _dispatch_ingestion_job(
+            db, job, record.id, org_id, version_dir,
+            kb_type=kb_type, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model,
+        )
+        return {"name": item_name, "job_id": job.id, "status": "queued"}
+
+
+def job_is_retryable(org_id: Optional[int], record: KnowledgeBaseRecord, job: IngestionJob) -> bool:
+    """Whether Retry can act on this job: it failed and its staged files are
+    still on disk. Callers pass the collection's newest job -- an older one
+    is never retryable regardless, because `retry_ingestion_job` refuses any
+    job a newer one has superseded."""
+    if job.status != "failed":
+        return False
+    return _kb_version_dir(org_id, record.name, job.version).is_dir()
+
+
+def retry_ingestion_job(
+    db: Session,
+    org_id: Optional[int],
+    item_name: str,
+    job_id: int,
+    *,
+    created_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Re-run a failed ingestion job in place. Returns `{"name", "job_id",
+    "status": "queued"}` with the SAME job id: the row is reset and
+    re-dispatched, not copied.
+
+    The same row on purpose: a second job sharing the failed one's version
+    directory would break `_prune_failed_ingestion_versions`, which reclaims
+    every failed job's directory but the newest failed job's -- a shared
+    directory would be deleted out from under the retry the next time that
+    pruning ran. Resetting the row keeps "one job, one version directory"
+    true everywhere.
+
+    Only the collection's newest job (by `id`, the ordering everything else
+    uses) can be retried: an older failure was superseded by whatever was
+    uploaded after it. That check rules out a NEWER queued/running job, but
+    not an older one still processing -- the admin upload path has no
+    in-flight guard, so a newer job can fail fast while an older worker is
+    still ingesting -- hence the explicit queued/running 409 below, without
+    which a retry would put a second worker on the same collection. The
+    failed attempt's KnowledgeDocument/KnowledgeChunk rows -- its per-file
+    diagnostic record -- are deleted first, because `run_ingestion_job`
+    inserts a fresh row per staged file and increments the counters from the
+    row's current values. (On a dispatch-submission failure those rows are
+    already gone; the shared dispatch-failure copy points at Retry, so
+    nothing tells the customer to re-upload files that are still staged.)
+
+    Nothing is double-billed: ingestion usage is recorded only when a job
+    completes, so the failed attempt was never metered. Unchanged documents
+    still reuse the previous *completed* generation's chunks and embeddings
+    (`_reusable_documents`), exactly as the original attempt would have.
+
+    Refused (409) when the job is not `failed`, when a newer job exists, and
+    when the version directory is no longer on disk (pruned, or removed by
+    an operator). An unknown collection or job -- another org's included --
+    is a 404.
+    """
+    record = db.query(KnowledgeBaseRecord).filter_by(name=item_name, org_id=org_id).one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
+
+    with _kb_upload_lock(f"{org_id}/{item_name}"):
+        # Ownership first: an unknown or cross-org job id is a 404 whatever
+        # the collection is doing -- the in-flight 409 must never reveal or
+        # deny a job this org doesn't own.
+        job = db.get(IngestionJob, job_id)
+        if job is None or job.kb_id != record.id:
+            raise HTTPException(
+                status_code=404, detail=f"'{item_name}' has no upload with id {job_id}."
+            )
+        in_flight = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.kb_id == record.id, IngestionJob.status.in_(("queued", "running")))
+            .first()
+        )
+        if in_flight is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{item_name}' is still processing an upload. Wait for it "
+                    "to finish, then retry."
+                ),
+            )
+        if job.status != "failed":
+            raise HTTPException(status_code=409, detail="Only a failed upload can be retried.")
+        newer = (
+            db.query(IngestionJob.id)
+            .filter(IngestionJob.kb_id == record.id, IngestionJob.id > job.id)
+            .first()
+        )
+        if newer is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A newer upload exists for '{item_name}'. Retry or replace that one instead.",
+            )
+        version_dir = _kb_version_dir(org_id, item_name, job.version)
+        if not version_dir.is_dir():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The files for '{item_name}' are no longer on the server. "
+                    "Upload the documents again."
+                ),
+            )
+
+        # The job's own shape and chunk parameters -- written at creation
+        # since this feature exists, so an interrupted `queued` job carries
+        # them too, with `_job_shape`'s config fallback for older rows.
+        kb_type, chunk_size, chunk_overlap, embedding_model = _job_shape(job, record.config or {})
+
+        doc_ids = [
+            doc_id
+            for (doc_id,) in db.query(KnowledgeDocument.id).filter_by(ingestion_job_id=job.id)
+        ]
+        if doc_ids:
+            db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id.in_(doc_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(KnowledgeDocument).filter_by(ingestion_job_id=job.id).delete(
+                synchronize_session=False
+            )
+        job.status = "queued"
+        job.error = None
+        job.documents_succeeded = 0
+        job.documents_failed = 0
+        job.completed_at = None
+        # The retried attempt belongs to whoever asked for it; an anonymous
+        # direct call keeps the original attribution rather than blanking it.
+        if created_by is not None:
+            job.created_by = created_by
+        db.commit()
 
         _dispatch_ingestion_job(
             db, job, record.id, org_id, version_dir,

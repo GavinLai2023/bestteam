@@ -58,10 +58,12 @@ from .ingestion import job_status_payload
 from .knowledge_bases import (
     KnowledgeBaseNotReady,
     _kb_upload_lock,
+    job_is_retryable,
     live_documents,
     remove_knowledge_base_document,
     restorable_generation,
     restore_previous_generation,
+    retry_ingestion_job,
     delete_knowledge_base,
     resolve_knowledge_base,
     upload_knowledge_base,
@@ -172,6 +174,9 @@ def _kb_summary(db: Session, org_id: Optional[int], record: KnowledgeBaseRecord)
     if latest is not None:
         latest_job = job_status_payload(db, latest)
         latest_job.pop("config", None)
+        # Whether the panel's Retry button can act on it: the newest attempt
+        # failed and its staged files are still on disk.
+        latest_job["retryable"] = job_is_retryable(org_id, record, latest)
     live = _latest_completed_job(db, record)
     previous = restorable_generation(db, org_id, record)
     config = record.config or {}
@@ -573,6 +578,22 @@ def restore_own_knowledge_base(
     Refused while an upload is processing, with no earlier upload, or when
     the previous files are gone; see `knowledge_bases.restore_previous_generation`."""
     return restore_previous_generation(db, org.id, item_name, created_by=user.username)
+
+
+@router.post("/knowledge-bases/{item_name}/ingestion-jobs/{job_id}/retry", status_code=202)
+def retry_own_ingestion_job(
+    item_name: str,
+    job_id: int,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Re-run a failed upload in place. A `202` with the SAME job to poll --
+    the row is reset and re-dispatched over its still-staged files, so
+    nothing is re-uploaded. Refused for a job that didn't fail, one a newer
+    upload superseded, or one whose files are gone; see
+    `knowledge_bases.retry_ingestion_job`."""
+    return retry_ingestion_job(db, org.id, item_name, job_id, created_by=user.username)
 
 
 @router.delete("/knowledge-bases/{item_name}", status_code=204)

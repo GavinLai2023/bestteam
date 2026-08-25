@@ -1650,7 +1650,34 @@ version directory is gone (`restorable_generation` is what `_kb_summary`'s
 One generation back only: it is the only one whose files are still on disk.
 `record.config` is untouched, so a restore that undoes a type change serves
 under the previous type while `config` keeps the new one.
-Allowed while teams use the collection, as `add` is. The collection DELETE is the same
+Allowed while teams use the collection, as `add` is.
+`POST /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}/retry`
+(`knowledge_bases.retry_ingestion_job`) re-runs a **failed** job in place over
+its still-staged files: the SAME row is reset (status back to `queued`, error
+and counters cleared, the failed attempt's Document/Chunk diagnostic rows
+deleted -- `run_ingestion_job` increments counters from the row and inserts a
+row per staged file) and re-dispatched under the job's own
+shape/chunk parameters. The same row on purpose: a second job sharing the
+failed one's version directory would have that directory reclaimed by
+`_prune_failed_ingestion_versions`, which keeps only the newest failed job's.
+To make an interrupted-while-`queued` job retryable after a restart, all
+three `IngestionJob` creation sites now write `chunk_size`/`chunk_overlap` at
+creation (previously only the worker wrote them at run start), with the
+config fallback for older rows (`_job_shape`, shared with removal and
+restore so the three fallbacks cannot drift; `_kb_version_dir` is likewise
+the one construction of a job's staged-files path). Only the collection's
+newest job can be retried (409 otherwise), and an explicit queued/running
+409 covers the case the newest-job check cannot: the admin upload path has
+no in-flight guard, so a newer job can fail fast while an OLDER worker is
+still ingesting -- retrying it must not put a second worker on the
+collection. 409 when not `failed` or when the version directory is gone,
+404 for an unknown/cross-org collection or job. The retrying user is
+written to `created_by`. Nothing is double-billed: ingestion usage is
+recorded only on completion. `_kb_summary`'s `latest_job` carries
+`retryable` (`job_is_retryable`: newest job failed + files on disk), which
+is what the panel's Retry button keys off; `fail_interrupted_jobs`' and the
+dispatch-failure error texts now offer Retry alongside re-uploading (the
+admin surface has no Retry button, so re-uploading stays in the copy). The collection DELETE is the same
 `knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
 (deployed dependency, in-flight ingestion) hold here too. Two consequences
 elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only
