@@ -96,6 +96,8 @@ export default function KnowledgeBasesPanel() {
   const [removing, setRemoving] = useState<string | null>(null)
   // The collection whose restore is in flight, so one click is one restore.
   const [restoring, setRestoring] = useState<string | null>(null)
+  // The collection whose retry is in flight, so one click is one retry.
+  const [retrying, setRetrying] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -208,6 +210,34 @@ export default function KnowledgeBasesPanel() {
     }
   }
 
+  const handleRetry = async (kb: OrgKnowledgeBase) => {
+    const job = kb.latest_job
+    if (!job) return
+    setRetrying(kb.name)
+    try {
+      const result = await api.retryOwnKnowledgeBaseIngestion(kb.name, job.job_id)
+      setRowErrors((prev) => {
+        const next = { ...prev }
+        delete next[kb.name]
+        return next
+      })
+      // Mark the row processing from the 202 itself (same reasoning as a
+      // removal): the poll keys off this even if the refresh below fails.
+      setItems((prev) =>
+        prev.map((i) =>
+          i.name === kb.name && i.latest_job
+            ? { ...i, latest_job: { ...i.latest_job, job_id: result.job_id, status: 'queued' } }
+            : i,
+        ),
+      )
+      await refresh()
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
+    } finally {
+      setRetrying(null)
+    }
+  }
+
   if (items.length === 0 && !error) return null
 
   return (
@@ -297,6 +327,21 @@ export default function KnowledgeBasesPanel() {
                 </>
               )}
               {rowErrors[kb.name] && <p className="banner banner-error">{rowErrors[kb.name]}</p>}
+              {job?.status === 'failed' && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!job.retryable || retrying === kb.name}
+                  title={
+                    job.retryable
+                      ? 'Process these documents again — nothing needs re-uploading'
+                      : 'The files for this upload are no longer on the server. Upload the documents again.'
+                  }
+                  onClick={() => void handleRetry(kb)}
+                >
+                  Retry
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-secondary"

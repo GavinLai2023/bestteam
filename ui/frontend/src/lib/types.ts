@@ -314,7 +314,10 @@ export interface OrgKnowledgeBase {
   // re-upload leaves the previous generation live, so this is not simply
   // "the latest job succeeded".
   servable: boolean
-  latest_job: Omit<IngestionJobStatus, 'config'> | null
+  // `retryable`: the newest attempt failed and its staged files are still on
+  // the server, so the panel's Retry button can re-run it in place. Optional
+  // so an absent field (an older response shape) reads as "not retryable".
+  latest_job: (Omit<IngestionJobStatus, 'config'> & { retryable?: boolean }) | null
   // The live generation's documents, by name. Empty until a first upload
   // completes. A `failed` one could not be read but is still in the
   // collection's files, so it can be removed like any other.

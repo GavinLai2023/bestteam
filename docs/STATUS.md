@@ -6,6 +6,26 @@
 
 ## Done
 
+- **A failed upload can be retried in place** (2026-08-25). The 2026-08-25
+  external re-assessment's "ingestion cannot recover after a restart" P1, in
+  its roadmap shape (a Retry button, not a durable queue — checkpoints,
+  resume, cancel and streaming writes stay refused as machinery a
+  tens-of-documents collection doesn't need).
+  `POST /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}/retry`
+  (`knowledge_bases.retry_ingestion_job`) resets the SAME failed job row
+  (status/error/counters, the failed attempt's diagnostic Document/Chunk rows
+  deleted) and re-dispatches it over its still-staged version directory —
+  same row on purpose, since a second job sharing the directory would have it
+  reclaimed by failed-version pruning. Newest-job-only; 409 for a
+  non-`failed` job, a superseded one, or files gone; 404 cross-org. All three
+  `IngestionJob` creation sites now persist `chunk_size`/`chunk_overlap` at
+  creation so a job interrupted while `queued` is retryable after the
+  restart; `fail_interrupted_jobs`' message now points at Retry instead of
+  re-uploading. `_kb_summary.latest_job.retryable` drives the "My documents"
+  panel's Retry button (no confirm — re-running staged files destroys
+  nothing). Unchanged documents still carry chunks/embeddings forward from
+  the previous completed generation, and a failed attempt was never metered,
+  so a retry is billed once.
 - **Trigger health metrics + backlog alert** (2026-08-25). The 2026-08-24
   re-assessment's last code-actionable release-gate item (monitoring for
   poll lag / oldest pending age / failure rate / draft latency). Two legs,

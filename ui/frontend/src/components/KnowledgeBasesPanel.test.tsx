@@ -15,6 +15,7 @@ vi.mock('../lib/api', () => ({
     searchOwnKnowledgeBase: vi.fn(),
     removeOwnKnowledgeBaseDocument: vi.fn(),
     restoreOwnKnowledgeBase: vi.fn(),
+    retryOwnKnowledgeBaseIngestion: vi.fn(),
   },
 }))
 
@@ -35,6 +36,7 @@ const kb = (overrides: Partial<OrgKnowledgeBase> = {}): OrgKnowledgeBase => ({
     documents_failed: 0,
     chunk_count: 12,
     errors: [],
+    retryable: false,
   },
   documents: [],
   previous_generation: null,
@@ -509,5 +511,85 @@ describe('KnowledgeBasesPanel', () => {
       await answerConfirm(true)
     })
     expect(await screen.findByText(/no longer on the server/)).toBeInTheDocument()
+  })
+
+  it('retries a failed upload from the row and marks it processing', async () => {
+    const failedJob = {
+      job_id: 7,
+      status: 'failed' as const,
+      file_count: 2,
+      documents_succeeded: 0,
+      documents_failed: 2,
+      chunk_count: 0,
+      errors: [{ filename: null, error: 'The documents could not be processed.' }],
+      retryable: true,
+    }
+    const failed = kb({ servable: false, latest_job: failedJob })
+    mockedApi.listOwnKnowledgeBases.mockResolvedValueOnce([failed])
+    // The re-fetch after retrying sees the row it just marked processing --
+    // same reasoning as the restore test above.
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      { ...failed, latest_job: { ...failedJob, status: 'queued' as const } },
+    ])
+    mockedApi.retryOwnKnowledgeBaseIngestion.mockResolvedValue({
+      name: 'policies', job_id: 7, status: 'queued',
+    })
+    render(<KnowledgeBasesPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(mockedApi.retryOwnKnowledgeBaseIngestion).toHaveBeenCalledWith('policies', 7)
+    expect(await screen.findByText('Processing…')).toBeInTheDocument()
+  })
+
+  it('disables Retry when the files are gone, and renders none on a healthy row', async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({
+        name: 'gone',
+        servable: false,
+        latest_job: {
+          job_id: 8,
+          status: 'failed',
+          file_count: 1,
+          documents_succeeded: 0,
+          documents_failed: 1,
+          chunk_count: 0,
+          errors: [],
+          retryable: false,
+        },
+      }),
+      kb({ name: 'healthy' }),
+    ])
+    render(<KnowledgeBasesPanel />)
+
+    const button = await screen.findByRole('button', { name: 'Retry' })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', expect.stringMatching(/no longer on the server/i))
+    // Exactly one Retry on the page: a row whose latest job succeeded has none.
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(1)
+  })
+
+  it("shows a refused retry's message on the row", async () => {
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      kb({
+        servable: false,
+        latest_job: {
+          job_id: 9,
+          status: 'failed',
+          file_count: 1,
+          documents_succeeded: 0,
+          documents_failed: 1,
+          chunk_count: 0,
+          errors: [],
+          retryable: true,
+        },
+      }),
+    ])
+    mockedApi.retryOwnKnowledgeBaseIngestion.mockRejectedValue(
+      new Error('A newer upload exists for this collection.'),
+    )
+    render(<KnowledgeBasesPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText(/newer upload exists/)).toBeInTheDocument()
   })
 })

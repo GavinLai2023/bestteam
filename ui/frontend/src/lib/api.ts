@@ -431,6 +431,13 @@ export const api = {
       `/api/org/knowledge-bases/${encodeURIComponent(name)}/restore`,
       { method: 'POST' },
     ),
+  // Re-runs a failed upload in place; a 202 with the SAME job to poll -- the
+  // staged files are still on the server, so nothing is re-uploaded.
+  retryOwnKnowledgeBaseIngestion: (name: string, jobId: number) =>
+    request<{ name: string; job_id: number; status: string }>(
+      `/api/org/knowledge-bases/${encodeURIComponent(name)}/ingestion-jobs/${jobId}/retry`,
+      { method: 'POST' },
+    ),
   // "Try a search": one query against the org's own collection, returning the
   // passages an agent would have retrieved. A collection that can't answer
   // yet (still processing, last upload failed, or never uploaded through the

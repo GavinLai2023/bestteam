@@ -612,7 +612,7 @@ def fail_interrupted_jobs(engine: Engine) -> int:
                     IngestionJob.status: "failed",
                     IngestionJob.error: (
                         "Processing was interrupted by a server restart. "
-                        "Please upload the documents again."
+                        "Use Retry to process these documents again."
                     ),
                     IngestionJob.completed_at: _now(),
                 },

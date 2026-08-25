@@ -910,6 +910,18 @@ are still on the server — and restoring again undoes the restore. Refused
 while an upload is processing, when there is no earlier upload, and when the
 previous files are gone.
 
+**Retrying a failed upload.** A failed ingestion — an embedding-provider
+outage, or a job interrupted by a server restart — leaves its staged files on
+the server, so "Retry" on the "My documents" panel
+(`POST /api/org/knowledge-bases/{name}/ingestion-jobs/{job_id}/retry`) re-runs
+the job in place instead of asking for the documents again. The same job row
+is reset and re-dispatched (a 202 with the same id to poll), unchanged
+documents still reuse the previous completed generation's chunks and
+embeddings, and nothing is double-billed — a failed attempt is never metered.
+Only the collection's newest job can be retried; refused when the job didn't
+fail, when a newer upload superseded it, and when its files are no longer on
+the server (the panel disables the button, naming the reason).
+
 See `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`
 for the full design.
 
