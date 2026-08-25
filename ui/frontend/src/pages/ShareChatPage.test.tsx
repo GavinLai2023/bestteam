@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import ShareChatPage from './ShareChatPage'
 import { shareChatApi } from '../lib/shareChatApi'
@@ -10,6 +10,7 @@ vi.mock('../lib/shareChatApi', () => ({
     getMessages: vi.fn(),
     getTeam: vi.fn(),
     sendMessage: vi.fn(),
+    sendFeedback: vi.fn(),
     cancelRun: vi.fn(),
     streamUrl: vi.fn(() => 'ws://127.0.0.1:8000/api/share/tok/stream/run-1'),
   },
@@ -510,5 +511,26 @@ describe('ShareChatPage', () => {
 
     await screen.findByPlaceholderText(/type a message/i)
     expect(screen.getByText('bestteam')).toBeInTheDocument()
+  })
+
+  it('lets a visitor send feedback from the header', async () => {
+    mockedApi.sendFeedback.mockResolvedValue({ id: 1 })
+    renderPage()
+    await screen.findByPlaceholderText(/type a message/i)
+
+    fireEvent.click(screen.getByRole('button', { name: /feedback/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByLabelText(/make a suggestion/i))
+    fireEvent.change(within(dialog).getByLabelText(/your feedback/i), {
+      target: { value: 'more emoji please' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() => expect(within(dialog).getByText(/thank you/i)).toBeInTheDocument())
+    expect(mockedApi.sendFeedback).toHaveBeenCalledWith('tok', {
+      kind: 'suggestion',
+      body: 'more emoji please',
+      context: expect.objectContaining({ page: '/share', locale: 'en' }),
+    })
   })
 })
