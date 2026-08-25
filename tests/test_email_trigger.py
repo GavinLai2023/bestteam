@@ -89,7 +89,7 @@ def test_mailbox_state_parses_regardless_of_field_order():
 
 # --- poll_org: cap / baseline / bookkeeping / errors -------------------------
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 
@@ -817,6 +817,39 @@ def test_poll_once_rolls_back_after_org_failure(db, monkeypatch):
     # poll_once must roll back before org B's list_enabled_triggers query,
     # or that query raises PendingRollbackError and org B never runs.
     assert seen == [a.id, b.id]
+
+
+def test_poll_once_raises_and_clears_the_backlog_alert(db, monkeypatch):
+    """The cycle itself watches the backlog: mail waiting longer than the
+    threshold alerts once through the notification channel, and draining it
+    announces recovery -- no dispatch has to fail for either to happen."""
+    from ui.backend.db.models import InboxEvent, Notification
+
+    monkeypatch.setenv("BESTTEAM_BACKLOG_ALERT_MINUTES", "30")
+    org, trigger = _org_with_trigger(db, last_uid=45)
+    monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, []))
+    db.add(InboxEvent(
+        org_id=org.id, mailbox_identity="m", external_id="9", status="pending",
+        detected_at=datetime.now(timezone.utc) - timedelta(hours=2),
+    ))
+    db.commit()
+
+    class _Factory:
+        def __call__(self): return self
+        def __enter__(self): return db
+        def __exit__(self, *exc): return False
+
+    poll_once(_no_pipeline, session_factory=_Factory())
+    poll_once(_no_pipeline, session_factory=_Factory())
+    assert db.query(Notification).filter_by(fingerprint="backlog").count() == 1
+
+    event = db.query(InboxEvent).one()
+    event.status = "done"
+    db.commit()
+    poll_once(_no_pipeline, session_factory=_Factory())
+    db.refresh(trigger)
+    assert trigger.alerted_fingerprint is None
+    assert db.query(Notification).filter_by(fingerprint="recovered").count() == 1
 
 
 def test_poll_forever_sleeps_first_and_respects_kill_switch(monkeypatch):

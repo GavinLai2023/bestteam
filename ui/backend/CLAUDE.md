@@ -288,6 +288,22 @@ late outcome is ignored), `email_trigger`'s connectivity check (mailbox), and
 `_release_stale_run` (timeout, which alerts immediately -- it has already been
 stuck for the full run timeout).
 
+A fourth alert is a *level*, not a fault streak: `evaluate_backlog` (same
+module, same fingerprint-set encoding, `consecutive_faults` untouched) fires
+once when the oldest **`pending`** inbox event outlives
+`BESTTEAM_BACKLOG_ALERT_MINUTES` (default 30) and announces recovery once
+when it drains -- the case where nothing ever *fails* (a daily or budget cap
+paused dispatch) so no outcome above would fire. `claimed` mail is
+deliberately not counted: it is in-flight, and a wedged run is the timeout
+alert's job. `email_trigger._apply_backlog_health` feeds it once per poll
+cycle. Metric *collection* is `trigger_metrics.py` (pure over persisted
+rows: poll lag, backlog age, 24h done/failed, detection-to-draft latency),
+whose findings the `admin check-health` CLI prints (exit 1 on FAIL). That
+CLI is deliberately the only watcher for a stalled poller: notifications are
+delivered *by* the poll loop, so an in-process alert about the poller being
+wedged could never leave the process -- cron it from outside
+(docs/deployment.md "Watching the watcher").
+
 Note: the underlying `fingerprint`/`last_error_kind` STRING VALUE that
 identifies this class of fault is still the literal `"workflow"` (not
 renamed to `"pipeline"`) -- only the Python constant names that hold it

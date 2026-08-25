@@ -6,6 +6,23 @@
 
 ## Done
 
+- **Trigger health metrics + backlog alert** (2026-08-25). The 2026-08-24
+  re-assessment's last code-actionable release-gate item (monitoring for
+  poll lag / oldest pending age / failure rate / draft latency). Two legs,
+  split by who can still report: `admin check-health` prints per-org
+  FAIL/WARN/OK findings computed from rows the poller already persists
+  (`ui/backend/trigger_metrics.py`; FAIL = poll lag beyond 3 intervals,
+  min 5 minutes) and exits 1 on FAIL — deliberately the *only* watcher for
+  a stalled poller, because notifications are delivered by the poll loop
+  itself; deployment.md says to cron it. In-process, a `backlog` alert
+  (`trigger_health.evaluate_backlog`) fires once through the existing
+  notification channel when the oldest **pending** inbox event outlives
+  `BESTTEAM_BACKLOG_ALERT_MINUTES` (default 30) — the case where dispatch
+  is paused by a cap and nothing ever fails — and announces recovery once
+  when it drains. `claimed` mail is not counted (run-timeout's job).
+  Deliberately not done: a failure-*rate* notification (the consecutive-
+  faults alert already covers streaks; a windowed rate would double-alert)
+  and any latency threshold (tuning info, shown OK-only in check-health).
 - **The platform asks the customer questions** (2026-08-24, spec
   `docs/superpowers/specs/2026-08-24-clarifying-questions-design.md`). The
   roadmap's "clarifying questions are inert" item, in the decided 2026-08-23
