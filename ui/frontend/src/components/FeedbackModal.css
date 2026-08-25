@@ -1,0 +1,65 @@
+.feedback-dialog {
+  max-width: 30rem;
+  width: calc(100vw - 2rem);
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 18%);
+}
+
+.feedback-dialog::backdrop {
+  background: rgb(15 18 26 / 45%);
+}
+
+.feedback-dialog h2 {
+  margin: 0 0 14px;
+  font-size: 1.05rem;
+}
+
+.feedback-dialog-kinds {
+  display: flex;
+  gap: 18px;
+  margin: 0 0 12px;
+  padding: 0;
+  border: none;
+}
+
+.feedback-dialog-kinds label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.92rem;
+}
+
+.feedback-dialog textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.feedback-dialog-error {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.feedback-dialog-thanks {
+  margin: 0 0 18px;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--text-soft);
+}
+
+.feedback-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}

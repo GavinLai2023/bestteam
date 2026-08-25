@@ -190,6 +190,10 @@ export const api = {
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
 
+  // Feedback (any authenticated principal; read side is admin-only)
+  submitFeedback: (payload: { kind: string; body: string; context?: Record<string, string> }) =>
+    request<{ id: number }>('/api/feedback', { method: 'POST', body: JSON.stringify(payload) }),
+
   // Admin: per-user memory management
   memoryUsers: () => request<{ enabled: boolean; users: MemoryUserSummary[] }>('/api/memory/users'),
   memoryRecords: (
