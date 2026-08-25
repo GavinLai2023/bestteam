@@ -973,3 +973,37 @@ class OrgEmailBudgetSetting(Base):
     monthly_cost_cap: Mapped[Optional[float]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class Feedback(Base):
+    """One defect report or suggestion, from a logged-in user or a share-link
+    visitor, triaged by the platform operator on the admin Feedback page.
+
+    `org_id` is provenance, not ownership: all feedback belongs to the
+    operator (there is no org-facing read surface). Exactly one of
+    `submitted_by` / `share_session_id` is set -- enforced by the two write
+    paths (db/feedback.py), not a CHECK. See docs/superpowers/specs/
+    2026-08-26-feedback-system-design.md.
+    """
+
+    __tablename__ = "feedback"
+    __table_args__ = (
+        CheckConstraint("kind IN ('defect', 'suggestion')", name="ck_feedback_kind"),
+        CheckConstraint(
+            "status IN ('new', 'acknowledged', 'resolved', 'dismissed')",
+            name="ck_feedback_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[Optional[int]] = mapped_column(ForeignKey("organizations.id"), nullable=True)
+    kind: Mapped[str]  # "defect" | "suggestion"
+    body: Mapped[str]
+    status: Mapped[str] = mapped_column(default="new")
+    admin_note: Mapped[Optional[str]] = mapped_column(nullable=True)
+    submitted_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    share_session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("share_sessions.id"), nullable=True, index=True
+    )
+    context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
