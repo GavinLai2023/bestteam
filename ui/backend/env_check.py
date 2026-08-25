@@ -277,3 +277,42 @@ def check_schema(
                    f"({head}): {', '.join(reversed(pending))}. The backend will start and then fail "
                    "with `no such column` in whichever feature touches a new column first. "
                    "Run `alembic upgrade head`")
+
+
+# --- org retention --------------------------------------------------------
+#
+# BESTTEAM_RUN_RETENTION_DAYS only seeds orgs created after it is set, so the
+# env check above can say OK while every existing org still keeps run history
+# forever. This one reads the live database (read-only, like check_schema)
+# and names those orgs.
+
+_ORG_RETENTION = "org-retention"
+
+
+def check_org_retention(db_path: Union[str, Path, None] = None) -> Finding:
+    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
+    if str(path) == ":memory:" or not path.exists():
+        return Finding("OK", _ORG_RETENTION, "no database yet; nothing to check")
+
+    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            uncovered = [row[0] for row in con.execute(
+                "SELECT o.name FROM organizations o "
+                "LEFT JOIN org_retention_settings r ON r.org_id = o.id "
+                "WHERE r.run_retention_days IS NULL ORDER BY o.name"
+            )]
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        if "no such table" in str(exc):
+            return Finding("OK", _ORG_RETENTION, "pre-migration schema; nothing to check")
+        return Finding("WARN", _ORG_RETENTION, f"could not read org retention from {path}: {exc}")
+
+    if uncovered:
+        return Finding("WARN", _ORG_RETENTION,
+                       f"org(s) keeping run history forever: {', '.join(uncovered)}. "
+                       "Set a retention period per org (PUT /api/org/retention) before "
+                       "a real customer uses it")
+    return Finding("OK", _ORG_RETENTION, "every org has a retention period")

@@ -257,3 +257,104 @@ def test_the_cli_reports_schema_drift_and_exits_1(monkeypatch, capsys, tmp_path)
     assert admin.main(["check-env"]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] schema" in out
+
+
+# --- org retention -------------------------------------------------------
+#
+# BESTTEAM_RUN_RETENTION_DAYS only sets the default for orgs created *after*
+# it -- an existing org with no retention period keeps run history forever
+# and the env WARN alone never mentions it. `check_org_retention` reads the
+# live database (read-only, like check_schema) and names those orgs.
+
+
+def _org_db(path, orgs, retention=()):
+    """orgs: list of names; retention: (org_index_1_based, days) pairs."""
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE organizations (id INTEGER PRIMARY KEY, name TEXT, active INTEGER DEFAULT 1)")
+    con.execute("CREATE TABLE org_retention_settings (id INTEGER PRIMARY KEY, org_id INTEGER, run_retention_days INTEGER)")
+    for name in orgs:
+        con.execute("INSERT INTO organizations (name) VALUES (?)", (name,))
+    for org_id, days in retention:
+        con.execute(
+            "INSERT INTO org_retention_settings (org_id, run_retention_days) VALUES (?, ?)",
+            (org_id, days),
+        )
+    con.commit()
+    con.close()
+
+
+def test_org_retention_missing_database_is_ok(tmp_path):
+    from ui.backend.env_check import check_org_retention
+
+    db = tmp_path / "data" / "bestteam.db"
+    finding = check_org_retention(db)
+    assert finding.level == "OK"
+    assert not db.exists(), "check_org_retention created the database"
+
+
+def test_org_retention_all_orgs_covered_is_ok(tmp_path):
+    from ui.backend.env_check import check_org_retention
+
+    db = tmp_path / "bestteam.db"
+    _org_db(db, ["default", "acme"], retention=[(1, 90), (2, 30)])
+    finding = check_org_retention(db)
+    assert finding.level == "OK", finding
+
+
+def test_org_retention_warns_and_names_uncovered_orgs(tmp_path):
+    from ui.backend.env_check import check_org_retention
+
+    db = tmp_path / "bestteam.db"
+    # acme has no settings row at all; globex has a row with NULL days
+    # (policy switched off) -- both keep history forever.
+    _org_db(db, ["default", "acme", "globex"], retention=[(1, 90), (3, None)])
+    finding = check_org_retention(db)
+    assert finding.level == "WARN"
+    assert "acme" in finding.message
+    assert "globex" in finding.message
+    assert "default" not in finding.message
+
+
+def test_org_retention_pre_migration_schema_is_ok(tmp_path):
+    # A database without the organizations table (pre-migration, or built by
+    # an old checkout): nothing to report, and never a crash.
+    import sqlite3
+
+    from ui.backend.env_check import check_org_retention
+
+    db = tmp_path / "bestteam.db"
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY)")
+    con.commit()
+    con.close()
+    finding = check_org_retention(db)
+    assert finding.level == "OK"
+
+
+def test_the_cli_includes_the_org_retention_finding(monkeypatch, capsys, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from ui.backend import admin
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, _script_head())
+    import sqlite3
+
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE organizations (id INTEGER PRIMARY KEY, name TEXT, active INTEGER DEFAULT 1)")
+    con.execute("CREATE TABLE org_retention_settings (id INTEGER PRIMARY KEY, org_id INTEGER, run_retention_days INTEGER)")
+    con.execute("INSERT INTO organizations (name) VALUES ('beta-org')")
+    con.commit()
+    con.close()
+    for name in list(_GOOD) + ["BESTTEAM_DEMO_PIPELINES"]:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in _GOOD.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(db))
+
+    admin.main(["check-env"])
+    out = capsys.readouterr().out
+    assert "[WARN] org-retention" in out
+    assert "beta-org" in out

@@ -2396,9 +2396,11 @@
   run's persisted trace simply ends; `runs.output` carries the reason).
 - **Autonomous trigger residuals:** `asyncio.to_thread` poll cycles aren't
   awaited on shutdown, so a mailbox check/commit/dispatch already in flight
-  can keep running briefly after the ASGI shutdown handler returns; a process
-  killed between a trigger's state commit and dispatch orphans a `runs` row
-  (overlap guard self-recovers on restart; no reconciliation sweep yet).
+  can keep running briefly after the ASGI shutdown handler returns. A process
+  killed between a trigger's state commit and dispatch no longer strands
+  anything: the startup sweep (`runtime.fail_interrupted_runs` +
+  `_release_orphaned_claims`, "Hard-restart orphans" above) fails the orphaned
+  `runs` row and releases or dead-letters its claimed inbox events.
 
 - **Property Maintenance Inbox retry doesn't pre-check every UID still exists
   in the mailbox** — `POST /api/runs/{id}/retry` revalidates UIDVALIDITY (the
