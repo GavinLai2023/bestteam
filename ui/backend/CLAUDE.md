@@ -1663,14 +1663,21 @@ failed one's version directory would have that directory reclaimed by
 To make an interrupted-while-`queued` job retryable after a restart, all
 three `IngestionJob` creation sites now write `chunk_size`/`chunk_overlap` at
 creation (previously only the worker wrote them at run start), with the
-config fallback for older rows. Only the collection's newest job can be
-retried (409 otherwise -- which also rules out a concurrent queued/running
-job); 409 when not `failed` or when the version directory is gone, 404 for
-an unknown/cross-org collection or job. Nothing is double-billed: ingestion
-usage is recorded only on completion. `_kb_summary`'s `latest_job` carries
-`retryable` (`job_is_retryable`: newest job failed + files on disk), which is
-what the panel's Retry button keys off; `fail_interrupted_jobs`' error text
-now points at Retry instead of re-uploading. The collection DELETE is the same
+config fallback for older rows (`_job_shape`, shared with removal and
+restore so the three fallbacks cannot drift; `_kb_version_dir` is likewise
+the one construction of a job's staged-files path). Only the collection's
+newest job can be retried (409 otherwise), and an explicit queued/running
+409 covers the case the newest-job check cannot: the admin upload path has
+no in-flight guard, so a newer job can fail fast while an OLDER worker is
+still ingesting -- retrying it must not put a second worker on the
+collection. 409 when not `failed` or when the version directory is gone,
+404 for an unknown/cross-org collection or job. The retrying user is
+written to `created_by`. Nothing is double-billed: ingestion usage is
+recorded only on completion. `_kb_summary`'s `latest_job` carries
+`retryable` (`job_is_retryable`: newest job failed + files on disk), which
+is what the panel's Retry button keys off; `fail_interrupted_jobs`' and the
+dispatch-failure error texts now offer Retry alongside re-uploading (the
+admin surface has no Retry button, so re-uploading stays in the copy). The collection DELETE is the same
 `knowledge_bases.delete_knowledge_base` the admin route calls, so both 409s
 (deployed dependency, in-flight ingestion) hold here too. Two consequences
 elsewhere: `resolve_knowledge_base` now reads the *latest* job rather than only

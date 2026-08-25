@@ -1952,6 +1952,71 @@ def test_retry_is_refused_when_a_newer_upload_exists(client):
     assert _retry(client, failed).status_code == 409
 
 
+def test_retry_is_refused_while_an_older_job_is_still_processing(client, monkeypatch):
+    # The admin upload path has no in-flight guard, so a newer job can fail
+    # fast while an older one is still queued/running -- retrying the failed
+    # one must not put a second worker on the same collection.
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="a.txt")]
+        )
+
+    def boom(*a, **k):
+        raise RuntimeError("executor shutting down")
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", boom)
+    with open_test_db() as db:
+        with pytest.raises(fastapi.HTTPException):
+            backend_knowledge_bases.upload_knowledge_base(
+                db, org_id, "policies", [_upload_file(name="b.txt")], mode="replace"
+            )
+        failed = (
+            db.query(IngestionJob)
+            .filter_by(status="failed")
+            .order_by(IngestionJob.id.desc())
+            .first()
+        )
+        failed_id = failed.id
+
+    resp = _retry(client, failed_id)
+    assert resp.status_code == 409
+    assert "still processing" in resp.json()["detail"]
+
+
+def test_retry_records_who_retried(client, monkeypatch):
+    # An org has one member, so the discriminating pair is a job created with
+    # no actor at all (the direct-call/admin shape) retried by the org user.
+    from ui.backend import ingestion as backend_ingestion
+
+    broken = {"on": True}
+    original = backend_ingestion.parse_file
+
+    def flaky(path):
+        if broken["on"]:
+            raise ValueError("parser outage")
+        return original(path)
+
+    monkeypatch.setattr(backend_ingestion, "parse_file", flaky)
+    with open_test_db() as db:
+        org_id = get_or_create_org(db, "default").id
+        job_id = backend_knowledge_bases.upload_knowledge_base(
+            db, org_id, "policies", [_upload_file(name="a.txt")]
+        )["job_id"]
+    assert _wait_for_job_status(job_id) == "failed"
+    with open_test_db() as db:
+        assert db.get(IngestionJob, job_id).created_by is None
+
+    broken["on"] = False
+    assert _retry(client, job_id).status_code == 202
+    assert _wait_for_job_status(job_id) == "completed"
+    with open_test_db() as db:
+        assert db.get(IngestionJob, job_id).created_by == "test"
+
+
 def test_retry_is_refused_when_the_files_are_gone(client, monkeypatch):
     import shutil
 

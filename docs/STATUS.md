@@ -20,7 +20,7 @@
   non-`failed` job, a superseded one, or files gone; 404 cross-org. All three
   `IngestionJob` creation sites now persist `chunk_size`/`chunk_overlap` at
   creation so a job interrupted while `queued` is retryable after the
-  restart; `fail_interrupted_jobs`' message now points at Retry instead of
+  restart; `fail_interrupted_jobs`' message now offers Retry alongside
   re-uploading. `_kb_summary.latest_job.retryable` drives the "My documents"
   panel's Retry button (no confirm — re-running staged files destroys
   nothing). Unchanged documents still carry chunks/embeddings forward from

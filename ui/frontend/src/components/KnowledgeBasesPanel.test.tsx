@@ -83,7 +83,7 @@ describe('KnowledgeBasesPanel', () => {
       kb({
         latest_job: {
           job_id: 1, status: 'completed', file_count: 2, documents_succeeded: 1,
-          documents_failed: 1, chunk_count: 4,
+          documents_failed: 1, chunk_count: 4, retryable: false,
           errors: [{ filename: 'scan.pdf', error: 'no text layer' }],
         },
       }),
@@ -107,7 +107,7 @@ describe('KnowledgeBasesPanel', () => {
       kb({
         latest_job: {
           job_id: 1, status: 'completed', file_count: 20, documents_succeeded: 5,
-          documents_failed: 15, chunk_count: 4,
+          documents_failed: 15, chunk_count: 4, retryable: false,
           errors: Array.from({ length: 10 }, (_, i) => ({
             filename: `bad-${i}.pdf`, error: 'no text layer',
           })),
@@ -131,7 +131,7 @@ describe('KnowledgeBasesPanel', () => {
         servable: true,
         latest_job: {
           job_id: 2, status: 'failed', file_count: 1, documents_succeeded: 0,
-          documents_failed: 1, chunk_count: 0,
+          documents_failed: 1, chunk_count: 0, retryable: true,
           errors: [{ filename: 'blank.txt', error: 'document produced no chunks' }],
         },
       }),
@@ -148,7 +148,7 @@ describe('KnowledgeBasesPanel', () => {
         servable: false,
         latest_job: {
           job_id: 2, status: 'failed', file_count: 1, documents_succeeded: 0,
-          documents_failed: 1, chunk_count: 0,
+          documents_failed: 1, chunk_count: 0, retryable: true,
           errors: [{ filename: null, error: 'Knowledge base has no readable documents' }],
         },
       }),
@@ -170,7 +170,7 @@ describe('KnowledgeBasesPanel', () => {
       kb({
         latest_job: {
           job_id: 3, status: 'running', file_count: 1, documents_succeeded: 0,
-          documents_failed: 0, chunk_count: 0, errors: [],
+          documents_failed: 0, chunk_count: 0, errors: [], retryable: false,
         },
       }),
     ])
@@ -244,7 +244,7 @@ describe('KnowledgeBasesPanel', () => {
     const processing = kb({
       latest_job: {
         job_id: 3, status: 'queued', file_count: 1, documents_succeeded: 0,
-        documents_failed: 0, chunk_count: 0, errors: [],
+        documents_failed: 0, chunk_count: 0, errors: [], retryable: false,
       },
     })
     mockedApi.listOwnKnowledgeBases
@@ -299,7 +299,7 @@ describe('KnowledgeBasesPanel', () => {
         name: 'processing',
         latest_job: {
           job_id: 3, status: 'running', file_count: 1, documents_succeeded: 0,
-          documents_failed: 0, chunk_count: 0, errors: [],
+          documents_failed: 0, chunk_count: 0, errors: [], retryable: false,
         },
       }),
       kb({
@@ -307,7 +307,7 @@ describe('KnowledgeBasesPanel', () => {
         servable: false,
         latest_job: {
           job_id: 4, status: 'failed', file_count: 1, documents_succeeded: 0,
-          documents_failed: 1, chunk_count: 0,
+          documents_failed: 1, chunk_count: 0, retryable: true,
           errors: [{ filename: null, error: 'Knowledge base has no readable documents' }],
         },
       }),
@@ -486,7 +486,7 @@ describe('KnowledgeBasesPanel', () => {
       kb({
         name: 'busy',
         previous_generation: { completed_at: null, filenames: ['a.txt'] },
-        latest_job: { job_id: 2, status: 'running', file_count: 1, documents_succeeded: 0, documents_failed: 0, chunk_count: 0, errors: [] },
+        latest_job: { job_id: 2, status: 'running', file_count: 1, documents_succeeded: 0, documents_failed: 0, chunk_count: 0, errors: [], retryable: false },
       }),
     ])
     render(<KnowledgeBasesPanel />)

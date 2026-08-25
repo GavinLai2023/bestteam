@@ -137,28 +137,25 @@ export default function KnowledgeBasesPanel() {
     }
   }
 
-  const handleRemoveDocument = async (kb: OrgKnowledgeBase, doc: OrgKnowledgeBaseDocument) => {
-    // Removing a document from a collection a live team searches is allowed
-    // (so is adding one), but the reader should know whose answers change.
-    const usedBy = kb.used_by.length > 0 ? ` Teams using "${kb.name}": ${kb.used_by.join(', ')}.` : ''
-    const ok = await confirm({
-      title: `Remove "${doc.filename}"?`,
-      body: `It is taken out of "${kb.name}" and teams can no longer search it.${usedBy}`,
-      confirmLabel: 'Remove',
-      destructive: true,
-    })
-    if (!ok) return
-    setRemoving(kb.name)
+  // The shared tail of every row-level job action (remove / restore /
+  // retry): call the endpoint, clear the row's error, mark the row
+  // processing from the 202 itself -- the poll above keys off this, so it
+  // starts even if the refresh below fails or an older list response lands
+  // after it -- then re-fetch. A refusal's message renders on the row it
+  // belongs to; `setBusy` keeps one click one request.
+  const runRowJobAction = async (
+    kb: OrgKnowledgeBase,
+    setBusy: (name: string | null) => void,
+    call: () => Promise<{ job_id: number }>,
+  ) => {
+    setBusy(kb.name)
     try {
-      const job = await api.removeOwnKnowledgeBaseDocument(kb.name, doc.filename)
+      const job = await call()
       setRowErrors((prev) => {
         const next = { ...prev }
         delete next[kb.name]
         return next
       })
-      // Mark the row processing from the 202 itself rather than waiting on a
-      // re-fetch: the poll above keys off this, so it starts even if the
-      // refresh below fails or an older list response lands after it.
       setItems((prev) =>
         prev.map((i) =>
           i.name === kb.name && i.latest_job
@@ -170,8 +167,24 @@ export default function KnowledgeBasesPanel() {
     } catch (e) {
       setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
     } finally {
-      setRemoving(null)
+      setBusy(null)
     }
+  }
+
+  const handleRemoveDocument = async (kb: OrgKnowledgeBase, doc: OrgKnowledgeBaseDocument) => {
+    // Removing a document from a collection a live team searches is allowed
+    // (so is adding one), but the reader should know whose answers change.
+    const usedBy = kb.used_by.length > 0 ? ` Teams using "${kb.name}": ${kb.used_by.join(', ')}.` : ''
+    const ok = await confirm({
+      title: `Remove "${doc.filename}"?`,
+      body: `It is taken out of "${kb.name}" and teams can no longer search it.${usedBy}`,
+      confirmLabel: 'Remove',
+      destructive: true,
+    })
+    if (!ok) return
+    await runRowJobAction(kb, setRemoving, () =>
+      api.removeOwnKnowledgeBaseDocument(kb.name, doc.filename),
+    )
   }
 
   const handleRestore = async (kb: OrgKnowledgeBase) => {
@@ -185,57 +198,16 @@ export default function KnowledgeBasesPanel() {
       destructive: true,
     })
     if (!ok) return
-    setRestoring(kb.name)
-    try {
-      const job = await api.restoreOwnKnowledgeBase(kb.name)
-      setRowErrors((prev) => {
-        const next = { ...prev }
-        delete next[kb.name]
-        return next
-      })
-      // Mark the row processing from the 202 itself (same reasoning as a
-      // removal): the poll keys off this even if the refresh below fails.
-      setItems((prev) =>
-        prev.map((i) =>
-          i.name === kb.name && i.latest_job
-            ? { ...i, latest_job: { ...i.latest_job, job_id: job.job_id, status: 'queued' } }
-            : i,
-        ),
-      )
-      await refresh()
-    } catch (e) {
-      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
-    } finally {
-      setRestoring(null)
-    }
+    await runRowJobAction(kb, setRestoring, () => api.restoreOwnKnowledgeBase(kb.name))
   }
 
+  // No confirm: re-running the same staged files destroys nothing.
   const handleRetry = async (kb: OrgKnowledgeBase) => {
     const job = kb.latest_job
     if (!job) return
-    setRetrying(kb.name)
-    try {
-      const result = await api.retryOwnKnowledgeBaseIngestion(kb.name, job.job_id)
-      setRowErrors((prev) => {
-        const next = { ...prev }
-        delete next[kb.name]
-        return next
-      })
-      // Mark the row processing from the 202 itself (same reasoning as a
-      // removal): the poll keys off this even if the refresh below fails.
-      setItems((prev) =>
-        prev.map((i) =>
-          i.name === kb.name && i.latest_job
-            ? { ...i, latest_job: { ...i.latest_job, job_id: result.job_id, status: 'queued' } }
-            : i,
-        ),
-      )
-      await refresh()
-    } catch (e) {
-      setRowErrors((prev) => ({ ...prev, [kb.name]: (e as Error).message }))
-    } finally {
-      setRetrying(null)
-    }
+    await runRowJobAction(kb, setRetrying, () =>
+      api.retryOwnKnowledgeBaseIngestion(kb.name, job.job_id),
+    )
   }
 
   if (items.length === 0 && !error) return null

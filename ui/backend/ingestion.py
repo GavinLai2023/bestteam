@@ -610,9 +610,14 @@ def fail_interrupted_jobs(engine: Engine) -> int:
             .update(
                 {
                     IngestionJob.status: "failed",
+                    # "Or upload again" stays in the copy: Retry exists only
+                    # on the org self-service panel and only for the
+                    # collection's newest job, so an admin-managed KB (no
+                    # Retry surface) or the older of two interrupted jobs
+                    # still needs the other way out.
                     IngestionJob.error: (
                         "Processing was interrupted by a server restart. "
-                        "Use Retry to process these documents again."
+                        "Use Retry, or upload the documents again."
                     ),
                     IngestionJob.completed_at: _now(),
                 },
