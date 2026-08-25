@@ -425,6 +425,7 @@ A trigger that starts failing now says so. Alerts appear in the app under
 | Mailbox unreachable | same threshold |
 | A run released by the stale-run watchdog | immediately — it has already been stuck for the full run timeout |
 | A Microsoft 365 client secret nearing expiry | 30 days, 7 days, and on expiry |
+| Incoming email backing up | when the oldest unprocessed message has waited over `BESTTEAM_BACKLOG_ALERT_MINUTES` (default 30, minimum 1) — nothing failed, dispatch just isn't keeping up (typically a daily or budget cap) |
 
 Alerts fire on **transitions, not occurrences**: once a condition is reported
 it stays quiet until it clears, and a recovery is announced once. A successful
@@ -469,6 +470,30 @@ message body. Webhook URLs must be HTTPS and must resolve to a public address:
 alerts are not a route into the deployment's own network, so self-hosted
 internal endpoints are not supported. There is no email delivery channel and
 there will not be one — this product has no SMTP anywhere by design.
+
+### Watching the watcher (`check-health`)
+
+Everything above is delivered *by* the poll loop itself, so none of it can
+report the one failure that matters most: the poller (or the whole process)
+being stalled or down. That check has to come from outside the process:
+
+```bash
+docker compose exec backend python -m ui.backend.admin check-health
+```
+
+prints one FAIL/WARN/OK line per org — poll lag, backlog age, 24-hour
+failure counts, and detection-to-draft latency, all computed from what the
+poller already persists — and exits 1 on any FAIL (a poll lag beyond three
+poll intervals, minimum 5 minutes). Run it from cron on the host and wire
+the exit code to whatever the operator already watches, e.g.:
+
+```
+*/10 * * * * docker compose -f /srv/bestteam/docker-compose.yml exec -T backend \
+  python -m ui.backend.admin check-health || <notify yourself>
+```
+
+It only reads: on a box whose database does not exist yet it says so and
+exits 0 without creating one.
 
 ### Keeping and removing run history (per-org)
 

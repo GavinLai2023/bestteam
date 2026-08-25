@@ -84,6 +84,7 @@ never accept the password as an argument — so it never lands in shell history.
 | `clear-email <org>` | Disconnect an org's mailbox (also disables its autonomous email trigger). |
 | `backfill-memory-principals` | One-off, **opt-in** upgrade step: bind each current user's legacy NULL-principal memory rows to their principal so their existing memory keeps being recalled (§6). |
 | `check-env` | Print the launch checklist for the process's environment (`[FAIL]`/`[WARN]`/`[OK]` per variable) and exit 1 on any FAIL. Reads only; runs before the database is opened. The final `schema` line compares the database's Alembic stamp with the migrations in this checkout and FAILs when it is behind head — run `alembic upgrade head` and re-run. See `docs/deployment.md`, "Beta launch checklist". |
+| `check-health` | Print the email trigger's health metrics per org (`[FAIL]`/`[WARN]`/`[OK]`: poll lag, backlog age, 24-hour done/failed counts, detection-to-draft latency) and exit 1 on any FAIL. Reads only. Run it **from cron** — a stalled or dead poller cannot report itself through in-app alerts, so this exit code is the outside watcher. See `docs/deployment.md`, "Watching the watcher". |
 
 > **Note on visibility:** there is intentionally no "list all users" or "list org
 > members" command. `list` shows admins; `list-orgs` shows orgs. To see a

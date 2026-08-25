@@ -84,6 +84,16 @@ def _prompt_password(parser: argparse.ArgumentParser, label: str = "Password") -
     return password
 
 
+def _print_findings(findings) -> int:
+    """The shared check-* output: one line per finding, exit 1 on any FAIL."""
+    for finding in findings:
+        print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
+    failures = sum(1 for f in findings if f.level == "FAIL")
+    warnings = sum(1 for f in findings if f.level == "WARN")
+    print(f"{failures} failure(s), {warnings} warning(s)" if failures else f"no failures, {warnings} warning(s)")
+    return 1 if has_failures(findings) else 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ui.backend.admin", description="Provision orgs, users, and admins."
@@ -171,6 +181,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "(FAIL/WARN/OK per variable); exit 1 on any FAIL. Reads only.",
     )
 
+    sub.add_parser(
+        "check-health",
+        help="print the email trigger's health metrics per org (poll lag, "
+             "backlog age, 24h failures, draft latency) as FAIL/WARN/OK; "
+             "exit 1 on any FAIL. Run it from cron -- a stalled or dead "
+             "poller can't report itself through in-app notifications.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "check-env":
@@ -179,12 +197,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # database does not exist yet, and leave it that way.
         db_path = default_db_path(os.environ)
         findings = check_environment(os.environ) + [check_schema(db_path), check_org_retention(db_path)]
-        for finding in findings:
-            print(f"[{finding.level}]{' ' * (5 - len(finding.level))}{finding.name}: {finding.message}")
-        failures = sum(1 for f in findings if f.level == "FAIL")
-        warnings = sum(1 for f in findings if f.level == "WARN")
-        print(f"{failures} failure(s), {warnings} warning(s)" if failures else f"no failures, {warnings} warning(s)")
-        return 1 if has_failures(findings) else 0
+        return _print_findings(findings)
+
+    if args.command == "check-health":
+        # Guard before `_open_session`: on a box with no database yet, opening
+        # the session would CREATE it, and a health check must not.
+        db_path = default_db_path(os.environ)
+        if str(db_path) != ":memory:" and not db_path.exists():
+            print(f"[OK]   triggers: no database at {db_path} yet; nothing to monitor")
+            return 0
+        from .email_trigger import poll_seconds
+        from .trigger_metrics import backlog_alert_seconds, collect, evaluate
+
+        with _open_session() as db:
+            metrics = collect(db)
+        findings = evaluate(
+            metrics,
+            poll_interval_seconds=poll_seconds(),
+            backlog_threshold_seconds=backlog_alert_seconds(),
+        )
+        return _print_findings(findings)
 
     with _open_session() as db:
         if args.command == "list":

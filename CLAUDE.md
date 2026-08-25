@@ -51,6 +51,10 @@ uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --ext
 # Launch checklist for a deployment's environment (FAIL/WARN/OK per variable)
 .\.venv\Scripts\python.exe -m ui.backend.admin check-env
 
+# Email-trigger health metrics (poll lag / backlog age / 24h failures / draft
+# latency) -- run from cron; a stalled poller can't report itself in-process
+.\.venv\Scripts\python.exe -m ui.backend.admin check-health
+
 # Monitoring dashboard — needs BOTH running simultaneously
 $env:BESTTEAM_SECRET_KEY = "dev-only-secret-change-me-for-real-use"
 .\.venv\Scripts\python.exe -m uvicorn ui.backend.main:app --port 8000 --host 127.0.0.1

@@ -35,7 +35,7 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import make_email_tools
 
-from . import email_budget, email_filter, secret_store, trigger_health
+from . import email_budget, email_filter, secret_store, trigger_health, trigger_metrics
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_budget_settings import get_budget_caps, spent_this_month
 from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
@@ -219,6 +219,39 @@ def _apply_health(db, trigger, outcome: str) -> None:
     except Exception:  # noqa: BLE001 -- alerting must never break the caller
         _logger.exception(
             "email trigger: health evaluation failed for org %s", trigger.org_id
+        )
+
+
+def _apply_backlog_health(db, trigger) -> None:
+    """Fold the org's backlog level into the trigger's alert state.
+
+    Runs once per poll cycle, after `poll_org`: dispatch pausing (a daily or
+    budget cap, the overlap guard) leaves events `pending` without any run
+    ever *failing*, so no `_apply_health` outcome would ever fire for it.
+    Isolated like `_apply_health` -- alerting must never break the cycle.
+    """
+    try:
+        decision = trigger_health.evaluate_backlog(
+            oldest_pending_seconds=trigger_metrics.oldest_pending_seconds(
+                db, trigger.org_id, _utcnow()
+            ),
+            threshold_seconds=trigger_metrics.backlog_alert_seconds(),
+            alerted_fingerprint=trigger.alerted_fingerprint,
+        )
+        if decision.alerted_fingerprint == trigger.alerted_fingerprint:
+            return
+        trigger.alerted_fingerprint = decision.alerted_fingerprint
+        if decision.notification is not None:
+            draft = decision.notification
+            create_notification(
+                db, org_id=trigger.org_id, kind=draft.kind, severity=draft.severity,
+                title=draft.title, body=draft.body, fingerprint=draft.fingerprint,
+            )
+        db.commit()
+    except Exception:  # noqa: BLE001 -- alerting must never break the caller
+        db.rollback()
+        _logger.exception(
+            "email trigger: backlog evaluation failed for org %s", trigger.org_id
         )
 
 
@@ -1484,6 +1517,7 @@ def poll_once(get_pipeline: Callable, session_factory=None) -> None:
         for trigger in list_enabled_triggers(db):
             try:
                 poll_org(db, trigger, get_pipeline)
+                _apply_backlog_health(db, trigger)
             except Exception:  # noqa: BLE001 -- the loop must outlive any org's failure
                 # Roll back BEFORE touching `trigger` again: a failed flush leaves
                 # the session's objects expired, so logging trigger.org_id first

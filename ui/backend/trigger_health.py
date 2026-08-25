@@ -46,6 +46,7 @@ OUTCOME_PIPELINE_OK = "workflow_ok"
 FINGERPRINT_PIPELINE = "workflow"
 FINGERPRINT_MAILBOX = "mailbox"
 FINGERPRINT_TIMEOUT = "run_timeout"
+FINGERPRINT_BACKLOG = "backlog"
 
 KIND_TRIGGER_HEALTH = "trigger_health"
 
@@ -201,10 +202,14 @@ def evaluate(
     clears = _OK_CLEARS.get(outcome)
     if clears is not None:
         cleared = outstanding & clears
-        if not outstanding:
+        # The backlog alert is a *level*, not a fault (see `evaluate_backlog`):
+        # it is invisible here, so it neither keeps a streak alive past a
+        # success nor gets cleared by one -- only its own drain clears it.
+        fault_outstanding = outstanding & set(_FAULT_FINGERPRINTS.values())
+        if not fault_outstanding:
             # Nothing was reported, so there is nothing to announce -- but the
             # streak did end.
-            return HealthDecision(0, None, None)
+            return HealthDecision(0, _encode(outstanding), None)
         if cleared:
             # Only this domain's alerts clear. Anything else outstanding stays
             # outstanding, so it is neither announced as recovered nor
@@ -229,3 +234,64 @@ def evaluate(
     return HealthDecision(
         faults, _encode(outstanding | {fingerprint}), _draft(outcome, faults)
     )
+
+
+@dataclass(frozen=True)
+class BacklogDecision:
+    """The trigger's new outstanding-alert set, plus a notification if due."""
+
+    alerted_fingerprint: Optional[str]
+    notification: Optional[NotificationDraft]
+
+
+def evaluate_backlog(
+    *,
+    oldest_pending_seconds: Optional[float],
+    threshold_seconds: float,
+    alerted_fingerprint: Optional[str],
+) -> BacklogDecision:
+    """The backlog transition: a *level*, not a fault streak.
+
+    Unlike `evaluate`'s outcomes, a backlog is measured, not counted -- the
+    oldest `pending` inbox event's age. Mail waiting longer than the
+    threshold alerts once; the backlog draining (or merely dropping back
+    under the threshold) announces recovery once. `consecutive_faults` is
+    untouched: nothing failed, dispatch is just not keeping up -- typically a
+    cap or budget pause. In-flight (`claimed`) mail is deliberately not
+    counted; a wedged run is the run-timeout alert's job.
+    """
+    outstanding = _parse(alerted_fingerprint)
+    over = (
+        oldest_pending_seconds is not None
+        and oldest_pending_seconds > threshold_seconds
+    )
+
+    if over and FINGERPRINT_BACKLOG not in outstanding:
+        minutes = int(oldest_pending_seconds // 60)
+        return BacklogDecision(
+            _encode(outstanding | {FINGERPRINT_BACKLOG}),
+            NotificationDraft(
+                kind=KIND_TRIGGER_HEALTH,
+                severity=SEVERITY_WARNING,
+                title="Incoming email is backing up",
+                body=(
+                    f"The oldest unprocessed email has been waiting about "
+                    f"{max(minutes, 1)} minute(s). Automatic runs may be paused "
+                    "by a daily or budget limit, or falling behind -- check the "
+                    "automation settings and run history."
+                ),
+                fingerprint=FINGERPRINT_BACKLOG,
+            ),
+        )
+    if not over and FINGERPRINT_BACKLOG in outstanding:
+        return BacklogDecision(
+            _encode(outstanding - {FINGERPRINT_BACKLOG}),
+            NotificationDraft(
+                kind=KIND_TRIGGER_HEALTH,
+                severity=SEVERITY_INFO,
+                title="The email backlog has cleared",
+                body="Waiting email reported earlier is being processed again.",
+                fingerprint="recovered",
+            ),
+        )
+    return BacklogDecision(_encode(outstanding), None)
