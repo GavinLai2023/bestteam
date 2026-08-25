@@ -73,11 +73,14 @@ one.
 
 ## Frontend — wizard UI (`ui/frontend/src/`)
 
-The Team Builder wizard is **five steps**
+The Team Builder wizard is **six steps**
 (`components/WizardProgress.tsx`'s `STEPS`): Your challenge (`/wizard`,
-`IntentPage`), Your documents (`documents`), Meet your team (`preview`),
-Confirm (`confirm`), Go live (`deploy`). A step is unlocked by **data
-presence** (`session.requirements_json` / `specification_json`), not by the
+`IntentPage`), A few questions (`questions`, `QuestionsPage` — the analyst's
+clarifying questions, one textarea each; IntentPage routes here only when the
+generated requirements carry any, so a `fake:`-catalog deployment and a
+failed requirements call still go straight to Documents), Your documents
+(`documents`), Meet your team (`preview`), Confirm (`confirm`), Go live
+(`deploy`). A step is unlocked by **data presence** (`session.requirements_json` / `specification_json`), not by the
 session's `status` string, so revisiting an earlier stage never relocks a
 later one.
 
@@ -259,8 +262,8 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
   `visibleItems`, which remains the org-scoping decision, so a hidden row can
   never become a mutation target; it clears on tab/org change alongside the
   selection). Delete is outlined-danger rather than sharing Save's weight.
-- **`/wizard`** (+ `/wizard/:sessionId/{documents|preview|confirm|deploy}`)
-  — the five-step Team Builder wizard, `components/WizardLayout.tsx` as the
+- **`/wizard`** (+ `/wizard/:sessionId/{questions|documents|preview|confirm|deploy}`)
+  — the six-step Team Builder wizard, `components/WizardLayout.tsx` as the
   shared chrome:
   - `lib/api.ts` — shared `fetch` wrapper (`API_BASE`/`WS_BASE` default to
     `http://localhost:8000`) exposing every backend endpoint as `api.*`
@@ -285,6 +288,13 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     `useBuilderSession` refetches on return).
   - `pages/wizard/*.tsx` — one page per step. `IntentPage` has no
     `sessionId` yet and creates the session via `api.createSession()`;
+    `QuestionsPage` is the interview (spec:
+    `docs/superpowers/specs/2026-08-24-clarifying-questions-design.md`):
+    Continue needs at least one non-blank answer, "Skip these questions" is
+    always available, and both send the full paired batch to
+    `POST /requirements`' `answers` field — a blank answer is a deliberate
+    skip the analyst converts into an `Assumed:` constraint. Revisiting with
+    no open questions shows a short card straight through to Documents;
     `DocumentsPage` uploads a knowledge base (or skips) and then generates --
     or, revisiting after a spec exists, *refines* -- the Specification;
     `PreviewPage` renders `TeamFlow` and runs a test run over the same
@@ -305,7 +315,13 @@ customer nav is Dashboard / Build a team / My teams / Run a team):
     screen saying so. The fields stay directly editable -- adding a goal is a
     precise act that a natural-language round trip does worse -- they just
     have no button of their own. The button is never gated on the text box
-    being non-empty (a customer may only have edited a field). While that
+    being non-empty (a customer may only have edited a field). Open
+    clarifying questions render inside the Requirements panel as
+    per-question textareas whose **non-blank** answers also ride the one
+    action (`/refine`'s `answers` field) — a blank answer there is not a
+    skip, the question just stays open; drafted answers reset whenever
+    `requirements_json` regenerates, since that round retires or replaces
+    the questions they belonged to. While that
     request is in flight the page disables everything it owns -- both
     textareas, every `BulletEditor` (which took a `disabled` prop for this),
     the upload link, Back to preview and Continue to deploy -- and shows one

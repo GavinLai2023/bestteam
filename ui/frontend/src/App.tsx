@@ -10,6 +10,7 @@ import MemoryPage from './pages/MemoryPage'
 import TracePage from './pages/TracePage'
 import AccountsPage from './pages/AccountsPage'
 import IntentPage from './pages/wizard/IntentPage'
+import QuestionsPage from './pages/wizard/QuestionsPage'
 import DocumentsPage from './pages/wizard/DocumentsPage'
 import PreviewPage from './pages/wizard/PreviewPage'
 import ConfirmPage from './pages/wizard/ConfirmPage'
@@ -60,6 +61,7 @@ function App() {
 
             <Route path="/wizard" element={<WizardLayout />}>
               <Route index element={<IntentPage />} />
+              <Route path=":sessionId/questions" element={<QuestionsPage />} />
               <Route path=":sessionId/documents" element={<DocumentsPage />} />
               <Route path=":sessionId/preview" element={<PreviewPage />} />
               <Route path=":sessionId/confirm" element={<ConfirmPage />} />

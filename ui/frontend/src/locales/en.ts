@@ -222,6 +222,7 @@ export const en = {
       generate: 'Generate summary',
       generating: 'Generating…',
       clarifyHeading: 'A couple of quick questions:',
+      clarifyHint: 'Your answers are applied when you press "Update the team".',
       summaryLabel: 'Summary',
       painPoints: 'Pain points',
       painPointsPlaceholder: 'e.g. replies take too long',
@@ -236,10 +237,21 @@ export const en = {
     },
     steps: {
       intent: 'Your challenge',
+      questions: 'A few questions',
       documents: 'Your documents',
       preview: 'Meet your team',
       confirm: 'Confirm',
       deploy: 'Go live',
+    },
+    questions: {
+      title: 'A few quick questions',
+      subtitle:
+        "Your answers help us design the right team. You can skip any question — or all of them — and we'll make a sensible assumption you can review in the summary.",
+      answerPlaceholder: 'Type your answer (optional)',
+      skip: 'Skip these questions',
+      updating: 'Updating what we understood…',
+      updatingNotice: "We're folding your answers into what we understood about your business — this takes a moment.",
+      noQuestions: 'No open questions — your description gave us what we need.',
     },
     intent: {
       title: 'Tell us about your challenge',

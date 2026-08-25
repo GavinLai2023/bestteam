@@ -409,3 +409,68 @@ describe('ConfirmPage while the update is in flight', () => {
     expect(screen.getByPlaceholderText(/FAQ document/i)).toBeEnabled()
   })
 })
+
+// The clarifying-questions banner used to be read-only: answers arrived as
+// free text in the change box with no link to the question they answered.
+// Each question now has its own input, and the answers ride the page's one
+// action -- blanks are filtered out (an unanswered question stays open).
+describe('ConfirmPage clarifying questions', () => {
+  const QUESTION = 'Which tone should replies use?'
+
+  const sessionWithQuestion = (): BuilderSession => ({
+    ...sessionWithSpec(),
+    requirements_json: {
+      summary: 'They answer payroll questions by hand.',
+      pain_points: [],
+      goals: [],
+      success_criteria: [],
+      constraints: [],
+      clarifying_questions: [QUESTION],
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockContext = { session: sessionWithQuestion(), setSession: vi.fn(), loading: false, sessionId: 's1', setNavBusy: vi.fn() }
+    mockedApi.modelCatalog.mockResolvedValue([
+      { spec: 'deepseek:friendly-assistant', display_name: 'Friendly Assistant' },
+    ])
+  })
+
+  it('renders an input for each open question', async () => {
+    renderPage()
+
+    expect(await screen.findByLabelText(QUESTION)).toBeInTheDocument()
+  })
+
+  it('sends a typed answer paired with its question through the one action', async () => {
+    mockedApi.refineTeam.mockResolvedValue(sessionWithQuestion())
+    renderPage()
+
+    fireEvent.change(await screen.findByLabelText(QUESTION), { target: { value: '  Friendly  ' } })
+    const button = screen.getByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+    fireEvent.click(button)
+
+    await waitFor(() =>
+      expect(mockedApi.refineTeam).toHaveBeenCalledWith('s1', {
+        requirements: expect.objectContaining({ clarifying_questions: [QUESTION] }),
+        answers: [{ question: QUESTION, answer: 'Friendly' }],
+        feedback: '',
+        model: 'deepseek:friendly-assistant',
+      }),
+    )
+  })
+
+  it('omits the answers key entirely when every answer is blank', async () => {
+    mockedApi.refineTeam.mockResolvedValue(sessionWithQuestion())
+    renderPage()
+
+    const button = await screen.findByText('Update the team')
+    await waitFor(() => expect(button.closest('button')).toBeEnabled())
+    fireEvent.click(button)
+
+    await waitFor(() => expect(mockedApi.refineTeam).toHaveBeenCalled())
+    expect(mockedApi.refineTeam.mock.calls[0][1]).not.toHaveProperty('answers')
+  })
+})

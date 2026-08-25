@@ -104,10 +104,14 @@ def _fake_architect_specification() -> "Specification":
     )
 
 
-def _fake_architect_requirements() -> "Requirements":
+_FAKE_INTERVIEW_MARKER = "[interview me]"
+_FAKE_ANSWERS_HEADER = "The customer was asked these clarifying questions:"
+
+
+def _fake_architect_requirements(prompt_text: str) -> "Requirements":
     from ..core.requirements import Requirements
 
-    return Requirements(
+    base = Requirements(
         summary="Customers need faster, friendlier email support.",
         pain_points=["Replies take too long."],
         goals=["Answer common questions quickly."],
@@ -115,6 +119,38 @@ def _fake_architect_requirements() -> "Requirements":
         constraints=["Must stay professional and on-topic."],
         clarifying_questions=[],
     )
+    if _FAKE_ANSWERS_HEADER in prompt_text:
+        # Deterministic "folding": each answered pair lands in constraints
+        # verbatim, each unanswered one becomes a fixed assumption -- so an
+        # E2E test can assert the round-trip on the Confirm page. Answers come
+        # from a textarea, so an "A: " line runs until the next "Q: " line (or
+        # the end of the answers block), not just to its own line break.
+        block = prompt_text.split(_FAKE_ANSWERS_HEADER, 1)[1].split("\n\n", 1)[0]
+        collected: list[str] = []
+        answer_lines: Any = None
+        for line in block.splitlines():
+            if line.startswith("Q: "):
+                if answer_lines is not None:
+                    collected.append("\n".join(answer_lines))
+                answer_lines = None
+            elif line.startswith("A: "):
+                answer_lines = [line[len("A: "):]]
+            elif answer_lines is not None:
+                answer_lines.append(line)
+        if answer_lines is not None:
+            collected.append("\n".join(answer_lines))
+        for text in collected:
+            if text.startswith("(not answered"):
+                base.constraints.append("Assumed: replies can go out within one business day.")
+            else:
+                base.constraints.append(f"The customer clarified: {text}")
+        return base
+    if _FAKE_INTERVIEW_MARKER in prompt_text:
+        base.clarifying_questions = [
+            "How many emails do you receive per day?",
+            "Which mailbox provider do you use?",
+        ]
+    return base
 
 
 class _FakeArchitectStructuredResult:
@@ -124,6 +160,9 @@ class _FakeArchitectStructuredResult:
         self._value = value
 
     def invoke(self, messages: Any) -> Any:
+        if callable(self._value):
+            text = "\n".join(str(getattr(m, "content", m)) for m in messages)
+            return self._value(text)
         return self._value
 
 
@@ -152,7 +191,7 @@ class _FakeArchitectChatModel(FakeListChatModel):
         from ..core.specification import Specification
 
         if schema is Requirements:
-            return _FakeArchitectStructuredResult(_fake_architect_requirements())
+            return _FakeArchitectStructuredResult(_fake_architect_requirements)
         if schema is Specification:
             return _FakeArchitectStructuredResult(_fake_architect_specification())
         raise NotImplementedError(

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from bestteam import Specification, generate_requirements, generate_specification, validate_specification
 from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.knowledge_base import make_knowledge_base_tool
-from bestteam.core.requirements import Requirements
+from bestteam.core.requirements import QuestionAnswer, Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
 
 from .auth_api import get_current_org, get_current_user
@@ -290,6 +290,9 @@ class RequirementsRequest(BaseModel):
     requirements: Optional[Dict[str, Any]] = None
     model: Optional[str] = None
     feedback: Optional[str] = None
+    # Answers to the stored requirements' clarifying_questions, paired.
+    # Blank answers are deliberate ("skip"): the analyst records assumptions.
+    answers: Optional[List[QuestionAnswer]] = None
 
 
 class SpecificationRequest(BaseModel):
@@ -311,6 +314,9 @@ class RefineRequest(BaseModel):
     requirements: Optional[Dict[str, Any]] = None
     feedback: str = ""
     model: str
+    # Non-blank answers to open clarifying questions; blanks are filtered out
+    # here (no skip button on Confirm -- an unanswered question stays open).
+    answers: Optional[List[QuestionAnswer]] = None
 
 
 class TestRunRequest(BaseModel):
@@ -482,7 +488,46 @@ def submit_requirements(
     a structured requirements summary."""
     session = _get_session_or_404(db, session_id, org.id)
 
-    if req.requirements is not None:
+    if req.answers is not None:
+        # The Questions step: fold the paired answers into the stored
+        # understanding. A blank answer is a deliberate skip -- the analyst
+        # records the assumption it made instead (see core/requirements.py).
+        if req.requirements is not None:
+            raise HTTPException(status_code=400, detail="Provide either 'answers' or 'requirements', not both")
+        if req.model is None:
+            raise HTTPException(status_code=400, detail="Answering clarifying questions needs a 'model'")
+        if session.requirements_json is None:
+            raise HTTPException(status_code=400, detail="There are no clarifying questions to answer yet")
+        current = Requirements.model_validate(session.requirements_json)
+        if not current.clarifying_questions:
+            raise HTTPException(status_code=400, detail="There are no clarifying questions to answer yet")
+        # The contract is the full paired batch: an empty, partial, stale or
+        # unrelated list would let the history record a "skip" that never
+        # showed the analyst any question (Codex review finding).
+        if sorted(qa.question for qa in req.answers) != sorted(current.clarifying_questions):
+            raise HTTPException(
+                status_code=400,
+                detail="Answers must cover exactly the current clarifying questions",
+            )
+        chat_model = _call_model(_resolve_model, req.model)
+        requirements = _call_model(
+            generate_requirements,
+            chat_model,
+            session.intent_text,
+            session.as_is_text,
+            current=current,
+            answers=req.answers,
+        )
+        append_feedback(
+            db,
+            session_id,
+            {
+                "stage": "clarifying",
+                "answers": [qa.model_dump() for qa in req.answers],
+                "skipped": all(not qa.answer.strip() for qa in req.answers),
+            },
+        )
+    elif req.requirements is not None:
         try:
             requirements = Requirements.model_validate(req.requirements)
         except ValidationError as exc:
@@ -644,7 +689,8 @@ def refine_team(
 
     chat_model = _call_model(_resolve_model, req.model)
 
-    if req.feedback.strip():
+    answered = [qa for qa in (req.answers or []) if qa.answer.strip()]
+    if req.feedback.strip() or answered:
         # `current` is the customer's edited draft, not the stored copy --
         # otherwise the round their edit triggered overwrites that edit.
         requirements = _call_model(
@@ -653,6 +699,7 @@ def refine_team(
             session.intent_text,
             session.as_is_text,
             current=requirements,
+            answers=answered or None,
             feedback=req.feedback,
         )
 
@@ -676,6 +723,16 @@ def refine_team(
 
     if req.feedback.strip():
         append_feedback(db, session_id, {"stage": "solution", "note": req.feedback})
+    if answered:
+        append_feedback(
+            db,
+            session_id,
+            {
+                "stage": "clarifying",
+                "answers": [qa.model_dump() for qa in answered],
+                "skipped": False,
+            },
+        )
     fields: Dict[str, Any] = {"specification_json": spec.model_dump(), "status": "solution"}
     if requirements is not None:
         fields["requirements_json"] = requirements.model_dump()

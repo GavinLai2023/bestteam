@@ -54,9 +54,19 @@ export interface Requirements {
   clarifying_questions: string[]
 }
 
+export interface QuestionAnswer {
+  question: string
+  answer: string
+}
+
+// A "solution"/"requirements" entry carries `note`; a "clarifying" entry
+// carries the paired `answers` and `skipped` instead.
 export interface FeedbackHistoryEntry {
   stage: string
-  note: string
+  note?: string
+  answers?: QuestionAnswer[]
+  skipped?: boolean
+  at?: string
 }
 
 export interface BuilderSession {

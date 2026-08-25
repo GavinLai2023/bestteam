@@ -5,7 +5,7 @@ from .core.hybrid_knowledge_base import HybridKnowledgeBase
 from .core.knowledge_base import KnowledgeBase, LocalFolderKnowledgeBase
 from .core.loader import load_pipeline
 from .core.memory import Memory, MemoryManager, MemoryRecord, SqliteBM25Memory
-from .core.requirements import Requirements, generate_requirements
+from .core.requirements import QuestionAnswer, Requirements, generate_requirements
 from .core.specification import (
     AgentSpec,
     KnowledgeBaseSpec,
@@ -60,6 +60,7 @@ __all__ = [
     "LocalFolderKnowledgeBase",
     "VectorKnowledgeBase",
     "HybridKnowledgeBase",
+    "QuestionAnswer",
     "Requirements",
     "generate_requirements",
     "Specification",

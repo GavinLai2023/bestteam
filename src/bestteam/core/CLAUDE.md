@@ -35,6 +35,20 @@ overview, architecture, and commands.
   the current understanding is the customer's own words and is preserved
   unless the newer text contradicts it. Default `None` = the pre-2026-08-23
   behaviour, which is still what the wizard's first, generating call wants.
+  **`answers` activates the interview** (2026-08-24, spec
+  `docs/superpowers/specs/2026-08-24-clarifying-questions-design.md`):
+  `QuestionAnswer{question, answer}` pairs render between `current` and
+  `feedback` as a `Q:`/`A:` block. A blank answer renders as
+  `_UNANSWERED_NOTE` — the instruction to assume, record the assumption in
+  `constraints` prefixed `Assumed:`, and retire the question — so one
+  rendering carries the whole skip ruling, with no separate mode parameter.
+  The system prompt's asking policy is "up to 4 questions that would most
+  change what team should be built, empty if the description covers it"
+  (was: 1-2 only when "too vague"), plus the folding contract (fold
+  answers, never re-ask an answered/assumed question, keep open ones —
+  which, with `current` passed, is what stops regeneration from overwriting
+  the list). `clarifying_questions` stays `List[str]`; answers live in the
+  prompt and in the backend's `feedback_history`, never in the schema.
 
 ## Skills (`SkillSpec`, `AgentSpec.skills`)
 
