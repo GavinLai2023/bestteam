@@ -69,18 +69,24 @@ export default function Layout() {
               <NavLink to="/trace" className={({ isActive }) => (isActive ? 'active' : '')}>
                 {t('nav.trace')}
               </NavLink>
+              <NavLink to="/feedback" className={({ isActive }) => (isActive ? 'active' : '')}>
+                {t('nav.feedback')}
+              </NavLink>
             </>
           )}
           <LanguageSelect />
-          {/* Shown to everyone, operators included: all feedback goes to the
-              platform operator (feedback_api.py), org is provenance only. */}
-          <button
-            type="button"
-            className="nav-action"
-            onClick={() => setSendingFeedback(true)}
-          >
-            {t('nav.feedback')}
-          </button>
+          {/* Org members only: an admin already has the triage page (its
+              NavLink above shares this label), and all feedback lands with
+              the platform operator anyway (feedback_api.py). */}
+          {!isAdmin && (
+            <button
+              type="button"
+              className="nav-action"
+              onClick={() => setSendingFeedback(true)}
+            >
+              {t('nav.feedback')}
+            </button>
+          )}
           {/* Shown to platform operators too: an operator's own password
               deserves the same self-service as a customer's. */}
           <button

@@ -270,6 +270,19 @@ export interface MemoryUserSummary {
   total: number
 }
 
+export interface FeedbackItem {
+  id: number
+  kind: 'defect' | 'suggestion'
+  body: string
+  status: 'new' | 'acknowledged' | 'resolved' | 'dismissed'
+  admin_note: string | null
+  org_name: string | null
+  username: string | null
+  source: 'user' | 'visitor'
+  context: Record<string, unknown> | null
+  created_at: string | null
+}
+
 export interface MemoryRecord {
   id: string
   type: string
