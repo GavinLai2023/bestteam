@@ -2049,6 +2049,19 @@ def test_retry_of_another_orgs_job_is_404_and_so_is_an_unknown_one(client):
     assert _retry(client, 999999).status_code == 404
 
 
+def test_retry_of_an_unknown_job_is_404_even_while_an_upload_is_in_flight(client, monkeypatch):
+    # The in-flight 409 must not answer for a job id the org doesn't own:
+    # an explicit unknown or cross-org id is a 404 whatever the collection
+    # is doing (Codex review finding).
+    from ui.backend import ingestion as backend_ingestion
+
+    monkeypatch.setattr(backend_ingestion._executor, "submit", lambda *a, **k: None)
+    resp = client.post("/api/org/knowledge-bases/policies/upload", files=_named_files("a.txt"))
+    assert resp.status_code == 200
+
+    assert _retry(client, 999999).status_code == 404
+
+
 def test_summary_reports_whether_the_latest_job_can_be_retried(client):
     import shutil
 

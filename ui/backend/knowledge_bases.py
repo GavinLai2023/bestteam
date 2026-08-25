@@ -908,6 +908,14 @@ def retry_ingestion_job(
         raise HTTPException(status_code=404, detail=f"Unknown knowledge base '{item_name}'")
 
     with _kb_upload_lock(f"{org_id}/{item_name}"):
+        # Ownership first: an unknown or cross-org job id is a 404 whatever
+        # the collection is doing -- the in-flight 409 must never reveal or
+        # deny a job this org doesn't own.
+        job = db.get(IngestionJob, job_id)
+        if job is None or job.kb_id != record.id:
+            raise HTTPException(
+                status_code=404, detail=f"'{item_name}' has no upload with id {job_id}."
+            )
         in_flight = (
             db.query(IngestionJob)
             .filter(IngestionJob.kb_id == record.id, IngestionJob.status.in_(("queued", "running")))
@@ -920,11 +928,6 @@ def retry_ingestion_job(
                     f"'{item_name}' is still processing an upload. Wait for it "
                     "to finish, then retry."
                 ),
-            )
-        job = db.get(IngestionJob, job_id)
-        if job is None or job.kb_id != record.id:
-            raise HTTPException(
-                status_code=404, detail=f"'{item_name}' has no upload with id {job_id}."
             )
         if job.status != "failed":
             raise HTTPException(status_code=409, detail="Only a failed upload can be retried.")
