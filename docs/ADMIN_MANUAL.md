@@ -1,8 +1,8 @@
 # Admin Manual — Running a `bestteam` Deployment
 
-A living reference for **platform admins/operators** using the four
-admin-only pages (**Accounts**, **Advanced**, **Memory**, **Trace**) and the
-operator CLI day to day. Update this file whenever an admin-only surface is
+A living reference for **platform admins/operators** using the five
+admin-only pages (**Accounts**, **Advanced**, **Memory**, **Trace**,
+**Feedback**) and the operator CLI day to day. Update this file whenever an admin-only surface is
 added or changed — treat it the same way `docs/STATUS.md` is kept current.
 
 This is the *how do I use it* companion to
@@ -24,10 +24,12 @@ Who gets these pages: a **platform admin** (`is_admin=true`, org-less — see
 | **Advanced** | `/advanced` | Deploy and edit config: pipelines ("AI teams"), skills, knowledge bases, tools (read-only), the model catalog. |
 | **Memory** | `/memory` | Browse, search, and delete a user's per-user memory; org-level erasure. Only present when the deployment has memory enabled. |
 | **Trace** | `/trace` | Run history and analytics across every org (superset of a customer's own Activity page); **diagnostic re-run** (§2.5) lives here. |
+| **Feedback** | `/feedback` | Defect reports and suggestions from logged-in users *and* share-link visitors; manual triage (§5.5). |
 
-All four share an **organisation selector** defaulting to "All organisations"
-(admins are cross-org by design) and reuse the same visual conventions
-(`.advanced` layout, `wizard-card` list rows).
+The first four share an **organisation selector** defaulting to "All
+organisations" (admins are cross-org by design) and reuse the same visual
+conventions (`.advanced` layout, `wizard-card` list rows); Feedback is
+cross-org by nature (filter by status/kind).
 
 ---
 
@@ -203,6 +205,30 @@ There is no email-based recovery and there will not be one: the deployment has
 no SMTP at all (see the root `CLAUDE.md`), so a forgotten password reaches you
 by whatever channel the customer already uses to reach you, and you set a
 temporary one for them to change.
+
+---
+
+## 5.5 The Feedback page
+
+Every submission from the in-app "Feedback" button (org members) or the
+share-chat header's feedback link (anonymous visitors) lands here — a defect
+report or a suggestion, free text only, newest first. `org` on a row says
+where it came from; all feedback belongs to you, the operator.
+
+- **Triage is a status change**: `new` → `acknowledged` → `resolved` /
+  `dismissed`, plus a free-text note per row. No transition rules — move a
+  row anywhere. There is no delete: the row is the record.
+- **Bodies render verbatim as plain text** — visitor text is untrusted, so
+  it is never interpreted as markdown or HTML.
+- Each row carries auto-captured context (source page, UI language; for
+  visitor rows the share link id and, when known, the run the visitor was
+  reacting to — resolvable on the Trace page).
+- Abuse bounds: share-side submissions require an open chat session (the
+  same signed cookie as the chat itself) and are capped at 5 per visitor
+  session per day; bodies cap at 4,000 characters.
+- What does **not** exist (yet): LLM categorisation/dedup, notifications on
+  new feedback, attachments, and any customer-visible triage state — a
+  submitter never sees the status you set.
 
 ---
 

@@ -6,6 +6,20 @@
 
 ## Done
 
+- **User feedback: defects/suggestions from the app and share links, admin
+  triage** (2026-08-26, spec
+  `docs/superpowers/specs/2026-08-26-feedback-system-design.md`). One
+  `feedback` table (migration `u8v9w0x1y2z3`); `POST /api/feedback` for any
+  authenticated user and `POST /api/share/{token}/feedback` for share-link
+  visitors (session cookie required — never mints one; 5/session/day cap,
+  4,000-char bodies, whitelisted context incl. source page and the run the
+  visitor reacted to); a shared bilingual `FeedbackModal` mounted from the
+  `Layout` nav (org members) and the share-chat header; and a fifth
+  admin-only page, **Feedback** (`/feedback`), for manual triage
+  (`new`/`acknowledged`/`resolved`/`dismissed` + a note; bodies plain-text
+  only). All feedback goes to the platform operator; `org_id` is provenance.
+  Phase 3 (LLM categorisation → self-closing improvement loop) deliberately
+  not started — see Next steps.
 - **A failed upload can be retried in place** (2026-08-25). The 2026-08-25
   external re-assessment's "ingestion cannot recover after a restart" P1, in
   its roadmap shape (a Retry button, not a durable queue — checkpoints,
@@ -2461,6 +2475,12 @@
 
 ## Next steps / roadmap
 
+- **Feedback phase 3: the self-closing loop** (spec'd out of scope
+  2026-08-26). In order of ambition: LLM categorisation/dedup of incoming
+  feedback (its bodies are attacker-controlled text — inbound-email
+  treatment required), then platform-drafted improvement plans, then
+  execution. The `status` lifecycle and structured `context` on every row
+  are the groundwork; nothing else is built.
 - **Should the wizard still pin every agent to one model?**
   `submit_solution_feedback` pins each agent's `model` to the request's
   `model`, and `/refine` copies that so the Confirm page's behaviour did not

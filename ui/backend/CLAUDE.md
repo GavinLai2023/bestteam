@@ -1111,6 +1111,38 @@ atomic reset-then-conditional-UPDATE CAS. The aggregate one is load-bearing:
 a client that never stores the cookie gets a brand-new, free session on every
 request, so the per-session cap alone caps nobody.
 
+## User feedback (`feedback_api.py` + a share route in `share_chat.py`)
+
+Defect reports and suggestions, all routed to the **platform operator** —
+`feedback.org_id` is provenance, not ownership, and there is no org-facing
+read surface (see `docs/superpowers/specs/2026-08-26-feedback-system-design.md`).
+Three write/read surfaces:
+
+- `POST /api/feedback` (`feedback_api.py`) — any authenticated principal.
+  Pydantic caps the body at 4,000 chars; the route strips and 422s an
+  all-whitespace body; `sanitize_context` whitelists client context keys
+  (`page`, `locale`) and truncates values to 200 chars.
+- `POST /api/share/{token}/feedback` (`share_chat.py`, because it reuses
+  that module's `_resolve_active_link`/`_resolve_session_from_cookie`) — the
+  anonymous surface. **It never mints a session**: no cookie → 403, so
+  feedback alone can't grow `share_sessions`/`_session_locks` the way the
+  message route's ordering comments guard against. Cap: `FEEDBACK_DAILY_CAP`
+  (5) per session per UTC day, a plain count-then-insert
+  (`db/feedback.py::count_session_feedback_today`) — deliberately not the
+  `try_consume_turn` CAS, since nothing is billed per submission and the
+  worst race outcome is cap+1 rows. Context whitelist adds `run_id`; the
+  server stamps `share_link_id` into `context` and `org_id` from the link.
+- `GET/PATCH /api/admin/feedback[...]` — `get_current_admin` only. List
+  filters (`status`/`kind`/`org_id`) validate against `db/feedback.py`'s
+  `STATUSES`/`KINDS`; rows are serialised with `org_name`, `username`, and a
+  `source` discriminator (`user`/`visitor`). PATCH sets `status` and/or
+  `admin_note`; no transition rules, no delete verb.
+
+What does not exist (deliberate, phase-3 material): LLM categorisation or
+dedup, notifications on new feedback, attachments, customer-visible triage
+state. When a model does eventually read this table, its bodies are
+attacker-controlled input and need the inbound-email treatment.
+
 ## Sync-to-async streaming bridge
 
 `Pipeline.stream()` / `compiled.stream()` are blocking generators. The

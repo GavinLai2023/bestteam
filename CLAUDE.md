@@ -88,10 +88,10 @@ relevant file below the first time it reads a file in that directory:
   tech debt / next steps.
 - `docs/DECISIONS.md` — why significant decisions were made (e.g. LangGraph
   vs CrewAI, org-scoped multi-tenancy), so they aren't re-litigated.
-- `docs/ADMIN_MANUAL.md` — how to use the four admin-only pages (Accounts,
-  Advanced, Memory, Trace, including diagnostic re-runs) and where the
-  operator CLI reference (`docs/ADMIN_GUIDE.md`) fits in. Keep it current
-  when an admin-only surface changes.
+- `docs/ADMIN_MANUAL.md` — how to use the five admin-only pages (Accounts,
+  Advanced, Memory, Trace including diagnostic re-runs, and Feedback
+  triage) and where the operator CLI reference (`docs/ADMIN_GUIDE.md`)
+  fits in. Keep it current when an admin-only surface changes.
 
 ## Known limitations / unimplemented extension points
 

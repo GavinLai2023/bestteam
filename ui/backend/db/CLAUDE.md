@@ -326,6 +326,17 @@ Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
   (see `ui/backend/CLAUDE.md`): this is the clean chat log the visitor UI and
   the org's audit view render. No retention/deletion policy yet — see
   `docs/STATUS.md`, Known issues.
+- `feedback` — one defect report or suggestion for the platform operator
+  (`db/feedback.py`; nullable `org_id` = provenance, never ownership).
+  Exactly one of `submitted_by` (users FK) / `share_session_id`
+  (share_sessions FK, indexed — the share route's per-day cap counts on it)
+  is set, enforced by `create_feedback`, not a CHECK. `kind`
+  (`defect`|`suggestion`) and `status`
+  (`new`|`acknowledged`|`resolved`|`dismissed`, default `new`) are
+  CHECK-constrained; `admin_note` and a whitelisted `context` JSON (source
+  page, locale, and for visitors `share_link_id`/`run_id`) round it out. No
+  delete verb and no retention policy — the row is the record. Migration
+  `u8v9w0x1y2z3`.
 - `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
   `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
   (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
