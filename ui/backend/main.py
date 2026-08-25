@@ -39,6 +39,7 @@ from . import email_trigger
 from . import error_reporting
 from . import ingestion
 from . import interview
+from . import process_lock
 from . import retention
 from . import runtime
 from . import secret_store
@@ -77,7 +78,7 @@ from .db.models import (
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
-from .db_session import SessionLocal, get_db
+from .db_session import DB_PATH, SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
     contain_pipeline_config_for_load,
@@ -157,6 +158,11 @@ async def _lifespan(_app):
 
     The membership guard is data-dependent (unlike the config guards below), so
     it runs when the server actually starts serving, not at import."""
+    # Single-process deployment is load-bearing (in-memory RunRegistry, one
+    # poller, per-process dispatch locks) -- and the sweeps just below release
+    # every outstanding inbox claim, which a second worker's startup would do
+    # to claims the first worker is actively processing. Refuse before either.
+    instance_lock = process_lock.acquire_single_instance_lock(DB_PATH)
     with SessionLocal() as session:
         try:
             _enforce_one_member_per_org_or_raise(session)
@@ -195,6 +201,8 @@ async def _lifespan(_app):
         poller.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await poller
+        if instance_lock is not None:
+            instance_lock.release()
 
 
 # Secrets-store guards run at app import, NOT in db_session, so the operator CLI

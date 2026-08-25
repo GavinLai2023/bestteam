@@ -95,7 +95,12 @@ platform kill switch (`BESTTEAM_TRIGGERS_DISABLED=1`), overlap guard (skips a
 cycle while the previous triggered run is still `running`), and per-org
 try/except so one org's mail-server failure never stops the loop (stored as
 customer-readable `last_error` on the row). Single-process poller: if the
-backend ever runs multiple workers, it needs a leader lock (known limitation).
+backend ever runs multiple workers, it needs a leader lock (known limitation)
+— and until it has one, `_lifespan` **enforces** single-process: it takes an
+exclusive OS lock on `<db>.lock` (`process_lock.py`) before the startup
+sweeps, so a second process (`uvicorn --workers N`, a second replica) refuses
+to start instead of running a second poller and releasing the first process's
+in-flight claims. `":memory:"` (tests) skips the lock.
 An automatic run is confined to the poller-detected UID batch: it runs an
 UNCACHED pipeline (`email_trigger.build_trigger_pipeline`) whose email tools
 are UID-scoped (`make_email_tools(backend, allowed_uids=)`), so the triage

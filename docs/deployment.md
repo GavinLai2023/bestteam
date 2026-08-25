@@ -402,7 +402,13 @@ Each automatic run handles at most `BESTTEAM_TRIGGER_BATCH_SIZE` messages
 processed over successive polls, nothing skipped or reprocessed. **Run the
 backend as a single process/worker:** the poller and its overlap protection
 are in-process, so multiple ASGI workers would each poll and could double-
-process mail. Leader election is future work; until then, one worker.
+process mail. Leader election is future work; until then, one worker — and
+the backend now enforces it: startup takes an exclusive OS lock on
+`<db>.lock` next to the database file (`ui/backend/process_lock.py`), so a
+second process against the same database (`uvicorn --workers N`, a second
+replica) refuses to start with a clear error instead of corrupting state.
+The lock is released by the OS on any exit, so a crashed process never
+blocks the next start.
 
 An invalid `BESTTEAM_TRIGGER_*` value (non-numeric or non-positive) refuses
 startup with a clear error instead of silently stopping the poller later.
