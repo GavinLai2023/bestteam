@@ -513,6 +513,12 @@ class InboxEvent(Base):
             name="uq_inbox_events_identity",
         ),
         Index("ix_inbox_events_org_id_status_id", "org_id", "status", "id"),
+        # The health metrics' 24h window query (trigger_metrics.collect)
+        # range-scans completed_at within (org, status).
+        Index(
+            "ix_inbox_events_org_id_status_completed_at",
+            "org_id", "status", "completed_at",
+        ),
         Index("ix_inbox_events_run_id", "run_id"),
     )
 

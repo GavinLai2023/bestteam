@@ -180,6 +180,16 @@ def test_collect_skips_disabled_triggers(db):
     assert trigger_metrics.collect(db) == []
 
 
+def test_collect_skips_deactivated_orgs(db):
+    # The poller excludes inactive orgs (full-suspend enforcement), so their
+    # last_checked_at freezes; reporting on them would page "poller stalled"
+    # for a customer an operator deliberately suspended.
+    org, _ = _org_with_trigger(db, "suspended", checked_ago=10)
+    org.active = False
+    db.commit()
+    assert trigger_metrics.collect(db) == []
+
+
 def test_collect_before_the_first_check_has_no_lag(db):
     _org_with_trigger(db)
     (m,) = trigger_metrics.collect(db)

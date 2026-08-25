@@ -101,7 +101,10 @@ def collect(db: Session, now: Optional[datetime] = None) -> List[OrgTriggerMetri
     rows = (
         db.query(EmailTrigger, Organization.name)
         .join(Organization, Organization.id == EmailTrigger.org_id)
-        .filter(EmailTrigger.enabled.is_(True))
+        # Same predicate as db/email_triggers.list_enabled_triggers: the
+        # poller skips a deactivated org, so reporting on one would page
+        # "poller stalled" about a customer an operator suspended on purpose.
+        .filter(EmailTrigger.enabled.is_(True), Organization.active.is_(True))
         .order_by(Organization.name)
         .all()
     )
@@ -111,16 +114,19 @@ def collect(db: Session, now: Optional[datetime] = None) -> List[OrgTriggerMetri
             .filter(InboxEvent.org_id == trigger.org_id, InboxEvent.status == "pending")
             .all()
         )
-        window = (
+        # The 24h bound lives in SQL so this never loads an org's whole
+        # terminal history (SQLite stores these aware-UTC writes as naive
+        # strings, so the aware bound compares correctly).
+        recent = (
             db.query(InboxEvent.status, InboxEvent.detected_at, InboxEvent.completed_at)
             .filter(
                 InboxEvent.org_id == trigger.org_id,
                 InboxEvent.status.in_(("done", "failed")),
                 InboxEvent.completed_at.isnot(None),
+                InboxEvent.completed_at >= since,
             )
             .all()
         )
-        recent = [row for row in window if _as_utc(row[2]) >= since]
         latencies = sorted(
             (_as_utc(completed) - _as_utc(detected)).total_seconds()
             for status, detected, completed in recent
