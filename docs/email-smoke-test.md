@@ -319,8 +319,13 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 
 ## 14. Out of scope
 
-- **Sending** email (no send verb exists — planned, not built).
-- **Ambient triggering** on new mail (planned, not built).
+- **Sending** email (no send verb exists in the process — deliberate; the
+  containment argument for the draft-only toolkit depends on it).
+- **Ambient triggering** on new mail. This is built (the per-org autonomous
+  email trigger, `ui/backend/email_trigger.py`), but it runs on the per-org
+  platform path, not the process-wide env path this runbook exercises — its
+  own checks live in the "Microsoft 365 / Exchange Online mailbox (per-org,
+  OAuth)" section at the end of this document.
 - **Per-org mailboxes.** This test uses the process-wide `BESTTEAM_EMAIL_*`
   mailbox — the single-org / SDK path. A multi-org platform instead connects
   each customer's mailbox per-org with `admin set-email <org>` (encrypted at
