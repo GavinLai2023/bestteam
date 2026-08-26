@@ -1,503 +1,425 @@
 # bestteam — `ui/backend/db/` (persistence layer)
 
-Directory-scoped notes for the SQLAlchemy persistence layer. See the root
-`CLAUDE.md` for project overview, architecture, and commands; see
-`ui/backend/CLAUDE.md` for the API layer that uses this schema.
+Per-deployment SQLite via SQLAlchemy 2.0 (`pip install 'bestteam[ui]'`).
+`db/models.py` defines the schema. Root `CLAUDE.md` for the overview;
+`ui/backend/CLAUDE.md` for the API layer that uses it.
 
-## Persistence layer
+**Current schema only.** Reasoning: `docs/DECISIONS.md`. Per-feature narrative:
+the dated specs under `docs/superpowers/specs/` and git history.
 
-Per-deployment SQLite database via SQLAlchemy 2.0 (`pip install
-'bestteam[ui]'`). `db/models.py` defines the schema:
+## Engine and wiring
 
-- `organizations` — customer orgs for the multi-tenancy model
-  (`db/orgs.py`: `create_org`/`get_or_create_org`/`seed_default_org`; the
-  `default` org is seeded at bootstrap so a single-customer deployment just
-  has one org). Org-owned tables carry a nullable `org_id` FK; users with
-  `org_id IS NULL` are platform operators; skills with `org_id IS NULL` are
-  platform built-ins visible to every org. The five named component tables
-  swap their global `unique(name)` for named composite
-  `UniqueConstraint("org_id", "name", name="uq_<table>_org_id_name")`
-  (the repo's first `__table_args__`). Migration `b7c8d9e0f1a2` guards every
-  op by inspection (because `db_session` runs `create_all` at import, the
-  `organizations` table may already exist when it runs) and backfills only
-  NULL `org_id`s: non-admin users and all org-owned rows → `default`;
-  admins and built-in skills stay NULL.
-- `knowledge_bases` / `skills` / `pipelines` — each row's `config` is a JSON
-  `raw` dict (the technical fields from `KnowledgeBaseSpec`/`SkillSpec`/
-  `Specification.to_raw()`, see `core/specification.py`); `pipelines.status`
-  tracks `draft` / `ready_for_testing` / `deployed` and is CHECK-constrained
-  to that set (`ck_workflows_status` — a migrated database keeps this old
-  constraint name; the `workflows`→`pipelines` rename migration
-  (`o2p3q4r5s6t7`) deliberately doesn't rebuild named constraints/indexes to
-  rename them, since SQLite constraint names are diagnostic labels only,
-  never queried against, and a fresh database gets `ck_pipelines_status` from
-  `create_all()` instead; migration `b1d7e4f2a9c8`, P1-06). Only
-  `status="deployed"` rows are runnable (`_get_pipeline`) or listed
-  (`GET /api/pipelines`) — see `ui/backend/CLAUDE.md`. The migration
-  backfilled every pre-existing non-`deployed` row to `deployed` so upgrading
-  a deployment doesn't retroactively hide/break previously-runnable
-  pipelines. A deployed pipeline's references now block deletion of the
-  records it depends on: a `knowledge_bases`/`skills` row can't be deleted
-  (`409`) while a `status="deployed"` `pipelines` row's `config` still
-  references it (KB via an agent's `tools`, skill via an agent's `skills`);
-  and a KB may not be named after a built-in tool (rejected `400` at deploy),
-  since both resolve through one flat name lookup. See
-  `ui/backend/CLAUDE.md`. A `pipelines` row is now the **stable team head**: it
-  carries `current_version_id` pointing at the latest immutable
-  `pipeline_versions` snapshot, and `config` is a mirror of that current
-  version. Deploy no longer overwrites history in place — it appends a version
-  via `db/pipelines.py::publish_pipeline_version` (P1-01/02/03).
-- `skill_versions` — immutable snapshots appended by
-  `db/skills.py::publish_skill_version` on every skill save. `skills` is the
-  stable library head: `current_version_id` selects the latest snapshot and
-  `config` remains its compatibility mirror. Migration `c4d5e6f7a8b9`
-  backfills every existing skill as v1 without changing its content and adds
-  the same `skill_versions.id` foreign keys on upgraded databases that
-  `create_all` produces for fresh databases (including retry repair when a
-  column exists without its constraint).
-- `pipeline_versions` — immutable published snapshots of a pipeline's `config`
-  (`PipelineVersion`; `id`, `pipeline_id` FK, `version_number`, `config`,
-  `created_by`, `created_at`; `(pipeline_id, version_number)` unique — the
-  constraint itself is still named `uq_workflow_versions_workflow_id_version_number`
-  on a migrated database, kept as-is by the `o2p3q4r5s6t7` rename migration
-  (see the `ck_workflows_status` note above)).
-  Deploy
-  appends one row and moves the parent's `current_version_id`; a row is never
-  updated after insert. This freezes the inline config blob; referenced skills
-  are frozen through the dependency's `resource_version_id` (below).
-  Standalone KBs/models are still resolved by name at load.
-  Migration `c3f5a1b8e2d4` creates the table and backfills one v1 per existing pipeline.
-  Deleting a pipeline head (`DELETE /api/config/pipelines/{name}`) refuses
-  (`409`) while any `Run` records one of its versions -- deletion removes the
-  version history those runs reference (FK enforcement is off, no DB cascade), so
-  provenance is preserved. A never-run head deletes cleanly, cascading its
-  (unreferenced) `pipeline_versions` and nulling any `builder_sessions.pipeline_id`
-  that pointed at it (self-heals on next deploy), under `component_mutation_lock`,
-  so no orphaned version rows or dangling session pointers survive. Known gap
-  (deferred, design spec): an in-flight run whose `runs` row is written by the
-  worker *after* dispatch isn't seen by the delete guard, so deleting a pipeline
-  at the instant a run of it starts can dangle that run's provenance pointer --
-  closed only by soft-delete/archive (deletion-lifecycle sub-project).
-- `pipeline_dependencies` — one typed row per (published version, skill|standalone-KB)
-  it depends on (`PipelineDependency`; `pipeline_version_id` FK, `resource_kind`,
-  `resource_name`, `resource_id` = the resolved `skills`/`knowledge_bases` id,
-  and `resource_version_id` = the immutable `skill_versions.id` for skills;
-  `(pipeline_version_id, resource_kind, resource_name)` unique — still named
-  `uq_workflow_dependencies_version_kind_name` on a migrated database, same
-  deliberate non-rename as above). Written
-  once at deploy in `db/pipelines.py::publish_pipeline_version` via
-  `db/dependencies.py::record_version_dependencies` (resolves names exactly as the
-  loader: org skill shadows platform built-in; KBs org-scoped; a built-in tool /
-  email tool / inline KB is not a KB dep — an inline KB shadows a *same-named*
-  standalone KB too, so the standalone isn't recorded when the pipeline defines
-  its own). The skill/KB `DELETE` guard now queries these rows by `resource_id`
-  for the **current** version (`pipelines_referencing`) instead of scanning JSON —
-  non-regressing, and the stable id makes the platform-built-in-skill cross-org
-  case fall out without an all-orgs scan. Skill dependencies are immutable:
-  editing a skill or creating an org override never rewrites a deployed team;
-  redeploy is the explicit opt-in to the then-current resolved skill version.
-  Migration `d4e6b2c9f1a7` creates the table and backfills each pipeline's current
-  version; `c4d5e6f7a8b9` adds and backfills skill-version pins. Model/tool deps
-  and standalone-KB content pinning remain deferred.
-- `knowledge_ingestion_jobs` (`IngestionJob`) — one async ingestion run for an
-  upload-managed `knowledge_bases` row (`ui/backend/ingestion.py`). `status`
-  (CHECK-constrained `queued`/`running`/`completed`/`failed`) tracks the job;
-  a KB's live document set is always its most recent `completed` job's rows —
-  the `status="completed"` flip **is** the atomic swap for this path, unlike
-  the legacy file-based upload's `CURRENT`-pointer-file swap. `version`
-  matches the on-disk version-directory name the uploaded files were staged
-  into, for traceable job↔directory correspondence. `kb_type`/
-  `embedding_model` record the shape this job's chunks were actually ingested
-  under — the read path resolves the KB's subclass and query-time embedding
-  model from **these**, never from `knowledge_bases.config`, which advances to
-  the new spec at upload-dispatch time while the previous generation is still
-  the live one (a re-upload that changes type would otherwise `json.loads`
-  a NULL `embedding_json`, and one that changes only the embedding model would
-  silently query a mismatched vector space). `chunk_size`/`chunk_overlap`
-  (migration `r5s6t7u8v9w0`, nullable) are on the row for the same reason and
-  are read for the same kind of decision: incremental ingestion carries an
-  unchanged document's chunks forward from the previous completed job, which
-  is only sound if this job would have cut them the same way, and `config`
-  cannot answer that either. NULL is every job written before the columns
-  existed and is treated as "not reusable" (`ingestion._carryable`), so an
-  upgrade re-embeds once rather than reusing chunks on a guess. `file_count`/
-  `documents_succeeded`/`documents_failed` and a capped `error` summarize the
-  outcome; indexed on `(kb_id, status, completed_at)` for the "most recent
-  completed job" resolution query. See `ui/backend/CLAUDE.md`.
-- `knowledge_documents` (`KnowledgeDocument`) — one uploaded file's ingestion
-  outcome within an `IngestionJob` (`kb_id`/`ingestion_job_id` FKs, `filename`,
-  `content_hash` (**read**, not merely recorded: it is what
-  `ingestion._reusable_documents` matches on to carry an unchanged document's
-  chunks and embeddings forward instead of re-embedding them),
-  `size_bytes`, CHECK-constrained `status`
-  `pending`/`parsing`/`chunked`/`failed`, capped `error`). Per-document status
-  is the partial-failure unit: one bad file (parse error, or zero chunks
-  produced) is recorded here as `failed` without aborting the rest of the
-  job. Indexed on `ingestion_job_id`.
-- `knowledge_chunks` (`KnowledgeChunk`) — one chunk of a `KnowledgeDocument`'s
-  parsed text (`document_id`/`kb_id` FKs, `chunk_index`, `text`, optional
+`db/database.py`: `make_engine(db_path)`, `init_db(engine)`, `session_factory`.
+`ui/backend/db_session.py` wires the per-deployment engine (default
+`ui/backend/data/bestteam.db`, override `BESTTEAM_DB_PATH`) and the `get_db()`
+dependency.
+
+- `":memory:"` uses a `StaticPool` so all connections share one database —
+  needed for tests and dry runs.
+- A file engine sets **`PRAGMA journal_mode=WAL`** on every connection, so
+  readers aren't blocked by the one writer the run workers / ingestion / poller /
+  requests take turns being. ⚠️ The `-wal`/`-shm` siblings are why
+  `scripts/backup-db.sh` goes through the **online backup API**, not a file copy.
+- **SQLite foreign-key enforcement is off** — several notes below depend on
+  knowing that nothing catches a dangling FK for you.
+
+## Org multi-tenancy
+
+`organizations` (`db/orgs.py`) — the `default` org is seeded at bootstrap, so a
+single-customer deployment just has one. Org-owned tables carry a nullable
+`org_id` FK; `users.org_id IS NULL` = platform operator; `skills.org_id IS NULL`
+= platform built-in visible to every org.
+
+The five named component tables swap a global `unique(name)` for a composite
+`UniqueConstraint("org_id", "name")`. Migration `b7c8d9e0f1a2` guards every op by
+inspection (`db_session` runs `create_all` at import, so `organizations` may
+already exist) and backfills only NULL `org_id`s: non-admin users and org-owned
+rows → `default`; admins and built-in skills stay NULL.
+
+## Components and versioning
+
+- **`knowledge_bases` / `skills` / `pipelines`** — each row's `config` is a JSON
+  `raw` dict. `pipelines.status` is CHECK-constrained to
+  `draft`/`ready_for_testing`/`deployed`; **only `deployed` rows are runnable or
+  listed**. The migration backfilled every pre-existing non-`deployed` row to
+  `deployed`, so upgrading doesn't retroactively break runnable pipelines.
+
+  ⚠️ **A migrated database keeps old constraint names** — `ck_workflows_status`,
+  `uq_workflow_versions_…`, `uq_workflow_dependencies_…`. The
+  `workflows`→`pipelines` rename (`o2p3q4r5s6t7`) deliberately doesn't rebuild
+  named constraints: SQLite constraint names are diagnostic labels, never queried
+  against, and a fresh database gets the new names from `create_all()`. Don't
+  "fix" this.
+
+  A `pipelines` row is the **stable team head**: `current_version_id` points at
+  the latest immutable `pipeline_versions` snapshot and `config` mirrors it.
+  Deploy appends a version via `publish_pipeline_version` — it never overwrites
+  history in place.
+
+- **`skill_versions`** — immutable snapshots appended by `publish_skill_version`
+  on every save; `skills` is the stable library head. Migration `c4d5e6f7a8b9`
+  backfills every existing skill as v1 without changing content, and adds the
+  same FKs on upgraded databases that `create_all` produces for fresh ones
+  (including retry repair when a column exists without its constraint).
+
+- **`pipeline_versions`** — immutable published snapshots (`id`, `pipeline_id`,
+  `version_number`, `config`, `created_by`, `created_at`;
+  `(pipeline_id, version_number)` unique). **A row is never updated after
+  insert.** This freezes the inline config blob; referenced skills freeze through
+  the dependency's `resource_version_id`. Standalone KBs and models are still
+  resolved by name at load.
+
+  Deleting a pipeline head refuses (`409`) while any `Run` records one of its
+  versions — deletion would remove version history those runs reference (**no DB
+  cascade, FK enforcement is off**), so provenance is preserved. A never-run head
+  deletes cleanly, cascading its versions and nulling any
+  `builder_sessions.pipeline_id` (self-heals on next deploy), under
+  `component_mutation_lock`. **Known gap**: an in-flight run whose `runs` row is
+  written by the worker *after* dispatch isn't seen by the delete guard, so
+  deleting a pipeline at the instant a run starts can dangle that run's
+  provenance pointer — closed only by soft-delete/archive.
+
+- **`pipeline_dependencies`** — one typed row per (published version,
+  skill|standalone-KB): `resource_kind`, `resource_name`, `resource_id` (the
+  resolved id), and `resource_version_id` (the immutable `skill_versions.id`, for
+  skills). Written once at deploy by `record_version_dependencies`, resolving
+  names **exactly as the loader does**: an org skill shadows a platform built-in;
+  KBs are org-scoped; a built-in tool, email tool or inline KB is not a dep — and
+  an inline KB shadows a *same-named* standalone one, so the standalone isn't
+  recorded when the pipeline defines its own.
+
+  The skill/KB `DELETE` guard queries these by `resource_id` for the **current**
+  version (`pipelines_referencing`) rather than scanning JSON — the stable id
+  makes the platform-built-in cross-org case fall out without an all-orgs scan.
+  **Skill dependencies are immutable**: editing a skill or creating an org
+  override never rewrites a deployed team; redeploy is the explicit opt-in.
+  Model/tool deps and standalone-KB content pinning remain deferred.
+
+- **`agents` / `teams`** — **removed** (migration `57b13700d5df`). Nothing read
+  them: a pipeline carries agents/teams inline in its own `config`, and
+  `_build_pipeline` accepts only `extra_tools`/`extra_skills`. Writable CRUD
+  existed historically, so the drop migration **refuses if either table holds
+  rows** and only drops when empty — a drop is not data-reversible.
+
+## Knowledge-base ingestion
+
+- **`knowledge_ingestion_jobs`** (`IngestionJob`) — one async ingestion run.
+  `status` CHECK-constrained `queued`/`running`/`completed`/`failed`; **a KB's
+  live document set is always its most recent `completed` job's rows — the
+  `completed` flip IS the atomic swap** for this path (unlike the legacy
+  file-based `CURRENT`-pointer swap). `version` matches the on-disk
+  version-directory name, for traceable job↔directory correspondence.
+
+  ⚠️ **`kb_type`/`embedding_model`/`chunk_size`/`chunk_overlap` record the shape
+  this job's chunks were actually ingested under, and the read path resolves from
+  THESE, never from `knowledge_bases.config`** — `config` advances to the new
+  spec at upload-dispatch time while the previous generation is still live. A
+  re-upload changing type would otherwise `json.loads` a NULL `embedding_json`,
+  and one changing only the embedding model would silently query a mismatched
+  vector space. `chunk_size`/`chunk_overlap` (migration `r5s6t7u8v9w0`, nullable)
+  are there for the same reason: incremental ingestion carries an unchanged
+  document's chunks forward only if this job would have cut them the same way,
+  and `config` can't answer that either. **NULL = pre-column job = not reusable**
+  (`_carryable`), so an upgrade re-embeds once rather than reusing on a guess.
+
+  Indexed `(kb_id, status, completed_at)` for the "most recent completed job"
+  query.
+
+- **`knowledge_documents`** — one uploaded file's outcome within a job
+  (`content_hash`, `size_bytes`, CHECK-constrained
+  `pending`/`parsing`/`chunked`/`failed`, capped `error`). ⚠️ **`content_hash` is
+  read, not merely recorded** — it's what `_reusable_documents` matches on to
+  carry an unchanged document's chunks and embeddings forward. Per-document
+  status is the partial-failure unit: one bad file is `failed` without aborting
+  the job. Indexed on `ingestion_job_id`.
+
+- **`knowledge_chunks`** — one chunk (`chunk_index`, `text`, optional
   `page`/`heading`, optional `embedding_json`/`embedding_model`).
-  `embedding_json` is a JSON-encoded
-  `List[float]` — same TEXT-column shape as `memories.embedding_json` —
-  populated only for `vector`/`hybrid` KBs. `page`/`heading` (migration
-  `m0n1o2p3q4r5`) are where in the document the chunk came from and are what
-  a retrieval result cites beyond the filename: `page` for a PDF (chunked per
-  page, so it is exact), `heading` for Markdown (the section the chunk opens
-  under, approximate). Both nullable, because only those two formats supply
-  them; rows ingested before the columns existed are NULL for both and cite
-  their filename alone, as they always did — there is no backfill, since
-  either value can only be recovered by re-parsing the original documents,
-  which a re-upload already does. Reconstructed into the matching
-  `KnowledgeBase` subclass via its `from_chunks(...)` alternate constructor
-  at read time (`ui/backend/knowledge_bases.py::resolve_knowledge_base`, see
-  `src/bestteam/core/CLAUDE.md`) rather than re-parsing files on every load.
-  Indexed on `(document_id, chunk_index)` and `kb_id`. Deleting a KB cascades
-  to delete all three of these tables' rows for it
-  (`ingestion.delete_kb_ingestion_data`). See
-  `docs/superpowers/specs/2026-08-16-kb-document-chunk-ingestion-design.md`.
-- `run_knowledge_generations` (`RunKnowledgeGeneration`) — one row per (run,
-  ingestion job): *this run's trace names chunk/document ids from this
-  generation*. Written by `runtime.run_in_background` from a KB tool's
-  `tool_completed` event the moment it arrives (a cancelled run has still
-  read the generation), one row per generation per run. Read by
-  `ingestion._prune_old_ingestion_versions`: a completed job outside the
-  newest-two window that some run references keeps its job/document/chunk
-  rows with `embedding_json` set NULL and its version directory deleted — an
-  audit resolves a chunk id to text, page, heading and filename, never a
-  vector. Released by `retention.purge_run` (with the trace; deliberately
-  **not** in `PURGED_FIELDS`, being an index over exported content) and by
-  `ingestion.delete_kb_ingestion_data`. No backfill (migration
-  `s6t7u8v9w0x1`). See
-  `docs/superpowers/specs/2026-08-24-kb-generation-audit-retention-and-restore-design.md`.
-- `agents` / `teams` — **removed** (migration `57b13700d5df`). Nothing ever
-  read them and their `/api/config` routes had already been removed: a
-  pipeline carries its agents/teams inline in its own `config`, and
-  `_build_pipeline` accepts only `extra_tools`/`extra_skills`, so a standalone
-  row could never reach a run. Writable CRUD routes existed historically
-  (`78c7a8a`..`036e1d6`), so the drop migration is guarded: it **refuses** if
-  either table holds rows and only drops when empty (a drop is not
-  data-reversible).
-- `org_email_credentials` — one org's mailbox connection for the email tools
-  (unique `org_id`; IMAP host/port/username + encrypted password + optional
-  drafts folder). The password is a Fernet token (`secret_store`), never
-  plaintext. CRUD in `db/email_credentials.py`; resolved at run time by
-  `email_tools.load_email_tools`. The multi-tenant replacement for the
-  process-wide `BESTTEAM_EMAIL_*` env vars.
-  `auth_type` is `'password'` or `'microsoft_oauth'` (Exchange Online no longer
-  accepts basic auth), with `oauth_tenant_id`/`oauth_client_id` holding the
-  Entra identifiers — those are identifiers, not secrets, and are stored in the
-  clear. **Load-bearing:** `password_encrypted` holds the mailbox password for
-  `'password'` and the Entra **client secret** for `'microsoft_oauth'` — one
-  encrypted column either way, so there is exactly one place a secret is
-  written and exactly one place `ensure_secrets_key_for_stored_credentials`
-  has to check at boot. A second secret column would be a second thing to
-  forget. `set_email_credentials` assigns every field unconditionally, so
-  switching a mailbox between auth types can't leave the previous type's
-  fields behind.
-- `email_triggers` — one org's autonomous new-mail trigger: opt-in flag +
-  target `pipeline_name`, UID dedup baseline (`last_uid`/`uidvalidity`),
-  the two date-scoped counters (`runs_today`, the operator's runs/day rail,
-  and `messages_today`, the customer's daily message cap — both reset off the
-  one shared `runs_date`, on purpose, so a rollover can never leave them
-  disagreeing about which day it is), overlap guard
-  (`last_run_id`), and health (`last_checked_at`/`last_error`). Unique
-  `org_id` — at most one auto-running team per org. CRUD in
-  `db/email_triggers.py`; poll-state mutations in `ui/backend/email_trigger.py`.
-- `inbox_events` (`InboxEvent`) — the durable per-message ledger the email
-  poller writes (Phase 1). Detection records one `pending` row per detected
-  message **in the same commit that advances `email_triggers.last_uid`**, which
-  is the whole point: before this, the cursor advanced and the work existed
-  only inside a thread-pool submission, so a process killed in that window
-  consumed mail nothing ever ran. A run then *claims* rows (one atomic
-  `UPDATE ... WHERE status='pending'`), and the claimed rows' `external_id`s
-  are its batch — batching is a claim policy now, not a coupling.
+  `embedding_json` is a JSON-encoded `List[float]` (same TEXT shape as
+  `memories.embedding_json`), populated only for `vector`/`hybrid`.
+  `page`/`heading` are what a retrieval cites beyond the filename — `page` for a
+  PDF (chunked per page, so exact), `heading` for Markdown (approximate). Both
+  nullable; **no backfill**, since either value can only be recovered by
+  re-parsing, which a re-upload already does. Reconstructed via `from_chunks(...)`
+  at read time rather than re-parsing files on every load. Indexed
+  `(document_id, chunk_index)` and `kb_id`.
+
+- **`run_knowledge_generations`** — one row per (run, ingestion job): *this run's
+  trace names chunk/document ids from this generation*. Written by
+  `run_in_background` from a KB tool's `tool_completed` the moment it arrives (a
+  cancelled run has still read the generation). Read by
+  `_prune_old_ingestion_versions`: **a completed job outside the newest-two window
+  that some run references keeps its job/document/chunk rows with
+  `embedding_json` set NULL and its version directory deleted** — an audit
+  resolves a chunk id to text, page, heading and filename, never a vector.
+  Released by `retention.purge_run` (with the trace; deliberately **not** in
+  `PURGED_FIELDS`, being an index over exported content) and by
+  `delete_kb_ingestion_data`. No backfill. Spec:
+  `2026-08-24-kb-generation-audit-retention-and-restore-design.md`.
+
+Deleting a KB cascades to all four tables (`delete_kb_ingestion_data`).
+
+## Email
+
+- **`org_email_credentials`** — one org's mailbox (unique `org_id`; IMAP
+  host/port/username + encrypted password + optional drafts folder). The password
+  is a Fernet token (`secret_store`), never plaintext. `auth_type` is `'password'`
+  or `'microsoft_oauth'`, with `oauth_tenant_id`/`oauth_client_id` in the clear —
+  those are identifiers, not secrets.
+
+  ⚠️ **Load-bearing: `password_encrypted` holds the mailbox password for
+  `'password'` and the Entra client secret for `'microsoft_oauth'`** — one
+  encrypted column either way, so there is exactly one place a secret is written
+  and one place `ensure_secrets_key_for_stored_credentials` has to check at boot.
+  A second secret column would be a second thing to forget.
+  `set_email_credentials` assigns **every field unconditionally**, so switching
+  auth types can't leave the previous type's fields behind.
+
+- **`email_triggers`** — one org's autonomous trigger: opt-in flag, target
+  `pipeline_name`, UID baseline (`last_uid`/`uidvalidity`), overlap guard
+  (`last_run_id`), health (`last_checked_at`/`last_error`/`last_error_kind`),
+  and two date-scoped counters. ⚠️ **`runs_today` (the operator's runs/day rail)
+  and `messages_today` (the customer's daily message cap) reset off the ONE
+  shared `runs_date`, on purpose**, so a rollover can never leave them
+  disagreeing about which day it is. Unique `org_id` — at most one auto-running
+  team per org.
+
+- **`inbox_events`** — the durable per-message ledger. Detection records one
+  `pending` row per detected message **in the same commit that advances
+  `last_uid`**; before this, the cursor advanced while the work existed only
+  inside a thread-pool submission, so a process killed in that window consumed
+  mail nothing ever ran. A run then *claims* rows (one atomic
+  `UPDATE ... WHERE status='pending'`) — **batching is a claim policy now, not a
+  coupling.**
+
   Identity is `UniqueConstraint(org_id, connector_type, mailbox_identity,
-  mailbox_generation, external_id)`. `mailbox_generation` (the IMAP
-  UIDVALIDITY) is **in** the key because a UID is only meaningful within one:
-  after a mailbox rebuild, UID 7 is a different message and must not look like
-  a duplicate. It is `""` and **never NULL** — SQLite treats NULLs as distinct
-  in a UNIQUE constraint, so a nullable column would silently disable dedup for
-  any connector with no generation concept. Because the key makes re-insertion
-  a no-op, the cursor degrades from a correctness requirement to a performance
-  optimisation: losing it re-examines messages, never reprocesses them.
-  `status` is `pending | claimed | done | failed | filtered`, and `filtered` is
-  written today (Phase 4a): it is a message the pre-LLM filter skipped before
-  any model saw it, recorded by the *same* `record_events` call in the *same*
-  commit as everything else detected that cycle — filtering chooses a row's
-  status, never whether the row exists. `attempts` is
-  charged at **dispatch**, never at claim, so a pipeline that fails to *build*
-  releases its messages penalty-free and retries forever (a broken team config
-  must not dead-letter a day of an org's mail). `connector_type`/
-  `mailbox_generation`/`external_id` are deliberately connector-neutral for
-  Phase 2 (Graph/Gmail). `decision` is written today too, alongside that
-  status: the short reason the filter gave (`bulk:list-id`,
-  `blocked_sender:*@news.example.com`, `not_allowlisted`, ...), which the
-  activity UI renders as a sentence. `release_filtered_event` is the whole
-  release path — one `filtered` → `pending` flip that also clears `decision`,
-  scoped by `org_id`, so a false positive rejoins the ordinary claim queue with
-  no second dispatch path to keep correct. Because a row can therefore become
-  claimable with **no new mail having arrived**, `has_pending_events` exists
-  next to `claim_events`: a scoped `LIMIT 1` existence check that lets
-  `poll_org` go on to dispatch on an otherwise-empty cycle instead of returning
-  early and leaving a released message (or a capped backlog) sitting until
-  unrelated mail happens to land. **Both of those take `mailbox_identity` and
-  `mailbox_generation` as required arguments** and filter on them: the two
-  columns were written on every row from the beginning and read by nothing, so
-  a mailbox replaced or rebuilt mid-backlog left `pending` rows that the next
-  quiet cycle happily claimed for the *new* mailbox — and after a rebuild
-  reissues UIDs, UID 7 is a different message. Required rather than optional
-  because the defect is that a caller could omit the mailbox. Such rows are
-  then marked terminal by `abandon_superseded_events` (every `pending` **or
-  `filtered`** row of the org that is **not** the current mailbox, and
-  optionally not the current generation — expressed that way so it needs no
-  memory of the previous identity), called from
-  `email_trigger.on_mailbox_saved`, from the trigger enable in
-  `email_trigger_api`, and from `poll_org`'s UIDVALIDITY re-baseline.
-  `filtered` is in scope because release is a bare flip to `pending`: a
-  superseded row left `filtered` stays in the release list, reports
-  `released: true`, and is then unclaimable for ever. `claimed` rows are left alone
-  there: one belongs to a run that will complete, be released by the stale-run
-  watchdog, or be released by `runtime.fail_interrupted_runs` at startup —
-  which now also sweeps claims orphaned *before* their `runs` row was ever
-  written, the one case a `Run.status == "running"` query cannot see. See
-  `docs/superpowers/specs/2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
-  CRUD in
-  `db/inbox_events.py` (nothing there commits — callers own the transaction
-  boundary, since the durability guarantee is the single commit).
-  See `docs/superpowers/specs/2026-08-17-email-phase-1-inbox-events-design.md`
-  and `docs/superpowers/specs/2026-08-17-email-phase-4a-filtering-budgets-design.md`.
-- `builder_sessions` — the wizard's session state machine. `status` is one
-  of `intent | requirements | spec | solution | testing | deployed`
-  (`db/builder_sessions.py::STATUSES`); `requirements_json`/
-  `specification_json` hold the Business Analyst / Solution Architect
-  agents' structured outputs; `feedback_history` is an append-only JSON list
-  recording each round of customer feedback. `pipeline_id` (nullable FK) is the
-  stable team head this session deploys to — set on first deploy so a redeploy
-  versions the same head and two same-named sessions converge on one team
-  (P1-02).
-- `runs` / `trace_events` — persisted replacement for `RunRegistry`'s
-  in-memory state (wired up in Phase 5). `runs.username` (migration
-  `c9d0e1f2a3b4`) records who started the run (CR-032, audit-only —
-  ownership is org-level via `org_id`). `runs.pipeline_version_id` (nullable FK,
-  migration `c3f5a1b8e2d4`) records the exact immutable `pipeline_versions`
-  snapshot a production run executed (P1-03/P1-15); NULL for sandbox test-runs
-  (they run the session spec, not a published version) and pre-migration rows.
-- `automation_item_results` (`AutomationItemResult`) — one immutable row per
-  input item per Run for a vertical solution template (Property Maintenance
-  Inbox is the first; Release 1A). Deliberately not a `Case`/work-item table
-  (`docs/DECISIONS.md`): no status transitions, no owner, no close action.
-  `org_id`/`run_id` FKs, `source_type` (fixed `"email"` today), a
-  server-generated `source_key` (never taken from a model's own output --
-  see `ui/backend/automation_results.py`), `result_type`, `status`
-  (`processed | needs_attention | skipped | error`), `needs_attention`, and a
-  length-capped/validated `payload` JSON that never holds a raw email body.
-  `UniqueConstraint(run_id, source_key)` makes writing the same item twice
-  (e.g. a duplicate completion callback) a no-op; indexed on
-  `(org_id, created_at)` and `(org_id, needs_attention, created_at)` for the
-  Activity page's summary/Needs-attention queries. `runs.trigger_context`
-  (JSON, nullable) and `runs.retry_of_run_id` (migration `c1d2e3f4a5b6`,
-  chained after `b8c9d0e1f2a3`) are the companion `Run` columns: the former
-  is the server's own record of an autonomous email-triggered run's
-  mailbox/UIDVALIDITY/UID batch (set by `email_trigger.py::_start_triggered_run`),
-  the latter links a manually-retried run back to the one it retried
-  (`email_trigger.py::retry_triggered_run`) -- a retry always inserts a new
-  `runs` row, never mutates the original.
-- `share_links` — one revocable, anonymous entry point to one deployed team
-  (`db/share_links.py`; `pipeline_id`/`org_id`/`created_by` FKs, a unique
-  random `token`, `active`, optional naive-UTC `expires_at`, `daily_cap`).
-  `turns_today`/`turns_date` is the link-wide **aggregate** daily-turn CAS
-  (`try_consume_link_turn`) -- `daily_cap` is both the per-session and the
-  per-link-per-day ceiling, because a visitor who never stores the session
-  cookie would otherwise get a fresh allowance on every request. An active
-  link blocks deleting the team it points at (`count_active_share_links`,
-  used by `crud.py`).
-- `share_sessions` — one anonymous visitor's browser against one
-  `share_links` row (`db/share_sessions.py`; unique `session_token`, carried
-  in an HMAC-signed cookie by `ui/backend/share_auth.py` -- never a `users`
-  row). `turns_today`/`turns_date` is the per-session daily-turn CAS
-  (`try_consume_turn`), same shape as `EmailTrigger.runs_today`/`runs_date`.
-  Never cross-visible to another session on the same link.
-- `share_messages` — one turn of a session's human-readable transcript
-  (`db/share_messages.py`; `share_session_id` FK, `turn_number`, `role`
-  (`user`|`assistant`), `content`, nullable `run_id` FK to the `runs` row
-  that produced an assistant turn). `UniqueConstraint(share_session_id,
-  turn_number)` makes a duplicate reply-recording call a no-op. Deliberately
-  separate from the replay-formatted string actually sent as a run's `input`
-  (see `ui/backend/CLAUDE.md`): this is the clean chat log the visitor UI and
-  the org's audit view render. No retention/deletion policy yet — see
-  `docs/STATUS.md`, Known issues.
-- `model_catalog` — maps a model `spec` string (e.g. `"openai:gpt-4o-mini"`,
-  `"fake:ok"`) to a customer-friendly `display_name`, complexity `tier`
-  (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing
-  (Phase 3). Seeded with `DEFAULT_MODEL_CATALOG` (`db/model_catalog.py`) on
-  first use of the production engine via `seed_default_catalog()`
-  (idempotent — no-op if the table is non-empty). A fourth `tier`,
-  `"embedding"` (`EMBEDDING_TIER`), marks an entry as an embedding model:
-  it is here only so `record_usage` can price a knowledge base's embedding
-  spend, and `list_chat_entries()` excludes it from every surface that
-  offers a *chat* model. None is seeded — prices depend on the provider.
-- `usage_records` — one metered LLM/embedding call, plus a `cost_estimate`
-  computed from `model_catalog` pricing where the model's spec matches an
-  entry (Phase 3, `db/usage.py::record_usage`). One ledger for every kind of
-  spend an org incurs, which is what lets the monthly cap be a single `SUM`
-  over `org_id`. **`run_id` is nullable** (migration `n1o2p3q4r5s6`) and a
-  nullable `ingestion_job_id` FK sits beside it, so a row names **one of
-  three** sources. Almost every row belongs to a run (`run_id` set); a
-  knowledge base's *ingestion* embedding spend belongs to an upload instead
-  and is written as one `agent="kb:ingest"` row per job (`ingestion_job_id`
-  set); and an ad-hoc `agent="kb:search"` row — one test search from the "Try
-  a search" panel (`org_knowledge_bases.py`) — has **both FKs NULL**, because
-  it belongs to no run and no upload. A KB's *query-time* spend inside a run
-  is an ordinary run row — it rides the calling agent's
-  `agent_completed.usage`. Consumers
-  that key on runs (`run_analytics_api.py`, `GET /api/runs/{id}`,
-  `unpriced_run_count`'s `count(distinct run_id)`) filter or count by run id,
-  so NULL-`run_id` rows drop out of them naturally; the monthly
-  `SUM(cost_estimate) WHERE org_id` deliberately includes them.
-  `ingestion_job_id` is a provenance label rather than a joinable key: both
-  generation pruning and KB deletion delete `knowledge_ingestion_jobs` rows,
-  and the usage row survives them on purpose (the same "keep the accounting"
-  rule a retention purge follows — an org's spend history must not change
-  retroactively because it deleted a knowledge base).
-- `users` — logins (`db/users.py` + `ui/backend/auth.py`/`auth_api.py`).
-  `is_admin` (migration `a1b2c3d4e5f6`) gates the Advanced config and
-  Memory pages; `org_id` (migration `b7c8d9e0f1a2`, NULL = platform
-  operator) scopes everything else. Both are granted/assigned only via the
-  `ui.backend.admin` operator CLI — there is no public registration.
-  `is_admin` and a non-NULL `org_id` are mutually exclusive (CR-030):
-  `set_admin_status` refuses to promote org members, and the API guards
-  ignore the flag on org-bound rows anyway.
-  Usernames stay globally unique across orgs (JWT `sub` + memory keying).
-  **One member per org** is a schema invariant: a partial unique index
-  `uq_users_org_id_not_null` on `org_id WHERE org_id IS NOT NULL` (migration
-  `e1f2a3b4c5d6`) — platform operators (NULL) are excluded, so there can be
-  many. That migration **refuses** if an upgraded DB already has multi-member
-  orgs (names them; never auto-deletes). See `db/users.py::create_user` (the
-  friendly pre-check) and `docs/DECISIONS.md`.
-  `principal_id` (migration `b8c9d0e1f2a3`, per-row random backfill) is the
-  **immutable per-account memory principal** for the deletion-lifecycle: set once
-  at creation via `new_principal_id()` and **never rotated** (unlike
-  `security_stamp`, which rotates on password reset), so a run's memory
-  recall/writes scope to it and a deleted-then-recreated username gets a fresh
-  value that can't reach the old account's memory. See `core/memory.py`
-  (`principal_id` store dimension + `retired_principals` fence).
+  mailbox_generation, external_id)`. ⚠️ **`mailbox_generation` (the IMAP
+  UIDVALIDITY) is IN the key** because a UID is only meaningful within one: after
+  a rebuild, UID 7 is a different message and must not look like a duplicate. It
+  is `""` and **never NULL** — SQLite treats NULLs as distinct in a UNIQUE
+  constraint, so a nullable column would silently disable dedup for any connector
+  with no generation concept. Because re-insertion is a no-op, the cursor
+  degrades from a correctness requirement to a performance optimisation: losing
+  it re-examines messages, never reprocesses them.
 
-`db/database.py` provides `make_engine(db_path)` (`":memory:"` uses a
-`StaticPool` so all connections share one database — needed for tests/dry
-runs; a file engine sets `PRAGMA journal_mode=WAL` on every connection, so
-readers are not blocked by the one writer the run workers / ingestion /
-poller / requests take turns being — the `-wal`/`-shm` siblings are why
-`scripts/backup-db.sh` goes through the online backup API rather than a file
-copy), `init_db(engine)` (`Base.metadata.create_all`), and
-`session_factory(engine)`. `db/builder_sessions.py` has the
-`builder_sessions` CRUD (`create_session`/`get_session`/`update_session`/
-`append_feedback`); CRUD for `knowledge_bases`/`skills`/`pipelines` lives in
-`ui/backend/crud.py` (Phase 2, see `ui/backend/CLAUDE.md`).
-`ui/backend/db_session.py` wires up the per-deployment engine (default
-`ui/backend/data/bestteam.db`, override with `BESTTEAM_DB_PATH`) and a
-`get_db()` FastAPI dependency.
+  `status` is `pending | claimed | done | failed | filtered`. `filtered` is a
+  message the pre-LLM filter skipped, recorded by the *same* `record_events` call
+  in the *same* commit as everything else that cycle — **filtering chooses a
+  row's status, never whether the row exists.** `decision` holds the short reason
+  (`bulk:list-id`, `blocked_sender:*@news.example.com`, `not_allowlisted`).
 
-## Run persistence and history API
+  **`attempts` is charged at dispatch, never at claim**, so a pipeline that fails
+  to *build* releases its messages penalty-free — a broken team config must not
+  dead-letter a day of an org's mail.
 
-`ui/backend/registry.py`'s `RunRegistry` is still the authoritative
-in-process **live** layer — an in-flight run's live state is lost on
-restart, and it isn't rehydrated from the DB. Since CR-012,
-`ui/backend/runtime.py::run_in_background` persists one `runs` row per run
-(committed before any usage record and updated to its terminal
-status/output), and now also persists every `TraceEvent` as a `trace_events`
-row (`TraceEventRecord`, in `seq` order, starting with a synthesized
-`run_queued` bookend published to the live registry the same way every other
-event is — see `ui/backend/CLAUDE.md`), so `usage_records`/`trace_events`
-foreign keys reference a real row and a run's full history survives past its
-live view. `GET /api/runs` (org-scoped, filterable by `pipeline`/`status`/
-`manual`/`since`/`until`, paginated via `limit`/`offset` + `total`, default
-page size 50/max 200 — no frontend "load more" yet, so a page beyond the
-default is currently only reachable by widening filters) and
-`GET /api/runs/{id}/trace` (seq-ordered persisted events for one run) serve
-this history; `POST /api/runs/{id}/cancel` requests cooperative cancellation
-(`ui/backend/registry.py::request_cancel`/`cancel_requested`, checked in
-`run_in_background` between yielded events). Still deferred: rehydrating
-`RunRegistry`'s live layer from the DB across restarts, and enabling SQLite
-foreign-key enforcement.
+  `release_filtered_event` is the whole release path: one `filtered` → `pending`
+  flip that also clears `decision`, scoped by `org_id`, so a false positive
+  rejoins the ordinary claim queue with no second dispatch path to keep correct.
+  Because a row can become claimable **with no new mail having arrived**,
+  `has_pending_events` sits next to `claim_events` — a scoped `LIMIT 1` existence
+  check letting `poll_org` dispatch on an otherwise-empty cycle.
 
-## `notifications` / `org_notification_settings` (email Phase 3a)
+  ⚠️ **Both take `mailbox_identity` and `mailbox_generation` as REQUIRED
+  arguments and filter on them.** Both columns were written from the beginning
+  and read by nothing, so a mailbox replaced or rebuilt mid-backlog left `pending`
+  rows the next quiet cycle happily claimed for the *new* mailbox. Required rather
+  than optional because the defect is that a caller could omit the mailbox.
 
-`notifications` is **one table serving two jobs**: the in-app alert list and
-the webhook outbox. That is deliberate -- delivery needs retry state
-(`delivery_state`, `delivery_attempts`, `last_delivery_error`) and the list
-needs the same rows, so two tables would immediately produce "shown in the app
-but never delivered" with no single place to reconcile them.
+  Such rows are marked terminal by `abandon_superseded_events` — every `pending`
+  **or `filtered`** row not on the current mailbox (and optionally not the current
+  generation), expressed that way so it needs no memory of the previous identity.
+  `filtered` is in scope because release is a bare flip: a superseded row left
+  `filtered` stays in the release list, reports `released: true`, and is then
+  unclaimable for ever. `claimed` rows are left alone — one belongs to a run that
+  will complete, be released by the stale-run watchdog, or be released at startup.
 
-`delivery_state = "skipped"` means the org configured no webhook. It is a
-normal configuration, **not** a failure, and the UI must not present it as one.
+  **CRUD in `db/inbox_events.py` commits nothing** — callers own the transaction
+  boundary, since the durability guarantee *is* the single commit.
 
-`fingerprint` identifies the *problem*, not the occurrence
-(`workflow`/`mailbox`/`run_timeout`/`secret_expiry_30`/...). `EmailTrigger`
-carries the health state for the first three (`consecutive_faults`,
-`alerted_fingerprint`); the secret-expiry sweep has no such row to write to, so
-it dedups by querying for an existing notification with that fingerprint
-(`has_fingerprint`).
+- **`org_email_filter_settings`** — `skip_bulk` plus three JSON lists
+  (`sender_blocklist`, `sender_allowlist`, `subject_blocklist`). **`skip_bulk`
+  defaults to `True` for an org with no row** — the one deliberate behaviour
+  change on upgrade, recoverable by one checkbox, and every filtered message stays
+  visible and releasable. Sender entries are a full address or `*@domain` and
+  **never a regular expression**. The evaluation order lives in the pure
+  `email_filter.py`, not here.
 
-`org_notification_settings` holds one webhook per org. The signing secret is a
-Fernet token via `secret_store`, same scheme as mailbox credentials, so the
-startup check that refuses to boot when a rotated key can't read stored
-credentials covers it too. `set_notification_settings(keep_existing_secret=)`
-exists because the API never returns the secret -- an update that omits it must
-keep it rather than wipe it.
+- **`org_email_budget_settings`** — `daily_message_cap` (int) and
+  `monthly_cost_cap` (float). ⚠️ **Both NULL by default — the opposite default to
+  `skip_bulk`, for the opposite reason**: an upgrade must never start *refusing*
+  to process a customer's mail because of a limit they never set. Neither is a
+  stored counter: the day's messages are on `email_triggers.messages_today`, and
+  the month's spend is **queried, never stored** (`SUM(usage_records.cost_estimate)`
+  from the first instant of the UTC month — what `usage_records.org_id` is
+  denormalised for). A spend column would need its own reset, backfill and drift
+  bug. **A `SUM` of NULL prices means "nothing priced", not "nothing spent"**,
+  which is why `unpriced_models_for_org`/`unpriced_run_count` exist beside it.
 
-## `org_retention_settings` + `runs.content_purged_at` (email Phase 3b)
+## Runs and results
 
-`org_retention_settings` is one row per org: `run_retention_days` (NULL = keep
-forever, the default, so an upgrade deletes nothing), plus `last_swept_at` and
-`last_purged_count`. Those two are not decoration -- a retention policy whose
-job silently stopped is indistinguishable from one that is working, until an
-audit, so the UI shows when it last ran and what it took.
+- **`runs` / `trace_events`** — the persisted replacement for `RunRegistry`'s
+  in-memory state. `username` records who started the run (audit-only; ownership
+  is org-level via `org_id`). `pipeline_version_id` records the exact immutable
+  snapshot a production run executed — NULL for sandbox test-runs (they run the
+  session spec, not a published version) and pre-migration rows.
+  `trigger_context` (JSON) is the server's record of an autonomous run's
+  mailbox/UIDVALIDITY/UID batch; `retry_of_run_id` links a retry back to the run
+  it retried — **a retry always inserts a new row, never mutates the original**;
+  `diagnostic_of_run_id` does the same for an admin diagnostic re-run.
 
-`set_retention_days(db, org_id, None)` turns the policy off but **keeps the
-row**: the sweep history outlives any one policy value.
+- **`automation_item_results`** — one immutable row per input item per Run for a
+  vertical solution template. **Deliberately not a `Case`/work-item table** — no
+  status transitions, no owner, no close action. `source_type` (fixed `"email"`),
+  a **server-generated** `source_key` (never taken from a model's output),
+  `result_type`, `status` (`processed | needs_attention | skipped | error`),
+  `needs_attention`, and a length-capped `payload` that **never holds a raw email
+  body**. `UniqueConstraint(run_id, source_key)` makes writing the same item twice
+  a no-op. Indexed `(org_id, created_at)` and
+  `(org_id, needs_attention, created_at)`.
 
-`runs.content_purged_at` is what marks a run purged -- never the emptiness of
-`input`/`output`, since a genuinely empty output is possible. A purge deletes
-that run's `trace_events` rows and empties each `automation_item_results.payload`,
-but never touches `usage_records` (it carries the org's cost history, and its
-rows name the run) nor an item result's `status`/`source_key` (those exclude
-already-drafted UIDs from a retry -- see `ui/backend/CLAUDE.md`).
-`inbox_events` is deliberately never purged: a UID plus the customer's own
-mailbox address is not data-subject content, and deleting it would break
-`resolve_retry_events`.
+- **`builder_sessions`** — the wizard state machine. `status` ∈
+  `intent | requirements | spec | solution | testing | deployed`.
+  `requirements_json`/`specification_json` hold the two agents' structured
+  outputs; `feedback_history` is an append-only JSON list. `pipeline_id` is the
+  stable head this session deploys to — set on first deploy so a redeploy
+  versions the same head and two same-named sessions converge on one team.
 
-## `org_email_filter_settings` + `org_email_budget_settings` (email Phase 4a)
+### History API
 
-Two more one-row-per-org settings tables, following `org_retention_settings`
-and `org_notification_settings` exactly: unique `org_id` FK, no row = the
-default policy, and the row is kept when a value is cleared. CRUD in
-`db/email_filter_settings.py` / `db/email_budget_settings.py`; neither commits.
+`run_in_background` persists one `runs` row per run (committed **before** any
+usage record, updated to its terminal status/output) and every `TraceEvent` as a
+`trace_events` row in `seq` order, starting with a synthesised `run_queued`
+bookend. So `usage_records`/`trace_events` FKs reference a real row and history
+survives past the live view.
 
-`org_email_filter_settings` is the pre-LLM filter's policy: `skip_bulk` (the
-built-in `Auto-Submitted`/`Precedence`/`List-Id`/`List-Unsubscribe` header
-rules) plus three JSON lists, `sender_blocklist`, `sender_allowlist` and
-`subject_blocklist`. **`skip_bulk` defaults to `True` for an org with no row**
--- the one deliberate behaviour change on upgrade, because a safety feature
-nobody switches on protects nobody, and it is recoverable: one checkbox turns
-it off and every filtered message stays visible and releasable in
-`inbox_events`. Sender entries are a full address or `*@domain` and **never a
-regular expression** (customer regexes would put catastrophic backtracking in
-the poll loop, and no admin could be told why a pattern did not match); the
-evaluation order that turns these columns into a decision lives in the pure
-`ui/backend/email_filter.py`, not here.
+`GET /api/runs` (org-scoped; filter `pipeline`/`status`/`manual`/`since`/`until`;
+`limit`/`offset` + `total`, default 50 / max 200 — **no frontend "load more" yet,
+so a page beyond the default is only reachable by widening filters**),
+`GET /api/runs/{id}/trace`, `POST /api/runs/{id}/cancel`.
 
-`org_email_budget_settings` is the customer's two caps: `daily_message_cap`
-(int) and `monthly_cost_cap` (float). **Both are NULL by default** -- the
-opposite default to `skip_bulk`, and for the opposite reason: an upgrade must
-never start *refusing* to process a customer's mail because of a limit they
-never set. Neither is a stored counter. The day's messages are counted on
-`email_triggers.messages_today` (above), and the month's spend is **queried,
-never stored** -- `spent_this_month` sums `usage_records.cost_estimate` from
-the first instant of the UTC month, which is what `usage_records.org_id` is
-denormalised for; a spend column would need its own reset, its own backfill
-and its own drift bug. A `SUM` of NULL prices means "nothing priced", not
-"nothing spent", which is why `unpriced_models_for_org` and
-`unpriced_run_count` exist beside it: the cap is a floor on reality, and the
-blind spot is reported rather than hidden. The deployment-wide
-`BESTTEAM_TRIGGER_DAILY_CAP` (runs/day) is a separate, operator-owned rail and
-is unaffected by either column.
+⚠️ `RunRegistry` remains the authoritative in-process **live** layer and **is not
+rehydrated from the DB on restart** — an in-flight run's live state is lost.
+Still deferred alongside enabling SQLite FK enforcement.
+
+## Sharing
+
+- **`share_links`** — one revocable anonymous entry point to one deployed team
+  (unique random `token`, `active`, optional **naive-UTC** `expires_at`,
+  `daily_cap`). `turns_today`/`turns_date` is the link-wide **aggregate** CAS.
+  ⚠️ **`daily_cap` is both the per-session and the per-link-per-day ceiling**,
+  because a visitor who never stores the session cookie would otherwise get a
+  fresh allowance on every request. An active link blocks deleting the team.
+- **`share_sessions`** — one visitor's browser against one link (unique
+  `session_token`, carried in an HMAC-signed cookie — **never a `users` row**).
+  `turns_today`/`turns_date` is the per-session CAS, same shape as
+  `EmailTrigger.runs_today`. Never cross-visible to another session on the link.
+- **`share_messages`** — one turn of the transcript (`turn_number`, `role`,
+  `content`, nullable `run_id`). `UniqueConstraint(share_session_id, turn_number)`
+  makes a duplicate reply-recording call a no-op. **Deliberately separate from the
+  replay-formatted string actually sent as a run's `input`**: this is the clean
+  chat log the visitor UI and the org's audit view render. No retention policy yet.
+
+## Accounts
+
+**`users`** — `is_admin` gates the Advanced config and Memory pages; `org_id`
+(NULL = platform operator) scopes everything else. Both are granted only via the
+operator CLI — **there is no public registration.**
+
+⚠️ **`is_admin` and a non-NULL `org_id` are mutually exclusive**:
+`set_admin_status` refuses to promote org members, and the API guards ignore the
+flag on org-bound rows anyway. Usernames stay globally unique across orgs (JWT
+`sub` + memory keying).
+
+⚠️ **One member per org is a schema invariant** — a partial unique index
+`uq_users_org_id_not_null` on `org_id WHERE org_id IS NOT NULL`; platform
+operators (NULL) are excluded, so there can be many. That migration **refuses if
+an upgraded DB already has multi-member orgs** (names them; never auto-deletes).
+
+`principal_id` is the **immutable per-account memory principal**: set once at
+creation and **never rotated** (unlike `security_stamp`, which rotates on
+password reset), so a deleted-then-recreated username gets a fresh value that
+can't reach the old account's memory. See `core/memory.py`'s `retired_principals`
+fence.
+
+`security_stamp` is a random per-account credential generation embedded in every
+token and WS ticket — an immutable random value, **not a timestamp**, so there's
+no ordering race.
+
+## Catalogue and metering
+
+- **`model_catalog`** — maps a model `spec` to `display_name`, complexity `tier`
+  (`fast`/`balanced`/`advanced`), and per-1K-token input/output pricing. Seeded
+  with `DEFAULT_MODEL_CATALOG` on first use of the production engine (idempotent).
+  ⚠️ **A fourth tier, `"embedding"`, marks an embedding model** — it is here only
+  so `record_usage` can price a KB's embedding spend, and `list_chat_entries()`
+  excludes it from every surface offering a *chat* model. None is seeded, since
+  prices depend on the provider.
+
+- **`usage_records`** — one metered LLM/embedding call plus a `cost_estimate`
+  from `model_catalog` where the spec matches. **One ledger for every kind of
+  spend an org incurs**, which is what lets the monthly cap be a single `SUM` over
+  `org_id`.
+
+  ⚠️ **`run_id` is nullable and a nullable `ingestion_job_id` sits beside it, so a
+  row names one of THREE sources:**
+
+  | Source | `run_id` | `ingestion_job_id` |
+  |---|---|---|
+  | A run (incl. a KB's query-time spend, riding `agent_completed.usage`) | set | NULL |
+  | Ingestion — one `agent="kb:ingest"` row per job | NULL | set |
+  | Ad-hoc `agent="kb:search"` from "Try a search" | NULL | NULL |
+
+  Consumers that key on runs (`run_analytics_api.py`, `GET /api/runs/{id}`,
+  `unpriced_run_count`) filter or count by run id, so NULL-`run_id` rows drop out
+  naturally; the monthly `SUM(cost_estimate) WHERE org_id` deliberately includes
+  them.
+
+  ⚠️ **`ingestion_job_id` is a provenance label, not a joinable key.** Both
+  generation pruning and KB deletion delete job rows, and the usage row survives
+  them **on purpose** — the same "keep the accounting" rule a retention purge
+  follows: an org's spend history must not change retroactively because it
+  deleted a knowledge base.
+
+## Alerting and retention settings
+
+- **`notifications`** — **one table serving two jobs**: the in-app alert list and
+  the webhook outbox. Deliberate — delivery needs retry state (`delivery_state`,
+  `delivery_attempts`, `last_delivery_error`) and the list needs the same rows, so
+  two tables would immediately produce "shown in the app but never delivered" with
+  no single place to reconcile.
+
+  ⚠️ **`delivery_state = "skipped"` means the org configured no webhook. It is a
+  normal configuration, NOT a failure, and the UI must not present it as one.**
+
+  `fingerprint` identifies the *problem*, not the occurrence
+  (`workflow`/`mailbox`/`run_timeout`/`secret_expiry_30`/…). `EmailTrigger`
+  carries the health state for the first three; the secret-expiry sweep has no
+  such row, so it dedups via `has_fingerprint`.
+
+- **`org_notification_settings`** — one webhook per org. The signing secret is a
+  Fernet token via `secret_store`, same scheme as mailbox credentials, so the
+  boot check that refuses to start when a rotated key can't read stored
+  credentials covers it too. `set_notification_settings(keep_existing_secret=)`
+  exists because the API never returns the secret — an update omitting it must
+  keep it rather than wipe it.
+
+- **`org_retention_settings`** — `run_retention_days` (NULL = keep forever, the
+  default, so an upgrade deletes nothing), plus `last_swept_at` and
+  `last_purged_count`. Those two are **not decoration**: a retention policy whose
+  job silently stopped is indistinguishable from one that is working, until an
+  audit. `set_retention_days(db, org_id, None)` turns the policy off but **keeps
+  the row** — the sweep history outlives any one policy value.
+
+  ⚠️ **`runs.content_purged_at` is what marks a run purged — never the emptiness
+  of `input`/`output`**, since a genuinely empty output is possible. A purge
+  deletes that run's `trace_events` and empties each
+  `automation_item_results.payload`, but never touches `usage_records` (it carries
+  the org's cost history and its rows name the run) nor an item result's
+  `status`/`source_key` (those exclude already-drafted UIDs from a retry).
+  **`inbox_events` is deliberately never purged**: a UID plus the customer's own
+  mailbox address is not data-subject content, and deleting it would break
+  `resolve_retry_events`.
+
+These settings tables all follow one shape: unique `org_id` FK, no row = the
+default policy, the row kept when a value is cleared, and **no CRUD function
+commits** — callers own the transaction.
