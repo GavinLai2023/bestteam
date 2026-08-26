@@ -75,7 +75,7 @@ file in that directory — so keep them short. Deep reference material belongs i
 | `docs/STATUS.md` | Living kanban: done / in progress / known issues / next |
 | `docs/DECISIONS.md` | **Why** decisions were made, so they aren't re-litigated |
 | `docs/KNOWLEDGE_BASES.md` | Full KB reference: retrieval, ingestion, metering, grounding |
-| `docs/ADMIN_MANUAL.md` | The four admin-only pages; keep current when one changes |
+| `docs/ADMIN_MANUAL.md` | The five admin-only pages; keep current when one changes |
 
 ## Known limitations — don't assume these exist
 

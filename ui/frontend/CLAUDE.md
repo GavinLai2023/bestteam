@@ -415,8 +415,8 @@ A platform operator (`is_admin`, `org_id IS NULL`) and an org member see disjoin
 UIs, partitioned by two symmetric `App.tsx` guards that both read `lib/useMe.ts`
 (one `GET /api/auth/me`) and **render `null` while it loads**:
 
-- **`RequireAdmin`** wraps `/accounts` + `/advanced` + `/memory` + `/trace`;
-  non-admins go to `/`.
+- **`RequireAdmin`** wraps `/accounts` + `/advanced` + `/memory` + `/trace` +
+  `/feedback`; non-admins go to `/`.
 - **`RequireOrgMember`** wraps `/`, `/run`, `/teams`, `/activity`, `/wizard/*`;
   operators go to `/advanced`, since every org-scoped surface 403s an org-less
   operator.
@@ -456,6 +456,16 @@ one** (filtered server-side).
 resets-password / moves / deletes each org's member. **Platform accounts are shown
 read-only** — the `/api/admin` surface keeps promote/demote and platform-account
 lifecycle in the CLI.
+
+**`/feedback`** (`FeedbackPage.tsx`) is the admin triage list — status/kind
+filters, expandable rows, status + note saved via `api.patchFeedback`.
+⚠️ **Bodies render as plain text only; visitor text is untrusted.** The submit
+side is `components/FeedbackModal.tsx`, one bilingual `<dialog>` shared by two
+entry points that each own their own POST: the `Layout` nav button (org members
+only — **an admin's nav carries the triage NavLink under the same `nav.feedback`
+label instead**) posting `api.submitFeedback` with `{page, locale}` context, and
+the share-chat header (`ShareChatPage`) posting `shareChatApi.sendFeedback` with
+the last dispatched `run_id` added.
 
 `lib/dateFormat.ts::formatDateTime` is locale-aware (keyed on
 `i18n.resolvedLanguage`) for every panel showing a date; `endOfLocalDay` lives

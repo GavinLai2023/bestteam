@@ -601,6 +601,35 @@ same atomic reset-then-conditional-UPDATE CAS. **The aggregate one is
 load-bearing**: a client that never stores the cookie gets a brand-new free
 session on every request, so the per-session cap alone caps nobody.
 
+## User feedback (`feedback_api.py` + a share route in `share_chat.py`)
+
+Defect reports and suggestions, all routed to the **platform operator**.
+⚠️ **`feedback.org_id` is provenance, not ownership** — there is no org-facing
+read surface. Spec: `2026-08-26-feedback-system-design.md`. Three surfaces:
+
+- `POST /api/feedback` — any authenticated principal. Pydantic caps the body at
+  4,000 chars; the route strips and 422s an all-whitespace body;
+  `sanitize_context` whitelists client context keys (`page`, `locale`) and
+  truncates values to 200 chars.
+- `POST /api/share/{token}/feedback` — the anonymous surface, living in
+  `share_chat.py` because it reuses that module's `_resolve_active_link`/
+  `_resolve_session_from_cookie`. ⚠️ **It never mints a session**: no cookie →
+  403, so feedback alone can't grow `share_sessions`/`_session_locks`. Cap is
+  `FEEDBACK_DAILY_CAP` (5) per session per UTC day, a plain count-then-insert —
+  **deliberately not the `try_consume_turn` CAS**, since nothing is billed per
+  submission and the worst race outcome is cap+1 rows. Context whitelist adds
+  `run_id`; the server stamps `share_link_id` and the link's `org_id`.
+- `GET/PATCH /api/admin/feedback[...]` — `get_current_admin` only. List filters
+  (`status`/`kind`/`org_id`) validate against `db/feedback.py`'s `STATUSES`/
+  `KINDS`; rows carry `org_name`, `username`, and a `source` discriminator
+  (`user`/`visitor`). PATCH sets `status` and/or `admin_note` — no transition
+  rules, no delete verb.
+
+Deliberately absent (phase-3): LLM categorisation or dedup, notifications,
+attachments, customer-visible triage state. ⚠️ **When a model eventually reads
+this table, the bodies are attacker-controlled and need the inbound-email
+treatment.**
+
 ## Sync-to-async streaming bridge
 
 `Pipeline.stream()` is a blocking generator. The backend runs it in a

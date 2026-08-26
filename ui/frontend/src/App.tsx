@@ -8,6 +8,7 @@ import ActivityPage from './pages/ActivityPage'
 import AdvancedPage from './pages/AdvancedPage'
 import MemoryPage from './pages/MemoryPage'
 import TracePage from './pages/TracePage'
+import FeedbackPage from './pages/FeedbackPage'
 import AccountsPage from './pages/AccountsPage'
 import IntentPage from './pages/wizard/IntentPage'
 import QuestionsPage from './pages/wizard/QuestionsPage'
@@ -74,6 +75,7 @@ function App() {
             <Route path="/advanced" element={<AdvancedPage />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/trace" element={<TracePage />} />
+            <Route path="/feedback" element={<FeedbackPage />} />
           </Route>
 
           {/* Kept outside both guards so an unknown path routes to `/`, where

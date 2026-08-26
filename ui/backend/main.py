@@ -54,6 +54,7 @@ from .auth_api import (
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
 from .email_trigger_api import router as email_trigger_router
+from .feedback_api import router as feedback_router
 from .interview import router as interview_router
 from .admin_api import router as admin_router
 from .memory_api import router as memory_router
@@ -330,6 +331,7 @@ app.include_router(memory_router)
 app.include_router(admin_router)
 app.include_router(org_settings_router)
 app.include_router(notifications_router)
+app.include_router(feedback_router)
 app.include_router(org_knowledge_bases_router)
 app.include_router(email_trigger_router)
 app.include_router(run_analytics_router)

@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { api } from '../lib/api'
 import { useMe } from '../lib/useMe'
 import BrandMark from './BrandMark'
 import ChangePasswordDialog from './ChangePasswordDialog'
+import FeedbackModal from './FeedbackModal'
 import LanguageSelect from './LanguageSelect'
 import './Layout.css'
 
@@ -11,8 +13,9 @@ export default function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { isAdmin } = useMe()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [changingPassword, setChangingPassword] = useState(false)
+  const [sendingFeedback, setSendingFeedback] = useState(false)
 
   // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
   // scroll position the previous page was at, landing the new page mid-way
@@ -66,9 +69,24 @@ export default function Layout() {
               <NavLink to="/trace" className={({ isActive }) => (isActive ? 'active' : '')}>
                 {t('nav.trace')}
               </NavLink>
+              <NavLink to="/feedback" className={({ isActive }) => (isActive ? 'active' : '')}>
+                {t('nav.feedback')}
+              </NavLink>
             </>
           )}
           <LanguageSelect />
+          {/* Org members only: an admin already has the triage page (its
+              NavLink above shares this label), and all feedback lands with
+              the platform operator anyway (feedback_api.py). */}
+          {!isAdmin && (
+            <button
+              type="button"
+              className="nav-action"
+              onClick={() => setSendingFeedback(true)}
+            >
+              {t('nav.feedback')}
+            </button>
+          )}
           {/* Shown to platform operators too: an operator's own password
               deserves the same self-service as a customer's. */}
           <button
@@ -90,6 +108,17 @@ export default function Layout() {
         <Outlet />
       </main>
       <ChangePasswordDialog open={changingPassword} onClose={() => setChangingPassword(false)} />
+      <FeedbackModal
+        open={sendingFeedback}
+        onClose={() => setSendingFeedback(false)}
+        onSubmit={async (kind, body) => {
+          await api.submitFeedback({
+            kind,
+            body,
+            context: { page: pathname, locale: i18n.language },
+          })
+        }}
+      />
     </div>
   )
 }

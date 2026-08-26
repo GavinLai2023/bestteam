@@ -318,6 +318,15 @@ Still deferred alongside enabling SQLite FK enforcement.
   makes a duplicate reply-recording call a no-op. **Deliberately separate from the
   replay-formatted string actually sent as a run's `input`**: this is the clean
   chat log the visitor UI and the org's audit view render. No retention policy yet.
+- **`feedback`** — one defect report or suggestion for the **platform operator**
+  (`db/feedback.py`). ⚠️ **`org_id` is provenance, never ownership** — there is no
+  org-facing read surface. Exactly one of `submitted_by` (users FK) /
+  `share_session_id` (share_sessions FK, indexed — the share route's per-day cap
+  counts on it) is set, enforced by `create_feedback`, **not by a CHECK**. `kind`
+  (`defect`|`suggestion`) and `status` (`new`|`acknowledged`|`resolved`|
+  `dismissed`, default `new`) are CHECK-constrained; plus `admin_note` and a
+  whitelisted `context` JSON. No delete verb, no retention policy — the row is the
+  record. Migration `u8v9w0x1y2z3`.
 
 ## Accounts
 
