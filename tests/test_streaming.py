@@ -389,3 +389,70 @@ def test_a_stopped_agent_records_no_partial_output():
     assert deltas, "some text did reach the visitor live"
     completed = [e for e in events if e.type == "agent_completed"]
     assert completed and completed[0].data == ""
+
+
+# ---------------------------------------------------------------------------
+# grounding_policy on the streaming path: failing text that already streamed
+# must be discarded (STREAM_RESET) before the corrected answer or refusal.
+# ---------------------------------------------------------------------------
+
+from bestteam.core.grounding import GROUNDING_REFUSAL_TEXT  # noqa: E402
+from bestteam.core.tool_context import report_trace  # noqa: E402
+
+_KB_CITATION = "handbook.pdf, p.3 § Refunds"
+_KB_CITED = f"Refunds take 14 days [source: {_KB_CITATION}]."
+
+
+def _kb_stub_tool():
+    def product_docs(query: str) -> str:
+        report_trace(query=query, hit_count=1, sources=[_KB_CITATION],
+                     citations=[_KB_CITATION], summary="1 result(s)")
+        return f"[source: {_KB_CITATION}]\nexcerpt"
+
+    product_docs.__bestteam_tool_kind__ = "knowledge_base"
+    return product_docs
+
+
+def _kb_streaming_agent(policy, responses):
+    return Agent(
+        name="a", role="r", goal="g",
+        model=_ToolCallingModel(responses=responses),
+        tools=[_kb_stub_tool()],
+        grounding_policy=policy,
+    )
+
+
+_KB_TOOL_CALL = AIMessage(
+    content="",
+    tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+)
+
+
+def test_grounding_retry_resets_the_stream_before_the_corrected_answer():
+    deltas: List[str] = []
+    agent = _kb_streaming_agent(
+        "retry",
+        [_KB_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content=_KB_CITED)],
+    )
+    text = _run_agent(agent, "q", streams=True, on_token=deltas.append)
+
+    assert text == _KB_CITED
+    assert STREAM_RESET in deltas
+    reset_at = deltas.index(STREAM_RESET)
+    assert "".join(deltas[:reset_at]) == "Uncited answer."
+    assert "".join(deltas[reset_at + 1:]) == _KB_CITED
+
+
+def test_grounding_refusal_ends_the_stream_with_a_reset():
+    deltas: List[str] = []
+    agent = _kb_streaming_agent(
+        "refuse",
+        [_KB_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content="Still uncited.")],
+    )
+    text = _run_agent(agent, "q", streams=True, on_token=deltas.append)
+
+    assert text == GROUNDING_REFUSAL_TEXT
+    assert deltas[-1] == STREAM_RESET, "no failing text may survive on the live stream"
+    assert GROUNDING_REFUSAL_TEXT not in "".join(deltas), (
+        "the refusal is authoritative output, not a streamed delta"
+    )

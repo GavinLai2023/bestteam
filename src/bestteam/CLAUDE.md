@@ -93,7 +93,17 @@ That turn ends with a `grounding_checked` event (`core/grounding.py`): the final
 text's `[source: …]` tags compared with the citation labels the turn's own
 searches returned (the tool reports them in full via
 `report_trace(citations=…)`; the trace event keeps only the bounded `sources`).
-**Recorded, never acted on.**
+**Recorded — and, only under an opt-in `Agent.grounding_policy`, acted on.**
+`observe` (default) keeps the event payload byte-identical to the
+pre-policy shape (no `policy`/`retried`/`refused` keys — consumers keyed on
+the exact dict rely on that). `retry` makes exactly one corrective call on
+the same conversation (the hits are already in the ToolMessages — no new
+searches; a retry answering with tool calls counts as failed). `refuse`
+retries once, then returns `GROUNDING_REFUSAL_TEXT` — which, on a turn whose
+searches found nothing, is every turn: refuse deliberately refuses what it
+cannot verify. Streaming: the failing text already reached the viewer, so
+`STREAM_RESET` precedes the corrected stream (and a refusal, which is never
+streamed — it rides `run_completed`).
 
 ⚠️ **That forcing is insurance, not a requirement.** `_first_call` catches a
 provider that rejects it — DeepSeek's thinking mode returns

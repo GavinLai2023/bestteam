@@ -17,6 +17,20 @@
   which the `fake:` smoke tests structurally cannot show. Run by hand
   pre-release; chunk embeddings cache in `.bestteam_cache/kb_eval_live.json`
   (< $0.01 a run). Docs: `docs/KNOWLEDGE_BASES.md` "The release gate".
+- **Grounding policy: `observe`/`retry`/`refuse` per agent** (2026-08-26,
+  spec `docs/superpowers/specs/2026-08-26-grounding-policy-design.md`).
+  Opt-in enforcement on top of grounding-lite: `Agent.grounding_policy`
+  (YAML field, validated; `AgentSpec` keeps it through `to_raw()`). The bar:
+  at least one `[source: …]` tag and every tag verified against the turn's
+  own searches. `retry` = one corrective model call on the same conversation
+  (hits are already in the ToolMessages), metered, cancellation-aware;
+  `refuse` = retry once, then return the fixed `GROUNDING_REFUSAL_TEXT` —
+  including on zero-hit turns, deliberately. Default `observe` keeps the
+  `grounding_checked` payload byte-identical; `retry`/`refuse` add
+  `policy`/`retried`/`refused` and the dashboard renders "— retried" /
+  "— answer refused". Streaming sends `STREAM_RESET` so failing text never
+  survives on a viewer's screen. Still out of scope: claim-level entailment,
+  graders, pipeline-level final-output checks (`docs/DECISIONS.md`).
 - **User feedback: defects/suggestions from the app and share links, admin
   triage** (2026-08-26, spec
   `docs/superpowers/specs/2026-08-26-feedback-system-design.md`). One

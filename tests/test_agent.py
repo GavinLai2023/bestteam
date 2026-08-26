@@ -29,3 +29,16 @@ def test_agent_system_prompt_includes_identity():
     assert "Research Analyst" in prompt
     assert "find facts" in prompt
     assert "Ex-journalist" in prompt
+
+
+def test_agent_grounding_policy_defaults_to_observe():
+    agent = Agent(name="bot", role="Helper", goal="do things")
+    assert agent.grounding_policy == "observe"
+
+
+def test_agent_rejects_an_unknown_grounding_policy():
+    with pytest.raises(ConfigurationError) as exc:
+        Agent(name="bot", role="Helper", goal="do things", grounding_policy="enforce")
+    message = str(exc.value)
+    assert "grounding_policy" in message
+    assert "observe" in message and "retry" in message and "refuse" in message

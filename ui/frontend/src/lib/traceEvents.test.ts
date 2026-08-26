@@ -70,4 +70,31 @@ describe('grounding_checked', () => {
       }),
     ).toBe('2 searches · 4 passages · 2 cited · 2 verified')
   })
+
+  // grounding_policy (retry/refuse): the event says when the policy acted.
+  it('notes a corrective retry', () => {
+    expect(
+      renderEventData({
+        type: 'grounding_checked',
+        agent: 'a',
+        data: {
+          searches: 1, hit_count: 3, cited: 1, verified: 1, unverified: [],
+          policy: 'retry', retried: true, refused: false,
+        },
+      }),
+    ).toBe('1 search · 3 passages · 1 cited · 1 verified — retried')
+  })
+
+  it('notes a refused answer', () => {
+    expect(
+      renderEventData({
+        type: 'grounding_checked',
+        agent: 'a',
+        data: {
+          searches: 1, hit_count: 0, cited: 0, verified: 0, unverified: [],
+          policy: 'refuse', retried: true, refused: true,
+        },
+      }),
+    ).toBe('1 search · 0 passages · 0 cited · 0 verified — retried — answer refused')
+  })
 })

@@ -89,6 +89,10 @@ class AgentSpec(BaseModel):
     model: str
     tools: List[str] = Field(default_factory=list)
     skills: List[str] = Field(default_factory=list)
+    # A loader-level field like `skills` (kept by `to_raw()`), not a
+    # wizard-only presentation field: round-tripping a pipeline that sets it
+    # must not drop it. Validated by `Agent.__post_init__` at compile time.
+    grounding_policy: Optional[str] = None
     display_name: Optional[str] = None
     friendly_description: Optional[str] = None
 
@@ -100,6 +104,8 @@ class AgentSpec(BaseModel):
             raw["tools"] = list(self.tools)
         if self.skills:
             raw["skills"] = list(self.skills)
+        if self.grounding_policy:
+            raw["grounding_policy"] = self.grounding_policy
         return raw
 
 
