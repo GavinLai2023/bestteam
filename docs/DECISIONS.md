@@ -434,3 +434,63 @@ Append new entries at the bottom using this template:
     cheaper once the startup stale-run sweep landed
     (`runtime.fail_interrupted_runs`), which removed the original objection
     to it.
+
+---
+
+## Inbound mail is filtered by header rules only, never by a classifier model
+
+- **Status**: Accepted (email Phase 4a)
+- **Context**: An org's mailbox receives bulk and irrelevant mail. Every
+  message that reaches dispatch bills a run, so something has to decide what
+  is worth processing — and the obvious candidate was a cheap gatekeeper
+  model.
+- **Decision**: A pure evaluator (`ui/backend/email_filter.py`) decides before
+  any model is involved. A sender blocklist/allowlist, a subject blocklist,
+  then a `skip_bulk` check over the standard bulk headers, in that fixed
+  order. The allowlist deliberately does **not** exempt a sender from the bulk
+  check. Two pattern forms only (a full address, `*@domain`); no regular
+  expressions. Alongside it, `org_email_budget_settings` adds a per-org daily
+  *message* cap and monthly *spend* cap that pause dispatch, alert once per
+  period and resume automatically — alongside, not replacing,
+  `BESTTEAM_TRIGGER_DAILY_CAP`, the operator's deployment-wide runs/day rail.
+- **Consequences**:
+  - A gatekeeper model was refused on three grounds: it would still bill per
+    message, it would still read attacker-controlled text, and it could not be
+    audited by the admin whose mail it dropped.
+  - Filtering only changes an `inbox_events` row's *status*. Every detected
+    message is still recorded in the commit that consumes it, so a false
+    positive is released with one `filtered` → `pending` flip.
+  - `skip_bulk` is on by default — the one behaviour change on upgrade. Both
+    budget caps default to NULL.
+  - Ruled out: any inspection beyond headers, so a human-written but
+    irrelevant email is still billed. Also ruled out is reconciling
+    `model_catalog` prices against a provider bill, so the spend cap bounds an
+    *estimate*, not actual spend.
+
+---
+
+## Attachment reading takes no path, so traversal is impossible rather than defended
+
+- **Status**: Accepted
+- **Context**: Agents need to read email attachments, but `parse_file` has an
+  explicit no-sandboxing contract and the filename is chosen by whoever sent
+  the message.
+- **Decision**: `email_read` lists a message's attachments;
+  `email_read_attachment(message_id, filename)` extracts one on demand. The
+  tool accepts **no path** — a message id confined to the run's batch, plus a
+  name matched against that message's own MIME parts, parsed from
+  `io.BytesIO`. Never from disk. Three limits are checked before parsing:
+  10 MB per attachment, 25 MB per message, 8,000 characters of extracted text;
+  breaching one returns a sentence, never an exception.
+- **Consequences**:
+  - Path traversal is not defended against — it is structurally impossible,
+    which is the only argument that survives `parse_file`'s contract.
+  - Two tools rather than one, so the model pays only for what it decides to
+    read and each extraction is its own trace event.
+  - The tool is in both `EMAIL_TOOL_NAMES` sets, so pairing it with an egress
+    tool is refused at deploy validation.
+  - Ruled out: OCR or any image understanding (a photographed invoice is
+    invisible), archive expansion (refused as a zip-bomb surface), and any
+    layout/formula/embedded-image fidelity. Fetching individual MIME parts is
+    also absent — `BODY.PEEK[]` pulls the whole message, so a large attachment
+    costs memory even when nothing reads it.
