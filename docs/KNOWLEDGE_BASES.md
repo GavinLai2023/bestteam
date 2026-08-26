@@ -464,8 +464,9 @@ a passage the agent really did retrieve, cited with a page or heading it
 dropped or altered along the way (e.g. citing `handbook.pdf, p.3` for a hit
 the search returned as `handbook.pdf, p.3 § Refunds`). The event carries
 counts and citation labels only (at most ten unverified labels, each at most
-200 characters), and it **records rather than acts**: the answer is returned
-unchanged, nothing is retried or refused. A knowledge-base agent that never
+200 characters). Under the default policy it **records rather than acts**:
+the answer is returned unchanged, nothing is retried or refused — see
+"Grounding policy" below for the opt-in enforcement. A knowledge-base agent that never
 searched (`searches: 0`) has every tag unverified. A hierarchical manager
 without a knowledge base of its own is not checked — its specialists are. A
 manager that *does* carry its own knowledge-base tool is checked, but only
@@ -490,6 +491,52 @@ by the filename-only rule even though the tag omits the true document name.
 Carrying the filename separately through the tool→adapter→checker contract
 would fix it, but only for a check that records and never acts — not worth
 the payload-shape change.
+
+### Grounding policy: `observe` | `retry` | `refuse`
+
+What an agent's turn *does* with a failed check is a per-agent, opt-in
+setting (2026-08-26, spec `2026-08-26-grounding-policy-design.md`):
+
+```yaml
+agents:
+  - name: support_agent
+    role: Support Specialist
+    goal: Answer questions from the product documentation
+    model: "openai:gpt-4o-mini"
+    tools: [product_docs]
+    grounding_policy: refuse   # or retry; omit for observe (the default)
+```
+
+An answer **passes** when it cites at least one source and every cited label
+is verified against the turn's own searches; anything else — no `[source: …]`
+tags at all, or any unverified tag — fails.
+
+- **`observe`** (default): record only. Byte-for-byte the behaviour described
+  above, and the `grounding_checked` event keeps its exact five-field shape.
+- **`retry`**: one corrective model call on the same conversation — the
+  search results are already in the turn's tool messages, so the model is
+  told to rewrite citing only returned sources, or to say the knowledge base
+  does not contain the answer. The retried answer is returned even if it
+  still fails. A retry that asks for more tools instead of answering counts
+  as a failed retry. Exactly one retry, metered like any other model call.
+- **`refuse`**: same single retry; if the retried answer still fails, a fixed
+  refusal text (`GROUNDING_REFUSAL_TEXT` in `core/grounding.py`) is returned
+  instead of the answer. Note the reach of this: an agent whose searches
+  returned nothing cannot produce a passing answer, so under `refuse` a
+  question the knowledge base cannot answer gets the refusal text — the
+  wanted behaviour for a high-risk (prices, policy, compliance) agent, and
+  the reason `refuse` is opt-in per agent rather than a global switch.
+
+With `retry`/`refuse` the `grounding_checked` event describes the **final**
+answer and adds three fields: `policy`, `retried`, `refused`. On the
+streaming path, text that already streamed to a viewer is discarded (the
+stream-reset control code) before the corrected answer streams or the
+refusal is returned — the authoritative answer is still `run_completed`'s.
+
+What the policy still does **not** do: judge whether a cited passage actually
+supports the claim (no claim-level entailment, no grader model), check a
+pipeline's final merged output (the check is per agent turn), or pin the
+agent to one *specific* knowledge base when it carries several tools.
 
 ### What a search looks like in the trace
 
@@ -1097,11 +1144,13 @@ so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
   `src/bestteam/core/CLAUDE.md`. Memory is not wired into knowledge base
   retrieval, or vice versa — recalling a user's memory and querying a
   knowledge base remain two independent tools.
-- **Grounding is checked, not enforced.** `grounding_checked` says whether an
-  answer's citations name passages that were retrieved; it does not say the
-  passage supports the claim, and an unverified citation changes nothing
-  about the run. Regenerating or refusing an ungrounded answer, and any
-  answer-level evaluation, are not built.
+- **Grounding checks citations, not claims.** `grounding_checked` says
+  whether an answer's citations name passages that were retrieved; it does
+  not say the passage supports the claim. The opt-in per-agent
+  `grounding_policy` (`retry`/`refuse`, see "Grounding policy") can
+  regenerate or refuse an answer that fails the citation check, but
+  claim-level entailment, grader models and answer-level evaluation are not
+  built, and the default remains record-only.
 
 ## File reference
 

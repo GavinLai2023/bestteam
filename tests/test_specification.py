@@ -484,3 +484,26 @@ def test_kb_spec_description_round_trips_and_is_capped():
 
     with pytest.raises(ValidationError):
         KnowledgeBaseSpec(name="kb", path="./docs", description="x" * 501)
+
+
+def test_agent_spec_keeps_grounding_policy_in_to_raw():
+    spec = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+        grounding_policy="refuse",
+    )
+
+    assert spec.to_raw()["grounding_policy"] == "refuse"
+
+
+def test_agent_spec_to_raw_omits_grounding_policy_when_unset():
+    spec = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+    )
+
+    assert "grounding_policy" not in spec.to_raw()

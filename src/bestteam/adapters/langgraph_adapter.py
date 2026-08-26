@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
-from ..core.grounding import check_grounding
+from ..core.grounding import GROUNDING_REFUSAL_TEXT, GROUNDING_RETRY_INSTRUCTION, check_grounding
 from ..core.team import CollaborationMode, Team
 from ..core.tool_context import tool_call_context
 from ..core.trace import TraceEvent
@@ -717,8 +717,9 @@ def _run_agent(
         )
     response = _first_call(messages)
     _record_usage(agent, response, usage_sink)
+    model_turns = 1
     if diagnostic:
-        _emit("model_turn", _model_turn_data(1, response))
+        _emit("model_turn", _model_turn_data(model_turns, response))
 
     for i in range(_MAX_TOOL_ITERATIONS):
         tool_calls = getattr(response, "tool_calls", None)
@@ -821,8 +822,9 @@ def _run_agent(
         _emit("agent_progress", {"note": f"iteration {i + 1} of {_MAX_TOOL_ITERATIONS}"})
         response = _call(model, messages)
         _record_usage(agent, response, usage_sink)
+        model_turns += 1
         if diagnostic:
-            _emit("model_turn", _model_turn_data(i + 2, response))
+            _emit("model_turn", _model_turn_data(model_turns, response))
 
     if should_cancel is not None and should_cancel():
         # A stop reached this turn, including one that only interrupted the
@@ -838,14 +840,52 @@ def _run_agent(
         return _tool_loop_exhausted_notice(agent.name)
     text = response.content if hasattr(response, "content") else str(response)
     if _has_knowledge_base_tool(agent):
-        # Grounding-lite: record how the answer's citations compare with what
-        # this turn's searches returned. Recorded, never acted on -- the text
-        # is returned unchanged. Not emitted on the early returns above (a
-        # stop, an exhausted loop): those turns produced no answer to check.
-        _emit(
-            "grounding_checked",
-            check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count).as_trace_data(),
-        )
+        # Grounding-lite: how does the answer's citations compare with what
+        # this turn's searches returned? With the default `observe` policy the
+        # result is recorded and the text returned unchanged -- and the event
+        # payload is byte-identical to the pre-policy one. Not emitted on the
+        # early returns above (a stop, an exhausted loop): those turns
+        # produced no answer to check.
+        result = check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count)
+        policy = agent.grounding_policy
+        retried = False
+        refused = False
+        if policy in ("retry", "refuse") and not result.passes:
+            # One corrective call on the same conversation: the search results
+            # are already in this turn's ToolMessages, so the model needs a
+            # rewrite instruction, not new searches. Exactly one retry -- no
+            # loop. The failing text may already have streamed to a viewer,
+            # so the sink is told to discard it before fresh text arrives.
+            if forward_text and on_token is not None:
+                on_token(STREAM_RESET)
+            messages.append(response)
+            messages.append(HumanMessage(content=GROUNDING_RETRY_INSTRUCTION))
+            retry_response = _call(model, messages)
+            _record_usage(agent, retry_response, usage_sink)
+            model_turns += 1
+            if diagnostic:
+                _emit("model_turn", _model_turn_data(model_turns, retry_response))
+            if should_cancel is not None and should_cancel():
+                # Same contract as the guards above: a stopped agent must not
+                # be recorded as having completed with partial output.
+                return ""
+            retried = True
+            if not getattr(retry_response, "tool_calls", None):
+                text = retry_response.content if hasattr(retry_response, "content") else str(retry_response)
+                result = check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count)
+            # else: a retry that asks for more tools instead of answering is a
+            # failed retry -- the original text and result stand.
+            if policy == "refuse" and not result.passes:
+                # The viewer must not keep a retried-but-still-ungrounded
+                # answer either; the authoritative refusal rides run_completed.
+                refused = True
+                if forward_text and on_token is not None:
+                    on_token(STREAM_RESET)
+                text = GROUNDING_REFUSAL_TEXT
+        data = result.as_trace_data()
+        if policy != "observe":
+            data.update(policy=policy, retried=retried, refused=refused)
+        _emit("grounding_checked", data)
     return text
 
 

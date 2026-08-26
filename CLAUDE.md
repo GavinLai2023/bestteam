@@ -85,8 +85,9 @@ to where the detail and the reasoning live.
 - **Knowledge bases**: no external vector store, no DMS connectors. Types are
   `local_folder` (BM25), `vector` (cosine), `hybrid` (RRF-fused); query
   expansion and reranking are opt-in. Ingestion is incremental, spend is
-  metered, and grounding is *checked, never enforced* — full reference in
-  `docs/KNOWLEDGE_BASES.md`.
+  metered, and grounding is *checked; enforcement is the opt-in per-agent
+  `grounding_policy: observe|retry|refuse`* (default observe = record only) —
+  full reference in `docs/KNOWLEDGE_BASES.md`.
 - **Per-user memory**: BM25-only by default (opt-in hybrid via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`). Semantic records get dedup; procedural
   records do not. Admin view/search/delete only — no manual add/edit, no

@@ -1034,3 +1034,141 @@ def test_a_raising_knowledge_base_tool_call_contributes_nothing_to_grounding():
         "verified": 0,
         "unverified": ["handbook.pdf"],
     }
+
+
+# ---------------------------------------------------------------------------
+# grounding_policy: observe records (exactly as before), retry makes one
+# corrective model call, refuse falls back to the fixed refusal text.
+# ---------------------------------------------------------------------------
+
+from bestteam.core.grounding import (  # noqa: E402
+    GROUNDING_REFUSAL_TEXT,
+    GROUNDING_RETRY_INSTRUCTION,
+)
+
+_TOOL_CALL = AIMessage(
+    content="",
+    tool_calls=[{"name": "product_docs", "args": {"query": "refunds"}, "id": "call_1"}],
+)
+_CITED = "Refunds take 14 days [source: handbook.pdf, p.3 § Refunds]."
+
+
+def _kb_agent(model, policy):
+    return Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3 § Refunds"])],
+        grounding_policy=policy,
+    )
+
+
+def _run_policy(policy, responses):
+    model = _FakeToolCallingChatModel(responses=responses)
+    events = list(_single_agent_pipeline(_kb_agent(model, policy)).stream("refund window?"))
+    final = next(e for e in events if e.type == "agent_completed").data
+    grounding = next(e for e in events if e.type == "grounding_checked").data
+    return final, grounding
+
+
+def test_observe_policy_records_a_failing_answer_without_a_retry():
+    final, grounding = _run_policy(
+        "observe",
+        [_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content=_CITED)],
+    )
+    assert final == "Uncited answer.", "observe must not retry"
+    # Byte-identical to the pre-policy event: no policy/retried/refused keys.
+    assert grounding == {
+        "searches": 1,
+        "hit_count": 1,
+        "cited": 0,
+        "verified": 0,
+        "unverified": [],
+    }
+
+
+def test_retry_policy_makes_one_corrective_call_and_reports_the_final_answer():
+    final, grounding = _run_policy(
+        "retry",
+        [_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content=_CITED)],
+    )
+    assert final == _CITED
+    assert grounding == {
+        "searches": 1,
+        "hit_count": 1,
+        "cited": 1,
+        "verified": 1,
+        "unverified": [],
+        "policy": "retry",
+        "retried": True,
+        "refused": False,
+    }
+
+
+def test_retry_policy_returns_the_retried_answer_even_when_it_still_fails():
+    final, grounding = _run_policy(
+        "retry",
+        [_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content="Still uncited.")],
+    )
+    assert final == "Still uncited."
+    assert grounding["retried"] is True
+    assert grounding["refused"] is False
+    assert grounding["cited"] == 0
+
+
+def test_retry_policy_does_not_touch_a_passing_answer():
+    final, grounding = _run_policy(
+        "retry",
+        [_TOOL_CALL, AIMessage(content=_CITED), AIMessage(content="never reached")],
+    )
+    assert final == _CITED
+    assert grounding["retried"] is False
+    assert grounding["policy"] == "retry"
+
+
+def test_refuse_policy_replaces_a_still_failing_answer_with_the_refusal_text():
+    final, grounding = _run_policy(
+        "refuse",
+        [_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content="Made up [source: fake.pdf].")],
+    )
+    assert final == GROUNDING_REFUSAL_TEXT
+    assert grounding["policy"] == "refuse"
+    assert grounding["retried"] is True
+    assert grounding["refused"] is True
+    # The check describes the answer that WAS refused, not the refusal text.
+    assert grounding["unverified"] == ["fake.pdf"]
+
+
+def test_refuse_policy_leaves_a_passing_answer_untouched():
+    final, grounding = _run_policy(
+        "refuse",
+        [_TOOL_CALL, AIMessage(content=_CITED)],
+    )
+    assert final == _CITED
+    assert grounding["retried"] is False
+    assert grounding["refused"] is False
+
+
+class _MessageRecordingModel(_FakeToolCallingChatModel):
+    """Records the message list of every model call."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        calls = getattr(self, "recorded_calls", None) or []
+        calls.append(list(messages))
+        object.__setattr__(self, "recorded_calls", calls)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def test_retry_call_carries_the_failing_answer_and_the_corrective_instruction():
+    model = _MessageRecordingModel(
+        responses=[_TOOL_CALL, AIMessage(content="Uncited answer."), AIMessage(content=_CITED)]
+    )
+    list(_single_agent_pipeline(_kb_agent(model, "retry")).stream("refund window?"))
+
+    retry_call = model.recorded_calls[-1]
+    assert retry_call[-1].content == GROUNDING_RETRY_INSTRUCTION
+    assert retry_call[-1].type == "human"
+    assert retry_call[-2].content == "Uncited answer.", (
+        "the failing answer must be in the conversation the retry corrects"
+    )

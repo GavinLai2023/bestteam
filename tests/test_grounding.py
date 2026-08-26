@@ -148,3 +148,53 @@ def test_as_trace_data_shape():
     }
     # A fresh list each time -- callers must not be able to mutate the result.
     assert result.as_trace_data()["unverified"] is not result.unverified
+
+
+def test_passes_requires_a_citation_and_no_unverified_labels():
+    def result(cited, verified, unverified):
+        return GroundingResult(
+            searches=1, hit_count=3, cited=cited, verified=verified, unverified=unverified
+        )
+
+    assert result(2, 2, []).passes is True
+    assert result(0, 0, []).passes is False, "an answer with no citations fails"
+    assert result(2, 1, ["made-up.pdf"]).passes is False, "a fabricated tag fails"
+
+
+def _pipeline_yaml(policy_line: str) -> str:
+    return (
+        "name: demo\n"
+        "agents:\n"
+        "  - name: a\n"
+        "    role: Helper\n"
+        "    goal: Answer\n"
+        '    model: "fake:done"\n'
+        f"    {policy_line}\n"
+        "teams:\n"
+        "  - name: t\n"
+        "    agents: [a]\n"
+        "    mode: sequential\n"
+        "pipeline:\n"
+        "  steps: [t]\n"
+    )
+
+
+def test_yaml_grounding_policy_reaches_the_agent(tmp_path):
+    from bestteam.core.loader import load_pipeline
+
+    path = tmp_path / "p.yaml"
+    path.write_text(_pipeline_yaml("grounding_policy: retry"), encoding="utf-8")
+
+    agent = load_pipeline(path).steps[0].agents[0]
+    assert agent.grounding_policy == "retry"
+
+
+def test_yaml_unknown_grounding_policy_is_a_configuration_error(tmp_path):
+    from bestteam.core.loader import load_pipeline
+    from bestteam.exceptions import ConfigurationError
+
+    path = tmp_path / "p.yaml"
+    path.write_text(_pipeline_yaml("grounding_policy: enforce"), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="grounding_policy"):
+        load_pipeline(path)

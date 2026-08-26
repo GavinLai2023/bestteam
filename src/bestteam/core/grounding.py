@@ -52,6 +52,31 @@ CITATION_TAG = re.compile(r"\[source:\s*([^\]]*?)\s*\]")
 MAX_UNVERIFIED = 10
 MAX_LABEL_CHARS = 200
 
+#: What an agent's turn does with a failed check (`Agent.grounding_policy`).
+#: `observe` records only -- byte-for-byte the pre-policy behaviour and the
+#: default; `retry` makes one corrective model call; `refuse` retries once
+#: and, still failing, returns `GROUNDING_REFUSAL_TEXT` instead of the answer.
+GROUNDING_POLICIES = ("observe", "retry", "refuse")
+
+#: The corrective instruction a `retry`/`refuse` turn appends as a user
+#: message. The turn's search results are already in the conversation's tool
+#: messages, so the model needs no new searches -- only a rewrite.
+GROUNDING_RETRY_INSTRUCTION = (
+    "Your previous answer failed a citation check. Rewrite it using ONLY "
+    "information from the search results earlier in this conversation, and "
+    "cite each claim with the exact [source: ...] tag the search returned. "
+    "If the search results do not contain the answer, say the knowledge base "
+    "does not contain the answer -- do not guess."
+)
+
+#: What a `refuse` turn returns when the retried answer still fails --
+#: deterministic, so downstream consumers can recognise a refused answer.
+GROUNDING_REFUSAL_TEXT = (
+    "I can't provide this answer: it could not be verified against the "
+    "knowledge base's search results. Please rephrase the question, or "
+    "consult the source documents directly."
+)
+
 # What ``knowledge_base._citation`` appends after the filename: a page
 # (``, p.3``) and/or a heading (`` § Refunds``). A label with neither is a
 # bare filename.
@@ -87,6 +112,13 @@ class GroundingResult:
     verified: int
     #: The rest, in order of first appearance, bounded.
     unverified: List[str]
+
+    @property
+    def passes(self) -> bool:
+        """The policy bar: at least one citation, every one of them verified.
+        No tags at all fails too -- an uncited answer from a knowledge-base
+        agent is exactly what `retry`/`refuse` exist to correct."""
+        return self.cited > 0 and not self.unverified
 
     def as_trace_data(self) -> Dict[str, Any]:
         """The ``grounding_checked`` event's ``data`` -- a fresh dict, fresh list."""

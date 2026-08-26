@@ -136,8 +136,13 @@ export function renderEventData(event: TraceEvent): string | null {
         `${(data.verified as number | undefined) ?? 0} verified`,
       ]
       const unverified = (data.unverified as string[] | undefined) ?? []
-      const line = parts.join(' · ')
-      return unverified.length > 0 ? `${line} — unverified: ${unverified.join(', ')}` : line
+      let line = parts.join(' · ')
+      if (unverified.length > 0) line += ` — unverified: ${unverified.join(', ')}`
+      // grounding_policy (retry/refuse): say when the policy acted. Absent
+      // under the default observe policy, so the line is unchanged there.
+      if (data.retried === true) line += ' — retried'
+      if (data.refused === true) line += ' — answer refused'
+      return line
     }
     default:
       return JSON.stringify(data)

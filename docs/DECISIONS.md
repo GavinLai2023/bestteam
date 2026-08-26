@@ -494,3 +494,35 @@ Append new entries at the bottom using this template:
     layout/formula/embedded-image fidelity. Fetching individual MIME parts is
     also absent — `BODY.PEEK[]` pulls the whole message, so a large attachment
     costs memory even when nothing reads it.
+
+## Grounding enforcement is a per-agent opt-in, and the default stays record-only (2026-08-26)
+
+**Decision**: `Agent.grounding_policy: observe | retry | refuse`, default
+`observe`. The grounding-lite ruling ("checked, never enforced",
+2026-08-24) stays the platform default; enforcement exists only where a
+customer turns it on for a specific agent.
+
+**Why per-agent and opt-in**: the failure the policy guards against — an
+answer whose citations its own searches cannot back — is only worth a paid
+corrective call (retry) or a refused answer (refuse) where a wrong answer is
+expensive: prices, policy, compliance, contracts. For an ordinary internal
+assistant a refusal is worse than an imperfectly-cited answer, and `refuse`
+deliberately refuses *any* unverifiable answer, including every turn whose
+searches returned nothing. A global switch would force one trade-off on
+every agent in a pipeline; the per-agent field lets one team mix a `refuse`
+pricing agent with `observe` colleagues.
+
+**Shape rulings**:
+
+- The bar is citation-level (at least one tag, all verified) — claim-level
+  entailment and grader models remain out of scope, as ruled in the
+  grounding-lite spec.
+- Exactly one retry, on the same conversation. The turn's hits are already
+  in its ToolMessages; a rewrite instruction is cheaper and more reliable
+  than a fresh search loop, and a bounded policy cannot loop a bill.
+- The refusal text is a fixed constant, so downstream consumers can
+  recognise a refused answer deterministically.
+- With `observe` the `grounding_checked` event stays byte-identical to the
+  pre-policy payload; the three new fields (`policy`, `retried`, `refused`)
+  appear only when a policy is set — dashboards keyed on the exact shape
+  keep working.
