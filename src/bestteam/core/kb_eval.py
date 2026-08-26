@@ -41,7 +41,11 @@ DEFAULT_TOP_K = 3
 DEFAULT_CHUNK_SIZE = 300
 DEFAULT_CHUNK_OVERLAP = 50
 
-_KINDS = ("lexical", "paraphrase")
+# `lexical`/`paraphrase` classify the bundled easy set; the last four
+# classify the hard set's failure modes (tests/fixtures/kb_eval_hard/
+# queries.yaml documents each). `report_for` + the CLI group by kind
+# generically, so a kind is just a label with a documented meaning.
+_KINDS = ("lexical", "paraphrase", "table", "long", "distractor", "crosslingual")
 
 
 @dataclass(frozen=True)

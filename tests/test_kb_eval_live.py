@@ -30,6 +30,18 @@ margin for provider drift:
 Hybrid's paraphrase hit@1 was only 0.25 -- the BM25 leg outranks the vector
 leg on an RRF tie (a documented side effect, `core/CLAUDE.md`) -- which is
 why the gate holds recall@3, not hit@1.
+
+The HARD set (`tests/fixtures/kb_eval_hard/` -- answers in CSV tables, facts
+buried in long documents, near-identical sibling documents, Chinese queries
+over English-only documents) is gated here too. Measured 2026-08-26, both
+vector and hybrid scored recall@3 1.00 on every kind. Two shapes worth
+knowing from that measurement, neither a failure:
+
+  - vector ranked the ENGLISH handbook first for two Chinese long-document
+    queries (the EN/ZH handbook pair is itself a cross-language distractor);
+    the right document was rank 2, inside recall@3.
+  - hybrid's crosslingual hit@1 was 0.00 -- the same BM25-leg tie preference
+    as the paraphrase queries above -- with every right document at rank 2-3.
 """
 import os
 from pathlib import Path
@@ -63,6 +75,7 @@ pytestmark = pytest.mark.optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GOLDEN_SET = Path(__file__).parent / "fixtures" / "kb_eval"
+_HARD_SET = Path(__file__).parent / "fixtures" / "kb_eval_hard"
 _EMBEDDING_MODEL = "openai:text-embedding-3-small"
 _CACHE_PATH = _REPO_ROOT / ".bestteam_cache" / "kb_eval_live.json"
 
@@ -73,18 +86,29 @@ _OVERALL_FLOOR = 0.90     # 18 of 20
 _LEXICAL_FLOOR = 0.9375   # 15 of 16
 _PARAPHRASE_FLOOR = 0.75  # 3 of 4
 
+# Hard-set recall@3 floors, same one-query-of-slack calibration from the
+# measured 1.00s. `crosslingual` is the load-bearing bucket (BM25 scores 0 on
+# it by construction, so only the embedding model holds it up).
+_HARD_OVERALL_FLOOR = 0.90        # 16 of 17
+_HARD_KIND_FLOORS = {
+    "table": 0.75,         # 3 of 4
+    "long": 0.75,          # 3 of 4
+    "distractor": 0.80,    # 4 of 5
+    "crosslingual": 0.75,  # 3 of 4
+}
 
-def _report(kb_cls) -> EvalReport:
+
+def _report(kb_cls, golden_set: Path = _GOLDEN_SET) -> EvalReport:
     kb = kb_cls(
         "golden_live",
-        _GOLDEN_SET / "docs",
+        golden_set / "docs",
         embedding_model=_EMBEDDING_MODEL,
         chunk_size=DEFAULT_CHUNK_SIZE,
         chunk_overlap=DEFAULT_CHUNK_OVERLAP,
         top_k=DEFAULT_TOP_K,
         cache_path=_CACHE_PATH,
     )
-    return evaluate(kb, load_queries(_GOLDEN_SET / "queries.yaml"), DEFAULT_TOP_K)
+    return evaluate(kb, load_queries(golden_set / "queries.yaml"), DEFAULT_TOP_K)
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +119,16 @@ def vector_report() -> EvalReport:
 @pytest.fixture(scope="module")
 def hybrid_report() -> EvalReport:
     return _report(HybridKnowledgeBase)
+
+
+@pytest.fixture(scope="module")
+def hard_vector_report() -> EvalReport:
+    return _report(VectorKnowledgeBase, _HARD_SET)
+
+
+@pytest.fixture(scope="module")
+def hard_hybrid_report() -> EvalReport:
+    return _report(HybridKnowledgeBase, _HARD_SET)
 
 
 def _kind(report: EvalReport, kind: str) -> EvalReport:
@@ -151,3 +185,31 @@ def test_hybrid_meets_release_floors(hybrid_report):
     """Hybrid must keep BOTH legs' strengths: BM25's lexical scores AND the
     vector leg's paraphrase recovery must survive RRF fusion."""
     _assert_floors(hybrid_report, "hybrid")
+
+
+def _assert_hard_floors(report: EvalReport, label: str) -> None:
+    failures = []
+    if report.recall_at_k < _HARD_OVERALL_FLOOR:
+        failures.append(f"overall {report.recall_at_k:.2f} (floor {_HARD_OVERALL_FLOOR})")
+    for kind, floor in _HARD_KIND_FLOORS.items():
+        recall = _kind(report, kind).recall_at_k
+        if recall < floor:
+            failures.append(f"{kind} {recall:.2f} (floor {floor})")
+    assert not failures, (
+        f"{label} recall@{report.top_k} on the HARD set below the release "
+        f"floor: {'; '.join(failures)}.\nMissed:\n{_misses(report)}"
+    )
+
+
+def test_vector_meets_hard_set_floors(hard_vector_report):
+    """The hard set's failure modes -- table cells, buried facts, sibling
+    distractors, crosslingual -- under the production default embedding
+    model. Crosslingual is the bucket only the embedding model can hold."""
+    _assert_hard_floors(hard_vector_report, "vector")
+
+
+def test_hybrid_meets_hard_set_floors(hard_hybrid_report):
+    """RRF fusion must not surrender what either leg wins on the hard set --
+    in particular the vector leg's crosslingual recovery (where the BM25 leg
+    contributes only noise) has to survive fusion into the top 3."""
+    _assert_hard_floors(hard_hybrid_report, "hybrid")
