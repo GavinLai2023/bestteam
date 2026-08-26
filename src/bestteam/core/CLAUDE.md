@@ -147,6 +147,10 @@ shared significant terms, so BM25 misses them by design — they are the headroo
 a real embedding model should close, and why the guarded thresholds are
 recall@3 ≥ 0.8 / MRR ≥ 0.7 rather than 1.0). `fake:` embeddings are
 deterministic noise, so the hybrid test is a smoke test asserting no quality.
+Real-model quality is gated by `tests/test_kb_eval_live.py` (`optional`
+marker, self-skips without `OPENAI_API_KEY`, run by hand pre-release):
+recall@3 floors for `vector`/`hybrid` under the deployment-default embedding
+model, calibrated 2026-08-26 — paraphrase ≥ 3/4 is the load-bearing one.
 
 ### YAML
 

@@ -6,6 +6,17 @@
 
 ## Done
 
+- **Release gate: retrieval quality under a real embedding model**
+  (2026-08-26). `tests/test_kb_eval_live.py` (`optional` marker, self-skips
+  without `OPENAI_API_KEY` so CI needs no secret) runs the bundled golden
+  set against `vector` and `hybrid` under
+  `openai:text-embedding-3-small` and holds recall@3 floors calibrated from
+  the first real measurement (vector and hybrid both 1.00 overall):
+  overall ≥ 0.90, lexical ≥ 15/16, paraphrase ≥ 3/4 — the last being the
+  proof the embedding model closes the gap BM25 misses by construction,
+  which the `fake:` smoke tests structurally cannot show. Run by hand
+  pre-release; chunk embeddings cache in `.bestteam_cache/kb_eval_live.json`
+  (< $0.01 a run). Docs: `docs/KNOWLEDGE_BASES.md` "The release gate".
 - **User feedback: defects/suggestions from the app and share links, admin
   triage** (2026-08-26, spec
   `docs/superpowers/specs/2026-08-26-feedback-system-design.md`). One

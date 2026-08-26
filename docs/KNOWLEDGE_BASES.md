@@ -1030,9 +1030,31 @@ character bigrams.
 
 Retrieval only. Nothing here scores the *answer* an agent then writes, and
 there is no regression baseline stored on disk to compare a run against — the
-numbers are printed, not tracked over time. There is also no fixture for the
-`vector`/`hybrid` types under a *real* embedding model: those runs cost money,
-so they are run by hand, and only the `fake:`-embedding smoke test runs in CI.
+numbers are printed, not tracked over time.
+
+### The release gate (real embedding model)
+
+`fake:` runs prove the harness; only a real model says anything about
+quality, and those runs cost money — so they live behind the `optional`
+marker in `tests/test_kb_eval_live.py` and are run **by hand before a
+release**, never by CI (the module skips itself when `OPENAI_API_KEY` is
+unset):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_kb_eval_live.py -m optional
+```
+
+It runs the bundled golden set against `vector` and `hybrid` knowledge bases
+under `openai:text-embedding-3-small` (the documented deployment default)
+and fails if recall@3 drops below the floors calibrated from the 2026-08-26
+measurement: overall ≥ 0.90, lexical ≥ 15/16, **paraphrase ≥ 3/4** — the
+last one being the point: the four queries BM25 misses by construction must
+be recovered by the embedding model, which the `fake:` smoke tests
+structurally cannot show. Chunk embeddings persist in the gitignored
+`.bestteam_cache/kb_eval_live.json`, so a full run costs well under $0.01
+and re-runs pay only the query embeddings. The measured baselines are
+recorded in the test module's docstring; recalibrate them in the same commit
+that changes chunking, fusion or the golden set.
 
 ## Known limitations
 
