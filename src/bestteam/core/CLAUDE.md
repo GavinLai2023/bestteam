@@ -161,8 +161,9 @@ live gate holds the real-model floors. `tests/test_kb_eval_rerank_live.py`
 cross-encoder (`BAAI/bge-reranker-base` — mmarco-mMiniLMv2 FAILED this gate
 by preferring parallel translated documents): same floors reranked, plus
 "reranking loses at most one query vs the same run unreranked" — and it
-asserts `rerank_score` is populated first, because rerank failure is
-fail-soft and would otherwise pass the floors without ever reranking.
+asserts `rerank_score` is populated on **every** gated query first, because
+rerank failure is fail-soft and per-pair, so the floors' slack would
+otherwise absorb a query that was never reranked at all.
 
 ### YAML
 

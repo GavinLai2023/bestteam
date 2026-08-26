@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { useConfirm } from '../../lib/useConfirm'
 import { pickDefaultModel } from '../../lib/models'
 import { useModelCatalog } from '../../lib/useModelCatalog'
-import type { WizardOutletContext } from '../../lib/types'
+import type { OrgKnowledgeBase, WizardOutletContext } from '../../lib/types'
 
 type Stage = null | 'uploading' | 'ingesting' | 'generating'
 
@@ -70,12 +70,50 @@ export default function DocumentsPage() {
   // the toggle only ever appears when the operator opted the deployment in.
   const [smartSearch, setSmartSearch] = useState(true)
 
+  // The org's own collections, fetched once so this page can show what's
+  // already in a collection instead of only finding out at 409-time.
+  const [existingKbs, setExistingKbs] = useState<OrgKnowledgeBase[]>([])
+  // The filename currently being removed from an already-ingested
+  // collection, so only one removal request is in flight at a time.
+  const [removingFile, setRemovingFile] = useState<string | null>(null)
+  // A failed removal gets its own banner beside the file list rather than the
+  // page-wide `error` one, whose "Try Again" runs `proceed()` -- spec
+  // generation, a billable model call, and not what failed (Codex review).
+  const [removalError, setRemovalError] = useState<string | null>(null)
+  // Set once an upload to a collection that already existed before this visit
+  // finishes ingesting -- pauses here so the customer sees the merged
+  // old+new file list before the page moves on to spec generation.
+  const [reviewingSlug, setReviewingSlug] = useState<string | null>(null)
+
   useEffect(() => {
     api
       .orgKnowledgeBaseCapabilities()
       .then((caps) => setSmartSearchAvailable(caps.smart_search_available))
       .catch(() => setSmartSearchAvailable(false))
   }, [])
+
+  useEffect(() => {
+    api
+      .listOwnKnowledgeBases()
+      .then(setExistingKbs)
+      .catch(() => setExistingKbs([]))
+  }, [])
+
+  // Which of the org's existing collections this team's agents already
+  // search -- ground truth from each agent's own tool list, never a guess:
+  // a collection name can never collide with a built-in/skill tool name
+  // (enforced at deploy time), so this intersection is exact.
+  const usedKbNames = useMemo(() => {
+    if (!session?.specification_json) return []
+    const referenced = new Set(session.specification_json.agents.flatMap((a) => a.tools ?? []))
+    return existingKbs.map((kb) => kb.name).filter((name) => referenced.has(name))
+  }, [session, existingKbs])
+
+  // The name to act on: whatever the customer typed or picked, falling back
+  // to the one collection detection resolved to -- derived at render rather
+  // than copied into `label` via an effect, so there's no separate "did we
+  // already prefill it" state to keep in sync.
+  const effectiveLabel = label || (usedKbNames.length === 1 ? usedKbNames[0] : '')
 
   if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
@@ -98,10 +136,120 @@ export default function DocumentsPage() {
     setFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
+  // An existing collection's name IS the identifier the backend stores it
+  // under, and the server's charset allows hyphens and capitals `slugify`
+  // would rewrite -- so a name that already exists is passed through
+  // verbatim and only a new free-text label is slugified. Slugifying it
+  // pointed the page, and the upload, at a different collection that does
+  // not exist (Codex review).
+  const resolveKbName = (raw: string): string => {
+    const trimmed = raw.trim()
+    return existingKbs.some((kb) => kb.name === trimmed) ? trimmed : slugify(trimmed)
+  }
+
+  const currentSlug = resolveKbName(effectiveLabel)
+  const currentKb = existingKbs.find((kb) => kb.name === currentSlug) ?? null
+
+  // Why Remove is refused, in the reader's own terms, or null when it's
+  // allowed -- the two cases `DELETE /{name}/documents/{filename}` 409s on.
+  // The backend stays the authority; this only saves a pointless click.
+  const removeBlockedReason = (kb: OrgKnowledgeBase, filename: string): string | null => {
+    if (kb.latest_job?.status === 'queued' || kb.latest_job?.status === 'running') {
+      return t('wizard.documents.removeExistingBlockedProcessing')
+    }
+    const readableAfter = kb.documents.filter(
+      (doc) => doc.status === 'chunked' && doc.filename !== filename,
+    )
+    if (readableAfter.length === 0) return t('wizard.documents.removeExistingBlockedOnly')
+    return null
+  }
+
+  const confirmAndRemoveExistingFile = async (kb: OrgKnowledgeBase, filename: string) => {
+    const ok = await confirm({
+      title: t('wizard.documents.removeExistingConfirmTitle', { name: filename }),
+      // A collection can be shared: removal changes what *every* team
+      // searching it can answer from, so the confirmation names them.
+      body: kb.used_by.length > 0
+        ? t('wizard.documents.removeExistingConfirmBodyShared', {
+            kb: kb.name,
+            teams: kb.used_by.join(', '),
+          })
+        : t('wizard.documents.removeExistingConfirmBody', { kb: kb.name }),
+      confirmLabel: t('wizard.documents.removeExistingFile', { name: filename }),
+      destructive: true,
+    })
+    if (!ok) return
+    setRemovingFile(filename)
+    setRemovalError(null)
+    try {
+      const result = await api.removeOwnKnowledgeBaseDocument(kb.name, filename)
+      const job = await pollIngestionJob(kb.name, result.job_id)
+      if (job === null) {
+        setNotice(t('wizard.documents.stillProcessing'))
+      } else if (job.status === 'failed') {
+        const detail = job.errors[0]?.error
+        setRemovalError(
+          detail
+            ? t('wizard.documents.processingFailedDetail', { detail })
+            : t('wizard.documents.processingFailed'),
+        )
+      }
+      setExistingKbs(await api.listOwnKnowledgeBases())
+    } catch (e) {
+      setRemovalError((e as Error).message)
+    } finally {
+      setRemovingFile(null)
+    }
+  }
+
+  // The tail shared by a fresh upload and by clicking Continue on the
+  // post-upload review panel: generate (or refine) the specification and
+  // move on. `kbHintSlug` is the collection just uploaded to, or null when
+  // there were no files (skip, or a review the customer opened with nothing
+  // new to add).
+  const finishWithSpecGeneration = async (kbHintSlug: string | null) => {
+    setStage('generating')
+    try {
+      // Tell the architect exactly which knowledge base was just uploaded --
+      // without this it only sees the org's whole KB catalog, which can
+      // leave a new upload unattached (or the wrong one picked) if the org
+      // already has other collections (Codex review finding).
+      const kbHint = kbHintSlug
+        ? `The customer just uploaded documents to a knowledge base named "${kbHintSlug}". Make sure at least one agent's tools includes it.`
+        : ''
+      // Revisiting this page after a specification already exists (the
+      // Confirm page's "add or update documents" link) must refine that
+      // design, not regenerate one from scratch -- regenerating silently
+      // discards any solution feedback already applied (Codex review finding).
+      const updated = session.specification_json
+        ? await api.submitSolution(sessionId!, { feedback: kbHint, model: pickDefaultModel(entries) })
+        : await api.submitSpecification(sessionId!, { model: pickDefaultModel(entries), feedback: kbHint || undefined })
+      setSession(updated)
+      navigate(`/wizard/${sessionId}/preview`)
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+      setStage(null)
+    }
+  }
+
+  const continueFromReview = () => {
+    const slug = reviewingSlug
+    setReviewingSlug(null)
+    setError(null)
+    setBusy(true)
+    void finishWithSpecGeneration(slug)
+  }
+
   const proceed = async (skip: boolean) => {
     if (busy || catalogLoading || catalogUnavailable) return
     const useFiles = !skip && files.length > 0
-    const slug = slugify(label)
+    const slug = resolveKbName(effectiveLabel)
+    // Whether this collection existed before this visit. Seeded from the
+    // list fetched on load, but that request can fail or still be in flight,
+    // so the name-conflict 409 below -- which proves it exists -- sets it too
+    // (Codex review).
+    let knownToExist = existingKbs.some((kb) => kb.name === slug)
     if (useFiles && !slug) {
       setError(t('wizard.documents.nameRequired'))
       return
@@ -145,6 +293,7 @@ export default function DocumentsPage() {
             setStage(null)
             return
           }
+          knownToExist = true
           const mode = answer === 'alternate' ? 'add' : 'replace'
           try {
             uploadResult = await api.uploadOwnKnowledgeBaseFiles(slug, files, mode, smartSearchEnabled, kbDescription)
@@ -185,6 +334,23 @@ export default function DocumentsPage() {
           setStage(null)
           return
         }
+        // A collection that already existed before this visit (detected on
+        // load, or discovered just now via the name-conflict dialog above)
+        // pauses here so the customer sees the merged old+new file list
+        // before the page moves on -- a brand-new collection has nothing to
+        // show yet, so it proceeds straight through as before.
+        if (knownToExist) {
+          try {
+            setExistingKbs(await api.listOwnKnowledgeBases())
+          } catch {
+            // Best-effort refresh -- the review panel falls back to what it
+            // already had rather than blocking on this.
+          }
+          setReviewingSlug(slug)
+          setBusy(false)
+          setStage(null)
+          return
+        }
       } catch (e) {
         setError((e as Error).message)
         setBusy(false)
@@ -193,29 +359,29 @@ export default function DocumentsPage() {
       }
     }
 
-    setStage('generating')
-    try {
-      // Tell the architect exactly which knowledge base was just uploaded --
-      // without this it only sees the org's whole KB catalog, which can
-      // leave a new upload unattached (or the wrong one picked) if the org
-      // already has other collections (Codex review finding).
-      const kbHint = useFiles
-        ? `The customer just uploaded documents to a knowledge base named "${slug}". Make sure at least one agent's tools includes it.`
-        : ''
-      // Revisiting this page after a specification already exists (the
-      // Confirm page's "add or update documents" link) must refine that
-      // design, not regenerate one from scratch -- regenerating silently
-      // discards any solution feedback already applied (Codex review finding).
-      const updated = session.specification_json
-        ? await api.submitSolution(sessionId!, { feedback: kbHint, model: pickDefaultModel(entries) })
-        : await api.submitSpecification(sessionId!, { model: pickDefaultModel(entries), feedback: kbHint || undefined })
-      setSession(updated)
-      navigate(`/wizard/${sessionId}/preview`)
-    } catch (e) {
-      setError((e as Error).message)
-      setBusy(false)
-      setStage(null)
-    }
+    await finishWithSpecGeneration(useFiles ? slug : null)
+  }
+
+  if (reviewingSlug) {
+    const kb = existingKbs.find((k) => k.name === reviewingSlug) ?? null
+    return (
+      <div className="wizard-card">
+        <h2>{t('wizard.documents.reviewTitle', { name: reviewingSlug })}</h2>
+        {kb && kb.documents.length > 0 && (
+          <ul className="tag-list" style={{ marginBottom: 16 }}>
+            {kb.documents.map((doc) => (
+              <li key={doc.filename}>{doc.filename}</li>
+            ))}
+          </ul>
+        )}
+        <div className="wizard-actions">
+          <button className="btn btn-primary" onClick={continueFromReview}>
+            {t('common.continue')}
+          </button>
+        </div>
+        {confirmNode}
+      </div>
+    )
   }
 
   return (
@@ -255,12 +421,52 @@ export default function DocumentsPage() {
         <input
           id="doc-label"
           type="text"
-          value={label}
+          value={effectiveLabel}
           onChange={(e) => setLabel(e.target.value)}
           placeholder={t('wizard.documents.namePlaceholder')}
           disabled={busy}
         />
       </div>
+
+      {usedKbNames.length > 1 && !currentKb && (
+        <div className="banner banner-info">
+          <p>{t('wizard.documents.pickCollectionHint')}</p>
+          <div className="wizard-actions" style={{ justifyContent: 'flex-start', gap: 8 }}>
+            {usedKbNames.map((name) => (
+              <button key={name} type="button" className="btn btn-secondary" onClick={() => setLabel(name)}>
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {currentKb && currentKb.documents.length > 0 && (
+        <div className="field">
+          <p className="hint">{t('wizard.documents.existingFilesTitle', { name: currentKb.name })}</p>
+          {removalError && <div className="banner banner-error">{removalError}</div>}
+          <ul className="tag-list" style={{ marginBottom: 16 }}>
+            {currentKb.documents.map((doc) => {
+              const blocked = removeBlockedReason(currentKb, doc.filename)
+              return (
+                <li key={doc.filename}>
+                  {doc.filename}{' '}
+                  <button
+                    type="button"
+                    onClick={() => void confirmAndRemoveExistingFile(currentKb, doc.filename)}
+                    disabled={busy || removingFile !== null || blocked !== null}
+                    aria-label={t('wizard.documents.removeExistingFile', { name: doc.filename })}
+                    title={blocked ?? t('wizard.documents.removeExistingFile', { name: doc.filename })}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
+                  >
+                    ×
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
 
       <div className="field">
         <label htmlFor="doc-description">
@@ -343,7 +549,7 @@ export default function DocumentsPage() {
         <button
           className="btn btn-primary"
           onClick={() => proceed(false)}
-          disabled={busy || catalogLoading || catalogUnavailable || (files.length > 0 && !slugify(label))}
+          disabled={busy || catalogLoading || catalogUnavailable || (files.length > 0 && !currentSlug)}
         >
           {busy ? stageLabel() : t('common.continue')}
         </button>

@@ -6,6 +6,18 @@
 
 ## Done
 
+- **DocumentsPage shows an existing team's KB files instead of a blank name
+  field** (2026-08-26). Revisiting the wizard's "Your documents" step for a
+  team that already searches a collection now detects which one from
+  `session.specification_json.agents[].tools` (exact match against the org's
+  own KB names, never a guess), prefills/pickers it, lists its files inline
+  with per-file Remove, and pauses on a merged old+new review panel after an
+  upload to an existing collection before continuing to spec generation — a
+  brand-new collection still proceeds straight through unchanged. Frontend
+  only, reusing endpoints `KnowledgeBasesPanel.tsx` already used
+  (`listOwnKnowledgeBases`/`removeOwnKnowledgeBaseDocument`); no backend or
+  schema change. See `ui/frontend/CLAUDE.md`.
+
 - **Hard golden set + real cross-encoder rerank gate** (2026-08-26).
   `tests/fixtures/kb_eval_hard/`: 11 documents / 17 queries across four new
   query kinds — `table` (answer is a CSV cell), `long` (fact buried late in

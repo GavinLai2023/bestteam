@@ -12,6 +12,8 @@ vi.mock('../../lib/api', () => ({
     orgKnowledgeBaseCapabilities: vi.fn(),
     uploadOwnKnowledgeBaseFiles: vi.fn(),
     orgKnowledgeBaseUploadJob: vi.fn(),
+    listOwnKnowledgeBases: vi.fn(),
+    removeOwnKnowledgeBaseDocument: vi.fn(),
     submitSpecification: vi.fn(),
     submitSolution: vi.fn(),
   },
@@ -55,12 +57,55 @@ const sessionWithSpec = (): BuilderSession => ({
   updated_at: '2026-08-09T00:00:00Z',
 })
 
+// A session whose agents already reference one or more knowledge-base tool
+// names -- ground truth for which existing collection(s) this team searches.
+const sessionUsingKbs = (...kbNames: string[]): BuilderSession => ({
+  id: 's1',
+  status: 'spec',
+  intent_text: 'reply to customer emails',
+  specification_json: {
+    name: 'support_workflow',
+    agents: [{ name: 'analyst', tools: kbNames }],
+    teams: [],
+  },
+  updated_at: '2026-08-09T00:00:00Z',
+})
+
+const orgKb = (
+  name: string,
+  filenames: string[],
+  extra: Partial<import('../../lib/types').OrgKnowledgeBase> = {},
+): import('../../lib/types').OrgKnowledgeBase => ({
+  name,
+  description: null,
+  type: 'local_folder',
+  updated_at: '2026-08-09T00:00:00Z',
+  used_by: [],
+  servable: true,
+  latest_job: null,
+  documents: filenames.map((filename) => ({ filename, status: 'chunked', size_bytes: 42 })),
+  previous_generation: null,
+  ...extra,
+})
+
+const processingJob = {
+  job_id: 7,
+  status: 'running' as const,
+  file_count: 1,
+  documents_succeeded: 0,
+  documents_failed: 0,
+  chunk_count: 0,
+  errors: [],
+  retryable: false,
+}
+
 describe('DocumentsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockContext = { session: freshSession(), setSession: vi.fn(), loading: false, sessionId: 's1' }
     mockedApi.modelCatalog.mockResolvedValue([{ spec: 'openai:gpt-4o-mini', display_name: 'GPT-4o mini' }])
     mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: false })
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([])
     mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({
       job_id: 1,
       status: 'completed',
@@ -432,5 +477,252 @@ describe('DocumentsPage', () => {
     })
 
     expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledTimes(1)
+  })
+
+  it('prefills the name and lists the files already there when the team uses exactly one existing collection', async () => {
+    mockContext = { session: sessionUsingKbs('product_policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([orgKb('product_policies', ['policy.txt'])])
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/what should we call these documents/i)).toHaveValue('product_policies'),
+    )
+    expect(await screen.findByText('Files already in "product_policies"')).toBeInTheDocument()
+    expect(screen.getByText('policy.txt')).toBeInTheDocument()
+  })
+
+  it('offers a picker instead of guessing when the team uses more than one existing collection', async () => {
+    mockContext = {
+      session: sessionUsingKbs('policies_a', 'policies_b'),
+      setSession: vi.fn(),
+      loading: false,
+      sessionId: 's1',
+    }
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      orgKb('policies_a', ['a.txt']),
+      orgKb('policies_b', ['b.txt']),
+    ])
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    await screen.findByText('Your team already searches more than one collection. Which one are you updating?')
+    expect(screen.getByLabelText(/what should we call these documents/i)).toHaveValue('')
+    expect(screen.queryByText('a.txt')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('policies_b'))
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/what should we call these documents/i)).toHaveValue('policies_b'),
+    )
+    expect(screen.getByText('b.txt')).toBeInTheDocument()
+  })
+
+  it('removes a file already in the collection and refreshes the list', async () => {
+    mockContext = { session: sessionUsingKbs('product_policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    // Reset rather than chain onto whatever's left in the queue -- a prior
+    // test's unconsumed `mockResolvedValueOnce` would otherwise leak in,
+    // since `vi.clearAllMocks()` in beforeEach clears call history but not
+    // queued once-implementations.
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    // Two documents, because removing the last readable one is a 409 the
+    // page now refuses up front.
+    mockedApi.listOwnKnowledgeBases
+      .mockResolvedValueOnce([orgKb('product_policies', ['policy.txt', 'keepme.txt'])])
+      .mockResolvedValueOnce([orgKb('product_policies', ['keepme.txt'])])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockResolvedValue({ name: 'product_policies', job_id: 9, status: 'queued' })
+    mockedApi.orgKnowledgeBaseUploadJob.mockResolvedValue({
+      job_id: 9, status: 'completed', file_count: 0, documents_succeeded: 0, documents_failed: 0,
+      chunk_count: 0, errors: [], config: {},
+    })
+
+    renderPage()
+    await screen.findByText('Files already in "product_policies"')
+
+    fireEvent.click(screen.getByRole('button', { name: /remove policy\.txt/i }))
+    await screen.findByText('Cancel')
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
+    await waitFor(() =>
+      expect(mockedApi.removeOwnKnowledgeBaseDocument).toHaveBeenCalledWith('product_policies', 'policy.txt'),
+    )
+    await waitFor(() => expect(screen.queryByText('policy.txt')).not.toBeInTheDocument())
+  })
+
+  it('pauses after uploading to an existing collection to show the merged file list before continuing', async () => {
+    mockContext = { session: sessionUsingKbs('policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    // Reset rather than chain onto whatever's left in the queue -- see the
+    // comment on the same call in the previous test.
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases
+      .mockResolvedValueOnce([orgKb('policies', ['oldfile.txt'])])
+      .mockResolvedValueOnce([orgKb('policies', ['oldfile.txt', 'newfile.txt'])])
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
+    // Reset first -- a cancelled name-conflict dialog in an earlier test
+    // deliberately leaves its retry value unconsumed in the queue (it never
+    // gets that far), and `vi.clearAllMocks()` doesn't drain queued
+    // once-implementations, only call history.
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockReset()
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockRejectedValueOnce(
+      Object.assign(new Error("'policies' already exists."), { status: 409 }),
+    )
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.submitSolution.mockResolvedValue(sessionUsingKbs('policies'))
+
+    renderPage()
+    await screen.findByText('Files already in "policies"')
+
+    const file = new File(['x'], 'newfile.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+    // Wait for the name-conflict dialog outside `act` (as the other tests
+    // using this helper do) before answering it inside one.
+    await screen.findByText('Cancel')
+    await act(async () => {
+      await answerConfirm(true) // "Replace everything" / "Add to it" dialog
+    })
+
+    await screen.findByText('Here’s what "policies" contains now')
+    expect(screen.getByText('oldfile.txt')).toBeInTheDocument()
+    expect(screen.getByText('newfile.txt')).toBeInTheDocument()
+    expect(mockedApi.submitSolution).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('Continue'))
+    await waitFor(() => expect(mockedApi.submitSolution).toHaveBeenCalled())
+    expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/preview')
+  })
+
+  it('keeps an existing collection’s own name instead of slugifying it into a different one', async () => {
+    // The server's charset allows hyphens and capitals, so a collection can
+    // legally be named `support-docs`. Slugifying a name that already exists
+    // points the page (and the upload) at `support_docs` -- a different,
+    // non-existent collection (Codex review finding).
+    mockContext = { session: sessionUsingKbs('support-docs'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([orgKb('support-docs', ['policy.txt', 'faq.txt'])])
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockReset()
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValue({ name: 'support-docs', job_id: 1, status: 'queued' })
+
+    renderPage()
+    await screen.findByText('Files already in "support-docs"')
+    expect(screen.getByLabelText(/what should we call these documents/i)).toHaveValue('support-docs')
+
+    const file = new File(['x'], 'newfile.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+    fireEvent.click(screen.getByText('Continue'))
+
+    await waitFor(() =>
+      expect(mockedApi.uploadOwnKnowledgeBaseFiles).toHaveBeenCalledWith('support-docs', [file], '', false, undefined),
+    )
+  })
+
+  it('disables Remove for the only readable document instead of offering a call the backend refuses', async () => {
+    mockContext = { session: sessionUsingKbs('policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([orgKb('policies', ['policy.txt'])])
+
+    renderPage()
+    await screen.findByText('Files already in "policies"')
+
+    const button = screen.getByRole('button', { name: /remove policy\.txt/i })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', expect.stringContaining('only document') as unknown as string)
+  })
+
+  it('disables Remove while the collection is still processing an upload', async () => {
+    mockContext = { session: sessionUsingKbs('policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      orgKb('policies', ['a.txt', 'b.txt'], { latest_job: processingJob }),
+    ])
+
+    renderPage()
+    await screen.findByText('Files already in "policies"')
+
+    expect(screen.getByRole('button', { name: /remove a\.txt/i })).toBeDisabled()
+  })
+
+  it('names every team that loses the document, not just this one', async () => {
+    // A collection is shared: removing a document changes the answers of
+    // every team searching it, so the confirmation has to name them
+    // (Codex review finding).
+    mockContext = { session: sessionUsingKbs('policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([
+      orgKb('policies', ['a.txt', 'b.txt'], { used_by: ['Support team', 'Sales team'] }),
+    ])
+
+    renderPage()
+    await screen.findByText('Files already in "policies"')
+
+    fireEvent.click(screen.getByRole('button', { name: /remove a\.txt/i }))
+    const body = await confirmDialogBody()
+    expect(body).toContain('Support team')
+    expect(body).toContain('Sales team')
+  })
+
+  it('still pauses for the merged review when the collection is only discovered by the name conflict', async () => {
+    // The list request can fail or still be in flight when the upload starts;
+    // the 409 then proves the collection already exists, so the promised
+    // review must not be skipped (Codex review finding).
+    mockContext = { session: sessionWithSpec(), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValue([orgKb('policies', ['oldfile.txt', 'newfile.txt'])])
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockReset()
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockRejectedValueOnce(
+      Object.assign(new Error("'policies' already exists."), { status: 409 }),
+    )
+    mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
+    mockedApi.submitSolution.mockResolvedValue(sessionWithSpec())
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
+    const file = new File(['x'], 'newfile.txt', { type: 'text/plain' })
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    fireEvent.click(screen.getByText('Continue'))
+    await screen.findByText('Cancel')
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
+    await screen.findByText('Here’s what "policies" contains now')
+    expect(mockedApi.submitSolution).not.toHaveBeenCalled()
+  })
+
+  it('does not offer a retry that generates a spec when removing a document fails', async () => {
+    // The page-wide error banner's "Try again" calls proceed(), which makes a
+    // billable model call -- the wrong action entirely for a failed removal
+    // (Codex review finding).
+    mockContext = { session: sessionUsingKbs('policies'), setSession: vi.fn(), loading: false, sessionId: 's1' }
+    mockedApi.listOwnKnowledgeBases.mockReset()
+    mockedApi.listOwnKnowledgeBases.mockResolvedValue([orgKb('policies', ['a.txt', 'b.txt'])])
+    mockedApi.removeOwnKnowledgeBaseDocument.mockRejectedValue(new Error('could not remove it'))
+
+    renderPage()
+    await screen.findByText('Files already in "policies"')
+
+    fireEvent.click(screen.getByRole('button', { name: /remove a\.txt/i }))
+    await screen.findByText('Cancel')
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
+    await screen.findByText('could not remove it')
+    expect(screen.queryByText('Try again')).not.toBeInTheDocument()
+    expect(mockedApi.submitSolution).not.toHaveBeenCalled()
+    expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
   })
 })

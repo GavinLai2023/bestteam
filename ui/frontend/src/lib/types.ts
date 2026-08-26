@@ -27,6 +27,11 @@ export interface AgentSpec {
   goal?: string
   display_name?: string
   friendly_description?: string
+  // The tool names this agent was given, including any knowledge-base name it
+  // searches -- already present in every session/pipeline response, just
+  // never typed here before DocumentsPage needed to detect which existing
+  // collection(s) a team already uses.
+  tools?: string[]
 }
 
 export interface TeamSpec {

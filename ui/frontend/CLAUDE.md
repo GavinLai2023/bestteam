@@ -207,6 +207,32 @@ with no open questions shows a short card straight through.
 spec exists, *refines* — the Specification. `PreviewPage` renders `TeamFlow` and
 runs a test run over the same stream WebSocket as `MonitorPage`.
 
+Revisiting `DocumentsPage` for a team that already has one, no longer means a
+blank name field and a 409 as the only clue what's there. `usedKbNames` derives
+the team's existing collection(s) from `session.specification_json.agents[].tools`
+intersected against `api.listOwnKnowledgeBases()` — exact, not a guess, since a
+KB name can never collide with a built-in/skill tool name. Exactly one match
+prefills the name (`effectiveLabel`, computed at render, not copied into `label`
+via an effect); more than one shows a picker instead of guessing. The matched
+collection's files render inline with a per-file Remove (`removeOwnKnowledgeBaseDocument`,
+polled to completion like an upload). Uploading to a collection that already
+existed before this visit pauses on a review panel (merged old+new file list,
+one Continue button) instead of auto-advancing to spec generation — a brand-new
+collection still proceeds straight through, unchanged.
+
+Four rules there, each closing a way the page could act on the wrong thing:
+**a matched existing name is used verbatim** (`resolveKbName`) — the server's
+charset allows hyphens and capitals, so slugifying `support-docs` addressed a
+different, non-existent collection; only free-text labels are slugified.
+**Remove mirrors the endpoint's own two 409s** (processing, or the last
+*readable* document) as a disabled button with the reason in `title`, like
+`KnowledgeBasesPanel`. **The confirm names `used_by`** — the collection may be
+shared, and removal changes what every team searching it can answer.
+**"Already existed" is remembered from the 409 too**, not only from the list
+fetched on load, which can fail or still be in flight. A failed removal renders
+its own banner beside the list, never the page-wide `error` one — that one's
+"Try Again" runs `proceed()`, i.e. billable spec generation.
+
 ### `ConfirmPage` — two stages stacked, exactly one action
 
 Ordered cause-before-effect: the Requirements panel ("what we understood about

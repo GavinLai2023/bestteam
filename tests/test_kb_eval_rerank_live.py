@@ -23,8 +23,9 @@ everything and is the recommendation.
 
 A silently broken reranker CANNOT pass this file: rerank failures are
 fail-soft (retrieval order is kept, `rerank_score` stays None), so
-`test_reranker_actually_ran` asserts scores are present before the floor
-tests mean anything.
+`test_reranker_actually_ran` asserts scores are present -- on every query
+of both sets, since a failure on one long or Chinese pair leaves only that
+query unreranked and the floors have the slack to pass anyway.
 
 Run it by hand before a release (CI never needs it -- the module skips
 without an API key or the `tools-rerank` extra):
@@ -92,8 +93,12 @@ _OVERALL_FLOOR = 0.90
 
 
 def _reports(golden_set: Path):
-    """(unreranked, reranked) hybrid reports over the same documents and
-    queries, so the not-worse comparison is same-run, same-embeddings."""
+    """(unreranked report, reranked report, the reranked base, its queries).
+
+    Both reports come from the same documents and queries, so the not-worse
+    comparison is same-run, same-embeddings; the base and queries come back
+    so `test_reranker_actually_ran` can re-ask each one for its hits (a
+    report keeps sources and ranks, not `rerank_score`)."""
     def build(**extra):
         return HybridKnowledgeBase(
             "rerank_live",
@@ -106,9 +111,12 @@ def _reports(golden_set: Path):
             **extra,
         )
     queries = load_queries(golden_set / "queries.yaml")
+    reranked = build(rerank_model=_RERANK_MODEL)
     return (
         evaluate(build(), queries, DEFAULT_TOP_K),
-        evaluate(build(rerank_model=_RERANK_MODEL), queries, DEFAULT_TOP_K),
+        evaluate(reranked, queries, DEFAULT_TOP_K),
+        reranked,
+        queries,
     )
 
 
@@ -138,26 +146,29 @@ def _misses(report: EvalReport) -> str:
     return "\n".join(lines) or "  (all queries retrieved their document)"
 
 
-def test_reranker_actually_ran():
+@pytest.mark.parametrize("which", ["golden_reports", "hard_reports"])
+def test_reranker_actually_ran(which, request):
     """Guards the guard: a rerank-time failure keeps retrieval order and
     leaves `rerank_score` None (fail-soft by design), which would let every
-    floor test below pass without the cross-encoder ever scoring a pair."""
-    kb = HybridKnowledgeBase(
-        "rerank_smoke",
-        _GOLDEN_SET / "docs",
-        embedding_model=_EMBEDDING_MODEL,
-        chunk_size=DEFAULT_CHUNK_SIZE,
-        chunk_overlap=DEFAULT_CHUNK_OVERLAP,
-        top_k=DEFAULT_TOP_K,
-        cache_path=_CACHE_PATH,
-        rerank_model=_RERANK_MODEL,
-    )
-    hits = kb.search_hits("unopened item return window for a full refund", DEFAULT_TOP_K)
-    assert hits, "retrieval returned nothing at all"
-    assert all(hit.rerank_score is not None for hit in hits), (
-        "rerank_score is None -- the cross-encoder failed and retrieval "
-        "order was kept, so the floor tests in this file are not measuring "
-        "reranking"
+    floor test below pass without the cross-encoder ever scoring a pair.
+
+    Checked on **every gated query of both sets**, not one smoke query: a
+    scoring failure the cross-encoder only hits on a particular pair (a long
+    document, a Chinese query) leaves exactly that query unreranked, and the
+    floors have enough slack to pass anyway — so a single English lookup
+    proves nothing about the queries the gate is actually scoring.
+    """
+    _, _, kb, queries = request.getfixturevalue(which)
+    unscored = []
+    for query in queries:
+        hits = kb.search_hits(query.query, DEFAULT_TOP_K)
+        if not hits or any(hit.rerank_score is None for hit in hits):
+            unscored.append(query.query)
+    assert not unscored, (
+        "rerank_score is None (or nothing was retrieved) for these queries -- "
+        "the cross-encoder failed on them and retrieval order was kept, so "
+        "the floors below are not measuring reranking for them:\n  "
+        + "\n  ".join(repr(q) for q in unscored)
     )
 
 
@@ -193,7 +204,7 @@ def test_reranking_is_not_worse_than_retrieval(which, request):
     ranking. (One query of slack, not zero, for the same reason the floors
     have slack -- a single provider-side embedding wobble should not read
     as a rerank regression.)"""
-    unreranked, reranked = request.getfixturevalue(which)
+    unreranked, reranked, _, _ = request.getfixturevalue(which)
     slack = 1 / len(unreranked.outcomes)
     assert reranked.recall_at_k >= unreranked.recall_at_k - slack, (
         f"reranking LOWERED recall@{reranked.top_k}: "
