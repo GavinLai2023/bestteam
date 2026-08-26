@@ -1,0 +1,12 @@
+Plan,Monthly price,Annual price,Storage,Seats included,Support response time
+Starter,£19,£190,50 GB,3,48 hours
+Growth,£79,£790,500 GB,10,24 hours
+Scale,£199,£1990,2 TB,25,8 hours
+Enterprise,Custom,Custom,Unlimited,Unlimited,1 hour
+Starter add-on seat,£4,£40,-,per seat,-
+Growth add-on seat,£6,£60,-,per seat,-
+Scale add-on seat,£8,£80,-,per seat,-
+Extra storage 100 GB,£5,£50,100 GB,-,-
+Extra storage 1 TB,£30,£300,1 TB,-,-
+Priority onboarding,£250 one-off,£250 one-off,-,-,-
+Dedicated success manager,£400,£4000,-,-,1 hour

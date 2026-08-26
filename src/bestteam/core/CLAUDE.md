@@ -152,6 +152,19 @@ marker, self-skips without `OPENAI_API_KEY`, run by hand pre-release):
 recall@3 floors for `vector`/`hybrid` under the deployment-default embedding
 model, calibrated 2026-08-26 — paraphrase ≥ 3/4 is the load-bearing one.
 
+Hard set: `tests/fixtures/kb_eval_hard/` — 11 documents / 17 queries across
+four further kinds (`table`, `long`, `distractor`, `crosslingual`; the last
+shares zero tokens with its English-only document, so BM25 scores 0 by
+construction). `tests/test_kb_eval_hard.py` pins the $0 BM25 baseline; the
+live gate holds the real-model floors. `tests/test_kb_eval_rerank_live.py`
+(`optional`+`slow`, also needs `tools-rerank`) gates a REAL multilingual
+cross-encoder (`BAAI/bge-reranker-base` — mmarco-mMiniLMv2 FAILED this gate
+by preferring parallel translated documents): same floors reranked, plus
+"reranking loses at most one query vs the same run unreranked" — and it
+asserts `rerank_score` is populated on **every** gated query first, because
+rerank failure is fail-soft and per-pair, so the floors' slack would
+otherwise absorb a query that was never reranked at all.
+
 ### YAML
 
 ```yaml

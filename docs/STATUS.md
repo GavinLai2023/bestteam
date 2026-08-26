@@ -6,6 +6,38 @@
 
 ## Done
 
+- **DocumentsPage shows an existing team's KB files instead of a blank name
+  field** (2026-08-26). Revisiting the wizard's "Your documents" step for a
+  team that already searches a collection now detects which one from
+  `session.specification_json.agents[].tools` (exact match against the org's
+  own KB names, never a guess), prefills/pickers it, lists its files inline
+  with per-file Remove, and pauses on a merged old+new review panel after an
+  upload to an existing collection before continuing to spec generation — a
+  brand-new collection still proceeds straight through unchanged. Frontend
+  only, reusing endpoints `KnowledgeBasesPanel.tsx` already used
+  (`listOwnKnowledgeBases`/`removeOwnKnowledgeBaseDocument`); no backend or
+  schema change. See `ui/frontend/CLAUDE.md`.
+
+- **Hard golden set + real cross-encoder rerank gate** (2026-08-26).
+  `tests/fixtures/kb_eval_hard/`: 11 documents / 17 queries across four new
+  query kinds — `table` (answer is a CSV cell), `long` (fact buried late in
+  a long handbook, EN and ZH), `distractor` (near-identical sibling
+  documents), `crosslingual` (Chinese query, English-only document — BM25
+  scores 0 by construction). `tests/test_kb_eval_hard.py` pins the $0 BM25
+  baseline (table/long/distractor all 1.00, crosslingual 0);
+  `tests/test_kb_eval_live.py` gates the hard set under the real embedding
+  model (measured 1.00 everywhere; floors leave one query of slack per
+  bucket). `tests/test_kb_eval_rerank_live.py` (`optional`+`slow`, needs
+  `tools-rerank`) gates reranking under a REAL multilingual cross-encoder:
+  reranked rankings must meet the same floors and lose at most one query vs
+  the same run unreranked, with an explicit `rerank_score is not None`
+  assert so the fail-soft rerank path can't fake a pass. The gate earned
+  its keep on run one: `mmarco-mMiniLMv2-L12-H384-v1` FAILED it (prefers
+  parallel translated docs over same-language originals, recall@3 1.00 →
+  0.90 on the golden set); `BAAI/bge-reranker-base` passed everything and
+  lifted hybrid crosslingual hit@1 0.00 → 1.00, so it is now the
+  documented recommendation for `BESTTEAM_KB_DEFAULT_RERANK_MODEL`. Docs:
+  `docs/KNOWLEDGE_BASES.md` "The hard set" / "The rerank gate".
 - **Release gate: retrieval quality under a real embedding model**
   (2026-08-26). `tests/test_kb_eval_live.py` (`optional` marker, self-skips
   without `OPENAI_API_KEY` so CI needs no secret) runs the bundled golden

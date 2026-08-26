@@ -363,7 +363,12 @@ logs a warning and falls back to the pre-rerank order — rerank is a quality
 layer, never a reason a query itself fails. Left unset (the default),
 `query()` is byte-for-byte unchanged.
 
-Requires `pip install 'bestteam[tools-rerank]'`.
+Requires `pip install 'bestteam[tools-rerank]'`. For a mixed-language (EN/ZH)
+corpus pick a **multilingual** cross-encoder — `BAAI/bge-reranker-base` is
+the one the release gate validates (see "The rerank gate" below). An
+English-only ms-marco model will misrank every Chinese query, and
+multilingual alone is not enough: `mmarco-mMiniLMv2-L12-H384-v1` failed the
+gate by preferring parallel translated documents over same-language ones.
 
 ## Configuring a knowledge base in YAML
 
@@ -1057,6 +1062,32 @@ queries:
   embedding model is supposed to close, and the reason the whole-set
   thresholds sit at 0.8 rather than 1.0.
 
+### The hard set
+
+`tests/fixtures/kb_eval_hard/` is a second golden set holding the failure
+modes real customer corpora actually have — eleven documents, seventeen
+queries, four further `kind`s (each documented in its `queries.yaml`):
+
+- **`table`** — the answer is a cell in a CSV table (EN and ZH price
+  tables), deep enough that the header-repetition chunking has to work for
+  the retrieved chunk to carry the cell's meaning.
+- **`long`** — the answer is one sentence buried late in a long
+  multi-section handbook (EN and ZH), competing against many chunks of the
+  same document's own vocabulary.
+- **`distractor`** — the corpus contains near-identical sibling documents
+  (three care-plan tiers, two return-process variants); the query names the
+  one detail that separates the right sibling from the wrong ones.
+- **`crosslingual`** — a Chinese query whose answer exists only in an
+  English-only document. Zero shared tokens, so BM25 scores 0 by
+  construction; like `paraphrase`, these are pure embedding-model headroom.
+
+`tests/test_kb_eval_hard.py` pins the $0 BM25 baseline on it (table, long
+and distractor all at 1.00 — table-aware chunking and CJK bigrams earn
+those; crosslingual at exactly 0), and the live gate below holds the
+real-model floors. Run it through the CLI with
+`--docs tests/fixtures/kb_eval_hard/docs --queries
+tests/fixtures/kb_eval_hard/queries.yaml`.
+
 ### Extending it
 
 Add a document to `docs/` and at least one query naming it in `queries.yaml`
@@ -1097,11 +1128,40 @@ and fails if recall@3 drops below the floors calibrated from the 2026-08-26
 measurement: overall ≥ 0.90, lexical ≥ 15/16, **paraphrase ≥ 3/4** — the
 last one being the point: the four queries BM25 misses by construction must
 be recovered by the embedding model, which the `fake:` smoke tests
-structurally cannot show. Chunk embeddings persist in the gitignored
+structurally cannot show. The same module gates the hard set (floors: overall
+≥ 0.90, and per kind table/long/crosslingual ≥ 3/4, distractor ≥ 4/5 — all
+calibrated from a measured 1.00). Chunk embeddings persist in the gitignored
 `.bestteam_cache/kb_eval_live.json`, so a full run costs well under $0.01
 and re-runs pay only the query embeddings. The measured baselines are
 recorded in the test module's docstring; recalibrate them in the same commit
 that changes chunking, fusion or the golden set.
+
+### The rerank gate (real cross-encoder)
+
+`tests/test_kb_eval_rerank_live.py` (markers `optional` + `slow`, run by
+hand pre-release like the gate above; additionally needs the `tools-rerank`
+extra) scores hybrid retrieval **with a real cross-encoder** on both golden
+sets and holds two lines: the reranked ranking still meets the same recall@3
+floors, and switching reranking on never costs more than one query of
+overall recall against the same run's unreranked baseline. A silently broken
+reranker cannot pass it — rerank failures are fail-soft (retrieval order
+kept, `rerank_score` None), so the module first asserts `rerank_score` is
+actually populated before the floors mean anything.
+
+The gated model is `BAAI/bge-reranker-base` — **multilingual on purpose**,
+because the golden sets are EN/ZH and an English-only cross-encoder (the
+ms-marco family) would misrank every Chinese query. Multilingual alone is
+not sufficient, and the gate proved it on its first run (2026-08-26):
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` scored the parallel *Chinese*
+document above the English original on English paraphrase queries and
+dropped recall@3 from 1.00 to 0.90 — reranking made retrieval worse.
+`BAAI/bge-reranker-base` passed everything (golden recall@3 1.00 / MRR
+0.95; hard set recall@3 1.00, and it lifted hybrid's crosslingual hit@1
+from 0.00 to 1.00 by undoing the BM25-leg RRF tie preference). Treat it as
+the recommendation for `BESTTEAM_KB_DEFAULT_RERANK_MODEL` on a
+mixed-language corpus, and re-run the gate with the deployment's actual
+model before changing it. First run downloads the model (~1.1 GB, cached by
+Hugging Face); inference is local and $0.
 
 ## Known limitations
 

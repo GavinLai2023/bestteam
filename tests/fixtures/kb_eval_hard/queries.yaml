@@ -1,0 +1,113 @@
+# Hard golden set (see docs/KNOWLEDGE_BASES.md, "Evaluating retrieval").
+# The bundled set in tests/fixtures/kb_eval/ measures the easy floor: short
+# single-topic documents, one obvious answer each. This set measures the
+# failure modes real customer corpora actually have. Each query still has
+# exactly one right document.
+#
+#   kind: table        -- the answer is a cell in a CSV table, deep enough
+#                         that the header-repetition chunking has to work.
+#   kind: long         -- the answer is one sentence buried late in a long
+#                         multi-section document, competing with many chunks
+#                         of the same document's own vocabulary.
+#   kind: distractor   -- the corpus contains near-identical sibling
+#                         documents (care-plan tiers, return-process
+#                         variants); the query names the one detail that
+#                         separates the right sibling from the wrong ones.
+#   kind: crosslingual -- a Chinese query whose answer exists only in an
+#                         English-only document. Zero shared tokens, so BM25
+#                         scores 0 by construction -- like `paraphrase`,
+#                         these are the headroom a real embedding model
+#                         should close.
+#
+# expected_substring has the same contract as the bundled set: the fact must
+# appear in a retrieved chunk OF expected_source itself.
+
+queries:
+  # --- table: answer is a cell, header repetition must hold ----------------
+  - query: how much does the Growth plan cost per month
+    expected_source: price_plans.csv
+    kind: table
+    expected_substring: "Growth,£79"
+
+  - query: how much storage is included in the Scale plan
+    expected_source: price_plans.csv
+    kind: table
+    expected_substring: "2 TB"
+
+  - query: 专业版套餐每个月的费用是多少
+    expected_source: 套餐价格.csv
+    kind: table
+    expected_substring: "专业版,¥399"
+
+  - query: 旗舰版套餐包含多大的存储空间
+    expected_source: 套餐价格.csv
+    kind: table
+    expected_substring: "5 TB"
+
+  # --- long: one sentence deep in a many-section document ------------------
+  - query: when does an expense claim need written approval from a director
+    expected_source: employee_handbook.md
+    kind: long
+    expected_substring: "£250"
+
+  - query: what is the annual professional development budget per employee
+    expected_source: employee_handbook.md
+    kind: long
+    expected_substring: "£1,200"
+
+  - query: 单笔报销超过多少钱需要部门总监的书面批准
+    expected_source: 员工手册.md
+    kind: long
+    expected_substring: 两千元
+
+  - query: 每位员工每年的培训预算是多少
+    expected_source: 员工手册.md
+    kind: long
+    expected_substring: 三千元
+
+  # --- distractor: near-identical siblings, one detail apart ---------------
+  - query: how long is the warranty period on the Lite care plan
+    expected_source: warranty_lite.md
+    kind: distractor
+    expected_substring: 12 months
+
+  - query: how long is the warranty period on the Plus care plan
+    expected_source: warranty_plus.md
+    kind: distractor
+    expected_substring: 24 months
+
+  - query: is there an engineer call-out fee on the Max care plan
+    expected_source: warranty_max.md
+    kind: distractor
+    expected_substring: free of charge
+
+  - query: 在门店购买的商品可以在几天内退货
+    expected_source: 退货流程_门店.md
+    kind: distractor
+    expected_substring: 七天
+
+  - query: 网上下单的订单可以在多少天内申请退货
+    expected_source: 退货流程_网购.md
+    kind: distractor
+    expected_substring: 十五天
+
+  # --- crosslingual: Chinese query, English-only document ------------------
+  - query: 客户数据在服务器上是用什么方式加密存储的
+    expected_source: data_security_policy.md
+    kind: crosslingual
+    expected_substring: AES-256
+
+  - query: 数据备份会保留多长时间
+    expected_source: data_security_policy.md
+    kind: crosslingual
+    expected_substring: 35 days
+
+  - query: 最严重级别的故障需要值班工程师在多长时间内响应
+    expected_source: incident_response.md
+    kind: crosslingual
+    expected_substring: 15 minutes
+
+  - query: 确认发生数据泄露以后多久会通知受影响的客户
+    expected_source: incident_response.md
+    kind: crosslingual
+    expected_substring: 72 hours
