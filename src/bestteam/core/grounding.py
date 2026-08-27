@@ -11,29 +11,31 @@ turn for an agent that has a knowledge-base tool bound and emits the result
 as a ``grounding_checked`` trace event.
 
 Verification rule: a tag is verified when its label equals a returned
-citation exactly (after whitespace normalisation), or when the tag names
-only a filename and that filename is the document of some returned citation.
-A tag carrying a page or heading that matches no returned citation is
-unverified -- a fabricated locator is precisely what this exists to show.
-Filenames are case-sensitive, so the comparison is too.
+citation exactly (after whitespace normalisation), or when it equals the
+filename of a returned document. Both are set membership over what the
+search reported -- **nothing here takes a label apart**. A tag carrying a
+page or heading that matches no returned citation is unverified -- a
+fabricated locator is precisely what this exists to show. Filenames are
+case-sensitive, so the comparison is too.
 
-Known limitation: ``CITATION_TAG`` stops at the first ``]``, so a heading
-that itself contains a closing bracket (e.g. a document section literally
-titled "Item [2]") truncates the tag and the label is reported unverified.
-Not worth tightening the regex for -- the check only records, it never acts
-on the result, so a truncated-but-harmless label costs nothing beyond a
-slightly noisier `unverified` list.
+⚠️ **The filenames have to arrive as their own field** (the tool's
+``citation_documents``, next to ``citations``), and that is not a
+formality. Splitting a label at the first ``, p.`` or `` § `` to recover
+the filename has no notion of where the filename actually ends, so a
+document legitimately named ``report, p.2.pdf`` was misread both ways: a
+correct full citation looked like a fabricated locator, and a bare
+``[source: report]`` was accepted for a document of another name. Under
+``refuse`` those are a wrong refusal and a missed one -- not the trace
+noise they were while the check only recorded.
 
-Known limitation: ``_filename`` splits a label at the first ``, p.`` or
-`` § `` it finds, with no notion of where the filename part actually ends.
-An uploaded document legitimately named e.g. ``report, p.2.pdf`` is
-therefore misread both ways: ``[source: report, p.2.pdf]`` is treated as a
-label with a locator and reported unverified even when cited correctly, and
-a bare ``[source: report]`` tag for that same document can be counted
-verified by the filename-only rule even though it omits the true document
-name. Carrying the filename separately through the tool -> adapter -> checker
-contract would fix this, but would change the ``citations`` payload shape for
-a check that only ever records -- not worth it.
+For the same reason a citation never contains ``]``:
+``knowledge_base._citation`` replaces it, so ``CITATION_TAG`` stopping at
+the first one cannot truncate a label the search really returned (a section
+titled "Item [2]" used to).
+
+``documents`` defaults to empty, which only a hand-written custom
+knowledge-base tool can produce (all three built-in types report the field).
+Such a tool loses the filename-only rule -- strictly stricter, never wrong.
 """
 
 from __future__ import annotations
@@ -77,25 +79,9 @@ GROUNDING_REFUSAL_TEXT = (
     "consult the source documents directly."
 )
 
-# What ``knowledge_base._citation`` appends after the filename: a page
-# (``, p.3``) and/or a heading (`` § Refunds``). A label with neither is a
-# bare filename.
-_LOCATOR_MARKERS = (", p.", " § ")
-
-
 def _normalise(label: str) -> str:
     """Collapse internal whitespace and strip the ends -- applied to both sides."""
     return " ".join(label.split())
-
-
-def _filename(label: str) -> str:
-    """The document part of a citation label: everything before the first locator."""
-    cut = len(label)
-    for marker in _LOCATOR_MARKERS:
-        index = label.find(marker)
-        if index != -1 and index < cut:
-            cut = index
-    return label[:cut]
 
 
 @dataclass(frozen=True)
@@ -135,15 +121,18 @@ def check_grounding(
     text: str,
     citations: Sequence[str],
     *,
+    documents: Sequence[str] = (),
     searches: int,
     hit_count: int,
 ) -> GroundingResult:
     """Compare the ``[source: …]`` tags in ``text`` with ``citations``.
 
     ``citations`` is every label the agent's knowledge-base searches returned
-    this turn, in full (not the bounded ``sources`` a trace event keeps).
-    ``searches`` and ``hit_count`` are carried through unchanged so the
-    result is the whole story of the turn in one object.
+    this turn, in full (not the bounded ``sources`` a trace event keeps), and
+    ``documents`` is the filename each of those came from -- reported as its
+    own field rather than parsed back out of a label (see the module
+    docstring). ``searches`` and ``hit_count`` are carried through unchanged
+    so the result is the whole story of the turn in one object.
 
     ``text`` is contractually a ``str`` (a model's final answer), but some
     providers hand back ``response.content`` as a list of content blocks
@@ -153,7 +142,7 @@ def check_grounding(
     run -- the check records, it never blocks.
     """
     returned = {_normalise(citation) for citation in citations}
-    returned_files = {_filename(citation) for citation in returned}
+    returned_files = {_normalise(document) for document in documents}
 
     haystack = text if isinstance(text, str) else ""
     # dict.fromkeys de-duplicates while keeping first-appearance order.
@@ -166,8 +155,7 @@ def check_grounding(
     verified = 0
     unverified: List[str] = []
     for label in labels:
-        filename_only = _filename(label) == label
-        if label in returned or (filename_only and label in returned_files):
+        if label in returned or label in returned_files:
             verified += 1
         else:
             unverified.append(label[:MAX_LABEL_CHARS])

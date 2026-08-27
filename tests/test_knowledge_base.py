@@ -510,6 +510,27 @@ def test_tool_reports_every_citation_while_sources_stay_capped(tmp_path):
     assert ctx.trace["citations"][: _MAX_TRACE_SOURCES] == ctx.trace["sources"]
 
 
+def test_tool_reports_document_names_alongside_the_citation_labels(tmp_path):
+    """The grounding check verifies a filename-only tag by set membership, so
+    the filename has to be reported as its own field. Deriving it by splitting
+    a label at ", p." / " § " misreads a document actually named that way."""
+    from bestteam.core.knowledge_base import _Chunk
+    from bestteam.core.tool_context import tool_call_context
+
+    chunks = [
+        _Chunk(source="report, p.2.pdf", text="apples orchard harvest", page=4, heading="Yield"),
+        _Chunk(source="guide.md", text="apples orchard pruning"),
+    ]
+    kb = LocalFolderKnowledgeBase.from_chunks("docs", chunks, top_k=2)
+    tool = make_knowledge_base_tool(kb)
+
+    with tool_call_context() as ctx:
+        tool("apples orchard")
+
+    assert ctx.trace["citations"] == ["report, p.2.pdf, p.4 § Yield", "guide.md"]
+    assert ctx.trace["citation_documents"] == ["report, p.2.pdf", "guide.md"]
+
+
 # ---------------------------------------------------------------------------
 # YAML loader integration
 # ---------------------------------------------------------------------------
@@ -1149,6 +1170,20 @@ def test_format_results_cites_page_and_heading():
 
     rendered = format_results("docs", "refunds", [_Chunk(source="handbook.pdf", text="body", page=3)])
     assert "1. [source: handbook.pdf, p.3]" in rendered
+
+
+def test_a_citation_never_contains_the_tag_terminator():
+    """`]` closes the `[source: …]` tag, so a heading or filename carrying one
+    would cut the tag short -- for a reader and for the grounding check, which
+    would then report a correct citation unverified and, under `refuse`,
+    wrongly refuse the answer. The tag cannot carry its own terminator."""
+    assert _citation(_Chunk(source="a.md", text="x", heading="Item [2]")) == "a.md § Item (2)"
+    assert _citation(_Chunk(source="notes [draft].md", text="x")) == "notes (draft).md"
+
+    rendered = format_results(
+        "docs", "refunds", [_Chunk(source="a.md", text="body", heading="Item [2]")]
+    )
+    assert "1. [source: a.md § Item (2)]" in rendered
 
 
 @pytest.mark.parametrize("kb_type", ["local_folder", "vector", "hybrid"])

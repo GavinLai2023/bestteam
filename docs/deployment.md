@@ -25,7 +25,7 @@ customer's IT for anything).
 
 | # | Step | Where |
 |---|------|-------|
-| 1 | Provision a host with Docker, clone the repo, write `.env` | §1 |
+| 1 | Provision a host with Docker, clone the repo, write `.env` | `docs/VPS_SETUP_RUNBOOK.md` (中文, step by step), then §1 |
 | 2 | **Work out the customer's mailbox type** — do not ask them | §0a |
 | 3 | Run the launch checklist against the real environment | §1, "Beta launch checklist" |
 | 4 | `docker compose build && docker compose up -d` | §2 |

@@ -665,10 +665,14 @@ def test_kb_tool_completed_hits_are_bounded_and_present_when_empty():
 # ---------------------------------------------------------------------------
 
 
-def _stub_knowledge_base_tool(citations):
+def _stub_knowledge_base_tool(citations, documents=()):
     """A tool shaped like `make_knowledge_base_tool`'s: the marker the adapter
     dispatches on, and a `report_trace` call with the fields the real tool
-    reports -- so these tests need no documents on disk."""
+    reports -- so these tests need no documents on disk.
+
+    `documents` is the real tool's `citation_documents`: the filename of each
+    returned chunk as its own field, which is what lets the grounding check
+    verify a filename-only tag without splitting a label apart."""
 
     def product_docs(query: str) -> str:
         report_trace(
@@ -676,6 +680,7 @@ def _stub_knowledge_base_tool(citations):
             hit_count=len(citations),
             sources=list(dict.fromkeys(citations))[:10],
             citations=list(citations),
+            citation_documents=list(documents),
             summary=f"{len(citations)} result(s)",
         )
         return "\n".join(f"[source: {c}]\nexcerpt" for c in citations)
@@ -1147,6 +1152,72 @@ def test_refuse_policy_leaves_a_passing_answer_untouched():
     )
     assert final == _CITED
     assert grounding["retried"] is False
+    assert grounding["refused"] is False
+
+
+def test_refuse_policy_accepts_a_filename_only_tag_the_search_reported():
+    """The filename-only rule reaches the checker as the tool's own
+    `citation_documents` field. Without it the adapter would refuse an answer
+    citing a document its search really did return."""
+    model = _FakeToolCallingChatModel(
+        responses=[_TOOL_CALL, AIMessage(content="Refunds take 14 days [source: handbook.pdf].")]
+    )
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3 § Refunds"], ["handbook.pdf"])],
+        grounding_policy="refuse",
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+    final = next(e for e in events if e.type == "agent_completed").data
+    grounding = next(e for e in events if e.type == "grounding_checked").data
+
+    assert final == "Refunds take 14 days [source: handbook.pdf]."
+    assert grounding["verified"] == 1
+    assert grounding["refused"] is False
+
+
+def test_refuse_policy_does_not_refuse_a_correct_citation_of_a_bracketed_heading():
+    """End to end over the real tool: a document section titled "Item [2]"
+    used to truncate the tag the check parses, so a correct citation was
+    reported unverified -- trace noise under `observe`, a wrong refusal under
+    `refuse`. The citation is rendered without the terminator instead."""
+    from bestteam.core.knowledge_base import (
+        LocalFolderKnowledgeBase,
+        _Chunk,
+        make_knowledge_base_tool,
+    )
+
+    kb = LocalFolderKnowledgeBase.from_chunks(
+        "product_docs",
+        [_Chunk(source="handbook.pdf", text="refunds take 14 days", page=3, heading="Item [2]")],
+        top_k=1,
+    )
+    model = _FakeToolCallingChatModel(
+        responses=[
+            _TOOL_CALL,
+            AIMessage(content="Refunds take 14 days [source: handbook.pdf, p.3 § Item (2)]."),
+        ]
+    )
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[make_knowledge_base_tool(kb)],
+        grounding_policy="refuse",
+    )
+
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+    final = next(e for e in events if e.type == "agent_completed").data
+    grounding = next(e for e in events if e.type == "grounding_checked").data
+
+    assert final == "Refunds take 14 days [source: handbook.pdf, p.3 § Item (2)]."
+    assert grounding["verified"] == 1
+    assert grounding["unverified"] == []
     assert grounding["refused"] is False
 
 

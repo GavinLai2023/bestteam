@@ -116,6 +116,13 @@ load-bearing.** `sources` is de-duplicated and capped at 10 for the trace event.
 because `core/grounding.py::check_grounding` needs the whole list — **it rides
 the report solely for the grounding check and never reaches a trace event**, the
 same way a KB tool's event never carries the indexed documents' own text.
+`citation_documents` rides alongside it for the same consumer only: each hit's
+filename as its own field, so the check verifies a filename-only tag by set
+membership. ⚠️ **Never re-derive it by splitting a label** at `, p.` / ` § ` —
+that misreads a document named `report, p.2.pdf` in both directions, which
+under `grounding_policy: refuse` is a wrong refusal and a missed one.
+`_citation` also swaps a bracket pair for parentheses (`_tag_safe`): a label
+cannot carry `]`, the character that ends its own tag.
 
 The wrapper is marked `__bestteam_tool_kind__ = "knowledge_base"` (a marker, not
 a name set — a KB tool is named after its KB), and the adapter builds
@@ -123,9 +130,10 @@ a name set — a KB tool is named after its KB), and the adapter builds
 (`query`/`hit_count`/`sources`/`summary`/`ingestion_job_id`/`hits`).
 
 ⚠️ **A hand-written custom KB tool carrying the marker but not calling
-`report_trace(..., citations=...)` will have every `[source: …]` tag in its
-agent's answers reported unverified by grounding-lite.** Either report the field
-or leave the marker off.
+`report_trace(..., citations=..., citation_documents=...)` will have every
+`[source: …]` tag in its agent's answers reported unverified by
+grounding-lite** — `citations` alone still loses the filename-only rule.
+Either report both fields or leave the marker off.
 
 A KB built from chunks that all share one `ingestion_job_id` exposes it as
 `kb.ingestion_job_id` (`None` for a folder or a mixed list), reported on every

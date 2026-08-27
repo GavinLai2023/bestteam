@@ -150,6 +150,33 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
         else:
             fail("BESTTEAM_SENTRY_DSN", f"not a valid DSN ({problem}); the backend refuses to start")
 
+    # The self-service wizard shows its "Enhanced" (semantic search) choice
+    # only when an embedding default is set, so leaving it unset is silent:
+    # every customer collection is BM25 keyword matching, which scores 0 on a
+    # paraphrased or cross-language query by construction. Recommended models
+    # and their measured floors: docs/KNOWLEDGE_BASES.md.
+    embedding = _get(env, "BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL")
+    if not embedding:
+        warn("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", "unset; customers get keyword search only — a "
+             "reworded or cross-language question finds nothing, and the wizard never offers the "
+             "\"Enhanced\" choice. Set e.g. openai:text-embedding-3-small")
+    elif embedding.startswith("fake:"):
+        fail("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", f"{embedding!r} is the deterministic $0 test "
+             "model; its vectors are noise, so a customer collection built on it retrieves nothing "
+             "meaningful")
+    else:
+        ok("BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL", embedding)
+        # Only meaningful with an embedding model: reranking sits on the
+        # hybrid retrieval that "Enhanced" turns on, so with none configured
+        # this would name a knob that cannot apply.
+        rerank = _get(env, "BESTTEAM_KB_DEFAULT_RERANK_MODEL")
+        if not rerank:
+            warn("BESTTEAM_KB_DEFAULT_RERANK_MODEL", "unset; semantic search runs unreranked. Set "
+                 "cross-encoder:BAAI/bge-reranker-base — the one model in the release gate that "
+                 "holds cross-language ranking (others measurably failed it)")
+        else:
+            ok("BESTTEAM_KB_DEFAULT_RERANK_MODEL", rerank)
+
     if _get(env, "FORWARDED_ALLOW_IPS"):
         ok("FORWARDED_ALLOW_IPS", _get(env, "FORWARDED_ALLOW_IPS"))
     else:

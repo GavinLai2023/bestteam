@@ -17,6 +17,8 @@ _GOOD = {
     "BESTTEAM_RUN_RETENTION_DAYS": "90",
     "BESTTEAM_SENTRY_DSN": "https://k@o.ingest.sentry.io/1",
     "FORWARDED_ALLOW_IPS": "10.0.0.2",
+    "BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL": "openai:text-embedding-3-small",
+    "BESTTEAM_KB_DEFAULT_RERANK_MODEL": "cross-encoder:BAAI/bge-reranker-base",
 }
 
 
@@ -83,6 +85,34 @@ def test_beta_defaults_warn_when_left_at_dev_values():
     assert {by[n].level for n in ("BESTTEAM_RUN_RETENTION_DAYS", "BESTTEAM_SENTRY_DSN", "FORWARDED_ALLOW_IPS")} == {"WARN"}
     assert not has_failures(check_environment(env))
     assert _by_name(check_environment(dict(_GOOD, BESTTEAM_RUN_RETENTION_DAYS="ninety")))["BESTTEAM_RUN_RETENTION_DAYS"].level == "FAIL"
+
+
+def test_an_unset_kb_embedding_default_warns_that_customers_get_keyword_search_only():
+    env = dict(_GOOD)
+    del env["BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"]
+    by = _by_name(check_environment(env))
+    assert by["BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"].level == "WARN"
+    assert "keyword" in by["BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"].message
+    # The rerank default is only meaningful once an embedding model is set, so
+    # it must not add a second warning about a KB feature that cannot apply.
+    assert "BESTTEAM_KB_DEFAULT_RERANK_MODEL" not in by
+    assert not has_failures(check_environment(env))
+
+
+def test_a_fake_kb_embedding_default_fails_because_retrieval_would_be_noise():
+    env = dict(_GOOD, BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL="fake:32")
+    finding = _by_name(check_environment(env))["BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL"]
+    assert finding.level == "FAIL"
+    assert has_failures(check_environment(env))
+
+
+def test_an_unset_rerank_default_warns_only_once_semantic_search_is_on():
+    env = dict(_GOOD)
+    del env["BESTTEAM_KB_DEFAULT_RERANK_MODEL"]
+    finding = _by_name(check_environment(env))["BESTTEAM_KB_DEFAULT_RERANK_MODEL"]
+    assert finding.level == "WARN"
+    assert "BAAI/bge-reranker-base" in finding.message
+    assert not has_failures(check_environment(env))
 
 
 def test_a_malformed_sentry_dsn_fails_because_the_backend_would_not_start():
