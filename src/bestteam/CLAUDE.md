@@ -92,7 +92,10 @@ Three paths force `tool_choice="required"` on an agent's **first** call:
 That turn ends with a `grounding_checked` event (`core/grounding.py`): the final
 text's `[source: …]` tags compared with the citation labels the turn's own
 searches returned (the tool reports them in full via
-`report_trace(citations=…)`; the trace event keeps only the bounded `sources`).
+`report_trace(citations=…, citation_documents=…)`; the trace event keeps only
+the bounded `sources`). **Both comparisons are set membership over reported
+fields — the check never splits a label apart**, because under `refuse` a
+misparse is a wrong refusal, not trace noise.
 **Recorded — and, only under an opt-in `Agent.grounding_policy`, acted on.**
 `observe` (default) keeps the event payload byte-identical to the
 pre-policy shape (no `policy`/`retried`/`refused` keys — consumers keyed on

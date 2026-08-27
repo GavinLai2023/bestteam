@@ -36,11 +36,26 @@ def test_filename_only_tag_is_verified_when_that_document_was_returned():
     result = check_grounding(
         "As the handbook says [source: handbook.pdf].",
         ["handbook.pdf, p.3 § Refunds"],
+        documents=["handbook.pdf"],
         searches=1,
         hit_count=1,
     )
     assert result.verified == 1
     assert result.unverified == []
+
+
+def test_filename_only_tag_needs_the_reported_document_names():
+    # `documents` defaults to empty, so a knowledge-base tool that reports
+    # `citations` but not `citation_documents` (only a hand-written custom one
+    # can) loses the filename-only rule rather than having the filename
+    # guessed out of a label. Stricter, and never wrong.
+    result = check_grounding(
+        "As the handbook says [source: handbook.pdf].",
+        ["handbook.pdf, p.3 § Refunds"],
+        searches=1,
+        hit_count=1,
+    )
+    assert result.unverified == ["handbook.pdf"]
 
 
 def test_tag_with_an_unreturned_page_is_unverified():
@@ -69,6 +84,7 @@ def test_filename_only_tag_for_a_document_never_returned_is_unverified():
     result = check_grounding(
         "See [source: invented.pdf].",
         ["handbook.pdf, p.3"],
+        documents=["handbook.pdf"],
         searches=1,
         hit_count=1,
     )
@@ -76,8 +92,44 @@ def test_filename_only_tag_for_a_document_never_returned_is_unverified():
 
 
 def test_filename_match_is_case_sensitive():
-    result = check_grounding("See [source: Handbook.pdf].", ["handbook.pdf, p.3"], searches=1, hit_count=1)
+    result = check_grounding(
+        "See [source: Handbook.pdf].",
+        ["handbook.pdf, p.3"],
+        documents=["handbook.pdf"],
+        searches=1,
+        hit_count=1,
+    )
     assert result.unverified == ["Handbook.pdf"]
+
+
+def test_a_filename_containing_a_locator_marker_is_verified_when_cited_in_full():
+    # An upload legitimately named "report, p.2.pdf". The check used to split
+    # the label at the first ", p." and treat the remainder as a page it never
+    # returned, so a perfectly correct citation was reported unverified --
+    # which, under `refuse`, is a wrong refusal rather than trace noise.
+    result = check_grounding(
+        "See [source: report, p.2.pdf § Summary].",
+        ["report, p.2.pdf § Summary"],
+        documents=["report, p.2.pdf"],
+        searches=1,
+        hit_count=1,
+    )
+    assert result.verified == 1
+    assert result.unverified == []
+
+
+def test_a_bare_filename_prefix_of_a_locator_named_document_is_unverified():
+    # The other half of the same defect: "report" is not the document's name,
+    # it is the part before the marker the old split guessed at.
+    result = check_grounding(
+        "See [source: report].",
+        ["report, p.2.pdf § Summary"],
+        documents=["report, p.2.pdf"],
+        searches=1,
+        hit_count=1,
+    )
+    assert result.verified == 0
+    assert result.unverified == ["report"]
 
 
 def test_repeated_label_counts_once_and_keeps_first_appearance_order():

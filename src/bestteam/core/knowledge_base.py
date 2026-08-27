@@ -167,14 +167,38 @@ def _generation_of(chunks: List[_Chunk]) -> Optional[int]:
     return None
 
 
+def _tag_safe(text: str) -> str:
+    """A citation cannot carry the character that ends its own tag.
+
+    `]` closes `[source: …]`, so a filename or heading containing one cuts
+    the tag short -- for a reader, and for `core/grounding.py`, which would
+    then report a correct citation unverified and, under an agent's
+    `refuse` grounding policy, refuse the answer over it.
+
+    Only `]` breaks the tag, but the opening bracket is swapped with it so a
+    section titled "Item [2]" still reads as "Item (2)" in an answer the
+    customer sees, rather than as a half-closed "Item [2)".
+    """
+    return text.replace("[", "(").replace("]", ")")
+
+
+def _citation_document(chunk: _Chunk) -> str:
+    """The filename part of a chunk's citation, exactly as the model sees it.
+
+    Reported alongside the full citations so the grounding check can verify a
+    filename-only tag by set membership instead of splitting a label apart.
+    """
+    return _tag_safe(chunk.source)
+
+
 def _citation(chunk: _Chunk) -> str:
     """The inside of a chunk's `[source: ...]` tag: its filename, then the
     page and section that narrow it down when the format supplied them."""
-    citation = chunk.source
+    citation = _citation_document(chunk)
     if chunk.page is not None:
         citation += f", p.{chunk.page}"
     if chunk.heading:
-        citation += f" § {chunk.heading}"
+        citation += f" § {_tag_safe(chunk.heading)}"
     return citation
 
 
@@ -1121,6 +1145,11 @@ def make_knowledge_base_tool(kb: KnowledgeBase) -> Callable[[str], str]:
             # invented one. `_kb_tool_trace_data` copies named fields only,
             # so this never reaches the trace event.
             citations=[_citation(chunk) for chunk in chunks],
+            # The filename of each of those, as its own field. The check
+            # verifies a filename-only tag against this set rather than
+            # splitting a label at ", p." / " § " -- which misread a document
+            # actually named that way, in both directions.
+            citation_documents=[_citation_document(chunk) for chunk in chunks],
             # Which generation of the collection answered (None for a
             # folder-built KB), and per hit the row identity and the scores
             # behind its rank -- never the text. Bounded like `sources`.

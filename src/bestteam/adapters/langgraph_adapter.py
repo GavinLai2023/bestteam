@@ -597,6 +597,7 @@ def _run_agent(
     kb_searches = 0
     kb_hit_count = 0
     kb_citations: List[str] = []
+    kb_documents: List[str] = []
     first_call_model = model
     forced_first_call = False
     if all_tools:
@@ -797,6 +798,7 @@ def _run_agent(
                         kb_searches += 1
                         kb_hit_count += int(tool_ctx.trace.get("hit_count") or 0)
                         kb_citations.extend(tool_ctx.trace.get("citations") or ())
+                        kb_documents.extend(tool_ctx.trace.get("citation_documents") or ())
                     else:
                         extra_data = {"summary": _summarize(result)}
                     if reveal:
@@ -846,7 +848,9 @@ def _run_agent(
         # payload is byte-identical to the pre-policy one. Not emitted on the
         # early returns above (a stop, an exhausted loop): those turns
         # produced no answer to check.
-        result = check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count)
+        result = check_grounding(
+            text, kb_citations, documents=kb_documents, searches=kb_searches, hit_count=kb_hit_count
+        )
         policy = agent.grounding_policy
         retried = False
         refused = False
@@ -872,7 +876,13 @@ def _run_agent(
             retried = True
             if not getattr(retry_response, "tool_calls", None):
                 text = retry_response.content if hasattr(retry_response, "content") else str(retry_response)
-                result = check_grounding(text, kb_citations, searches=kb_searches, hit_count=kb_hit_count)
+                result = check_grounding(
+                    text,
+                    kb_citations,
+                    documents=kb_documents,
+                    searches=kb_searches,
+                    hit_count=kb_hit_count,
+                )
             # else: a retry that asks for more tools instead of answering is a
             # failed retry -- the original text and result stand.
             if policy == "refuse" and not result.passes:

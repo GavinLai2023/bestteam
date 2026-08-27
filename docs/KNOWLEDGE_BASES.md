@@ -461,7 +461,7 @@ recorded as one `grounding_checked` trace event:
 ```
 
 A tag is verified when it equals a returned citation (whitespace aside), or
-when it names only a filename and that document was among the hits. Anything
+when it equals the filename of a document among the hits. Anything
 else is unverified — which is not the same as fabricated. It means the tag
 does not exactly match a returned citation and is not a bare filename among
 the hits; that includes a genuinely fabricated locator, but it also includes
@@ -480,22 +480,26 @@ against **its own** searches: a tag it retells from a subordinate's answer
 is reported unverified, because cross-agent checking is out of scope for this
 feature — a documented consequence, not a bug.
 
-Known limitation: a citation label containing its own `]` (an unusual
-document heading like "Item [2]") truncates the tag the check parses, so that
-citation is reported unverified even when it is exact. Not worth a regex
-change for a records-only check.
+**Both comparisons are set membership over what the search reported; the
+check never takes a label apart.** The filenames arrive as their own field
+(the tool reports `citation_documents` beside `citations`), and a citation
+never contains `]` — `_citation` swaps a bracket pair in a filename or
+heading for parentheses, so a section titled "Item [2]" is cited as
+`§ Item (2)` and the tag cannot be truncated by its own terminator.
 
-Known limitation: a filename containing `, p.` or ` § ` (e.g. an upload named
-`report, p.2.pdf`) is misread as a label with a locator, because the check
-splits a label at the first occurrence of either marker without knowing where
-the filename actually ends. This cuts both ways: `[source: report, p.2.pdf]`
-for that document is reported unverified even when cited correctly, because
-the check treats `p.2.pdf` as a locator rather than part of the filename; and
-a bare `[source: report]` tag for the same document can be counted verified
-by the filename-only rule even though the tag omits the true document name.
-Carrying the filename separately through the tool→adapter→checker contract
-would fix it, but only for a check that records and never acts — not worth
-the payload-shape change.
+Both were once parsed instead, and both were wrong in a way that matters
+under `refuse`: a `]` in a heading cut the tag short, and a filename
+containing `, p.` or ` § ` (an upload named `report, p.2.pdf`) was split at
+the marker with no notion of where the filename ended — reporting a correct
+full citation unverified, and accepting a bare `[source: report]` for a
+document of another name. While the check only recorded, both were trace
+noise; once a policy acts on the result, the first is a wrong refusal and
+the second a missed one.
+
+Known limitation: `documents` defaults to empty, so a **hand-written custom**
+knowledge-base tool that reports `citations` without `citation_documents`
+loses the filename-only rule and has every filename-only tag reported
+unverified. All three built-in types report both fields.
 
 ### Grounding policy: `observe` | `retry` | `refuse`
 
