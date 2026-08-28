@@ -13,15 +13,20 @@ Docker, clone the repo, write `.env`」——背后真正要做的事。`deploym
 **前提**：
 
 - 一台已经开好的 DigitalOcean Droplet（Ubuntu 24.04 LTS），你有 root 登录方式
-- 一个已经买好的域名（本文以 `bestteam.online` 为例）
+- 一个已经买好的域名（本文以 `bestteam.online` 为例，平台本身部署在它的子域名
+  `app.bestteam.online` 上）
 - 一个能改这个域名 DNS 解析的后台账号
 - 至少一个大模型的 API Key（OpenAI / Anthropic / 其他）
+
+> **裸域名 `bestteam.online` 是对外 marketing 网站，跟这份文档无关。** 这份文档
+> 从头到尾部署的是平台本身，域名统一用子域名 `app.bestteam.online`——两者是分开
+> 的两套东西，marketing 网站可以是完全不同的托管方式，不需要碰这台 Droplet。
 
 **做完之后你会得到**：
 
 ```
                 浏览器
-                  │  https://bestteam.online
+                  │  https://app.bestteam.online
                   ▼
         ┌───────────────────┐
         │  Caddy（跑在主机上）│  ← 负责 HTTPS 证书，自动申请、自动续期
@@ -203,18 +208,19 @@ cd /opt/bestteam
 ## 5. 配置域名解析
 
 **这一步必须在装 Caddy 之前完成并生效**，因为 Caddy 申请证书时，证书机构会反过来
-访问 `bestteam.online` 验证这台机器真的是你的。域名还没指过来，申请就会失败。
+访问 `app.bestteam.online` 验证这台机器真的是你的。域名还没指过来，申请就会失败。
 
-到你买域名的后台，添加一条 **A 记录**：
+到你买域名的后台，添加一条 **A 记录**（是子域名 `app`，不是裸域名 `@`——裸域名
+留给 marketing 网站用）：
 
 | 类型 | 主机记录 | 值 |
 |------|----------|-----|
-| A | `@`（表示 `bestteam.online` 本身） | 你的 Droplet IP |
+| A | `app`（表示 `app.bestteam.online`） | 你的 Droplet IP |
 
 **怎么确认做对了**：在服务器上执行
 
 ```bash
-dig +short bestteam.online
+dig +short app.bestteam.online
 ```
 
 打印出来的应该正好是你的 Droplet IP。
@@ -320,9 +326,9 @@ BESTTEAM_SECRETS_KEY=<第二条命令的输出>
 ### 7.2 网址（三处，必须在构建之前填对）
 
 ```
-BESTTEAM_CORS_ORIGINS=https://bestteam.online
-VITE_API_BASE=https://bestteam.online
-VITE_WS_BASE=wss://bestteam.online
+BESTTEAM_CORS_ORIGINS=https://app.bestteam.online
+VITE_API_BASE=https://app.bestteam.online
+VITE_WS_BASE=wss://app.bestteam.online
 ```
 
 注意 `VITE_WS_BASE` 开头是 **`wss`** 不是 `https`（这是实时推送用的协议）。三个都
@@ -476,7 +482,7 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 ## 9. 配置 HTTPS
 
-**开始之前再确认一次**：`dig +short bestteam.online` 打印的是这台机器的 IP。不对就
+**开始之前再确认一次**：`dig +short app.bestteam.online` 打印的是这台机器的 IP。不对就
 回第 5 步等着。
 
 **安装 Caddy**：
@@ -503,7 +509,7 @@ sudo nano /etc/caddy/Caddyfile
 **把文件里原有的内容全部删掉**，换成：
 
 ```
-bestteam.online {
+app.bestteam.online {
 	# 上传的知识库文档可能很大，放宽请求体上限
 	request_body {
 		max_size 250MB
@@ -534,7 +540,7 @@ sudo systemctl reload caddy
 **怎么确认做对了**：
 
 ```bash
-curl https://bestteam.online/api/health
+curl https://app.bestteam.online/api/health
 ```
 
 期望：`{"status":"ok","database":"ok"}`。能看到这个，就说明**域名、证书、反向代理、
@@ -555,8 +561,8 @@ curl https://bestteam.online/api/health
 - [ ] `docker compose ps` → 两个容器都在，backend 是 `healthy`
 - [ ] `check-env` → 没有 `[FAIL]`
 - [ ] `check-env` 里 `BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL` 那行是 `[OK]`，不是 `[WARN]`（`[WARN]` = 客户只有关键词检索，见 7.6）
-- [ ] `curl https://bestteam.online/api/health` → `{"status":"ok","database":"ok"}`
-- [ ] 浏览器打开 `https://bestteam.online` → 看到登录页，地址栏有**小锁**、没有「不安全」警告
+- [ ] `curl https://app.bestteam.online/api/health` → `{"status":"ok","database":"ok"}`
+- [ ] 浏览器打开 `https://app.bestteam.online` → 看到登录页，地址栏有**小锁**、没有「不安全」警告
 - [ ] `curl http://<你的IP>:8000/api/health` **从你自己的电脑上跑** → 应该**连不上**（后端没有暴露在公网，这是对的）
 
 最后一条是安全验收，别跳过。如果它居然通了，说明第 6 步的端口绑定没生效——回去检
