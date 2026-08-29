@@ -356,7 +356,17 @@ export const en = {
       connectMailboxFirst: 'Connect your mailbox above before you can launch this team.',
       liveTitle: 'Your team is live 🎉',
       liveBody: '"{{name}}" is up and running and ready to take on real requests.',
-      adjust: 'Make more adjustments',
+      // Email teams only. Deploying publishes the team; it still watches
+      // nothing until the automatic-runs switch is on, and that switch is off
+      // by default.
+      liveEmailNext:
+        "One more step: switch on automatic runs below and it'll start watching your inbox.",
+      adjust: 'Make changes',
+      // The two ways off this screen. A team that answers questions is
+      // finished, so the offer is to talk to it; an email team still has its
+      // switch and limits here, so its button only closes the build.
+      tryIt: 'Try it out',
+      done: 'Done',
     },
   },
   // The "My teams" page. It lives under pages/wizard/ but is its own route

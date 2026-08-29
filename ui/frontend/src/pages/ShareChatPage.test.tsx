@@ -82,7 +82,7 @@ describe('ShareChatPage', () => {
     })
     setLanguage('zh-CN')
     renderPage()
-    expect(await screen.findByText('抱歉，生成回复时出了点问题。')).toBeInTheDocument()
+    expect(await screen.findByText('抱歉，生成回复时出现问题。')).toBeInTheDocument()
   })
 
   it('shows the live status line in the visitor language', async () => {
@@ -105,7 +105,7 @@ describe('ShareChatPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText(/^that message is too long/i)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
-    await waitFor(() => expect(screen.getByText(/消息太长了/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/消息过长/)).toBeInTheDocument())
   })
 
   it('does not echo the backend detail of a 409 on this public page', async () => {
@@ -125,7 +125,7 @@ describe('ShareChatPage', () => {
     renderPage()
     expect(await screen.findByText(/no longer available/i)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: /language/i }), { target: { value: 'zh-CN' } })
-    await waitFor(() => expect(screen.getByText('这个分享链接已失效。')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('该分享链接已失效。')).toBeInTheDocument())
   })
 
   it('sends on Enter and keeps Shift+Enter for a new line', async () => {
