@@ -509,6 +509,35 @@ def test_parse_file_excel_cell_with_newline_stays_one_row(tmp_path):
     ]
 
 
+def test_parse_file_excel_rejects_a_workbook_that_unpacks_too_large(tmp_path, monkeypatch):
+    # An .xlsx is a zip, and a kilobyte upload can declare gigabytes once
+    # inflated. The parser refuses on the archive's own unpacked sizes,
+    # before a single sheet is read.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "big.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a"])
+    workbook.save(str(f))
+    monkeypatch.setattr("bestteam.tools.file_parser._MAX_XLSX_UNPACKED_BYTES", 10)
+    with pytest.raises(ConfigurationError, match="big.xlsx.*unpacks to more than"):
+        parse_file(str(f))
+
+
+def test_parse_file_excel_rejects_a_workbook_with_too_many_cells(tmp_path, monkeypatch):
+    # A stray-formatted sheet declares millions of empty cells; iterating
+    # them all would pin a CPU for minutes on the shared instance. The count
+    # covers every cell the sheets declare, not just the ones with values.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "wide.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a", "b"])
+    workbook.active.append(["c", "d"])
+    workbook.save(str(f))
+    monkeypatch.setattr("bestteam.tools.file_parser._MAX_XLSX_CELLS", 3)
+    with pytest.raises(ConfigurationError, match="wide.xlsx.*cells"):
+        parse_file(str(f))
+
+
 def test_parse_file_rejects_unsupported_type(tmp_path):
     f = tmp_path / "image.png"
     f.write_bytes(b"\x89PNG")

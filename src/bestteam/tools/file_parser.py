@@ -5,6 +5,7 @@ import csv
 import io
 import re
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 from xml.sax.saxutils import escape, quoteattr
@@ -503,6 +504,20 @@ def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> s
     return f"[CSV: {name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n"))
 
 
+# Both caps exist because ingestion runs every customer's uploads on the one
+# shared instance, so one workbook must not be able to buy minutes of CPU or
+# gigabytes of RAM with a 30MB upload. Deliberately constants, not settings,
+# for the same reason the PBKDF2 iteration count is: a limit that can be
+# raised per-deployment will be, and then the instance it protects isn't
+# protected. An .xlsx is a zip, so the archive's declared unpacked sizes are
+# readable before any XML is parsed -- that is what catches a decompression
+# bomb. The cell budget is the other axis: a sheet with one stray-formatted
+# cell at row 1,048,576 declares every empty row above it, and `iter_rows`
+# dutifully yields them all.
+_MAX_XLSX_UNPACKED_BYTES = 300 * 1024 * 1024
+_MAX_XLSX_CELLS = 5_000_000
+
+
 def _parse_excel_bytes(data: bytes, name: str) -> str:
     try:
         import openpyxl
@@ -512,19 +527,46 @@ def _parse_excel_bytes(data: bytes, name: str) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            unpacked = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ConfigurationError(
+            f"Could not read '{name}' as an Excel workbook. "
+            "Re-save it as .xlsx and upload it again."
+        ) from exc
+    if unpacked > _MAX_XLSX_UNPACKED_BYTES:
+        raise ConfigurationError(
+            f"'{name}' unpacks to more than "
+            f"{_MAX_XLSX_UNPACKED_BYTES // (1024 * 1024)} MB of sheet data and "
+            "was not ingested. Split the workbook into smaller files, or save "
+            "the sheets you need as CSV."
+        )
+
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    parts = []
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        # Written back through `csv.writer` for the reason `_parse_csv_bytes`
-        # gives: a cell containing a comma has to stay one field, or it
-        # silently becomes two columns that no longer line up with the header
-        # row repeated above it. `_one_line` keeps a cell containing a line
-        # break one row for the same reason in the other axis.
-        out = io.StringIO()
-        writer = csv.writer(out, lineterminator="\n")
-        for row in ws.iter_rows(values_only=True):
-            writer.writerow(["" if v is None else _one_line(str(v)) for v in row])
-        parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n")))
-    wb.close()
+    try:
+        parts = []
+        cells_seen = 0
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # Written back through `csv.writer` for the reason `_parse_csv_bytes`
+            # gives: a cell containing a comma has to stay one field, or it
+            # silently becomes two columns that no longer line up with the header
+            # row repeated above it. `_one_line` keeps a cell containing a line
+            # break one row for the same reason in the other axis.
+            out = io.StringIO()
+            writer = csv.writer(out, lineterminator="\n")
+            for row in ws.iter_rows(values_only=True):
+                cells_seen += len(row)
+                if cells_seen > _MAX_XLSX_CELLS:
+                    raise ConfigurationError(
+                        f"'{name}' declares more than {_MAX_XLSX_CELLS:,} cells "
+                        "and was not ingested. Delete unused rows and columns "
+                        "(Excel keeps formatted-but-empty ones), or split the "
+                        "workbook into smaller files."
+                    )
+                writer.writerow(["" if v is None else _one_line(str(v)) for v in row])
+            parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n")))
+    finally:
+        wb.close()
     return f"[Excel: {name}]\n\n" + "\n\n".join(parts)
