@@ -2,7 +2,7 @@
 
 *One page for beta customers and the operator running their instance. Every
 item here is a known, deliberate limit of the beta build — not a bug to
-report — and each links to where it is decided. Last revised 2026-08-22.*
+report — and each links to where it is decided. Last revised 2026-08-29.*
 
 ## Your account and organisation
 
@@ -78,9 +78,11 @@ report — and each links to where it is decided. Last revised 2026-08-22.*
 - Every model call is metered per organisation; the Activity page shows spend
   as an **estimate** from the operator's price list (embedding token counts are
   ±30 %). Models the operator has not priced show as unpriced, not as free.
-- You can set a monthly spend cap and a daily message cap for automation on
-  the Activity page's Automations tab; hitting one pauses automatic runs until
-  the period rolls over and tells you once.
+- You can set a **daily message cap** for automation on your email team's own
+  page (open it from My teams), below where the mailbox is connected; reaching
+  it pauses automatic runs until tomorrow and tells you once. A monthly spend
+  cap is enforced too, but it has no setting in the product — ask the operator
+  if you want one.
 
 ## Your data
 
