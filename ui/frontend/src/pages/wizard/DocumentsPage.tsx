@@ -413,6 +413,42 @@ export default function DocumentsPage() {
         </div>
       )}
 
+      {/* The picker leads: choosing files is the decision this step is about,
+          and everything below it -- the name, the description, the search
+          quality -- only describes what was chosen. */}
+      <div className="upload-section">
+        <label className="btn btn-secondary" style={{ display: 'inline-block' }}>
+          {t('wizard.documents.chooseFiles')}
+          <input
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={addFiles}
+            disabled={busy}
+            accept=".txt,.md,.csv,.json,.yaml,.yml,.log,.pdf,.xlsx,.xlsm,.docx,.xml"
+          />
+        </label>
+      </div>
+
+      {files.length > 0 && (
+        <ul className="tag-list" style={{ marginBottom: 16 }}>
+          {files.map((f, i) => (
+            <li key={`${f.name}-${i}`}>
+              {f.name}{' '}
+              <button
+                type="button"
+                onClick={() => removeFile(i)}
+                disabled={busy}
+                aria-label={t('wizard.documents.removeFile', { name: f.name })}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="field">
         <label htmlFor="doc-label">
           {t('wizard.documents.nameLabel')}{' '}
@@ -484,7 +520,10 @@ export default function DocumentsPage() {
         <p className="hint">{t('wizard.documents.descriptionHint')}</p>
       </div>
 
-      {smartSearchAvailable && (
+      {/* Only with files to upload: `smartSearchEnabled` is read nowhere but the
+          upload call, so with nothing chosen this is a choice that changes
+          nothing. */}
+      {smartSearchAvailable && files.length > 0 && (
         <div className="field">
           <label>{t('wizard.documents.searchQuality')}</label>
           <div className="wizard-actions" style={{ justifyContent: 'flex-start', gap: 8, marginBottom: 4 }}>
@@ -507,39 +546,6 @@ export default function DocumentsPage() {
           </div>
           <p className="hint">{t('wizard.documents.searchQualityHint')}</p>
         </div>
-      )}
-
-      <div className="upload-section">
-        <label className="btn btn-secondary" style={{ display: 'inline-block' }}>
-          {t('wizard.documents.chooseFiles')}
-          <input
-            type="file"
-            multiple
-            style={{ display: 'none' }}
-            onChange={addFiles}
-            disabled={busy}
-            accept=".txt,.md,.csv,.json,.yaml,.yml,.log,.pdf,.xlsx,.xlsm,.docx,.xml"
-          />
-        </label>
-      </div>
-
-      {files.length > 0 && (
-        <ul className="tag-list" style={{ marginBottom: 16 }}>
-          {files.map((f, i) => (
-            <li key={`${f.name}-${i}`}>
-              {f.name}{' '}
-              <button
-                type="button"
-                onClick={() => removeFile(i)}
-                disabled={busy}
-                aria-label={t('wizard.documents.removeFile', { name: f.name })}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
       )}
 
       <div className="wizard-actions">
