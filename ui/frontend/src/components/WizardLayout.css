@@ -52,15 +52,101 @@
   font-weight: 400;
 }
 
+/* `.field-box` is the app's other field shape: one framed box with the label
+   floating inside it, instead of `.field`'s label stacked above a control. The
+   login page is its only caller today; it lives here because this is the shared
+   form stylesheet and nothing about the shape belongs to that page.
+
+   The box is the box -- border, radius and background belong to the wrapper, so
+   the label can sit over the input and a button can sit inside the frame. The
+   input itself is a bare, transparent control. */
+.field-box {
+  position: relative;
+  height: 56px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.field-box input {
+  width: 100%;
+  height: 100%;
+  /* Top-heavy on purpose: the label floats into the space above the value. */
+  padding: 22px 16px 6px;
+  font-size: 1rem;
+  border: none;
+  /* Matches the wrapper so the autofill backstop below stays inside the
+     rounded frame. */
+  border-radius: 12px;
+  background: transparent;
+}
+
+.field-box label {
+  position: absolute;
+  left: 17px;
+  top: 50%;
+  transform: translateY(-50%);
+  transform-origin: left center;
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--text-muted);
+  /* Clicks belong to the input underneath; the `for` attribute already gives
+     the label its accessibility role. */
+  pointer-events: none;
+  transition: transform 140ms ease, color 140ms ease;
+}
+
+.field-box input:focus + label,
+.field-box input:not(:placeholder-shown) + label {
+  transform: translateY(calc(-50% - 12px)) scale(0.78);
+}
+
+.field-box input:focus + label {
+  color: var(--accent);
+}
+
+/* One ring for the whole field rather than one per control: the frame is what
+   the reader sees, and the input inside it has no border of its own to colour. */
+.field-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.field-box input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.field-box:has(input:disabled) {
+  background: var(--surface-muted);
+}
+
+.field-box input:disabled {
+  background: transparent;
+}
+
+/* Chrome paints its own background on an autofilled input, which would cover
+   the floated label and ignore dark mode. Neither is settable directly; an
+   inset shadow is the only way to repaint it. */
+.field-box input:-webkit-autofill,
+.field-box input:-webkit-autofill:hover,
+.field-box input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  box-shadow: inset 0 0 0 100px var(--surface);
+}
+
+/* Chrome comes from the element rule in `index.css`; a wizard field is only
+   ever full width, which that rule has no business deciding. */
 .wizard input[type='text'],
 .wizard textarea,
 .wizard select {
-  font: inherit;
-  padding: 10px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  resize: vertical;
   width: 100%;
+}
+
+.wizard textarea {
+  resize: vertical;
 }
 
 .wizard-actions {
@@ -87,6 +173,42 @@
 
 .btn-primary:disabled {
   background: #a5a6f6;
+  cursor: progress;
+}
+
+/* The one button that publishes a team. It is `btn-primary`'s colour, scaled up
+   and given a glow, so the click that puts a build live does not look like any
+   other click in the wizard. Reserved for that -- a second `btn-hero` on a page
+   cancels the effect. The global prefers-reduced-motion rule in index.css
+   already flattens the transition. */
+.btn-hero {
+  padding: 14px 32px;
+  font-size: 1rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: 0 2px 14px color-mix(in srgb, var(--accent) 38%, transparent);
+  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.btn-hero:hover {
+  background: var(--accent-strong);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--accent) 50%, transparent);
+  transform: translateY(-1px);
+}
+
+.btn-hero:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+/* The glow has to go with the colour: a grey button that still glows reads as
+   available. `cursor: progress` matches what this button (as `btn-primary`)
+   already showed -- it is disabled while launching and, for an email team,
+   until a mailbox is connected. */
+.btn-hero:disabled {
+  background: #a5a6f6;
+  box-shadow: none;
+  transform: none;
   cursor: progress;
 }
 

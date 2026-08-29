@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { api, TOKEN_KEY } from '../lib/api'
 import BrandMark from '../components/BrandMark'
+import BetaBadge from '../components/BetaBadge'
 import LanguageSelect from '../components/LanguageSelect'
-// `.field`, `.btn` and `.banner-error` live here despite the file's name -- it
-// is the app's shared form stylesheet, and the page has always read it.
+// `.field-box`, `.btn` and `.banner-error` live here despite the file's name --
+// it is the app's shared form stylesheet, and the page has always read it.
 import '../components/WizardLayout.css'
 import './LoginPage.css'
 
@@ -68,6 +69,7 @@ export default function LoginPage() {
         <span className="login-brand-name">
           <BrandMark size={26} />
           {t('nav.brand')}
+          <BetaBadge />
         </span>
         <p className="login-tagline">{t('nav.tagline')}</p>
         {/* Decoration, not information: hidden rather than stacked on a phone,
@@ -89,44 +91,48 @@ export default function LoginPage() {
         {error && <div className="banner banner-error">{error}</div>}
 
         <form onSubmit={submit}>
-          <div className="field">
-            <label htmlFor="username">{t('login.username')}</label>
+          {/* The label sits after the input and doubles as the resting
+              placeholder, so CSS can float it on `:focus` / `:not(
+              :placeholder-shown)`. The `placeholder=" "` is what makes the
+              latter work -- a real placeholder would show through the label. */}
+          <div className="field-box">
             <input
               id="username"
               type="text"
               autoComplete="username"
+              placeholder=" "
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               disabled={submitting}
               autoFocus
             />
+            <label htmlFor="username">{t('login.username')}</label>
           </div>
 
-          <div className="field">
+          <div className="field-box login-password">
+            <input
+              id="password"
+              type={revealed ? 'text' : 'password'}
+              autoComplete="current-password"
+              placeholder=" "
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyUp={(e) => setCapsLock(e.getModifierState('CapsLock'))}
+              disabled={submitting}
+            />
             <label htmlFor="password">{t('login.password')}</label>
-            <div className="login-password-field">
-              <input
-                id="password"
-                type={revealed ? 'text' : 'password'}
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyUp={(e) => setCapsLock(e.getModifierState('CapsLock'))}
-                disabled={submitting}
-              />
-              <button
-                type="button"
-                className="login-reveal"
-                aria-label={revealed ? t('login.hidePassword') : t('login.showPassword')}
-                aria-pressed={revealed}
-                onClick={() => setRevealed((r) => !r)}
-                disabled={submitting}
-              >
-                <EyeIcon crossed={revealed} />
-              </button>
-            </div>
-            {capsLock && <p className="login-caps-lock">{t('login.capsLock')}</p>}
+            <button
+              type="button"
+              className="login-reveal"
+              aria-label={revealed ? t('login.hidePassword') : t('login.showPassword')}
+              aria-pressed={revealed}
+              onClick={() => setRevealed((r) => !r)}
+              disabled={submitting}
+            >
+              <EyeIcon crossed={revealed} />
+            </button>
           </div>
+          {capsLock && <p className="login-caps-lock">{t('login.capsLock')}</p>}
 
           <button
             type="submit"

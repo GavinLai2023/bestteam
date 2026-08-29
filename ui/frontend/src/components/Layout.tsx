@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { useMe } from '../lib/useMe'
 import BrandMark from './BrandMark'
+import BetaBadge from './BetaBadge'
 import ChangePasswordDialog from './ChangePasswordDialog'
 import FeedbackModal from './FeedbackModal'
 import LanguageSelect from './LanguageSelect'
@@ -35,6 +36,7 @@ export default function Layout() {
         <span className="brand">
           <BrandMark />
           {t('nav.brand')}
+          <BetaBadge />
         </span>
         <div className="top-nav-links">
           {/* Customer pages are org-scoped; a platform operator (no org) can't

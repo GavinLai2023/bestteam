@@ -32,12 +32,8 @@
 }
 
 .advanced-org select {
-  font: inherit;
   font-weight: 500;
   padding: 6px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface);
 }
 
 .advanced-kinds,
@@ -120,11 +116,8 @@
 }
 
 .advanced-new input {
-  font: inherit;
   font-size: 0.85rem;
   padding: 6px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
   /* Flex items default to min-width: auto, so without this an input refuses to
      shrink below its intrinsic size and overflows the card. */
   min-width: 0;
@@ -141,8 +134,6 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem;
   padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
   resize: vertical;
 }
 

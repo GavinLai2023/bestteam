@@ -89,9 +89,7 @@
   flex: 1;
   padding: 0.6rem 0.8rem;
   border-radius: 0.6rem;
-  border: 1px solid var(--border-strong);
   resize: none;
-  font: inherit;
   line-height: 1.4;
 }
 

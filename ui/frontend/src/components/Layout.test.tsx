@@ -32,6 +32,12 @@ describe('Layout nav', () => {
     }
   })
 
+  it('marks the product as beta beside the wordmark', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    expect(screen.getByText('beta')).toBeInTheDocument()
+  })
+
   it('shows only the customer links for an org member', () => {
     vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
     renderLayout()

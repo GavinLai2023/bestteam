@@ -39,6 +39,11 @@ describe('LoginPage', () => {
     expect(container.querySelector('button[type=submit]')).toBeInTheDocument()
   })
 
+  it('marks the product as beta beside the wordmark', () => {
+    renderPage()
+    expect(screen.getByText('beta')).toBeInTheDocument()
+  })
+
   it('renders a failed login in a .banner-error, which e2e waits for', async () => {
     vi.mocked(api.login).mockRejectedValue(new Error('Invalid username or password'))
     const { container } = renderPage()

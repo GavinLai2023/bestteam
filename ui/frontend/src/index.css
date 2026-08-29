@@ -159,17 +159,54 @@ body {
   border-radius: 4px;
 }
 
-/* Form controls inherit the browser's white-on-black defaults unless a rule
-   says otherwise, and the per-component rules elsewhere each set `border` from
-   a token but never `background`/`color` -- so every textarea and select
-   rendered white with black text in dark mode while its own border was
-   correctly themed. Element selectors have the lowest specificity, so this
-   fills that gap without overriding any component rule that does set them. */
-input,
+/* The chrome every form control shares. It lives here, on element selectors,
+   because a dozen component rules used to each restate the same border, radius
+   and padding -- and every control they did NOT cover (`.field` outside the
+   wizard, the inline account forms, the triage note) rendered as a raw browser
+   box. Element selectors have the lowest specificity, so a component rule that
+   needs a different padding, radius or width still wins by saying only that.
+   `background`/`color` are part of it: without them a control rendered white
+   with black text in dark mode while its own border was correctly themed.
+
+   Checkboxes, radios and file inputs are excluded -- padding and a border
+   deform the first two and say nothing about the third's button. The exclusion
+   sits inside `:where()` so it costs no specificity: written as plain `:not()`
+   it would outweigh a class rule like `.field-box input` and win, which is the
+   opposite of what a base layer is for. */
+input:where(:not([type='checkbox'], [type='radio'], [type='file'])),
 select,
 textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
+}
+
+input[type='checkbox'],
+input[type='radio'],
+input[type='file'] {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* A ring on the control itself rather than the outline above: that one is a
+   4px-radius rectangle, which sits visibly askew around an 8px control and
+   doubles up with the accent border this already gives it. */
+input:where(:not([type='checkbox'], [type='radio'], [type='file'])):focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
 }
 
 @media (prefers-reduced-motion: reduce) {
