@@ -477,6 +477,38 @@ def test_parse_file_csv_row_shaped_like_a_marker_is_escaped(tmp_path):
     ]
 
 
+def test_parse_file_excel_keeps_a_comma_inside_a_cell_quoted(tmp_path):
+    # Same defect the CSV path already fixed: re-joining cells bare turns one
+    # value into two apparent columns, silently shifting every column after it
+    # out from under the header row the chunker repeats above each chunk.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "items.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["sku", "name"])
+    workbook.active.append(["A1", "Widget, large"])
+    workbook.save(str(f))
+    assert parse_file(str(f)).splitlines()[-1] == 'A1,"Widget, large"'
+
+
+def test_parse_file_excel_cell_with_newline_stays_one_row(tmp_path):
+    # A cell containing a line break must stay one field on one line --
+    # rendered verbatim it becomes an extra, shorter row, and every column
+    # after the break sits under the wrong header.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "notes.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["sku", "note"])
+    workbook.active.append(["A1", "first line\nsecond line"])
+    workbook.save(str(f))
+    assert parse_file(str(f)).splitlines() == [
+        "[Excel: notes.xlsx]",
+        "",
+        "[Sheet: Sheet]",
+        "sku,note",
+        "A1,first line second line",
+    ]
+
+
 def test_parse_file_rejects_unsupported_type(tmp_path):
     f = tmp_path / "image.png"
     f.write_bytes(b"\x89PNG")

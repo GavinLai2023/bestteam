@@ -516,9 +516,15 @@ def _parse_excel_bytes(data: bytes, name: str) -> str:
     parts = []
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        rows = []
+        # Written back through `csv.writer` for the reason `_parse_csv_bytes`
+        # gives: a cell containing a comma has to stay one field, or it
+        # silently becomes two columns that no longer line up with the header
+        # row repeated above it. `_one_line` keeps a cell containing a line
+        # break one row for the same reason in the other axis.
+        out = io.StringIO()
+        writer = csv.writer(out, lineterminator="\n")
         for row in ws.iter_rows(values_only=True):
-            rows.append(",".join("" if v is None else str(v) for v in row))
-        parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped("\n".join(rows)))
+            writer.writerow(["" if v is None else _one_line(str(v)) for v in row])
+        parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n")))
     wb.close()
     return f"[Excel: {name}]\n\n" + "\n\n".join(parts)
