@@ -538,6 +538,50 @@ def test_parse_file_excel_rejects_a_workbook_with_too_many_cells(tmp_path, monke
         parse_file(str(f))
 
 
+def test_parse_file_excel_hidden_sheets_are_indexed_too(tmp_path):
+    # Pins a limitation rather than fixing one: a hidden sheet's rows are
+    # parsed, indexed and searchable like any other sheet's. Anyone hiding a
+    # tab to keep it out of the knowledge base needs to delete it instead.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "report.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["public"])
+    hidden = workbook.create_sheet("Internal")
+    hidden.append(["do not publish"])
+    hidden.sheet_state = "hidden"
+    workbook.save(str(f))
+    result = parse_file(str(f))
+    assert "[Sheet: Internal]" in result.splitlines()
+    assert "do not publish" in result
+
+
+def test_parse_file_excel_chart_sheet_gets_a_clear_refusal(tmp_path):
+    # openpyxl's read-only reader crashes on a standalone chart tab
+    # (rels.find on a list, inside load_workbook itself), which would surface
+    # to the customer as a raw AttributeError. Detected from the archive
+    # instead, where a chart tab always means an xl/chartsheets/ entry.
+    # Charts embedded in a normal worksheet are unaffected.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "dash.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a"])
+    workbook.create_chartsheet("Trend")
+    workbook.save(str(f))
+    with pytest.raises(ConfigurationError, match="dash.xlsx.*chart"):
+        parse_file(str(f))
+
+
+def test_parse_file_excel_password_protected_gets_a_clear_refusal(tmp_path):
+    # An encrypted workbook is an OLE2 container, not a zip. Without the
+    # magic-byte check it falls into the generic not-a-workbook message,
+    # whose re-save advice is wrong for a file that needs its password
+    # removed.
+    f = tmp_path / "locked.xlsx"
+    f.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"0" * 100)
+    with pytest.raises(ConfigurationError, match="locked.xlsx.*password"):
+        parse_file(str(f))
+
+
 def test_parse_file_rejects_unsupported_type(tmp_path):
     f = tmp_path / "image.png"
     f.write_bytes(b"\x89PNG")

@@ -533,14 +533,35 @@ def _parse_excel_bytes(data: bytes, name: str) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
+    # A password-protected workbook is an OLE2 container, not a zip, so it
+    # has to be told apart before the zip check: the generic message's
+    # re-save advice is wrong for a file that needs its password removed.
+    if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        raise ConfigurationError(
+            f"'{name}' appears to be password-protected. Remove the password "
+            "in Excel and upload it again."
+        )
+
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entry_names = archive.namelist()
             unpacked = sum(info.file_size for info in archive.infolist())
     except zipfile.BadZipFile as exc:
         raise ConfigurationError(
             f"Could not read '{name}' as an Excel workbook. "
             "Re-save it as .xlsx and upload it again."
         ) from exc
+    # openpyxl's read-only reader crashes on a standalone chart tab, inside
+    # `load_workbook` itself -- there is no sheet object to skip. A chart tab
+    # always means an xl/chartsheets/ entry in the archive, so it is refused
+    # from there with advice instead of an AttributeError. Charts embedded in
+    # a normal worksheet don't create one and are unaffected.
+    if any(entry.startswith("xl/chartsheets/") for entry in entry_names):
+        raise ConfigurationError(
+            f"'{name}' contains a standalone chart tab, which the workbook "
+            "reader cannot open. Delete the chart tab in Excel (charts inside "
+            "a normal sheet are fine) and upload it again."
+        )
     if unpacked > _MAX_XLSX_UNPACKED_BYTES:
         raise ConfigurationError(
             f"'{name}' unpacks to more than "
