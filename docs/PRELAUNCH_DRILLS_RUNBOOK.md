@@ -67,7 +67,7 @@ docker compose exec backend python -m ui.backend.admin create-user drilluser --o
    docker compose exec backend python -m ui.backend.admin set-email drilltest \
      --host imap.gmail.com --user your-test-address@gmail.com --test
    ```
-2. 登录前端（`https://<你的域名>` 或 `http://<VPS-IP>:5173`，取决于你怎么部署），用 `drilluser` 登录，走 Team Builder 向导部署一个用到邮件工具的团队，并在 Deploy 页打开「自动运行」。
+2. 登录前端（`https://<你的域名>`，或没配域名时 `http://<VPS-IP>`——`docker-compose.yml` 里 frontend 发布的是 **80** 端口；`5173` 是本地开发的 Vite 端口，VPS 上没有），用 `drilluser` 登录，走 Team Builder 向导部署一个用到邮件工具的团队，并在 Deploy 页打开「自动运行」。
 3. 给测试邮箱发一封新邮件。
 
 ### 2.2 强杀 backend
@@ -82,13 +82,15 @@ docker compose exec backend python -m ui.backend.admin check-health
 
 ```bash
 docker compose kill -s SIGKILL backend
-docker compose ps   # backend 应该显示 Exited
+docker compose ps
 ```
+
+> **不要期待看到 `Exited`。** backend 在 `docker-compose.yml` 里是 `restart: unless-stopped`——被 SIGKILL 打死之后 Docker 会**自动**把它拉回来（这条策略就是为此存在的：崩溃或主机重启后自己回来，只有显式 `docker compose stop` 之后才保持停止）。所以 `docker compose ps` 多半直接显示 `Up`，或者一闪而过的 `Restarting`。**没抓到退出瞬间不代表 kill 没生效**，判断依据是下一节的日志和状态，不是 `ps` 的手速。
 
 ### 2.3 重新拉起来，检查恢复情况
 
 ```bash
-docker compose up -d backend
+docker compose up -d backend   # 已经被 restart 策略拉起来的话，这条是幂等的
 ```
 
 等它启动后（几秒钟），依次确认：
@@ -96,7 +98,7 @@ docker compose up -d backend
 | 检查项 | 命令 | 期望结果 |
 |---|---|---|
 | 服务恢复健康 | `curl http://localhost:8000/api/health` | `200 {"status":"ok",...}` |
-| 启动日志里能看到清理动作 | `docker compose logs backend --since 5m \| grep -i "sweep\|interrupted\|orphan"` | 能看到类似 "swept N interrupted run(s)" 的字样（如果 kill 时刚好没有 running 的 run，可能是 0 条，这也正常——说明没有东西需要清理） |
+| 启动日志里能看到清理动作 | `docker compose logs backend --since 5m \| grep -i interrupted` | 能看到 `Marked N interrupted run(s) as failed on startup`（如果 kill 时刚好有知识库导入在跑，还会有一条 `Marked N interrupted knowledge-base ingestion job(s) as failed on startup`）。这两行**只在真的有东西要清理时才打印**——kill 时没有 running 的 run 就一行都没有，这也正常 |
 | 单实例锁被正确释放（没有把自己锁死） | 上一步 backend 能正常启动本身就证明了这一点；如果反而报 `SingleInstanceError`，说明锁释放有问题，需要人工删除 `<db文件>.lock` 后再启动，并把这个现象记下来上报 | backend 正常 Up + healthy，不需要手动删锁文件 |
 | 之前"进行中"的 run 没有卡在 `running` 状态 | 登录前端 Activity 页，或 `curl -H "Authorization: Bearer <token>" http://localhost:8000/api/runs` | 状态是 `failed`，不是永远 `running` |
 | 邮件没有被卡住/丢失 | 检查测试邮箱的收件箱和草稿箱 | 之前发的测试邮件要么已经处理完（有草稿），要么还在等待下一轮轮询处理——不应该永久卡在"认领中"状态 |
@@ -131,14 +133,13 @@ docker compose run --rm --no-deps backend python -m uvicorn ui.backend.main:app 
 
 **验证的问题**：`scripts/restore.sh` 已经写好几个月了，但从来没有真的跑过一次。这个演练就是跑一次，确认它真的能用。
 
-### 3.1 先产生一些"看得出有没有恢复成功"的数据
+### 3.1 先确认"看得出有没有恢复成功"的数据
 
-演练 1 里创建的 `drilltest` org 和 `drilluser` 正好可以用。为了能明确判断"恢复成功了"，再加一个之后会删除的标记：
+演练 1 里创建的 `drilltest` org 和 `drilluser` 就是"备份时已经存在"的那份数据——恢复之后它必须还在。这一步不需要再创建任何东西。
 
-```bash
-docker compose exec backend python -m ui.backend.admin create-user restoremarker --org drilltest
-# 密码随便设，记下来——这个账号的存在与否就是"恢复是否成功"的证据
-```
+> **不要给 `drilltest` 再建第二个账号。**"一个 org 只有一个成员"是数据库层强制的不变量（`users.org_id` 上的部分唯一索引，加 `create_user` 的前置检查），不是约定——`create-user <另一个名字> --org drilltest` 会被直接拒绝，报 "Organization already has a member"。原因见 `docs/DECISIONS.md`"one member per org"：org 范围的资源（尤其是自助连接的共享邮箱）还没有成员级权限区分，在有 per-org 管理员角色之前不允许两个成员共管同一个邮箱。
+>
+> 所以下面用**新建一个 org** 来当"备份之后才发生的变化"的标记。
 
 ### 3.2 做一次备份
 
@@ -156,10 +157,14 @@ ls -la /tmp/drill-backup/
 这一步是为了验证恢复"确实是回到了备份那个时间点"，而不是"反正数据库没坏所以看起来像是成功了"：
 
 ```bash
-docker compose exec backend python -m ui.backend.admin create-user afterbackup --org drilltest
+docker compose exec backend python -m ui.backend.admin create-org afterbackup --display-name "After Backup"
+docker compose exec backend python -m ui.backend.admin list-orgs
+# 期望：输出里同时有 drilltest 和 afterbackup 两行
 ```
 
-现在 `afterbackup` 这个账号存在，但它是在备份**之后**创建的——恢复完成后，这个账号应该**消失**（因为恢复回到了备份那一刻，备份之后发生的事情不存在）。
+现在 `afterbackup` 这个 org 存在，但它是在备份**之后**创建的——恢复完成后，它应该**消失**（因为恢复回到了备份那一刻，备份之后发生的事情不存在）。
+
+> 如果 `create-org` 报错 `BESTTEAM_EMAIL_BACKEND is set but this deployment has more than one organization`，说明这台部署还在用进程级邮件凭据（那条路径只支持单 org）。共享多租户部署本来就不该设 `BESTTEAM_EMAIL_*`——把它们从 `.env` 里去掉、改用 `set-email` 的按 org 凭据，重启后再跑这一步。
 
 ### 3.4 执行恢复
 
@@ -176,8 +181,8 @@ docker compose exec backend python -m ui.backend.admin create-user afterbackup -
 | 检查项 | 怎么验证 | 期望结果 |
 |---|---|---|
 | 服务恢复健康 | `curl http://localhost:8000/api/health` | `200` |
-| 备份时已存在的账号还在 | 用 `restoremarker` 的账号密码登录 | 能登录成功 |
-| 备份之后才创建的账号消失了 | 用 `afterbackup` 的账号密码登录 | 登录失败（用户不存在）——**这一步是恢复真的生效的关键证据**，如果这个账号还在，说明恢复根本没有真的替换数据库 |
+| 备份时已存在的账号还在 | 用 `drilluser` 的账号密码登录前端 | 能登录成功 |
+| 备份之后才创建的 org 消失了 | `docker compose exec backend python -m ui.backend.admin list-orgs` | 输出里有 `drilltest`、**没有** `afterbackup`——**这一步是恢复真的生效的关键证据**，如果 `afterbackup` 还在，说明恢复根本没有真的替换数据库 |
 | 数据文件也恢复了（如果测试时上传过知识库文档） | 检查对应的知识库文档还在 | 文档存在，可以正常检索 |
 
 ### 3.6 记录这次演练特有的两个未知点
@@ -185,13 +190,13 @@ docker compose exec backend python -m ui.backend.admin create-user afterbackup -
 `project_beta_freeze` 里提到，有两件事只有真正跑一次 `restore.sh` 才能确认，请在这次演练里顺手记录下来（不需要额外操作，只是留意结果）：
 
 1. **`docker compose cp` 写入一个已停止的容器，是否真的写穿到了数据卷** —— 3.5 节如果验证通过，就说明写穿了，没问题；如果验证失败但脚本本身没报错，很可能是这个环节出了问题，需要进一步排查。
-2. **文件恢复是"追加"而不是"替换"** —— `tar xzf` 没有删除语义，所以恢复文件归档之后，**备份之后新建的知识库上传目录不会被清理，会变成孤儿目录**（数据库已经回滚，不再引用它们）。这不是 bug，只是要知道：`restore.sh` 恢复完之后，如果想要一个"干净"的状态，可能需要手动清理这些孤儿目录。可以顺手确认一下：`afterbackup` 账号存在期间如果上传过知识库文档，恢复后对应的文件目录是否还残留在磁盘上。
+2. **文件恢复是"追加"而不是"替换"** —— `tar xzf` 没有删除语义，所以恢复文件归档之后，**备份之后新建的知识库上传目录不会被清理，会变成孤儿目录**（数据库已经回滚，不再引用它们）。这不是 bug，只是要知道：`restore.sh` 恢复完之后，如果想要一个"干净"的状态，可能需要手动清理这些孤儿目录。可以顺手确认一下：在 3.3 之后（备份之后）用 `drilluser` 再上传一份知识库文档，恢复完成后，数据库里已经查不到它，但它的文件目录大概率还留在磁盘上。
 
 ### 3.7 通过标准
 
 - [ ] `restore.sh` 跑完打印 "Restore complete: the backend is healthy."
 - [ ] 备份时已存在的账号能登录
-- [ ] 备份之后创建的账号无法登录（证明真的回滚了，不是假通过）
+- [ ] 备份之后创建的 `afterbackup` org 在 `list-orgs` 里已经消失（证明真的回滚了，不是假通过）
 - [ ] 记录了上面两个未知点的实际观察结果
 
 ---
@@ -234,6 +239,8 @@ docker compose exec backend python -m ui.backend.admin set-email drilltest \
 ```
 会提示你输入 client secret（不会显示在屏幕上，也不会留在 shell 历史里）。`--test` 会在保存前先做一次真实连接验证。
 
+> **`set-email` 没有录入密钥到期日的参数**（只有 `--auth/--host/--user/--tenant/--client-id/--port/--drafts/--test`）。而到期告警只对**记录了到期日**的凭据生效——所以只走场景 A 配置的 org，**永远不会收到密钥即将过期的提醒**。4.1 里记下的那个过期日期，只能在场景 B 的向导里填（"Secret expiry date (optional)" 那一栏）。如果这台部署将来主要靠 CLI 代客户配置，把这一点记下来当作已知缺口。
+
 **场景 B：走客户自助向导（体验客户会看到的流程）**
 
 用 `drilluser` 登录前端，走到 Team Builder 的「Connect your mailbox」步骤，选择 **Microsoft 365 / Outlook (Exchange Online)**，依次填入邮箱地址、Directory (tenant) ID、Application (client) ID、client secret，点 **Test connection**。
@@ -257,6 +264,8 @@ docker compose exec backend python -m ui.backend.admin set-email drilltest \
 
 把 4.2 连上的邮箱接一个真实团队并跑一次：
 
+> **一个 org 只能有一个邮箱、一个自动运行的团队**（`email_credentials` 和 `email_triggers` 都在 `org_id` 上唯一，写入是 upsert）。所以 4.2 用 `drilltest` 连 M365，会**静默覆盖**演练 1 里连的 Gmail；下面打开自动运行，也会**静默把演练 1 那个团队的自动运行关掉**——不会报错，这是预期行为，不是 bug。如果你想让两者共存，给 M365 演练单开一个 org（`create-org drilltest-m365` + `create-user`）。
+
 1. 给测试邮箱发一封新邮件。
 2. 用这个邮箱运行邮件团队（手动运行一次），确认 Drafts 文件夹里出现了回复草稿，Sent 文件夹里**没有**任何东西被发出（这是核心安全属性：只生成草稿，绝不自动发送）。
 3. 在 Deploy 页打开「自动运行」，再发一封新邮件，确认几分钟内（取决于轮询间隔）自动出现了新的草稿，不需要人工点运行。
@@ -269,7 +278,10 @@ docker compose exec backend python -m ui.backend.admin set-email drilltest \
 1. 回到 Entra 应用注册页，为同一个应用**再创建一个新的 client secret**（不要先删旧的——先加新的，验证完再删旧的，这样中途不会出现"两边都不能用"的空窗期）。
 2. 用新 secret 重新执行场景 A 或场景 B 的连接步骤（`set-email --test` 或向导里重新填写）。
 3. 确认连接测试通过，自动轮询在下一个周期恢复正常（如果之前旧密钥还没过期，轮询本来就没中断；如果为了测试，先删掉旧密钥制造一次"密钥失效"的状态，再走轮换，更接近真实场景，见下一步）。
-4. **可选但推荐**：先删除旧密钥（制造真实的失效），确认几个轮询周期内该 org 收到了"Microsoft 365 client secret nearing expiry / 无法连接"类的告警通知（Activity → Alerts），再补上新密钥验证恢复——这样能顺便验证密钥过期告警链路本身是通的。
+4. **可选但推荐**：先删除旧密钥（制造真实的失效），确认该 org 在 Activity → Alerts 里收到告警，再补上新密钥验证恢复。
+   **注意这里会看到哪一种告警**——系统里是两条互不相干的链路，别把它们当成一个：
+   - **"Your mailbox can't be reached"**（`trigger_health.py`）：由**连接连续失败**触发，删掉密钥测的就是这一条。需要**连续 3 次**轮询失败才发（`BESTTEAM_TRIGGER_ALERT_THRESHOLD`，默认 3），所以要等 3 个轮询周期，不是 1 个。
+   - **"Your Microsoft 365 app password expires soon / has expired"**（`email_trigger.sweep_secret_expiry`）：由**记录在案的到期日**触发（到期前 30 天、7 天各一次），跟能不能连上无关。删掉 Azure 里的密钥**不会**触发它。
 5. 在 Azure 里删除旧的 client secret，完成轮换。
 
 **记录下来**：从"决定轮换"到"轮询恢复正常"，实际花了多长时间、需要几步操作——这就是将来写给客户/自己看的轮换 SOP 的素材。
@@ -283,8 +295,8 @@ docker compose exec backend python -m ui.backend.admin set-email drilltest \
    Remove-MailboxPermission -Identity <测试邮箱地址> -User <object-id> -AccessRights FullAccess
    ```
    或者更彻底地，撤销 `IMAP.AccessAsApp` 的 admin consent（Entra ID → Enterprise applications → 找到这个应用 → Permissions → Revoke），或者直接删除整个 App registration。
-2. 等下一个轮询周期，确认：
-   - 该 org 在 Activity → Alerts 里出现了"邮箱无法访问"类的告警（"Your mailbox can't be reached"）
+2. 等**至少 3 个**轮询周期（告警阈值是连续 3 次失败，见 4.5 步骤 4 的说明），确认：
+   - 该 org 在 Activity → Alerts 里出现了 "Your mailbox can't be reached" 告警
    - 系统**没有**因为这个失败而崩溃或影响其他 org
    - 手动触发一次连接测试（`set-email --test`，或向导里的 Test connection），错误提示能让人明白是权限被收回了，而不是一个模糊的报错
 
@@ -357,9 +369,10 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 ```bash
 docker compose exec backend python -m ui.backend.admin delete-user drilluser
-docker compose exec backend python -m ui.backend.admin delete-user restoremarker
-docker compose exec backend python -m ui.backend.admin delete-user afterbackup   # 如果演练 2 之后它还在（正常情况下恢复演练本身应该已经让它消失了）
+docker compose exec backend python -m ui.backend.admin list-orgs   # 确认 afterbackup 已经不在了
 ```
+
+演练 2 用的 `afterbackup` org 正常情况下已经被恢复步骤本身抹掉了。如果你在跑 `restore.sh` 之前中止了演练，它会留下来——目前没有 `delete-org` 命令，一个没有成员的 org 不会出现在任何客户可见的地方，也不产生费用，可以先放着。
 
 `drilltest` 这个 org 本身没有单独的删除命令（`admin.py` 目前没有 `delete-org`），删完成员账号即可——一个没有成员的 org 不会出现在任何客户可见的地方，也不会产生费用。如果你想彻底清掉，可以在这次演练全部做完、确认没有问题之后，直接从头 `restore.sh` 一份"演练开始前"状态的备份（如果你在演练最开始也做过一次备份的话），这样最干净。
 
