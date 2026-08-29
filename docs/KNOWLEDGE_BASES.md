@@ -1198,6 +1198,19 @@ Hugging Face); inference is local and $0.
   identical content is treated as new (the reuse key includes the filename),
   and the SDK path (a path-constructed KB) has only the per-chunk-text JSON
   cache, with no document-level reuse at all.
+- **Spreadsheets are ingested as raw cell values, not as Excel renders
+  them.** A formula cell is read from the file's *cached* value
+  (`data_only=True`): a workbook written programmatically (openpyxl,
+  pandas) that never passed through Excel has no cached values, so its
+  formula cells ingest as empty. A merged range keeps its value in the
+  top-left cell only — the other cells render empty, which can also defeat
+  the chunker's header-row heuristic when the merge sits in the header row.
+  Number and date *formats* are lost: a date renders as the underlying
+  `2026-03-01 00:00:00`, a percentage as `0.15`. Hidden sheets are parsed
+  and indexed like visible ones — delete a tab to keep it out of the
+  knowledge base. A workbook is refused with a customer-readable error if
+  it is password-protected, contains a standalone chart tab, unpacks to
+  more than 300 MB, or declares more than 5,000,000 cells.
 - **BM25 can be unstable on tiny corpora** (a handful of documents) —
   mitigated, but not eliminated, by the stopword filter and the
   shared-significant-terms gate before ranking.
