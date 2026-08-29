@@ -710,6 +710,24 @@ def test_parse_file_reads_docx_tables(tmp_path):
     assert "9.99" in result
 
 
+def test_parse_file_docx_table_cell_keeps_a_comma_quoted(tmp_path):
+    # The defect the CSV and Excel paths already fixed, in its last home: a
+    # bare join turns one cell into two apparent columns, shifting every
+    # column after it out from under the header row the chunker repeats.
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "sku"
+    table.cell(0, 1).text = "name"
+    table.cell(1, 0).text = "A1"
+    table.cell(1, 1).text = "Widget, large"
+    document.save(str(f))
+
+    assert 'A1,"Widget, large"' in parse_file(str(f)).splitlines()
+
+
 def test_parse_file_docx_headings_become_markdown(tmp_path):
     docx = pytest.importorskip("docx")
 

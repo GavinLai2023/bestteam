@@ -249,20 +249,26 @@ def _parse_docx_bytes(data: bytes, name: str) -> str:
         if isinstance(item, Table):
             _flush_paragraphs()
             table_number += 1
-            rows = [
-                ",".join(_one_line(cell.text) for cell in row.cells)
-                for row in item.rows
-            ]
-            # A row with no text in any cell is dropped rather than rendered.
-            # It carries nothing a search could match, and in a ONE-column
-            # table it renders as the empty string -- which is the blank line
-            # `core/knowledge_base.py::_docx_segments` reads as the end of the
-            # block, so a spacer row would drop every row after it out of the
-            # table and index it as prose with no header and no citation.
-            # Dropping them is what makes that terminator unambiguous.
+            # Written through `csv.writer` like the CSV and Excel paths, and
+            # for their reason: a cell containing a comma has to stay one
+            # field, or it becomes two apparent columns that no longer line
+            # up with the header row the chunker repeats above each chunk.
+            out = io.StringIO()
+            writer = csv.writer(out, lineterminator="\n")
+            for row in item.rows:
+                cells = [_one_line(cell.text) for cell in row.cells]
+                # A row with no text in any cell is dropped rather than
+                # rendered. It carries nothing a search could match, and in a
+                # ONE-column table it renders as the empty string -- which is
+                # the blank line `core/knowledge_base.py::_docx_segments`
+                # reads as the end of the block, so a spacer row would drop
+                # every row after it out of the table and index it as prose
+                # with no header and no citation. Dropping them is what makes
+                # that terminator unambiguous.
+                if any(cells):
+                    writer.writerow(cells)
             parts.append(
-                f"[Table {table_number}]\n"
-                + "\n".join(row for row in rows if row.replace(",", "").strip())
+                f"[Table {table_number}]\n" + out.getvalue().strip("\n")
             )
         elif item.text.strip():
             paragraph_run.append(_docx_paragraph_line(item))
