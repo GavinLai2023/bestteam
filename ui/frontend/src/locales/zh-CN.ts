@@ -464,6 +464,9 @@ export const zhCN: Resources = {
     revoke: '撤销',
     close: '关闭',
     copyFailed: '无法自动复制链接，请手动选中并复制。',
+    notShareable:
+      '该团队能读取组织的邮箱，因此无法分享。'
+      + '分享链接是匿名的，拿到链接的任何人都能让团队读出邮箱里的内容。',
   },
   sharedSessions: {
     back: '返回',

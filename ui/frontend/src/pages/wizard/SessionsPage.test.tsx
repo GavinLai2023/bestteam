@@ -515,6 +515,40 @@ describe('SessionsPage live grouping', () => {
   })
 })
 
+// A team holding email tools reads the org's real mailbox, and a share link
+// is anonymous -- the backend refuses to mint one (share_links_api.py). The
+// card says why instead of offering a button that can only fail.
+describe('SessionsPage sharing a team that reads the mailbox', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.listShareLinks.mockResolvedValue([])
+  })
+
+  it('replaces the share controls with a reason when the team uses email', async () => {
+    mockedApi.listSessions.mockResolvedValue({
+      sessions: [session({ pipeline_id: 5, uses_email: true })],
+    })
+
+    renderPage()
+
+    expect(await screen.findByText(/can't be shared/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Shared sessions' })).not.toBeInTheDocument()
+  })
+
+  it('leaves the share controls alone for a team that does not use email', async () => {
+    mockedApi.listSessions.mockResolvedValue({
+      sessions: [session({ pipeline_id: 5, uses_email: false })],
+    })
+
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'Share' })).toBeInTheDocument()
+    expect(screen.queryByText(/can't be shared/i)).not.toBeInTheDocument()
+  })
+})
+
 // A live team had no off switch at all: delete is offered only for a
 // never-deployed draft, and the only other "off" in the product suspends the
 // whole organisation. Pause is the reversible half.

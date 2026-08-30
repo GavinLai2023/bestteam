@@ -535,6 +535,14 @@ Two deliberately separate surfaces:
   this link" case returns **the same single 404 detail**, including "the team
   isn't deployed" — a distinguishable message there is an existence oracle.
 
+⚠️ **A team holding email tools cannot be shared at all.** `share_links_api`
+refuses to mint a link (409), and `share_chat._resolve_shareable_pipeline` —
+the one lookup both the send path and `GET /{token}/team` use — refuses an
+existing one with the module's single 404. A link is anonymous, so otherwise
+whoever holds it can ask the team to read the org's inbox back to them: the
+same bound `find_email_egress_conflicts` keeps at deploy. That helper also
+refuses a **paused** team (`pipelines.active`).
+
 **Auth is a signed session cookie** (`share_auth.py`), not a JWT: a visitor has
 no account, org or `users` row. The cookie carries only an opaque
 `session_token`, HMAC-signed with **`auth.SECRET_KEY`** — so rotating that key

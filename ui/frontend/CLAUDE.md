@@ -403,6 +403,10 @@ expiry are set at creation — to change them, revoke and regenerate) and
 their own toggles**, with `SessionsPage` owning the audit one's open state, so a
 page listing many teams doesn't fire a fetch per card on load.
 
+⚠️ **A team with `uses_email` gets neither control** — one line of copy
+(`shareLinks.notShareable`) sits where they were. The backend refuses to mint a
+link for such a team, so the buttons could only fail.
+
 ## Auth and login UI
 
 `lib/api.ts` stores a bearer token in `localStorage` (`bestteam_token`), attaches

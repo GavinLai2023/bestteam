@@ -551,6 +551,12 @@ export const en = {
     revoke: 'Revoke',
     close: 'Close',
     copyFailed: "Couldn't copy the link automatically. Select and copy it by hand.",
+    // Shown on the My Teams card in place of the controls above. The backend
+    // refuses to mint a link for such a team (share_links_api.py).
+    notShareable:
+      "This team can read your organisation's mailbox, so it can't be shared. "
+      + 'A share link is anonymous, and anyone holding it could ask the team to '
+      + 'read your email back to them.',
   },
   // The read-only audit view beside it (components/SharedSessionsPanel.tsx).
   sharedSessions: {

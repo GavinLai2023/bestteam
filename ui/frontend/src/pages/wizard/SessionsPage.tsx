@@ -212,19 +212,26 @@ export default function SessionsPage() {
                       </div>
                     </button>
                     {session.status === 'deployed' && session.pipeline_id != null && (
-                      <>
-                        <ShareLinksPanel pipelineId={session.pipeline_id} />
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={() =>
-                            setOpenAudit((id) => (id === session.pipeline_id ? null : session.pipeline_id!))
-                          }
-                        >
-                          {t('myTeams.sharedSessions')}
-                        </button>
-                        {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
-                      </>
+                      // A team holding email tools reads the org's real mailbox, and a
+                      // share link is anonymous -- `share_links_api` refuses to mint one.
+                      // Say why here rather than offer a button that can only fail.
+                      session.uses_email ? (
+                        <p className="hint">{t('shareLinks.notShareable')}</p>
+                      ) : (
+                        <>
+                          <ShareLinksPanel pipelineId={session.pipeline_id} />
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() =>
+                              setOpenAudit((id) => (id === session.pipeline_id ? null : session.pipeline_id!))
+                            }
+                          >
+                            {t('myTeams.sharedSessions')}
+                          </button>
+                          {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
+                        </>
+                      )
                     )}
                     {session.pipeline_id != null && (
                       <button
