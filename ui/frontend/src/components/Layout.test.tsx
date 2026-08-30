@@ -50,21 +50,72 @@ describe('Layout nav', () => {
   })
 })
 
+// Language, Change password and Log out are account settings, not navigation.
+// Left in the nav row they sat between the links and each other -- eight items
+// on one line, with a select box in the middle of them.
+describe('Layout account menu', () => {
+  const openMenu = () => fireEvent.click(screen.getByRole('button', { name: 'Account' }))
+
+  it('names the signed-in user on the trigger', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'ana', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    expect(screen.getByRole('button', { name: 'Account' })).toHaveTextContent('ana')
+  })
+
+  it('keeps the account items out of the nav row until it is opened', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    expect(screen.queryByRole('button', { name: 'Change password' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Language')).not.toBeInTheDocument()
+  })
+
+  it('reveals all three once opened', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    openMenu()
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Language')).toBeInTheDocument()
+  })
+
+  it('closes on Escape', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    openMenu()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument()
+  })
+
+  it('closes when a click lands outside it', () => {
+    vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
+    renderLayout()
+    openMenu()
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument()
+  })
+})
+
 describe('Layout change-password entry point', () => {
+  const openMenu = () => fireEvent.click(screen.getByRole('button', { name: 'Account' }))
+
   it.each([
     ['a platform operator', { is_admin: true, username: 'x', org: null }, true],
     ['an org member', { is_admin: false, username: 'x', org: 'acme' }, false],
   ])('offers it to %s', (_who, me, isAdmin) => {
     vi.mocked(useMe).mockReturnValue({ me, loading: false, isAdmin })
     renderLayout()
+    openMenu()
     expect(screen.getByRole('button', { name: 'Change password' })).toBeInTheDocument()
   })
 
-  // tests/e2e/test_smoke.py clicks `button.logout-button`; a second button
-  // wearing that class is a Playwright strict-mode failure, not a style bug.
+  // tests/e2e/test_smoke.py opens the account menu, then clicks
+  // `button.logout-button`; a second button wearing that class is a Playwright
+  // strict-mode failure, not a style bug.
   it('leaves the log-out selector matching exactly one button', () => {
     vi.mocked(useMe).mockReturnValue({ me: { is_admin: false, username: 'x', org: 'acme' }, loading: false, isAdmin: false })
     const { container } = renderLayout()
+    openMenu()
     expect(container.querySelectorAll('button.logout-button')).toHaveLength(1)
   })
 
@@ -73,6 +124,7 @@ describe('Layout change-password entry point', () => {
     renderLayout()
     expect(screen.queryByLabelText(/current password/i)).not.toBeInTheDocument()
 
+    openMenu()
     fireEvent.click(screen.getByRole('button', { name: 'Change password' }))
 
     expect(screen.getByLabelText(/current password/i)).toBeInTheDocument()

@@ -40,6 +40,7 @@ export const zhCN: Resources = {
     changePassword: '修改密码',
     logOut: '退出登录',
     language: '语言',
+    account: '账号',
   },
   common: {
     tryAgain: '重试',

@@ -69,6 +69,9 @@ def goto_expecting_login_redirect(page, path, timeout=5000):
 
 
 def logout(page):
+    # Log out lives in the nav's account menu, which renders its items only
+    # while open -- so the button does not exist to click until this does.
+    page.click("button.account-trigger")
     page.click("button.logout-button")
     page.wait_for_url("**/login", timeout=5000)
 

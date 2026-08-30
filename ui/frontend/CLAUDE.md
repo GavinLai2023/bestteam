@@ -428,6 +428,11 @@ contract with `tests/e2e/test_smoke.py`**, which drives the real page through
 exactly those selectors. `LoginPage.test.tsx` asserts each so a rename fails in the
 unit tier instead of the e2e one.
 
+⚠️ **Language, Change password and Log out live in `Layout`'s account menu**,
+not the nav row — a closed menu renders none of them, so
+`tests/e2e/test_smoke.py` clicks `button.account-trigger` before
+`button.logout-button`. Escape and an outside `mousedown` both close it.
+
 `components/ChangePasswordDialog.tsx` posts to `POST /api/auth/password` and
 ⚠️ **swaps the returned token into `localStorage` immediately** — the change
 revokes the old one, so any request made before the swap would 401. **Its success

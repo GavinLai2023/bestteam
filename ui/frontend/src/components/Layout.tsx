@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
@@ -13,10 +13,12 @@ import './Layout.css'
 export default function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
-  const { isAdmin } = useMe()
   const { t, i18n } = useTranslation()
+  const { me, isAdmin } = useMe()
   const [changingPassword, setChangingPassword] = useState(false)
   const [sendingFeedback, setSendingFeedback] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
+  const accountRef = useRef<HTMLDivElement>(null)
 
   // Route changes (e.g. wizard Preview -> Confirm) otherwise keep whatever
   // scroll position the previous page was at, landing the new page mid-way
@@ -24,6 +26,25 @@ export default function Layout() {
   useEffect(() => {
     window.scrollTo(0, 0)
   }, [pathname])
+
+  // Escape and a click elsewhere both close the menu -- the two ways anyone
+  // expects to dismiss one. `mousedown`, not `click`, so pressing outside
+  // closes before the element under the pointer reacts.
+  useEffect(() => {
+    if (!accountOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAccountOpen(false)
+    }
+    const onMouseDown = (e: MouseEvent) => {
+      if (!accountRef.current?.contains(e.target as Node)) setAccountOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('mousedown', onMouseDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('mousedown', onMouseDown)
+    }
+  }, [accountOpen])
 
   const logOut = () => {
     localStorage.removeItem('bestteam_token')
@@ -76,7 +97,6 @@ export default function Layout() {
               </NavLink>
             </>
           )}
-          <LanguageSelect />
           {/* Org members only: an admin already has the triage page (its
               NavLink above shares this label), and all feedback lands with
               the platform operator anyway (feedback_api.py). */}
@@ -89,21 +109,48 @@ export default function Layout() {
               {t('nav.feedback')}
             </button>
           )}
-          {/* Shown to platform operators too: an operator's own password
-              deserves the same self-service as a customer's. */}
-          <button
-            type="button"
-            className="nav-action"
-            onClick={() => setChangingPassword(true)}
-          >
-            {t('nav.changePassword')}
-          </button>
-          {/* `logout-button` carries no styling any more -- it is kept because
-              tests/e2e/test_smoke.py clicks `button.logout-button`, and it must
-              stay unique to this button for Playwright's strict mode. */}
-          <button type="button" className="nav-action logout-button" onClick={logOut}>
-            {t('nav.logOut')}
-          </button>
+          {/* Language, password and log out are account settings, not places
+              to navigate to. Inline they made a row of eight, with a select
+              box sitting in the middle of the links. */}
+          <div className="account-menu" ref={accountRef}>
+            <button
+              type="button"
+              className="nav-action account-trigger"
+              aria-label={t('nav.account')}
+              aria-haspopup="true"
+              aria-expanded={accountOpen}
+              onClick={() => setAccountOpen((open) => !open)}
+            >
+              {me?.username}
+              <span className="account-caret" aria-hidden="true">
+                ▾
+              </span>
+            </button>
+            {accountOpen && (
+              <div className="account-panel">
+                <LanguageSelect />
+                {/* Shown to platform operators too: an operator's own password
+                    deserves the same self-service as a customer's. */}
+                <button
+                  type="button"
+                  className="nav-action"
+                  onClick={() => {
+                    setAccountOpen(false)
+                    setChangingPassword(true)
+                  }}
+                >
+                  {t('nav.changePassword')}
+                </button>
+                {/* `logout-button` carries no styling -- it is kept because
+                    tests/e2e/test_smoke.py clicks `button.logout-button` after
+                    opening this menu, and it must stay unique to this button
+                    for Playwright's strict mode. */}
+                <button type="button" className="nav-action logout-button" onClick={logOut}>
+                  {t('nav.logOut')}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </nav>
       <main className="app-main">

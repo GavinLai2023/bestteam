@@ -89,3 +89,52 @@
 .app-main {
   flex: 1;
 }
+
+/* The account menu: language, password and log out, which are settings rather
+   than destinations. Anchored to its trigger so the panel hangs under it. */
+.account-menu {
+  position: relative;
+}
+
+.account-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-caret {
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.account-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 180px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+/* Left-aligned here: in a stacked menu the pill's centred text reads as
+   ragged, where in the nav row it was one item among centred siblings. */
+.account-panel .nav-action {
+  text-align: left;
+}
+
+/* The panel is anchored to the right edge of the nav, which on a narrow
+   screen puts it past the viewport; pin it to the nav's own right instead. */
+@media (max-width: 480px) {
+  .account-panel {
+    right: auto;
+    left: 0;
+  }
+}

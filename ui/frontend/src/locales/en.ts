@@ -31,6 +31,9 @@ export const en = {
     // translated -- someone who has landed in a language they cannot read
     // needs to recognise their own by sight to get out.
     language: 'Language',
+    // The nav's account menu trigger. Its visible text is the username, so
+    // this is the accessible name rather than a label anyone reads.
+    account: 'Account',
   },
   common: {
     tryAgain: 'Try again',
