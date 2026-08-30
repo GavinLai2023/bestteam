@@ -5,15 +5,15 @@
 ## Prerequisites
 
 - **Frontend** running: `cd ui/frontend && npm run dev`.
-- **Backend** running **with the demo workflows enabled**, so the "Run a team"
+- **Backend** running **with the demo pipelines enabled**, so the "Run a team"
   dropdown has something to pick on a fresh database:
 
   ```bash
-  BESTTEAM_DEMO_WORKFLOWS=1 BESTTEAM_SECRET_KEY=dev-only-secret-change-me-for-real-use \
+  BESTTEAM_DEMO_PIPELINES=1 BESTTEAM_SECRET_KEY=dev-only-secret-change-me-for-real-use \
     python -m uvicorn ui.backend.main:app --port 8000
   ```
 
-  `BESTTEAM_DEMO_WORKFLOWS` is off by default (the bundled workflows are demo
+  `BESTTEAM_DEMO_PIPELINES` is off by default (the bundled pipelines are demo
   fixtures, not tenant data); this guide needs them. See `docs/deployment.md`.
 
 - **Two accounts.** There is **no public registration** — accounts are
@@ -50,7 +50,7 @@
 1. Open http://localhost:5173 — you should be redirected to `/login`.
 2. Enter `demo` / `demo-pass-123` and click **Login**.
 3. **Expected:** Logged in, and `/` forwards you to `/activity` ("Team
-   activity") — or to `/wizard` if `default` has no deployed workflow yet.
+   activity") — or to `/wizard` if `default` has no deployed pipeline yet.
    The nav shows **Dashboard / Build a team / My teams / Run a team**.
 
 ### T1-2 · An admin lands somewhere else
@@ -79,14 +79,14 @@
 
 ## T2 · Run a team (`/run`) — as `demo`
 
-### T2-1 · Workflow list loads
+### T2-1 · Team list loads
 1. Log in as `demo` and click **Run a team** in the nav (`/run`).
-2. **Expected:** The **Workflow** dropdown is populated (e.g. `code_review`,
-   `research_brief`). No `workflows.map` error in the console.
-   *If it's empty, the backend was started without `BESTTEAM_DEMO_WORKFLOWS=1`
-   and this org has no deployed workflows yet.*
+2. **Expected:** The **Team** dropdown is populated (e.g. `code_review`,
+   `research_brief`). No list-rendering error in the console.
+   *If it's empty, the backend was started without `BESTTEAM_DEMO_PIPELINES=1`
+   and this org has no deployed pipelines yet.*
 
-### T2-2 · Run a workflow
+### T2-2 · Run a team
 1. Select `code_review` from the dropdown.
 2. Type a short input, e.g. `def add(a, b): return a + b`.
 3. Click **Run**.
@@ -114,21 +114,21 @@ from `/advanced`).
 
 ### T3-1 · Navigate between resource types
 1. Go to `/advanced`.
-2. Click each tab in the left nav: **Workflows**, **Skills**,
+2. Click each tab in the left nav: **Pipelines**, **Skills**,
    **Knowledge bases**, **Tools**, **Model catalog**.
 3. **Expected:** Each click reloads the list panel. Empty lists show `"None yet."`.
-   There are no Agents/Teams tabs — a deployed workflow carries its agents and
+   There are no Agents/Teams tabs — a deployed pipeline carries its agents and
    teams inline in its own JSON.
 
 ### T3-2 · Organisation selector
-1. On an org-scoped tab (Workflows / Knowledge bases), note the **Organisation**
+1. On an org-scoped tab (Pipelines / Knowledge bases), note the **Organisation**
    selector in the page header; it lists the orgs (e.g. `Default Organization`).
 2. On the **Skills** tab, the selector also offers **Platform (built-ins)** —
    the default — for the platform skill tier.
 3. **Tools** and **Model catalog** show no selector (they aren't org-scoped).
 
 ### T3-3 · Switching org clears the editor (regression guard)
-1. On the **Workflows** tab, select any existing workflow so its JSON loads in
+1. On the **Pipelines** tab, select any existing pipeline so its JSON loads in
    the editor.
 2. Change the **Organisation** selector to a different org (or, on **Skills**,
    between an org and **Platform (built-ins)**).
@@ -193,13 +193,13 @@ from `/advanced`).
 4. Click **Save**.
 5. **Expected:** Green `"Saved."` banner; `fake:hello` appears in the list.
 
-### T3-11 · Create a Workflow via Advanced
-1. Click the **Workflows** tab; set the **Organisation** selector to
+### T3-11 · Create a Pipeline via Advanced
+1. Click the **Pipelines** tab; set the **Organisation** selector to
    `Default Organization`.
-2. In the **New name** input, type `test_workflow`. Click **New**, then enter:
+2. In the **New name** input, type `test_pipeline`. Click **New**, then enter:
    ```json
    {
-     "name": "test_workflow",
+     "name": "test_pipeline",
      "teams": [{ "name": "solo_team", "mode": "sequential", "agents": ["helper"] }],
      "agents": [
        {
@@ -210,14 +210,14 @@ from `/advanced`).
          "model": "fake:I am your helper. How can I assist you today?"
        }
      ],
-     "workflow": { "steps": ["solo_team"] }
+     "pipeline": { "steps": ["solo_team"] }
    }
    ```
 3. Click **Save** → green `"Saved."` banner.
 4. Log out, log in as `demo`, go to **Run a team** (`/run`).
-5. **Expected:** `test_workflow` appears in the Workflow dropdown (it was created
+5. **Expected:** `test_pipeline` appears in the Team dropdown (it was created
    in `default`, and `demo` belongs to `default`). Note this doesn't need the
-   demo flag — it's a real DB workflow, not a bundled demo.
+   demo flag — it's a real DB pipeline, not a bundled demo.
 
 ---
 
@@ -258,13 +258,13 @@ from `/advanced`).
 3. **Expected:** The diagram refreshes; the feedback note appears under **Adjustments so far**.
 
 ### T4-5 · Deploy page — Launch the team
-1. From Confirm, continue to deploy → **"Ready to go live?"** with the workflow name.
+1. From Confirm, continue to deploy → **"Ready to go live?"** with the team name.
 2. Click **Launch my team**.
 3. **Expected:** `"Your team is live 🎉"` and a **Run a team** button.
 
 ### T4-6 · Run a team (post-deploy)
 1. Click **Run a team**.
-2. **Expected:** Redirected to `/run?workflow=<name>` with the new workflow
+2. **Expected:** Redirected to `/run?pipeline=<name>` with the new team
    pre-selected.
 3. Enter an input and Run → output in the Live trace.
 
@@ -338,7 +338,7 @@ from `/advanced`).
 ### T7-2 · Trace page
 1. Go to `/trace`.
 2. **Expected:** Heading **"Trace"** with tabs **Runs**, **Analytics**,
-   **Models**. The Runs tab filters by workflow; clicking a run opens its
+   **Models**. The Runs tab filters by pipeline; clicking a run opens its
    detail.
 
 ### T7-3 · Memory page
@@ -356,13 +356,13 @@ from `/advanced`).
 2. Navigate to `/advanced`.
 3. **Expected:** Redirected to `/login`.
 
-### T8-2 · Duplicate workflow name is an upsert (as `op`)
-1. In Advanced → Workflows (org `Default Organization`), create `duplicate_test`.
+### T8-2 · Duplicate pipeline name is an upsert (as `op`)
+1. In Advanced → Pipelines (org `Default Organization`), create `duplicate_test`.
 2. Create another with the same name.
 3. **Expected:** The list has exactly one `duplicate_test` — the PUT upserts.
 
 ### T8-3 · Run with no input (as `demo`)
-1. On `/run`, select a workflow but leave Input blank.
+1. On `/run`, select a team but leave Input blank.
 2. **Expected:** The **Run** button is disabled.
 
 ### T8-4 · Unknown path routes home
@@ -381,9 +381,9 @@ from `/advanced`).
 | `/activity` | Dashboard — "Team activity" | `demo` (org user) | Automations / Runs / Shared tabs, run detail, persisted history |
 | `/wizard` | Team Builder | `demo` (org user) | Challenge → Documents → Preview → Confirm → Deploy |
 | `/teams` | My teams | `demo` (org user) | Deployed teams, share links, resume a draft |
-| `/run` | Run a team | `demo` (org user) | Workflow list, run, live trace, Stop |
+| `/run` | Run a team | `demo` (org user) | Team list, run, live trace, Stop |
 | `/share/:token` | Public share chat | **none — logged out** | Anonymous multi-turn chat; revoked link is refused |
 | `/accounts` | Organisations & users | `op` (platform admin) | Org create/deactivate, per-org user management |
-| `/advanced` | Advanced config | `op` (platform admin) | Workflows/Skills/KB/Tools/Model catalog CRUD, org selector |
+| `/advanced` | Advanced config | `op` (platform admin) | Pipelines/Skills/KB/Tools/Model catalog CRUD, org selector |
 | `/memory` | Memory admin | `op` (platform admin) | Per-user memory (if `BESTTEAM_MEMORY_DB` set) |
 | `/trace` | Trace | `op` (platform admin) | Runs / Analytics / Models tabs |

@@ -2,7 +2,7 @@
 
 A step-by-step runbook for manually exercising the draft-only email toolkit
 (PR #13) end to end: bring up the backend + frontend, log in, run the
-`email_triage_demo_live` workflow against a real mailbox, and confirm reply
+`email_triage_demo_live` pipeline against a real mailbox, and confirm reply
 **drafts** appear while **nothing is ever sent**.
 
 This is a manual, browser-driven test. Budget ~15 minutes once you have a
@@ -21,7 +21,7 @@ test mailbox and an OpenAI key.
   database, which on an existing deployment may lag the shipped default — if
   you're validating a change to the rule itself, adopt it first (see
   `docs/deployment.md` → "Updating built-in skills").
-- The full run path: `POST /api/runs` → `RunRegistry` → `Workflow.stream()`
+- The full run path: `POST /api/runs` → `RunRegistry` → `Pipeline.stream()`
   on a worker thread → live trace over the WebSocket → the frontend
   monitoring dashboard.
 
@@ -39,7 +39,7 @@ The worst outcome is a bad draft a human reviews in their own mail client.
 | A test mailbox | a compatible IMAP account **or** an M365/Graph app registration — see [§15](#15-provider-notes--mailbox-compatibility) | the tools need a real inbox |
 | `OPENAI_API_KEY` | a working OpenAI key with quota | the demo uses `openai:gpt-4o-mini`; `fake:` models never call tools |
 | DB at migration head | see step 4 | boots clean, no seeding warning |
-| `BESTTEAM_DEMO_WORKFLOWS=1` | set at backend startup (step 7) | the bundled demo workflows are off by default; the flag exposes `email_triage_demo_live` |
+| `BESTTEAM_DEMO_PIPELINES=1` | set at backend startup (step 7) | the bundled demo pipelines are off by default; the flag exposes `email_triage_demo_live` |
 
 > **Cost note:** the demo makes real OpenAI calls (a handful of small
 > `gpt-4o-mini` requests per run). Reading is `BODY.PEEK`/read-only for IMAP,
@@ -93,12 +93,12 @@ The default dev DB (`ui/backend/data/bestteam.db`) is already at head.
 ## 5. Provision the login account
 
 Public registration was removed — accounts are operator-provisioned. This test
-runs the workflow as one org user; no admin account is needed. `create-user`
+runs the pipeline as one org user; no admin account is needed. `create-user`
 prompts for a password interactively.
 
 | Account | Role | Used for |
 |---|---|---|
-| `demo` | org user (`default` org) | running the workflow |
+| `demo` | org user (`default` org) | running the pipeline |
 
 Pick your own password when prompted (the examples below use `demo` as the
 username; choose any password you like — it only guards this local account):
@@ -146,7 +146,7 @@ $env:BESTTEAM_SECRET_KEY = $(.\.venv\Scripts\python.exe -c "import secrets; prin
 
 ```powershell
 $env:OPENAI_API_KEY="sk-..."
-$env:BESTTEAM_DEMO_WORKFLOWS="1"
+$env:BESTTEAM_DEMO_PIPELINES="1"
 $env:BESTTEAM_EMAIL_BACKEND="imap"
 $env:BESTTEAM_IMAP_HOST="imap.yourhost.com"
 $env:BESTTEAM_IMAP_PORT="993"
@@ -156,7 +156,7 @@ $env:BESTTEAM_IMAP_PASSWORD="your-app-password"
 ```
 
 **Microsoft 365 / Graph mailbox:** same signing key (above) plus the
-`OPENAI_API_KEY` and `BESTTEAM_DEMO_WORKFLOWS` lines, then:
+`OPENAI_API_KEY` and `BESTTEAM_DEMO_PIPELINES` lines, then:
 
 ```powershell
 $env:BESTTEAM_EMAIL_BACKEND="graph"
@@ -172,10 +172,10 @@ Notes:
   value from the repo. The startup guard only rejects the two known
   placeholders (`bestteam-dev-secret-change-me` and the `.env.example`
   default); it does not vouch for anything else, so treat the key as a secret.
-- `BESTTEAM_DEMO_WORKFLOWS="1"` is **required for this test**. The bundled
-  YAML workflows (including `email_triage_demo_live`) are off by default —
+- `BESTTEAM_DEMO_PIPELINES="1"` is **required for this test**. The bundled
+  YAML pipelines (including `email_triage_demo_live`) are off by default —
   they're demo fixtures, not customer teams — so without this flag the
-  workflow won't appear in the list and running it by name returns 404. Leave
+  pipeline won't appear in the list and running it by name returns 404. Leave
   it unset on a real deployment. See `.env.example` / `docs/deployment.md`.
 - This is a **single-org** deployment (only the `default` org), so the CR-031
   guard permits `BESTTEAM_EMAIL_*`. If you ever add a second org to this DB,
@@ -201,15 +201,15 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/login \
 
 ---
 
-## 9. Run the workflow (browser — the primary path)
+## 9. Run the pipeline (browser — the primary path)
 
 1. Open `http://localhost:5173` and log in as **`demo`** with the password you
    set in step 5. Logging in lands you on the Dashboard (or the wizard, if the
    org has nothing deployed) — click **Run a team** in the nav to reach the
    run page at `/run`.
 2. On the run page, select the **`email_triage_demo_live`**
-   workflow. It's a bundled YAML demo (`ui/backend/workflows/`), so it only
-   appears when `BESTTEAM_DEMO_WORKFLOWS="1"` is set — which you did in step 7.
+   pipeline. It's a bundled YAML demo (`ui/backend/pipelines/`), so it only
+   appears when `BESTTEAM_DEMO_PIPELINES="1"` is set — which you did in step 7.
    If it's missing from the list, that flag isn't set on the running backend.
 3. Enter an input such as:
    > `Triage my unread emails and draft replies.`
@@ -271,14 +271,14 @@ token; `POST /api/runs` is an org-user surface):
 ```bash
 TOKEN="<access_token from step 8>"
 
-# list workflows the org can see (includes the YAML demo when
-# BESTTEAM_DEMO_WORKFLOWS=1 is set on the backend, per step 7)
-curl -s http://127.0.0.1:8000/api/workflows -H "Authorization: Bearer $TOKEN"
+# list pipelines the org can see (includes the YAML demo when
+# BESTTEAM_DEMO_PIPELINES=1 is set on the backend, per step 7)
+curl -s http://127.0.0.1:8000/api/pipelines -H "Authorization: Bearer $TOKEN"
 
 # start the run
 curl -s -X POST http://127.0.0.1:8000/api/runs \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"workflow":"email_triage_demo_live","input":"Triage my unread emails and draft replies."}'
+  -d '{"pipeline":"email_triage_demo_live","input":"Triage my unread emails and draft replies."}'
 # -> {"run_id":"..."}
 
 # poll the run (events accumulate on the record)
@@ -294,7 +294,7 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 | Backend `RuntimeError: BESTTEAM_SECRET_KEY ... placeholder` on boot | secret key unset or a known placeholder | set a non-placeholder `BESTTEAM_SECRET_KEY` (step 7) |
 | Backend `RuntimeError` about email + more than one org | CR-031 guard: `BESTTEAM_EMAIL_*` set with >1 org | keep a single org, or unset the email vars |
 | Boot warning "Skipping default-data seeding ... schema predates the latest migration" | DB behind head | `alembic upgrade head`, restart |
-| `email_triage_demo_live` missing from the workflow list (or `POST /api/runs` returns 404 for it) | `BESTTEAM_DEMO_WORKFLOWS` not set — bundled demos are off by default | set `$env:BESTTEAM_DEMO_WORKFLOWS="1"` before starting the backend (step 7) |
+| `email_triage_demo_live` missing from the pipeline list (or `POST /api/runs` returns 404 for it) | `BESTTEAM_DEMO_PIPELINES` not set — bundled demos are off by default | set `$env:BESTTEAM_DEMO_PIPELINES="1"` before starting the backend (step 7) |
 | Login returns 401 | wrong password, or account not provisioned | re-run step 5 |
 | Run fails with "Unknown skill 'email_triage_reply'" | skill not seeded (DB predates the skill, or seeding was skipped on a pre-migration schema) | restart the backend — built-in skills are seeded on boot; if it persists, run `alembic upgrade head` first |
 | Trace shows the agent answering **without** any `email_*` tool calls | `OPENAI_API_KEY` missing/invalid, or a `fake:` model | set a real key; `fake:` models never call tools |
@@ -329,7 +329,7 @@ curl -s http://127.0.0.1:8000/api/runs/<run_id> -H "Authorization: Bearer $TOKEN
 - **Per-org mailboxes.** This test uses the process-wide `BESTTEAM_EMAIL_*`
   mailbox — the single-org / SDK path. A multi-org platform instead connects
   each customer's mailbox per-org with `admin set-email <org>` (encrypted at
-  rest), which is what a deployed workflow uses at run time; the process-wide
+  rest), which is what a deployed pipeline uses at run time; the process-wide
   env vars stay refused on a multi-org deployment (CR-031). This runbook
   exercises the single-org env path; see `docs/deployment.md` §4c for the
   per-org setup.
