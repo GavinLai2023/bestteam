@@ -319,6 +319,13 @@ class PipelineRecord(Base):
     # draft | ready_for_testing | deployed -- mirrors the Solution/Testing/
     # Deployment stages of docs/team_builder_methodology.md.
     status: Mapped[str] = mapped_column(default="draft")
+    # The customer's own reversible pause, deliberately NOT a fourth `status`:
+    # a paused team is still deployed, and every other reader of `status`
+    # ("deployed" means "has a published version to run") would have had to
+    # learn a new value. False stops runs from every entry point -- manual,
+    # automatic and shared -- while config, versions and history all stay.
+    # Mirrors `organizations.active` one level down.
+    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
     current_version_id: Mapped[Optional[int]] = mapped_column(

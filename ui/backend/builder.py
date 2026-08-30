@@ -77,6 +77,10 @@ def _session_to_dict(
     # (so it shows the connect-mailbox step). Computed only when a spec exists
     # and the caller passes its org context; defaults False otherwise.
     uses_email = False
+    # A paused team is still listed here -- My Teams is where it gets switched
+    # back on -- so the card needs to know. True for anything not deployed:
+    # a draft is not paused, it has simply never run.
+    active = True
     if db is not None and org_id is not None and session.specification_json:
         spec_raw = session.specification_json
         pipeline_version_id = None
@@ -92,6 +96,7 @@ def _session_to_dict(
             if record is not None:
                 spec_raw = record.config
                 pipeline_version_id = record.current_version_id
+                active = record.active
         uses_email = spec_uses_email(
             db,
             spec_raw,
@@ -108,6 +113,7 @@ def _session_to_dict(
         "pipeline_id": session.pipeline_id,
         "feedback_history": session.feedback_history,
         "uses_email": uses_email,
+        "active": active,
         "created_at": iso_utc(session.created_at),
         "updated_at": iso_utc(session.updated_at),
     }
@@ -357,6 +363,7 @@ def _synthetic_session_for_pipeline(
             org_id,
             pipeline_version_id=record.current_version_id,
         ),
+        "active": record.active,
         "created_at": iso_utc(record.created_at),
         "updated_at": iso_utc(record.updated_at),
     }

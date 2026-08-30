@@ -14,6 +14,7 @@ vi.mock('../../lib/api', () => ({
     listOwnKnowledgeBases: vi.fn().mockResolvedValue([]),
     listShareLinks: vi.fn(),
     listShareSessions: vi.fn(),
+    setPipelineActive: vi.fn(),
   },
 }))
 
@@ -511,5 +512,105 @@ describe('SessionsPage live grouping', () => {
 
     expect(await screen.findByText('Live (1)')).toBeInTheDocument()
     expect(screen.queryByText(/In Progress/)).not.toBeInTheDocument()
+  })
+})
+
+// A live team had no off switch at all: delete is offered only for a
+// never-deployed draft, and the only other "off" in the product suspends the
+// whole organisation. Pause is the reversible half.
+describe('SessionsPage pausing a live team', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'disabled', daily_cap: 0 })
+    mockedApi.listShareLinks.mockResolvedValue([])
+  })
+
+  it('offers Pause on a live team', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: true })] })
+
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'Pause' })).toBeInTheDocument()
+  })
+
+  it('offers nothing to pause on a draft that was never deployed', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: null })] })
+
+    renderPage()
+
+    await screen.findByText('my-team')
+    expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument()
+  })
+
+  it('asks before pausing, since automatic runs go off with it', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: true })] })
+    renderPage()
+    const pause = await screen.findByRole('button', { name: 'Pause' })
+
+    await act(async () => {
+      fireEvent.click(pause)
+    })
+    await act(async () => {
+      await answerConfirm(false)
+    })
+
+    expect(mockedApi.setPipelineActive).not.toHaveBeenCalled()
+  })
+
+  it('pauses the team when confirmed', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: true })] })
+    mockedApi.setPipelineActive.mockResolvedValue({ id: 5, name: 'my-team', active: false })
+    renderPage()
+    const pause = await screen.findByRole('button', { name: 'Pause' })
+
+    await act(async () => {
+      fireEvent.click(pause)
+    })
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
+    expect(mockedApi.setPipelineActive).toHaveBeenCalledWith(5, false)
+    expect(await screen.findByRole('button', { name: 'Switch back on' })).toBeInTheDocument()
+  })
+
+  it('says a paused team is paused', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: false })] })
+
+    renderPage()
+
+    expect(await screen.findByText('Paused')).toBeInTheDocument()
+  })
+
+  it('switches a paused team back on without asking', async () => {
+    // Nothing is lost by resuming, so a confirmation would only be a click.
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: false })] })
+    mockedApi.setPipelineActive.mockResolvedValue({ id: 5, name: 'my-team', active: true })
+    renderPage()
+    const resume = await screen.findByRole('button', { name: 'Switch back on' })
+
+    await act(async () => {
+      fireEvent.click(resume)
+    })
+
+    expect(mockedApi.setPipelineActive).toHaveBeenCalledWith(5, true)
+    expect(await screen.findByRole('button', { name: 'Pause' })).toBeInTheDocument()
+  })
+
+  it('shows the failure and leaves the team running when pausing fails', async () => {
+    mockedApi.listSessions.mockResolvedValue({ sessions: [session({ pipeline_id: 5, active: true })] })
+    mockedApi.setPipelineActive.mockRejectedValue(new Error('Nope'))
+    renderPage()
+    const pause = await screen.findByRole('button', { name: 'Pause' })
+
+    await act(async () => {
+      fireEvent.click(pause)
+    })
+    await act(async () => {
+      await answerConfirm(true)
+    })
+
+    expect(await screen.findByText('Nope')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
   })
 })

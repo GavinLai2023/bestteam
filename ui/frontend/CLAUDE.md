@@ -78,7 +78,7 @@ shared `<Layout/>` nav shell.
 | `/` | `LandingPage` — **not a page but a router**: forwards an org member to `/activity`, or `/wizard` if the org has no deployed pipeline; `RequireOrgMember` sends an admin to `/advanced` first |
 | `/run` | `MonitorPage` — "Run a team" (a deliberate destination, not the daily home) |
 | `/activity` | `ActivityPage` — the Dashboard |
-| `/teams` | `SessionsPage` — "My teams" |
+| `/teams` | `SessionsPage` — "My teams"; each live team's Pause/Switch-back-on |
 | `/wizard/*` | the six-step Team Builder |
 | `/advanced`, `/accounts`, `/memory`, `/trace` | admin-only |
 | `/share/:token` | the one **public, unauthenticated** route |

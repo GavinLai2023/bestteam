@@ -412,6 +412,14 @@ export const zhCN: Resources = {
     sharedSessions: '分享记录',
     deleteTitle: '删除“{{name}}”？',
     deleteBody: '此操作无法撤销。',
+    pause: '暂停',
+    resume: '重新启用',
+    paused: '已暂停',
+    pauseTitle: '暂停“{{name}}”？',
+    pauseBody:
+      '团队会在所有入口停止响应：自动运行关闭，分享链接失效，'
+      + '“运行团队”列表里也不再出现。不会删除任何内容，重新启用即可全部恢复。',
+    pauseAction: '暂停团队',
   },
   share: {
     placeholder: '输入消息…',

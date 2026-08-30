@@ -83,6 +83,9 @@ export interface BuilderSession {
   specification_json?: Specification | null
   feedback_history?: FeedbackHistoryEntry[]
   uses_email?: boolean
+  // False = the customer paused this live team. Absent for a draft, which is
+  // not paused -- it has simply never run.
+  active?: boolean
   pipeline_id?: number | null
   updated_at: string
 }

@@ -483,6 +483,17 @@ export const en = {
     sharedSessions: 'Shared sessions',
     deleteTitle: 'Delete "{{name}}"?',
     deleteBody: "This can't be undone.",
+    // Pausing a live team. Resuming has no confirmation of its own -- nothing
+    // is lost by switching a team back on.
+    pause: 'Pause',
+    resume: 'Switch back on',
+    paused: 'Paused',
+    pauseTitle: 'Pause "{{name}}"?',
+    pauseBody:
+      'The team stops answering everywhere: automatic runs switch off, share '
+      + 'links stop working, and it leaves the Run a team list. Nothing is '
+      + 'deleted, and switching it back on undoes all of it.',
+    pauseAction: 'Pause the team',
   },
   // The public share-link chat (pages/ShareChatPage.tsx). The English values
   // are verbatim what the page showed before it was translated -- tests find

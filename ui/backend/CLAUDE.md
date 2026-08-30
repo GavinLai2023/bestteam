@@ -705,8 +705,17 @@ excluding them from `run_analytics.py`.
 
 ## Backend API
 
-`main.py` holds `/api/health`, `/api/pipelines`, `/api/pipelines/{name}/graph`,
-`/api/runs`, and the `/api/runs/{id}/stream` WebSocket. Two routers add the rest:
+`main.py` holds `/api/health`, `/api/pipelines`, `/api/pipelines/{id}` (PATCH),
+`/api/pipelines/{name}/graph`, `/api/runs`, and the `/api/runs/{id}/stream`
+WebSocket.
+
+`PATCH /api/pipelines/{id}` `{"active": bool}` is the customer's **pause** —
+the only per-team off switch (deleting a live team is still deferred;
+`organizations.active` suspends the whole org). Ownership matches
+`list_pipelines` exactly, so anything else is a 404. Pausing also disables the
+org's trigger **only when it names this team** (the org has one trigger and it
+may hold another team's automatic runs); resuming deliberately does **not**
+switch them back on, the same rule `on_mailbox_saved` follows. Two routers add the rest:
 
 ### `builder.py` (`/api/builder/sessions`) — the wizard state machine
 

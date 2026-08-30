@@ -103,6 +103,13 @@ def set_trigger(
             status_code=400,
             detail="That team isn't live yet -- launch it before turning on automatic runs.",
         )
+    # Before the capability checks: the customer paused this team themselves,
+    # so that is the fact they can act on, whatever tools it happens to hold.
+    if not record.active:
+        raise HTTPException(
+            status_code=400,
+            detail="This team is paused. Switch it back on from My teams first.",
+        )
     if not spec_uses_email(
         db,
         record.config,

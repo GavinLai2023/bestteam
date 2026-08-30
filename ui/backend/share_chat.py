@@ -238,7 +238,7 @@ def send_share_message(
     # created (controller-ruled fix, Task 8 review finding 1a).
     pipeline_record = (
         db.query(PipelineRecord)
-        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed", active=True)
         .one_or_none()
     )
     if pipeline_record is None:
@@ -415,7 +415,7 @@ def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
     link = _resolve_active_link(db, token)
     pipeline_record = (
         db.query(PipelineRecord)
-        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed", active=True)
         .one_or_none()
     )
     if pipeline_record is None:

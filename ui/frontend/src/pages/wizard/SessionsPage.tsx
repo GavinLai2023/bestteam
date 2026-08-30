@@ -112,6 +112,32 @@ export default function SessionsPage() {
     sessions: sessions.filter((s) => bucketFor(s) === bucket),
   })).filter((group) => group.sessions.length > 0)
 
+  // Pausing asks first (it takes automatic runs and every share link down
+  // with it); resuming does not, because nothing is lost by switching a team
+  // back on. Both update the card in place rather than refetching -- the
+  // response is the authority on what the flag now is.
+  const handleActive = async (session: BuilderSession, active: boolean) => {
+    const label = session.specification_json?.name ?? session.intent_text
+    if (!active) {
+      const ok = await confirm({
+        title: t('myTeams.pauseTitle', { name: label }),
+        body: t('myTeams.pauseBody'),
+        confirmLabel: t('myTeams.pauseAction'),
+        destructive: true,
+      })
+      if (!ok) return
+    }
+    setError(null)
+    try {
+      const updated = await api.setPipelineActive(session.pipeline_id!, active)
+      setSessions((prev) =>
+        prev.map((s) => (s.pipeline_id === session.pipeline_id ? { ...s, active: updated.active } : s)),
+      )
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   const handleDelete = async (session: BuilderSession) => {
     const label = session.specification_json?.name ?? session.intent_text
     const ok = await confirm({
@@ -171,6 +197,9 @@ export default function SessionsPage() {
                     <button className="wizard-card session-card" onClick={() => navigate(resumePathFor(session))}>
                       <h3>{displayName ?? session.intent_text}</h3>
                       <p className="subtitle">{descriptionFor(session)}</p>
+                      {session.pipeline_id != null && session.active === false && (
+                        <p className="hint automation-tag">{t('myTeams.paused')}</p>
+                      )}
                       {isAutomated && (
                         <p className="hint automation-tag">
                           {automationLabel(trigger.status)}
@@ -196,6 +225,15 @@ export default function SessionsPage() {
                         </button>
                         {openAudit === session.pipeline_id && <SharedSessionsPanel pipelineId={session.pipeline_id} />}
                       </>
+                    )}
+                    {session.pipeline_id != null && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => handleActive(session, session.active === false)}
+                      >
+                        {t(session.active === false ? 'myTeams.resume' : 'myTeams.pause')}
+                      </button>
                     )}
                     {session.pipeline_id == null && (
                       <button

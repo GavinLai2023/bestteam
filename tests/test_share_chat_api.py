@@ -983,3 +983,21 @@ def test_the_technical_name_is_the_fallback_when_there_is_no_display_name(client
     token, _ = _make_link()
 
     assert client.get(f"/api/share/{token}/team").json()["name"] == "greeter"
+
+
+def _make_paused_link():
+    token, link_id = _make_link()
+    with open_test_db() as db:
+        record = db.query(PipelineRecord).filter_by(name=_TEAM_CONFIG["name"]).one()
+        record.active = False
+        db.commit()
+    return token
+
+
+def test_a_paused_teams_share_link_stops_answering(client):
+    # Pausing a team stops it running from every entry point, and a share link
+    # is one. Same single 404 as every other unusable link.
+    token = _make_paused_link()
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."

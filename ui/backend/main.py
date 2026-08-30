@@ -53,6 +53,8 @@ from .auth_api import (
 )
 from .builder import router as builder_router
 from .crud import public_router as catalog_read_router, router as crud_router
+from .db.email_triggers import get_email_trigger
+from .email_trigger import disable_trigger
 from .email_trigger_api import router as email_trigger_router
 from .feedback_api import router as feedback_router
 from .interview import router as interview_router
@@ -430,6 +432,20 @@ def _dependency_freshness(db: Session) -> Tuple[Any, ...]:
     return (skills_count, skills_max, kb_count, kb_max, email_count, email_max)
 
 
+def _is_paused(db: Session, name: str, org_id: Optional[int]) -> bool:
+    """True when this org has a deployed team of that name and it is paused.
+
+    False for a YAML demo or a name with no record at all -- "unknown" is
+    `_resolve_pipeline_and_version`'s 404 to give, not this function's.
+    """
+    return (
+        db.query(PipelineRecord.id)
+        .filter_by(name=name, org_id=org_id, status="deployed", active=False)
+        .first()
+        is not None
+    )
+
+
 def _resolve_pipeline_and_version(
     name: str, db: Optional[Session] = None, org_id: Optional[int] = None, owner_principal_id: Optional[str] = None
 ) -> tuple[Pipeline, Optional[int], Optional[int]]:
@@ -632,6 +648,9 @@ def list_pipelines(
     for row in db.query(PipelineRecord.name, PipelineRecord.id, PipelineRecord.config).filter(
         PipelineRecord.org_id == org.id,
         PipelineRecord.status == "deployed",
+        # A paused team is still deployed -- it just must not be offered as
+        # something to run now, which is exactly what this list is for.
+        PipelineRecord.active.is_(True),
         or_(PipelineRecord.created_by == user.principal_id, PipelineRecord.created_by.is_(None)),
     ):
         id_by_name[row.name] = row.id
@@ -649,6 +668,56 @@ def list_pipelines(
         "pipeline_ids": id_by_name,
         "display_names": display_by_name,
     }
+
+
+class PipelinePatch(BaseModel):
+    active: bool
+
+
+@app.patch("/api/pipelines/{pipeline_id}")
+def patch_pipeline(
+    pipeline_id: int,
+    body: PipelinePatch,
+    db: Session = Depends(get_db),
+    org: Organization = Depends(get_current_org),
+    user: User = Depends(get_current_user),
+):
+    """Pause or resume one of this user's deployed teams.
+
+    A pause is reversible and destroys nothing: the config, its published
+    versions, its runs and its share links all stay. It is the only per-team
+    off switch there is -- deleting a live team remains deferred, and
+    `organizations.active` suspends the whole customer.
+
+    Ownership matches `list_pipelines` exactly (own or admin-shared, within
+    the org); anything else is a 404 rather than a 403, so this route reveals
+    no more about another org's teams than that list does.
+    """
+    record = (
+        db.query(PipelineRecord)
+        .filter(
+            PipelineRecord.id == pipeline_id,
+            PipelineRecord.org_id == org.id,
+            PipelineRecord.status == "deployed",
+            or_(PipelineRecord.created_by == user.principal_id, PipelineRecord.created_by.is_(None)),
+        )
+        .one_or_none()
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown team '{pipeline_id}'")
+
+    record.active = body.active
+    # A trigger pointed at a team that can no longer run would poll the
+    # mailbox, claim the messages and fail every dispatch. Only when it names
+    # THIS team: the org has one trigger, and it may well hold another team's
+    # automatic runs. Resuming deliberately does not switch them back on --
+    # the same rule `on_mailbox_saved` follows for a replaced mailbox.
+    if not body.active:
+        trigger = get_email_trigger(db, org.id)
+        if trigger is not None and trigger.pipeline_name == record.name:
+            disable_trigger(db, org.id)
+    db.commit()
+    return {"id": record.id, "name": record.name, "active": record.active}
 
 
 @app.get("/api/pipelines/{name}/graph")
@@ -676,6 +745,15 @@ async def create_run(
     # run is stamped with exactly the version whose config it executes.
     # Only allow running pipelines created by this user (by principal_id) or
     # admin-shared (created_by = NULL).
+    # Checked before the pipeline is resolved: that call builds (and on a
+    # cache miss loads every skill and KB for) a team this request will not
+    # run. A 409 rather than the 404 an unknown team gets -- the customer
+    # paused this themselves, and the message has to say so.
+    if _is_paused(db, req.pipeline, org.id):
+        raise HTTPException(
+            status_code=409,
+            detail="This team is paused. Switch it back on from My teams to run it.",
+        )
     pipeline, version_id, pipeline_id = _resolve_pipeline_and_version(req.pipeline, db, org.id, user.principal_id)
     run = registry.create(req.pipeline, req.input, org_id=org.id, username=user.username)
 
