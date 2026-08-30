@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/useConfirm'
 import type { OrgEmailAuthType, OrgEmailConnectPayload, OrgEmailStatus } from '../lib/types'
 
 interface EmailConnectProps {
@@ -33,6 +35,7 @@ const EMPTY_FORM: EmailForm = {
 // own error). `onStatusChange` fires with the current connected boolean whenever
 // it's known, so the Deploy gate can disable launch until a mailbox is connected.
 export default function EmailConnect({ onChange, onStatusChange }: EmailConnectProps) {
+  const { t } = useTranslation()
   const [status, setStatus] = useState<OrgEmailStatus | null>(null) // {connected, host, username, ...} | null
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
@@ -44,6 +47,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
   // Outlook) never needs them, and a visible number field invites the
   // scroll-wheel-changes-993-to-994 mistake.
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [confirmNode, confirm] = useConfirm()
 
   const refresh = async () => {
     setLoading(true)
@@ -95,6 +99,21 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
   }
 
   const save = async () => {
+    // A changed address replaces the org's one mailbox for every team and
+    // switches automatic runs off server-side (`on_mailbox_saved`). The banner
+    // above says so; this makes it an answer rather than something to notice.
+    const target = form.username.trim()
+    if (status?.connected && target !== (status.username || '')) {
+      const ok = await confirm({
+        title: t('email.connect.switchConfirmTitle'),
+        body: t('email.connect.switchConfirmBody', {
+          current: status.username, address: target,
+        }),
+        confirmLabel: t('email.connect.switchConfirmAction'),
+        destructive: true,
+      })
+      if (!ok) return
+    }
     setBusy('save'); setError(null)
     try {
       await api.setOrgEmail(payload())
@@ -143,17 +162,17 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
     setEditing(true)
   }
 
-  if (loading) return <p className="hint">Checking mailbox…</p>
+  if (loading) return <p className="hint">{t('email.connect.checking')}</p>
 
   // Initial status fetch failed: show the error and let them retry, rather than
   // sitting on "Checking mailbox…" forever.
   if (status === null) {
     return (
       <div className="wizard-card" style={{ background: '#f9fafb' }}>
-        <h3>Connect your mailbox</h3>
+        <h3>{t('email.connect.title')}</h3>
         {error && <p className="banner banner-error">{error}</p>}
         <div className="wizard-actions">
-          <button className="btn btn-secondary" onClick={refresh}>Retry</button>
+          <button className="btn btn-secondary" onClick={refresh}>{t('email.connect.retry')}</button>
         </div>
       </div>
     )
@@ -165,37 +184,43 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
 
   return (
     <div className="wizard-card" style={{ background: '#f9fafb' }}>
-      <h3>Connect your mailbox</h3>
-      <p className="subtitle">
-        This team reads and drafts email in your inbox. It only ever saves <strong>drafts</strong> for
-        you to review — it never sends. Use an app-specific password, not your account password.
-      </p>
+      {confirmNode}
+      <h3>{t('email.connect.title')}</h3>
+      <p className="subtitle">{t('email.connect.subtitle')}</p>
 
       {error && <p className="banner banner-error">{error}</p>}
 
       {status.connected && !editing ? (
         <>
           <p className="banner banner-success">
-            Connected as <strong>{status.username}</strong> on {status.host}.
+            {t('email.connect.connectedPrefix')}
+            <strong>{status.username}</strong>
+            {t('email.connect.connectedSuffix', { host: status.host })}
           </p>
+          {/* The mailbox is org-wide (one row per org), so a second team built
+              later reconnects THIS mailbox rather than adding one. Say so, or
+              switching it looks like a per-team setting. */}
+          <p className="hint">{t('email.connect.sharedByEveryTeam')}</p>
           <div className="wizard-actions">
-            <button className="btn btn-secondary" onClick={startReconnect}>Reconnect</button>
+            <button className="btn btn-secondary" onClick={startReconnect}>
+              {t('email.connect.reconnect')}
+            </button>
             <button className="btn btn-link" onClick={disconnect} disabled={busy === 'clear'}>
-              {busy === 'clear' ? 'Disconnecting…' : 'Disconnect'}
+              {t(busy === 'clear' ? 'email.connect.disconnecting' : 'email.connect.disconnect')}
             </button>
           </div>
         </>
       ) : (
         <>
           <fieldset className="field">
-            <legend>How is this mailbox hosted?</legend>
+            <legend>{t('email.connect.hostingLegend')}</legend>
             <label htmlFor="ec-auth-password">
               <input
                 id="ec-auth-password" type="radio" name="ec-auth" value="password"
                 checked={!isM365}
                 onChange={() => setForm({ ...form, authType: 'password' })}
               />{' '}
-              Standard mailbox (IMAP) — Gmail, and most providers
+              {t('email.connect.hostingImap')}
             </label>
             <label htmlFor="ec-auth-m365">
               <input
@@ -203,58 +228,51 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
                 checked={isM365}
                 onChange={() => setForm({ ...form, authType: 'microsoft_oauth' })}
               />{' '}
-              Microsoft 365 / Outlook (Exchange Online)
+              {t('email.connect.hostingMicrosoft')}
             </label>
           </fieldset>
 
           {isM365 ? (
             <>
               <p className="hint">
-                Microsoft 365 no longer allows app passwords, so this connects through an
-                app registration instead. Ask your IT administrator to register an app in
-                Azure, grant it the <strong>IMAP.AccessAsApp</strong> permission with admin
-                consent, and give it access to this mailbox in Exchange Online. They will
-                then have the three values below.
+                {t('email.connect.microsoftHintBefore')}
+                <strong>IMAP.AccessAsApp</strong>
+                {t('email.connect.microsoftHintAfter')}
               </p>
               <div className="field">
-                <label htmlFor="ec-user">Email address</label>
+                <label htmlFor="ec-user">{t('email.connect.emailAddress')}</label>
                 <input id="ec-user" type="text" value={form.username} onChange={field('username')} placeholder="support@yourcompany.com" />
               </div>
               <div className="field">
-                <label htmlFor="ec-tenant">Directory (tenant) ID</label>
+                <label htmlFor="ec-tenant">{t('email.connect.tenantId')}</label>
                 <input id="ec-tenant" type="text" value={form.tenantId} onChange={field('tenantId')} />
               </div>
               <div className="field">
-                <label htmlFor="ec-client">Application (client) ID</label>
+                <label htmlFor="ec-client">{t('email.connect.clientId')}</label>
                 <input id="ec-client" type="text" value={form.clientId} onChange={field('clientId')} />
               </div>
               <div className="field">
-                <label htmlFor="ec-secret">Client secret</label>
+                <label htmlFor="ec-secret">{t('email.connect.clientSecret')}</label>
                 <input id="ec-secret" type="password" value={form.clientSecret} onChange={field('clientSecret')} autoComplete="off" />
               </div>
               <div className="field">
-                <label htmlFor="ec-secret-expiry">Secret expiry date (optional)</label>
+                <label htmlFor="ec-secret-expiry">{t('email.connect.secretExpiry')}</label>
                 <input id="ec-secret-expiry" type="date" value={form.secretExpiresAt} onChange={field('secretExpiresAt')} />
-                <p className="hint">
-                  Azure shows this beside the secret you just copied. Every client secret
-                  expires, and when one does the mailbox stops working with an error that
-                  looks like a wrong password — enter the date and we&rsquo;ll warn you a
-                  month beforehand.
-                </p>
+                <p className="hint">{t('email.connect.secretExpiryHint')}</p>
               </div>
             </>
           ) : (
             <>
               <div className="field">
-                <label htmlFor="ec-host">IMAP server</label>
+                <label htmlFor="ec-host">{t('email.connect.imapServer')}</label>
                 <input id="ec-host" type="text" value={form.host} onChange={field('host')} placeholder="imap.gmail.com" />
               </div>
               <div className="field">
-                <label htmlFor="ec-user">Email address / username</label>
+                <label htmlFor="ec-user">{t('email.connect.imapUsername')}</label>
                 <input id="ec-user" type="text" value={form.username} onChange={field('username')} placeholder="you@example.com" />
               </div>
               <div className="field">
-                <label htmlFor="ec-pass">App password</label>
+                <label htmlFor="ec-pass">{t('email.connect.appPassword')}</label>
                 <input id="ec-pass" type="password" value={form.password} onChange={field('password')} autoComplete="off" />
               </div>
             </>
@@ -266,7 +284,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
             style={{ padding: 0, alignSelf: 'flex-start' }}
             onClick={() => setShowAdvanced((v) => !v)}
           >
-            {showAdvanced ? '▾ Advanced settings' : '▸ Advanced settings'}
+            {t(showAdvanced ? 'email.connect.advancedHide' : 'email.connect.advancedShow')}
           </button>
 
           {showAdvanced && (
@@ -274,7 +292,7 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
               {/* Exchange Online is always 993, so there is nothing to choose. */}
               {!isM365 && (
               <div className="field">
-                <label htmlFor="ec-port">IMAP port</label>
+                <label htmlFor="ec-port">{t('email.connect.port')}</label>
                 {/* type=number changes on mouse-wheel scroll; blur on wheel so a
                     non-technical user can't silently turn 993 into 994. */}
                 <input
@@ -287,32 +305,42 @@ export default function EmailConnect({ onChange, onStatusChange }: EmailConnectP
                   onWheel={(e) => e.currentTarget.blur()}
                   placeholder="993"
                 />
-                <p className="hint">Almost always 993 — leave as-is unless your email provider says otherwise.</p>
+                <p className="hint">{t('email.connect.portHint')}</p>
               </div>
               )}
               <div className="field">
-                <label htmlFor="ec-drafts">Drafts folder</label>
-                <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder="Leave blank" />
-                <p className="hint">Leave blank — we'll find your Drafts folder automatically. Only set this to force a specific folder.</p>
+                <label htmlFor="ec-drafts">{t('email.connect.draftsFolder')}</label>
+                <input id="ec-drafts" type="text" value={form.drafts} onChange={field('drafts')} placeholder={t('email.connect.draftsPlaceholder')} />
+                <p className="hint">{t('email.connect.draftsHint')}</p>
               </div>
             </>
           )}
 
+          {/* Changing the address (not just the password) is a replacement:
+              the server switches every team over and turns automatic runs off
+              (`on_mailbox_saved`). Warn before the save, not after. */}
+          {status.connected && form.username.trim() &&
+            form.username.trim() !== (status.username || '') && (
+            <p className="banner banner-error">
+              {t('email.connect.switchWarning', { address: form.username.trim() })}
+            </p>
+          )}
+
           {testResult && (
             <p className={`banner ${testResult.ok ? 'banner-success' : 'banner-error'}`}>
-              {testResult.ok ? 'Connection works.' : testResult.error}
+              {testResult.ok ? t('email.connect.testOk') : testResult.error}
             </p>
           )}
 
           <div className="wizard-actions">
             <button className="btn btn-secondary" onClick={test} disabled={!canSubmit || busy === 'test'}>
-              {busy === 'test' ? 'Testing…' : 'Test connection'}
+              {t(busy === 'test' ? 'email.connect.testing' : 'email.connect.test')}
             </button>
             <button className="btn btn-primary" onClick={save} disabled={!canSubmit || busy === 'save'}>
-              {busy === 'save' ? 'Connecting…' : 'Connect mailbox'}
+              {t(busy === 'save' ? 'email.connect.saving' : 'email.connect.save')}
             </button>
             {status.connected && (
-              <button className="btn btn-link" onClick={() => { setEditing(false); setTestResult(null) }}>Cancel</button>
+              <button className="btn btn-link" onClick={() => { setEditing(false); setTestResult(null) }}>{t('common.cancel')}</button>
             )}
           </div>
         </>

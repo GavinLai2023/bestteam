@@ -324,6 +324,77 @@ export const zhCN: Resources = {
       done: '完成',
     },
   },
+  email: {
+    connect: {
+      title: '连接邮箱',
+      checking: '正在检查邮箱…',
+      retry: '重试',
+      subtitle:
+        '团队会读取收件箱并起草回复，只把草稿存进邮箱等人过目，不会替您发送。请填应用专用密码，'
+        + '不要填账户密码。',
+      connectedPrefix: '已连接 ',
+      connectedSuffix: '，服务器 {{host}}。',
+      sharedByEveryTeam:
+        '一个组织只连接一个邮箱，组织下所有团队共用这一个。换成另一个地址，所有团队都会跟着换过去。',
+      reconnect: '重新连接',
+      disconnect: '断开连接',
+      disconnecting: '正在断开…',
+      hostingLegend: '邮箱类型',
+      hostingImap: '标准邮箱（IMAP），Gmail 及大多数服务商',
+      hostingMicrosoft: 'Microsoft 365 / Outlook（Exchange Online）',
+      microsoftHintBefore:
+        'Microsoft 365 已不再支持应用专用密码，这里改用应用注册的方式连接。请 IT 管理员在 Azure '
+        + '中注册一个应用，为它授予 ',
+      microsoftHintAfter:
+        ' 权限并完成管理员同意，再在 Exchange Online 中开放这个邮箱的访问权限。之后即可拿到下面'
+        + '三项值。',
+      emailAddress: '邮箱地址',
+      tenantId: '目录（租户）ID',
+      clientId: '应用程序（客户端）ID',
+      clientSecret: '客户端密码',
+      secretExpiry: '密码到期日（选填）',
+      secretExpiryHint:
+        'Azure 会在刚复制的那串密码旁边显示这个日期。客户端密码都有有效期，一到期邮箱就停止工作，'
+        + '报错看上去和密码填错完全一样。填了日期，到期前一个月会收到提醒。',
+      imapServer: 'IMAP 服务器',
+      imapUsername: '邮箱地址 / 用户名',
+      appPassword: '应用专用密码',
+      advancedShow: '▸ 高级设置',
+      advancedHide: '▾ 高级设置',
+      port: 'IMAP 端口',
+      portHint: '几乎都是 993，除非邮件服务商另有说明，否则保持不变。',
+      draftsFolder: '草稿箱文件夹',
+      draftsPlaceholder: '留空即可',
+      draftsHint: '留空即可，系统会自动找到草稿箱。只有需要指定某个文件夹时才填。',
+      test: '测试连接',
+      testing: '正在测试…',
+      testOk: '连接正常。',
+      save: '连接邮箱',
+      saving: '正在连接…',
+      switchWarning:
+        '保存后所有团队都会改用 {{address}}，因为一个组织只有一个共用邮箱。自动运行会被关掉，'
+        + '需要重新为指定的团队打开。',
+      switchConfirmTitle: '把所有团队都换到这个邮箱？',
+      switchConfirmBody:
+        '一个组织的所有团队共用一个邮箱。保存后 {{current}} 会被 {{address}} 全面替换，'
+        + '自动运行也会被关掉，需要重新为指定的团队打开。',
+      switchConfirmAction: '更换邮箱',
+    },
+    trigger: {
+      title: '自动运行',
+      subtitle:
+        '让“{{name}}”自己盯着收件箱：每隔几分钟查看一次新邮件，不用手动启动就把回复拟好，'
+        + '每天最多自动运行 {{cap}} 次。同样只存草稿，不会发送。',
+      takenByOtherTeam:
+        '当前自动运行的团队是“{{name}}”。一个组织只能有一个团队自动运行，在这里打开就会停掉'
+        + '“{{name}}”。',
+      pausedCap: '已暂停，今天的 {{cap}} 次自动运行已经用完，明天恢复。',
+      turnOff: '关闭自动运行',
+      turnOn: '有新邮件时自动运行',
+      saving: '正在保存…',
+      watching: '已开启，正在等待新邮件。',
+    },
+  },
   myTeams: {
     subtitle: '从上次中断的地方继续，或调整已建好的团队。',
     empty: '暂无团队，组建后会显示在这里。',

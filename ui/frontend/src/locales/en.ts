@@ -369,6 +369,96 @@ export const en = {
       done: 'Done',
     },
   },
+  // The org's one mailbox and its one automatic team. Both components render
+  // inside the wizard's Go live step, but both are ORG-scoped rather than
+  // team-scoped -- which is what most of this copy exists to say out loud.
+  email: {
+    connect: {
+      title: 'Connect your mailbox',
+      checking: 'Checking mailbox…',
+      retry: 'Retry',
+      subtitle:
+        'This team reads and drafts email in your inbox. It only ever saves drafts for you to '
+        + 'review — it never sends. Use an app-specific password, not your account password.',
+      // Split either side of the address so it can stay bold mid-sentence in
+      // both languages' word order (there is no <Trans> in this app).
+      connectedPrefix: 'Connected as ',
+      connectedSuffix: ' on {{host}}.',
+      sharedByEveryTeam:
+        'One mailbox is connected per organisation, and it is used by every team in your '
+        + 'organisation. Reconnecting a different address moves all of them to it.',
+      reconnect: 'Reconnect',
+      disconnect: 'Disconnect',
+      disconnecting: 'Disconnecting…',
+      hostingLegend: 'How is this mailbox hosted?',
+      hostingImap: 'Standard mailbox (IMAP) — Gmail, and most providers',
+      hostingMicrosoft: 'Microsoft 365 / Outlook (Exchange Online)',
+      // Split around the literal permission name, which is not translated:
+      // the reader has to match it by sight against Azure.
+      microsoftHintBefore:
+        'Microsoft 365 no longer allows app passwords, so this connects through an app '
+        + 'registration instead. Ask your IT administrator to register an app in Azure, grant '
+        + 'it the ',
+      microsoftHintAfter:
+        ' permission with admin consent, and give it access to this mailbox in Exchange '
+        + 'Online. They will then have the three values below.',
+      emailAddress: 'Email address',
+      tenantId: 'Directory (tenant) ID',
+      clientId: 'Application (client) ID',
+      clientSecret: 'Client secret',
+      secretExpiry: 'Secret expiry date (optional)',
+      secretExpiryHint:
+        'Azure shows this beside the secret you just copied. Every client secret expires, and '
+        + 'when one does the mailbox stops working with an error that looks like a wrong '
+        + 'password — enter the date and we’ll warn you a month beforehand.',
+      imapServer: 'IMAP server',
+      imapUsername: 'Email address / username',
+      appPassword: 'App password',
+      advancedShow: '▸ Advanced settings',
+      advancedHide: '▾ Advanced settings',
+      port: 'IMAP port',
+      portHint:
+        'Almost always 993 — leave as-is unless your email provider says otherwise.',
+      draftsFolder: 'Drafts folder',
+      draftsPlaceholder: 'Leave blank',
+      draftsHint:
+        "Leave blank — we'll find your Drafts folder automatically. Only set this to force "
+        + 'a specific folder.',
+      test: 'Test connection',
+      testing: 'Testing…',
+      testOk: 'Connection works.',
+      save: 'Connect mailbox',
+      saving: 'Connecting…',
+      // The two warnings about the one-mailbox-per-org replacement: the banner
+      // while typing, then the dialog that makes it an answer.
+      switchWarning:
+        'This will switch every team over to {{address}}, because your organisation uses one '
+        + 'mailbox for all of them. Automatic runs will be turned off until you switch them on '
+        + 'again for the team you want.',
+      switchConfirmTitle: 'Switch every team to this mailbox?',
+      switchConfirmBody:
+        'Your organisation uses one mailbox for all of its teams. Saving this replaces '
+        + '{{current}} with {{address}} everywhere, and automatic runs will be turned off until '
+        + 'you switch them on again for the team you want.',
+      switchConfirmAction: 'Switch mailbox',
+    },
+    trigger: {
+      title: 'Automatic runs',
+      subtitle:
+        'Let "{{name}}" watch the inbox on its own: it checks for new email every few minutes '
+        + 'and drafts replies without you having to start it — up to {{cap}} automatic runs '
+        + 'per day. It still only ever saves drafts; it never sends.',
+      takenByOtherTeam:
+        '"{{name}}" is the team running automatically right now. Only one team per organisation '
+        + 'can, so turning this on stops "{{name}}".',
+      pausedCap:
+        "Paused — today's limit of {{cap}} automatic runs was reached. Runs resume tomorrow.",
+      turnOff: 'Turn off automatic runs',
+      turnOn: 'Run automatically when new email arrives',
+      saving: 'Saving…',
+      watching: 'On — watching for new email.',
+    },
+  },
   // The "My teams" page. It lives under pages/wizard/ but is its own route
   // rather than a wizard stage, so its strings sit outside `wizard`.
   myTeams: {

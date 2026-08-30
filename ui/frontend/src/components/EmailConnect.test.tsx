@@ -186,3 +186,110 @@ describe('EmailConnect secret expiry', () => {
     })
   })
 })
+
+describe('EmailConnect one mailbox per organisation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.setOrgEmail.mockResolvedValue({ connected: true })
+    mockedApi.getOrgEmail.mockResolvedValue({
+      connected: true,
+      host: 'imap.example.com',
+      username: 'support@acme.com',
+      port: 993,
+      auth_type: 'password',
+    })
+  })
+
+  it('says the connected mailbox is shared by every team in the organisation', async () => {
+    render(<EmailConnect />)
+    expect(await screen.findByText(/every team in your organisation/i)).toBeInTheDocument()
+  })
+
+  it('warns before saving when the address entered is a different mailbox', async () => {
+    render(<EmailConnect />)
+    fireEvent.click(await screen.findByRole('button', { name: /reconnect/i }))
+
+    fireEvent.change(screen.getByLabelText(/email address/i), {
+      target: { value: 'billing@acme.com' },
+    })
+
+    const warning = screen.getByText(/switch every team over to billing@acme.com/i)
+    expect(warning).toBeInTheDocument()
+    expect(warning).toHaveTextContent(/automatic runs/i)
+  })
+
+  it('stays quiet while the same address is being reconnected', async () => {
+    render(<EmailConnect />)
+    fireEvent.click(await screen.findByRole('button', { name: /reconnect/i }))
+
+    expect(screen.queryByText(/switch every team over/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('EmailConnect switching to a different mailbox', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.setOrgEmail.mockResolvedValue({ connected: true })
+    mockedApi.getOrgEmail.mockResolvedValue({
+      connected: true,
+      host: 'imap.example.com',
+      username: 'support@acme.com',
+      port: 993,
+      auth_type: 'password',
+    })
+  })
+
+  // The shared `answerConfirm` helper finds the dialog by the only "Cancel" on
+  // screen; this form has one of its own while editing, so scope it here.
+  const dialog = () => document.querySelector('.confirm-dialog')
+  const answer = (accept: boolean) => {
+    const buttons = dialog()!.querySelectorAll('button')
+    fireEvent.click(accept ? buttons[buttons.length - 1] : buttons[0])
+  }
+
+  const reconnectAs = async (address: string) => {
+    render(<EmailConnect />)
+    fireEvent.click(await screen.findByRole('button', { name: /reconnect/i }))
+    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: address } })
+    fireEvent.change(screen.getByLabelText(/app password/i), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: /connect mailbox/i }))
+  }
+
+  it('asks to confirm before switching every team to another address', async () => {
+    await reconnectAs('billing@acme.com')
+
+    await waitFor(() => expect(dialog()).not.toBeNull())
+    expect(dialog()!.textContent).toMatch(/billing@acme\.com/)
+    expect(dialog()!.textContent).toMatch(/automatic runs/i)
+    expect(mockedApi.setOrgEmail).not.toHaveBeenCalled()
+  })
+
+  it('saves nothing when that confirmation is cancelled', async () => {
+    await reconnectAs('billing@acme.com')
+    await waitFor(() => expect(dialog()).not.toBeNull())
+
+    answer(false)
+
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(mockedApi.setOrgEmail).not.toHaveBeenCalled()
+  })
+
+  it('saves the new mailbox once the switch is confirmed', async () => {
+    await reconnectAs('billing@acme.com')
+    await waitFor(() => expect(dialog()).not.toBeNull())
+
+    answer(true)
+
+    await waitFor(() => expect(mockedApi.setOrgEmail).toHaveBeenCalled())
+    expect(mockedApi.setOrgEmail.mock.calls[0][0]).toMatchObject({
+      username: 'billing@acme.com',
+    })
+  })
+
+  it('does not ask when only the password is being rotated', async () => {
+    await reconnectAs('support@acme.com')
+
+    await waitFor(() => expect(mockedApi.setOrgEmail).toHaveBeenCalled())
+    expect(dialog()).toBeNull()
+  })
+})
