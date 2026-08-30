@@ -42,7 +42,10 @@ failover for that guarantee.
 `.xml` parsing uses stdlib `xml.etree.ElementTree`, which **doesn't resolve
 external entities (not XXE-vulnerable)** but has **no protection against
 entity-expansion ("billion laughs") DoS** — the same unmitigated-DoS posture the
-PDF/Excel/Word parsers have against decompression bombs, not a new risk class.
+PDF/Word parsers have against decompression bombs, not a new risk class. (The
+Excel path is the exception: it refuses a workbook whose archive unpacks past
+300 MB or declares more than 5,000,000 cells — deliberately constants, not
+settings, like the PBKDF2 count.)
 
 ## Email tools (`email_client.py`) — draft-only by design
 
@@ -283,11 +286,17 @@ writes a cell containing a line break as a quoted field across two physical line
 (which would become two rows, every column under the wrong header), and a value
 containing a comma has to stay quoted on the way out. **The delimiter is not
 sniffed** — a semicolon- or tab-delimited export reads as one field per row.
-`_parse_excel_bytes` writes its sheet rows through the same `csv.writer` +
-`_one_line`, so a spreadsheet cell keeps a comma quoted and a line break
-collapsed. ⚠️ **Asymmetry this leaves: Word *table* rows are still a bare
-`,`-join (`_one_line` only), so a docx cell containing a comma still splits
-into two apparent columns.**
+`_parse_excel_bytes` and the Word-table renderer write their rows through the
+same `csv.writer` + `_one_line`, so in all three tabular formats a cell keeps
+a comma quoted and a line break collapsed. ⚠️ **Excel fidelity limits: a
+formula cell is its *cached* value (`data_only=True` — a workbook written
+programmatically that never passed through Excel has none, so its formula
+cells ingest as empty), a merged range keeps only its top-left value,
+number/date formats are lost, and hidden sheets are indexed like visible
+ones.** A password-protected workbook (OLE2 magic) and a standalone chart tab
+(`xl/chartsheets/` in the archive — openpyxl's read-only reader crashes inside
+`load_workbook` on one, so there is no sheet object to skip) are refused with
+customer-readable advice.
 
 `csv.reader`'s default 131,072-character field limit is **raised at import**
 (`_CSV_FIELD_LIMIT`): it guards a *streaming* reader's memory and nothing here

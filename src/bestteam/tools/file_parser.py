@@ -5,6 +5,7 @@ import csv
 import io
 import re
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 from xml.sax.saxutils import escape, quoteattr
@@ -248,20 +249,26 @@ def _parse_docx_bytes(data: bytes, name: str) -> str:
         if isinstance(item, Table):
             _flush_paragraphs()
             table_number += 1
-            rows = [
-                ",".join(_one_line(cell.text) for cell in row.cells)
-                for row in item.rows
-            ]
-            # A row with no text in any cell is dropped rather than rendered.
-            # It carries nothing a search could match, and in a ONE-column
-            # table it renders as the empty string -- which is the blank line
-            # `core/knowledge_base.py::_docx_segments` reads as the end of the
-            # block, so a spacer row would drop every row after it out of the
-            # table and index it as prose with no header and no citation.
-            # Dropping them is what makes that terminator unambiguous.
+            # Written through `csv.writer` like the CSV and Excel paths, and
+            # for their reason: a cell containing a comma has to stay one
+            # field, or it becomes two apparent columns that no longer line
+            # up with the header row the chunker repeats above each chunk.
+            out = io.StringIO()
+            writer = csv.writer(out, lineterminator="\n")
+            for row in item.rows:
+                cells = [_one_line(cell.text) for cell in row.cells]
+                # A row with no text in any cell is dropped rather than
+                # rendered. It carries nothing a search could match, and in a
+                # ONE-column table it renders as the empty string -- which is
+                # the blank line `core/knowledge_base.py::_docx_segments`
+                # reads as the end of the block, so a spacer row would drop
+                # every row after it out of the table and index it as prose
+                # with no header and no citation. Dropping them is what makes
+                # that terminator unambiguous.
+                if any(cells):
+                    writer.writerow(cells)
             parts.append(
-                f"[Table {table_number}]\n"
-                + "\n".join(row for row in rows if row.replace(",", "").strip())
+                f"[Table {table_number}]\n" + out.getvalue().strip("\n")
             )
         elif item.text.strip():
             paragraph_run.append(_docx_paragraph_line(item))
@@ -503,6 +510,20 @@ def _parse_csv_bytes(data: bytes, name: str, *, lenient_text: bool = False) -> s
     return f"[CSV: {name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n"))
 
 
+# Both caps exist because ingestion runs every customer's uploads on the one
+# shared instance, so one workbook must not be able to buy minutes of CPU or
+# gigabytes of RAM with a 30MB upload. Deliberately constants, not settings,
+# for the same reason the PBKDF2 iteration count is: a limit that can be
+# raised per-deployment will be, and then the instance it protects isn't
+# protected. An .xlsx is a zip, so the archive's declared unpacked sizes are
+# readable before any XML is parsed -- that is what catches a decompression
+# bomb. The cell budget is the other axis: a sheet with one stray-formatted
+# cell at row 1,048,576 declares every empty row above it, and `iter_rows`
+# dutifully yields them all.
+_MAX_XLSX_UNPACKED_BYTES = 300 * 1024 * 1024
+_MAX_XLSX_CELLS = 5_000_000
+
+
 def _parse_excel_bytes(data: bytes, name: str) -> str:
     try:
         import openpyxl
@@ -512,19 +533,67 @@ def _parse_excel_bytes(data: bytes, name: str) -> str:
             "Install it with: pip install 'bestteam[tools-files]'"
         ) from exc
 
+    # A password-protected workbook is an OLE2 container, not a zip, so it
+    # has to be told apart before the zip check: the generic message's
+    # re-save advice is wrong for a file that needs its password removed.
+    if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        raise ConfigurationError(
+            f"'{name}' appears to be password-protected. Remove the password "
+            "in Excel and upload it again."
+        )
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entry_names = archive.namelist()
+            unpacked = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ConfigurationError(
+            f"Could not read '{name}' as an Excel workbook. "
+            "Re-save it as .xlsx and upload it again."
+        ) from exc
+    # openpyxl's read-only reader crashes on a standalone chart tab, inside
+    # `load_workbook` itself -- there is no sheet object to skip. A chart tab
+    # always means an xl/chartsheets/ entry in the archive, so it is refused
+    # from there with advice instead of an AttributeError. Charts embedded in
+    # a normal worksheet don't create one and are unaffected.
+    if any(entry.startswith("xl/chartsheets/") for entry in entry_names):
+        raise ConfigurationError(
+            f"'{name}' contains a standalone chart tab, which the workbook "
+            "reader cannot open. Delete the chart tab in Excel (charts inside "
+            "a normal sheet are fine) and upload it again."
+        )
+    if unpacked > _MAX_XLSX_UNPACKED_BYTES:
+        raise ConfigurationError(
+            f"'{name}' unpacks to more than "
+            f"{_MAX_XLSX_UNPACKED_BYTES // (1024 * 1024)} MB of sheet data and "
+            "was not ingested. Split the workbook into smaller files, or save "
+            "the sheets you need as CSV."
+        )
+
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    parts = []
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        # Written back through `csv.writer` for the reason `_parse_csv_bytes`
-        # gives: a cell containing a comma has to stay one field, or it
-        # silently becomes two columns that no longer line up with the header
-        # row repeated above it. `_one_line` keeps a cell containing a line
-        # break one row for the same reason in the other axis.
-        out = io.StringIO()
-        writer = csv.writer(out, lineterminator="\n")
-        for row in ws.iter_rows(values_only=True):
-            writer.writerow(["" if v is None else _one_line(str(v)) for v in row])
-        parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n")))
-    wb.close()
+    try:
+        parts = []
+        cells_seen = 0
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # Written back through `csv.writer` for the reason `_parse_csv_bytes`
+            # gives: a cell containing a comma has to stay one field, or it
+            # silently becomes two columns that no longer line up with the header
+            # row repeated above it. `_one_line` keeps a cell containing a line
+            # break one row for the same reason in the other axis.
+            out = io.StringIO()
+            writer = csv.writer(out, lineterminator="\n")
+            for row in ws.iter_rows(values_only=True):
+                cells_seen += len(row)
+                if cells_seen > _MAX_XLSX_CELLS:
+                    raise ConfigurationError(
+                        f"'{name}' declares more than {_MAX_XLSX_CELLS:,} cells "
+                        "and was not ingested. Delete unused rows and columns "
+                        "(Excel keeps formatted-but-empty ones), or split the "
+                        "workbook into smaller files."
+                    )
+                writer.writerow(["" if v is None else _one_line(str(v)) for v in row])
+            parts.append(f"[Sheet: {sheet_name}]\n" + _escape_marker_shaped(out.getvalue().strip("\n")))
+    finally:
+        wb.close()
     return f"[Excel: {name}]\n\n" + "\n\n".join(parts)

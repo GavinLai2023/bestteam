@@ -509,6 +509,79 @@ def test_parse_file_excel_cell_with_newline_stays_one_row(tmp_path):
     ]
 
 
+def test_parse_file_excel_rejects_a_workbook_that_unpacks_too_large(tmp_path, monkeypatch):
+    # An .xlsx is a zip, and a kilobyte upload can declare gigabytes once
+    # inflated. The parser refuses on the archive's own unpacked sizes,
+    # before a single sheet is read.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "big.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a"])
+    workbook.save(str(f))
+    monkeypatch.setattr("bestteam.tools.file_parser._MAX_XLSX_UNPACKED_BYTES", 10)
+    with pytest.raises(ConfigurationError, match="big.xlsx.*unpacks to more than"):
+        parse_file(str(f))
+
+
+def test_parse_file_excel_rejects_a_workbook_with_too_many_cells(tmp_path, monkeypatch):
+    # A stray-formatted sheet declares millions of empty cells; iterating
+    # them all would pin a CPU for minutes on the shared instance. The count
+    # covers every cell the sheets declare, not just the ones with values.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "wide.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a", "b"])
+    workbook.active.append(["c", "d"])
+    workbook.save(str(f))
+    monkeypatch.setattr("bestteam.tools.file_parser._MAX_XLSX_CELLS", 3)
+    with pytest.raises(ConfigurationError, match="wide.xlsx.*cells"):
+        parse_file(str(f))
+
+
+def test_parse_file_excel_hidden_sheets_are_indexed_too(tmp_path):
+    # Pins a limitation rather than fixing one: a hidden sheet's rows are
+    # parsed, indexed and searchable like any other sheet's. Anyone hiding a
+    # tab to keep it out of the knowledge base needs to delete it instead.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "report.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["public"])
+    hidden = workbook.create_sheet("Internal")
+    hidden.append(["do not publish"])
+    hidden.sheet_state = "hidden"
+    workbook.save(str(f))
+    result = parse_file(str(f))
+    assert "[Sheet: Internal]" in result.splitlines()
+    assert "do not publish" in result
+
+
+def test_parse_file_excel_chart_sheet_gets_a_clear_refusal(tmp_path):
+    # openpyxl's read-only reader crashes on a standalone chart tab
+    # (rels.find on a list, inside load_workbook itself), which would surface
+    # to the customer as a raw AttributeError. Detected from the archive
+    # instead, where a chart tab always means an xl/chartsheets/ entry.
+    # Charts embedded in a normal worksheet are unaffected.
+    openpyxl = pytest.importorskip("openpyxl")
+    f = tmp_path / "dash.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a"])
+    workbook.create_chartsheet("Trend")
+    workbook.save(str(f))
+    with pytest.raises(ConfigurationError, match="dash.xlsx.*chart"):
+        parse_file(str(f))
+
+
+def test_parse_file_excel_password_protected_gets_a_clear_refusal(tmp_path):
+    # An encrypted workbook is an OLE2 container, not a zip. Without the
+    # magic-byte check it falls into the generic not-a-workbook message,
+    # whose re-save advice is wrong for a file that needs its password
+    # removed.
+    f = tmp_path / "locked.xlsx"
+    f.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"0" * 100)
+    with pytest.raises(ConfigurationError, match="locked.xlsx.*password"):
+        parse_file(str(f))
+
+
 def test_parse_file_rejects_unsupported_type(tmp_path):
     f = tmp_path / "image.png"
     f.write_bytes(b"\x89PNG")
@@ -679,6 +752,24 @@ def test_parse_file_reads_docx_tables(tmp_path):
     assert "Price" in result
     assert "Widget" in result
     assert "9.99" in result
+
+
+def test_parse_file_docx_table_cell_keeps_a_comma_quoted(tmp_path):
+    # The defect the CSV and Excel paths already fixed, in its last home: a
+    # bare join turns one cell into two apparent columns, shifting every
+    # column after it out from under the header row the chunker repeats.
+    docx = pytest.importorskip("docx")
+
+    f = tmp_path / "doc.docx"
+    document = docx.Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "sku"
+    table.cell(0, 1).text = "name"
+    table.cell(1, 0).text = "A1"
+    table.cell(1, 1).text = "Widget, large"
+    document.save(str(f))
+
+    assert 'A1,"Widget, large"' in parse_file(str(f)).splitlines()
 
 
 def test_parse_file_docx_headings_become_markdown(tmp_path):
