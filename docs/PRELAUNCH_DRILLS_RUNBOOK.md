@@ -17,7 +17,7 @@
 
 **建议执行顺序**：1 → 2 → 3 → 4。原因：演练 1 和 2 只需要一个空的测试部署，做起来最快，也最容易发现「Docker/VPS 环境本身有没有配对」这类基础问题；演练 3 涉及 Azure 后台操作，需要预约时间、可能要等待权限生效，放最后；演练 4 是把前面都验证完之后的收尾动作。
 
-**在哪里做**：必须在**目标 VPS** 上做（不能在本地开发机上，因为本地机器大概率没有 Docker，而且这份演练本身就是在验证「部署环境」）。全程使用一个**测试用的 org/用户**，不要用真实客户的数据——即便这台 VPS 就是将来给客户用的那台也没关系，只要还没有真实客户上线，跑完演练后把测试数据清掉即可（第 5.4 节有清理步骤）。
+**在哪里做**：必须在**目标 VPS** 上做（不能在本地开发机上，因为本地机器大概率没有 Docker，而且这份演练本身就是在验证「部署环境」）。全程使用一个**测试用的 org/用户**，不要用真实客户的数据——即便这台 VPS 就是将来给客户用的那台也没关系，只要还没有真实客户上线，跑完演练后把测试数据清掉即可（第 5.5 节有清理步骤）。
 
 ---
 
@@ -475,74 +475,321 @@ Disconnect-ExchangeOnline -Confirm:$false
 
 ## 5. 收尾：check-health 上线 + 设置留存期 + 清理测试数据
 
-三件演练之外、但同样是"上线前必须做"的收尾动作。
+演练之外、但同样属于「上线前必须做完」的收尾动作。前面三个演练验证的是**系统扛不扛得住**，这一节做的是**出事的时候你会不会知道**，以及**别把演练留下的垃圾数据交给真实客户**。
+
+顺序有讲究，**不要跳着做**：5.5 会删掉测试账号，而 5.4 的留存期只有 org 成员登录后才能设置——账号删了就再也设不了了。
 
 ### 5.1 把 check-health 接入 cron
 
-演练过程中你已经手动跑过几次 `check-health`，现在把它变成自动巡检：
+这是整个部署里**唯一一个从进程外面看进程死活**的东西，值得多花十分钟做对。
+
+**为什么必须从外面看**：产品里所有的告警（邮箱连不上、密钥要过期、积压太久）都是**由邮件轮询循环自己投递的**（`email_trigger.run_maintenance`）。所以轮询器本身卡死、或者整个进程挂掉的时候，它没有任何办法告诉你——这恰恰是最要命的那种故障：客户的邮件一封都不会被处理，而系统一声不吭。`check-health` 从容器外面跑，就是为了补这个洞。
+
+#### 5.1.1 先手动跑一次，看懂输出
 
 ```bash
-crontab -e
+cd /opt/bestteam
+docker compose exec backend python -m ui.backend.admin check-health; echo "exit=$?"
 ```
 
-加一行（`docs/deployment.md` "Watching the watcher" 里的示例，按你的部署目录调整路径）：
+它对**每一个开着自动运行的 org** 打印四行，最后一行是汇总。典型输出：
 
 ```
-*/10 * * * * docker compose -f /opt/bestteam/docker-compose.yml exec -T backend python -m ui.backend.admin check-health || echo "bestteam check-health FAILED at $(date)" >> /var/log/bestteam-health.log
+[OK]   poll[drilltest]: checked 43s ago
+[OK]   backlog[drilltest]: no messages waiting
+[OK]   runs[drilltest]: 3 message(s) completed, none failed in the last 24h
+[OK]   latency[drilltest]: detection to draft: p50 51s, max 78s over the last 24h
+no failures, 0 warning(s)
 ```
 
-`|| ...` 后面接你实际想要的告警方式（发邮件给自己、写日志配合日志监控工具、调用一个 webhook 都行——这里只是给一个最小可用的兜底，不需要一开始就做得很复杂）。
+四行分别是什么，以及**什么时候它不是 OK**：
 
-验证 cron 真的会跑：等 10 分钟后检查 `/var/log/bestteam-health.log`（如果一切正常，这个文件应该不会出现新内容，因为只有失败才写日志——可以先临时把 crontab 里的时间改成每分钟测试一次，确认没有报错后再改回 10 分钟）。
+| 行 | 含义 | 不是 OK 的条件 |
+|---|---|---|
+| `poll[org]` | 距离上一次「检查完这个邮箱」过了多久 | 超过 `max(3 × 轮询间隔, 5 分钟)`——按默认 120 秒算就是 **360 秒**——报 **FAIL**；从来没检查过一次报 WARN |
+| `backlog[org]` | 有几封邮件在排队、最老的等了多久 | 最老的超过 `BESTTEAM_BACKLOG_ALERT_MINUTES`（默认 30 分钟）报 **WARN** |
+| `runs[org]` | 24 小时内处理完 / 失败的邮件数 | 有失败就报 **WARN** |
+| `latency[org]` | 从发现邮件到写出草稿的 p50 / 最大耗时 | 只报数字，永远不会 FAIL |
 
-同时确认**备份 cron** 也已经按 `docs/deployment.md`「Backup and restore」配置好了（不是这次演练的一部分，但这是同一批收尾工作，容易漏掉）：
+**只有 `poll` 那一行会 FAIL，也只有 FAIL 会让退出码变成 1**（WARN 不影响退出码，`admin.py:_print_findings`）。换句话说这个 cron 巡检盯的是**一件事**：轮询器停摆或进程已死。
+
+> **它不负责发现「邮箱连不上」。** 连接失败时轮询器照样会记下「我检查过了」（`last_checked_at` 在失败分支里也会更新），所以 `poll` 那一行仍然是 OK。凭据失效、权限被撤销这类问题走的是另一条路——客户自己在 **Activity → Alerts** 里看到的 "Your mailbox can't be reached"（演练 3 §4.9 / §4.10 验证过的那条）。两条链路分工不同，别指望一条覆盖另一条。
+
+#### 5.1.2 为什么用 `exec` 而不是 `run --rm`
+
+前面 `check-env` 用的是 `docker compose run --rm --no-deps`，这里换成了 `exec`，不是笔误：
+
+- `exec` 是**进正在运行的那个容器**执行。容器要是根本没起来，这条命令直接非零退出——而「整个进程死了」正是这个巡检最该抓到的情况，所以这个失败是我们想要的。
+- `run --rm` 会**另起一个容器**，主进程已经死了它照样能连上数据库把指标算出来（那时 `poll` 会 FAIL，也能报警），但多绕了一层。
+- 这条命令**不会**和单实例锁打架：锁是 `main.py` 启动 FastAPI 时拿的，admin CLI 只开一个数据库会话、不碰锁，所以每 10 分钟跑一次没有任何副作用（`ui/backend/process_lock.py`、`admin.py:_open_session`）。
+
+#### 5.1.3 写成一个脚本，别写成 crontab 一行
+
+crontab 里的一行有几个专坑新手的地方：`%` 有特殊含义、引号和 `$(...)` 容易被吃掉、写错了没法单独测。**做成脚本这些问题一个都不存在**，而且可以先手动跑一遍确认它好使。
+
+```bash
+sudo tee /usr/local/bin/bestteam-health-check.sh >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# Cron watchdog for the email poller. Writes to the log only when the check
+# fails, so an empty log means "everything was fine every time".
+set -uo pipefail
+
+DEPLOY_DIR=/opt/bestteam
+LOG=/var/log/bestteam-health.log
+
+cd "$DEPLOY_DIR" || { echo "=== $(date -Is) cannot cd to $DEPLOY_DIR" >> "$LOG"; exit 1; }
+output=$(/usr/bin/docker compose exec -T backend \
+  python -m ui.backend.admin check-health 2>&1)
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  {
+    echo "=== $(date -Is) check-health exit=$status"
+    echo "$output"
+  } >> "$LOG"
+fi
+exit "$status"
+EOF
+
+sudo chmod +x /usr/local/bin/bestteam-health-check.sh
+sudo touch /var/log/bestteam-health.log
+```
+
+几个细节，改路径的时候别改坏了：
+
+- **`-T` 不能省**。cron 没有终端，不加 `-T` 的 `docker compose exec` 会因为分配不到 TTY 而失败——那样你收到的每一条告警都是假的。
+- **`docker` 写绝对路径**。cron 的 `PATH` 很短（通常只有 `/usr/bin:/bin`），你在交互式 shell 里能跑的命令，cron 里未必找得到。先确认位置：`command -v docker`，把输出填进脚本。
+- **`DEPLOY_DIR` 必须是放着 `docker-compose.yml` 的那个目录**，`docker compose` 靠当前目录找项目。
+- 脚本最后**把 `check-health` 的退出码原样传出去**。日志是这里的告警渠道，但将来要换成别的（监控 agent、webhook、推送）时，直接拿退出码就行，不用改脚本。
+
+先手动验证脚本本身：
+
+```bash
+sudo /usr/local/bin/bestteam-health-check.sh; echo "exit=$?"
+sudo cat /var/log/bestteam-health.log
+```
+
+期望：`exit=0`，日志文件是空的（健康时脚本什么都不写）。
+
+#### 5.1.4 加进 crontab
+
+```bash
+sudo crontab -e     # 用 root 的 crontab：docker 一般需要 root 或 docker 组权限
+```
+
+加两行：
+
+```
+MAILTO=""
+*/10 * * * * /usr/local/bin/bestteam-health-check.sh
+```
+
+- **`MAILTO=""` 是有意为之**：cron 默认会把命令的输出**发邮件**给该用户，而这台机器上没有 MTA（本项目刻意不带任何 SMTP，见 `docs/DECISIONS.md`），这些邮件只会烂在 `/var/mail` 里或者直接丢掉。脚本自己写日志，所以把 cron 的邮件关掉。
+- **如果你坚持不用脚本、要写成一行**：记住 **crontab 里未转义的 `%` 会被当成换行符**，命令会从那里被截断。所以一行里出现的 `%` 全都要写成 `\%`（5.2 备份那一行里的 `date +\%F` 就是这个原因）。**这个反斜杠只在 crontab 里需要，写进脚本文件反而是错的**——复制粘贴时别把它带过去。
+
+确认这条 cron 真的在跑（不是「日志没内容所以应该在跑」）：
+
+```bash
+sudo crontab -l                        # 确认那两行在
+sudo journalctl -u cron --since -1h    # Debian/Ubuntu；也可以看 /var/log/syslog
+# 期望：每 10 分钟一条 CMD (/usr/local/bin/bestteam-health-check.sh)
+```
+
+#### 5.1.5 制造一次真实失败，确认告警链路是通的
+
+**这一步是这一节的重点**。健康的时候日志是空的，所以「日志一直没内容」既可能是「一切正常」，也可能是「这条 cron 从头到尾就没跑起来」——两者长得一模一样。必须人为坏一次，看它响不响。
+
+**测试 A：整个进程死掉**
+
+```bash
+docker compose stop backend
+sudo /usr/local/bin/bestteam-health-check.sh    # 不用等下一个 10 分钟，直接手动跑
+sudo tail -n 20 /var/log/bestteam-health.log
+docker compose start backend
+```
+
+期望：日志里出现一段 `=== <时间> check-health exit=1`，后面跟着 Docker 的报错（措辞随版本变，大意是 `service "backend" is not running`）。**看到这一段，才算这条告警链路验证过。**
+
+**测试 B（可选，但更接近真实故障）：进程活着，轮询停摆**
+
+需要 `drilltest` 的自动运行还开着（也就是演练 3 §4.8 之后的状态）：
+
+```bash
+docker compose stop backend
+# 等 7 分钟以上——阈值是 max(3 × 120 秒, 300 秒) = 360 秒
+docker compose start backend
+# 启动完立刻跑，别等
+docker compose exec backend python -m ui.backend.admin check-health; echo "exit=$?"
+```
+
+期望：`[FAIL] poll[drilltest]: last mailbox check was 4xxs ago (interval 120s) -- the poller looks stalled or the process is down`，`exit=1`。
+
+再等两三分钟重跑一次，应该恢复成 `[OK] poll[drilltest]: checked ...s ago`。**为什么不是一启动就变绿**：轮询循环是**先睡一个间隔再检查**（`poll_forever`，避免启动瞬间打一次真实邮箱），所以启动后要过一轮才有新的检查时间。
+
+#### 5.1.6 一个必须知道的盲区
+
+**没有任何 org 开着自动运行时，`check-health` 只打印一行然后退出 0**：
+
+```
+[OK]   triggers: no org has automatic email runs enabled
+no failures, 0 warning(s)
+```
+
+也就是说：从你清理掉演练数据（5.5）到第一个真实客户打开自动运行之间，这条 cron **永远是绿的，但它其实什么都没在看**。别把这段时间的「一直没报警」当成「监控已经验证过了」——所以 5.1.5 那次人为失败**一定要趁演练数据还在、自动运行还开着的时候做完**。
+
+另外：`/var/log/bestteam-health.log` 只在失败时写入，长不起来，可以不管；5.2 那个备份日志是每天都写的，交给 `logrotate` 或者定期自己截断。
+
+### 5.2 确认备份 cron 也已经配好
+
+不属于这次演练，但属于同一批收尾动作，而且是最容易漏的一件——演练 2 只证明了「`restore.sh` 能用」，没有证明「明天早上真的会有一份备份可以拿来 restore」。
+
+按 `docs/deployment.md`「Backup and restore」配置（路径按你的实际情况改）：
+
+```bash
+sudo mkdir -p /var/backups/bestteam
+sudo crontab -e
+```
+
+> **这次打开的 crontab 不是空的**——5.1.4 加的那两行还在里面。下面这一行是**追加在它们下面**的，不是替换掉整个文件（把原来的内容删掉，巡检 cron 就一起没了）。`MAILTO=""` 对整个 crontab 生效，备份这一行也被它管住，不用再写一遍。
 
 ```
 15 3 * * * cd /opt/bestteam && ./scripts/backup-db.sh /var/backups/bestteam/bestteam-$(date +\%F).db >> /var/log/bestteam-backup.log 2>&1 && ./scripts/backup-files.sh /var/backups/bestteam/bestteam-files-$(date +\%F).tgz >> /var/log/bestteam-backup.log 2>&1
 ```
 
-### 5.2 确认 `BESTTEAM_SECRETS_KEY` 已经安全备份
+这一行里有三个不能改坏的地方：
 
-第 4 节里连接 M365 邮箱用到的 client secret，是用 `BESTTEAM_SECRETS_KEY` 加密存进数据库的。确认这个 key：
+- **`cd /opt/bestteam &&` 不能省**。两个脚本内部都直接调 `docker compose`（没带 `-f`），靠当前目录找到 `docker-compose.yml`。
+- **`\%F` 的反斜杠不能省**（见 5.1.4 的 `%` 说明），去掉之后命令会被从那里截断。
+- **`&&` 是串联**：数据库备份失败的话，文件备份根本不会跑。这是有意的（数据库才是主体），但意味着**失败是静默的**——只有 `/var/log/bestteam-backup.log` 里有痕迹，没有人会主动去看。
 
-- 已经保存在密码管理器/密钥保管工具里（**不要**和数据库备份放在一起——两者放一起等于加密白做）
-- 在这台服务器丢失/需要重建时，你知道去哪里找回它
+所以第二天早上必须**手动确认一次**，这条 cron 才算验证过：
 
-### 5.3 给真实客户设置留存期
+```bash
+ls -la /var/backups/bestteam/
+tail -n 20 /var/log/bestteam-backup.log
+```
 
-正式客户上线前，决定这个 org 要不要设一个有限的邮件历史留存期（默认是永久保留）。这是在前端操作的：
+期望：当天日期的 `.db` 和 `.tgz` 各一份，日志里是两行 `Backed up ... to ...`。
 
-**Activity → Data** 标签页，选择 30/90/180/365 天，或者继续保持"永久保留"（如果客户明确要求）。
+> **`.tgz` 很小甚至只有几百字节是正常的**，不是备份失败。它装的是数据卷上**除数据库以外**的东西——知识库上传的原始文档、builder 会话的工作区。没上传过知识库文档的部署，这个包本来就几乎是空的。数据库那份 `.db` 才是主体。
+>
+> 另外：**这两个脚本不带参数时，默认写到当前目录下的 `backups/`**（也就是 `/opt/bestteam/backups/`），不是写到你以为的地方。手动跑的时候如果找不到文件，先去那儿看看。
 
-如果不确定客户的要求，`check-env` 现在会点名哪些已存在的 org 还在用"永久保留"（see `project_aug24_reassessment` 里 PR #92 加的这项检查），可以先跑一遍确认当前状态：
+最后两件事，缺一个这份备份就是假的：
+
+- **清理旧备份**，否则磁盘迟早满。同一个 crontab 里加一行最简单：
+  ```
+  30 4 * * * find /var/backups/bestteam -mtime +30 -delete
+  ```
+- **把备份复制到这台机器之外**（对象存储、另一台机器、你自己的电脑都行）。**和数据库一起坏掉的备份不是备份**——磁盘故障、误删整个目录、VPS 被回收，这三种情况下同机备份全都救不了你。
+
+### 5.3 确认 `BESTTEAM_SECRETS_KEY` 已经安全备份
+
+演练 3 里连接 M365 邮箱用到的 client secret，是用 `BESTTEAM_SECRETS_KEY`（Fernet）加密后存进数据库的。**这个 key 丢了，数据库备份对邮件功能就是废的。**
+
+> 注意有两个长得几乎一样的变量：`BESTTEAM_SECRET_KEY`（会话签名）和 `BESTTEAM_SECRETS_KEY`（凭据加密），差一个 `S`。两者填成同一个值时 backend 直接拒绝启动，`check-env` 会报 FAIL。
+
+要确认的不是「我存过了」，而是**「我存的那一份能用」**。真去对一次：
+
+```bash
+grep BESTTEAM_SECRETS_KEY /opt/bestteam/.env
+```
+
+把这一行和密码管理器里的那份**逐字比对**——尤其是结尾的 `=`，Fernet key 是 base64，末尾常有一到两个等号，手抄很容易漏掉。
+
+同时确认：
+
+- 它保存在密码管理器 / 密钥保管工具里，**不和数据库备份放在一起**（放一起等于加密白做：偷到备份的人连钥匙一起拿走了）
+- 这台服务器丢失、需要重建时，你知道去哪里找回它
+
+**丢了会发生什么**（知道后果，才知道这件事值不值得认真做）：backend 会**直接拒绝启动**，并且点名是哪几个 org 的凭据解不开：
+
+```
+BESTTEAM_SECRETS_KEY cannot decrypt the stored email credentials for org id(s) [3]
+(wrong or rotated key). Restore the original key, or clear and re-enter the
+affected mailboxes ...
+```
+
+这是刻意设计的——让问题在启动时就暴露，而不是等到某个客户的邮件跑到一半才失败（`ui/backend/db/email_credentials.py:ensure_secrets_key_for_stored_credentials`）。**此时 operator CLI 仍然能跑**，补救办法是清掉再重新录入受影响的邮箱：
+
+```bash
+docker compose run --rm --no-deps backend python -m ui.backend.admin clear-email <org>
+docker compose run --rm --no-deps backend python -m ui.backend.admin set-email <org> --user ... --test
+```
+
+**没有原地换钥匙的命令**——换 key 就意味着挨个 org 重新录一遍邮箱凭据，也就意味着要去找每个客户重新拿一次 client secret。所以这个 key 的正确做法是**存好、别换**。
+
+### 5.4 给真实客户设置留存期
+
+正式客户上线前，决定这个 org 的邮件历史要保留多久。**默认是永久保留**，而且升级软件永远不会替客户改这个设置。
+
+**这是在前端操作的，没有对应的 CLI 命令**——`PUT /api/org/retention` 走的是 org 成员登录。用该 org 的账号登录，进 **Activity → Data**（页面标题 "Your data"）：
+
+1. **先点 "Download export"**，把「将来会被删掉的那些内容」下载一份 JSON 存档。删掉之后拿不回来，这一步只花几秒钟。
+2. **How long to keep run history** 里选 30 / 90 / 180 / 365 天，或者保持 **Keep forever**（客户明确要求时）。
+3. 点 **Save**。**保存本身不删任何东西**，删除发生在下一次清理。
+4. 等两三分钟刷新页面，应该出现一行 `Last cleanup: <时间>, removed N run(s)`（N 通常是 0）。**这一行就是「清理确实在跑」的证据。** 清理挂在邮件轮询的定时器上，默认 120 秒一轮，**即使这个 org 没开自动运行也照跑**（`email_trigger.run_maintenance`）。
+5. 页面下方还有 **Remove history now**：需要手打 `DELETE` 确认，作用是不等下一轮清理、立刻删掉比留存期更老的已完成 run 的内容。演练里用不到，但要知道它在那儿。
+
+**清理删什么、留什么**（跟客户解释时要说准）：删的是**内容**——邮件正文、我们写的草稿、逐步 trace；留的是**账目**——这个 run 跑过、什么时候跑的、花了多少、哪些邮件已经回过。留账目不是打折，是为了计费和「别对同一封邮件回两次」还能成立。
+
+设置完之后跑一遍 `check-env` 确认当前状态：
 
 ```bash
 docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 ```
 
-### 5.4 清理这次演练留下的测试数据
+它会**点名**还在用永久保留的 org：
 
-演练全部通过之后，清掉本次用到的测试账号，避免它们和将来真实客户的数据混在一起：
-
-```bash
-docker compose exec backend python -m ui.backend.admin delete-user drilluser
-docker compose exec backend python -m ui.backend.admin list-orgs   # 确认 afterbackup 已经不在了
+```
+[WARN] org retention: org(s) keeping run history forever: drilltest. Set a
+retention period per org (PUT /api/org/retention) before a real customer uses it
 ```
 
-演练 2 用的 `afterbackup` org 正常情况下已经被恢复步骤本身抹掉了。如果你在跑 `restore.sh` 之前中止了演练，它会留下来——目前没有 `delete-org` 命令，一个没有成员的 org 不会出现在任何客户可见的地方，也不产生费用，可以先放着。
+注意这是 **WARN 不是 FAIL**，不影响退出码——它提醒你，但不会拦着你上线。
 
-`drilltest` 这个 org 本身没有单独的删除命令（`admin.py` 目前没有 `delete-org`），删完成员账号即可——一个没有成员的 org 不会出现在任何客户可见的地方，也不会产生费用。如果你想彻底清掉，可以在这次演练全部做完、确认没有问题之后，直接从头 `restore.sh` 一份"演练开始前"状态的备份（如果你在演练最开始也做过一次备份的话），这样最干净。
+### 5.5 清理这次演练留下的测试数据
 
-### 5.5 最终签署清单
+演练全部通过之后再做这一步（前面几节还要用到 `drilltest`）。**按顺序执行**：
 
-全部完成后，把下面这份清单填一遍，作为"这台部署已经可以接真实客户"的证据留存（贴进工单系统、Slack、或者随便一个能追溯的地方都可以）：
+```bash
+# 1. 先把演练用的邮箱凭据从数据库里清掉
+docker compose exec backend python -m ui.backend.admin clear-email drilltest
+
+# 2. 删掉测试账号
+docker compose exec backend python -m ui.backend.admin delete-user drilluser
+
+# 3. 停用这两个 org（见下面的说明——这一步很重要）
+docker compose exec backend python -m ui.backend.admin deactivate-org drilltest
+docker compose exec backend python -m ui.backend.admin deactivate-org afterbackup   # 如果它还在
+
+# 4. 确认最终状态
+docker compose exec backend python -m ui.backend.admin list-orgs
+```
+
+**第 1 步为什么要单独做**：`delete-user` 删的是账号，不是 org 的邮箱凭据。不 `clear-email` 的话，演练用的那份 client secret 会一直躺在数据库里（虽然是加密的，而且你在 §4.11 已经把 Azure 那边删掉、它早就失效了）。清掉更干净。
+
+**第 3 步为什么重要**：`deactivate-org` 会让轮询器和 `check-health` **同时**跳过这个 org（两边用的是同一个过滤条件：trigger 开启 **且** org 处于 active）。不停用的话，一个没有成员、凭据已失效的 org 会被永远轮询下去，每两分钟失败一次。这不会弄坏别人，但会在日志里刷噪音。
+
+**关于 `drilltest` / `afterbackup` 这两个 org 本身**：目前**没有 `delete-org` 命令**，`deactivate-org` 是能做到的最干净的状态。一个停用的 org 不出现在任何客户可见的地方，也不产生费用。唯一的残留是 5.4 那条 `check-env` 的 WARN——**它不看 org 是否 active，所以这两个 org 会永远出现在「还在永久保留」的名单里**。两个选择：
+
+- **接受它**，并在签署清单上写清楚「名单里的 `drilltest` / `afterbackup` 是演练残留，不是漏配的客户」。否则三个月后你自己看到那条 WARN 也要重新查一遍。
+- **恢复到演练之前**：如果你在演练最开始（第 1 节之前）做过一次备份，直接 `restore.sh` 回去最干净，一点痕迹都不留。没做过就选上一条，不值得为此重建部署。
+
+演练 2 用的 `afterbackup` 正常情况下已经被 §3.4 的恢复步骤本身抹掉了——`list-orgs` 里看不到它是预期结果。只有在你跑 `restore.sh` 之前中止了演练时它才会留下来。
+
+### 5.6 最终签署清单
+
+全部完成后，把下面这份清单填一遍，作为「这台部署已经可以接真实客户」的证据留存（贴进工单系统、Slack、或者随便一个能追溯的地方都可以）：
 
 - [ ] 演练 1（强杀/重启/恢复）全部通过标准打勾
 - [ ] 演练 2（备份/恢复）全部通过标准打勾
-- [ ] 演练 3（M365）全部通过标准打勾（如果客户不用 M365，这一项可以跳过，但要在清单上明确写"客户邮箱类型：非 M365，跳过"）
-- [ ] `check-health` 已接入 cron 并验证过会正常报错
-- [ ] 备份 cron 已配置
-- [ ] `BESTTEAM_SECRETS_KEY` 已安全备份
-- [ ] 已决定并设置了这个客户 org 的留存期
-- [ ] 本次演练用的测试账号已清理
+- [ ] 演练 3（M365）全部通过标准打勾（如果客户不用 M365，这一项可以跳过，但要在清单上明确写「客户邮箱类型：非 M365，跳过」）
+- [ ] `check-health` 已接入 cron，并且**用 5.1.5 的方法人为制造过一次失败、确认日志里真的出现了告警**（只确认「配好了」不算）
+- [ ] 知道 5.1.6 那个盲区：没有 org 开自动运行时，这个巡检恒绿
+- [ ] 备份 cron 已配置，且**第二天早上亲眼确认过 `.db` 和 `.tgz` 都生成了**
+- [ ] 备份有异地副本，且配了旧文件清理
+- [ ] `BESTTEAM_SECRETS_KEY` 已安全备份，并和 `.env` 里的值**逐字对比过**
+- [ ] 已决定并设置了这个客户 org 的留存期（或明确记录「客户要求永久保留」）
+- [ ] 本次演练用的测试账号已清理，测试 org 已停用
 - [ ] 演练日期、执行人、遇到的问题（如果有）已记录
