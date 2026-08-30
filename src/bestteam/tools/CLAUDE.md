@@ -283,9 +283,11 @@ writes a cell containing a line break as a quoted field across two physical line
 (which would become two rows, every column under the wrong header), and a value
 containing a comma has to stay quoted on the way out. **The delimiter is not
 sniffed** — a semicolon- or tab-delimited export reads as one field per row.
-⚠️ **Asymmetry this leaves: `_parse_excel_bytes` still joins cells with a bare
-`,`, so a *spreadsheet* cell containing a comma still splits into two apparent
-columns.**
+`_parse_excel_bytes` writes its sheet rows through the same `csv.writer` +
+`_one_line`, so a spreadsheet cell keeps a comma quoted and a line break
+collapsed. ⚠️ **Asymmetry this leaves: Word *table* rows are still a bare
+`,`-join (`_one_line` only), so a docx cell containing a comma still splits
+into two apparent columns.**
 
 `csv.reader`'s default 131,072-character field limit is **raised at import**
 (`_CSV_FIELD_LIMIT`): it guards a *streaming* reader's memory and nothing here
