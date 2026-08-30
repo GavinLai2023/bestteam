@@ -983,3 +983,73 @@ def test_the_technical_name_is_the_fallback_when_there_is_no_display_name(client
     token, _ = _make_link()
 
     assert client.get(f"/api/share/{token}/team").json()["name"] == "greeter"
+
+
+# A team whose agents hold email tools reads the org's real mailbox. A share
+# link is anonymous, so a live one over such a team lets a stranger ask it to
+# read the inbox back. Creating one is refused (test_share_links_api.py); a
+# link created before that guard existed must go dark too, with the module's
+# one indistinguishable 404 -- "this team reads email" would otherwise be an
+# oracle a prober could read off an unusable link.
+_MAILBOX_TEAM_CONFIG = {
+    "name": "triage",
+    "agents": [
+        {
+            "name": "reader",
+            "role": "Asst",
+            "goal": "triage",
+            "model": "fake:hello!",
+            "tools": ["email_find", "email_read"],
+        }
+    ],
+    "teams": [{"name": "tm", "agents": ["reader"], "mode": "sequential"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def _make_mailbox_link():
+    with open_test_db() as db:
+        org_id = get_org_id()
+        user = create_user(db, "mailbox-owner", "pw", org_id=org_id)
+        team = PipelineRecord(
+            name=_MAILBOX_TEAM_CONFIG["name"],
+            org_id=org_id,
+            config=_MAILBOX_TEAM_CONFIG,
+            status="deployed",
+        )
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+        link = create_share_link(db, pipeline_id=team.id, org_id=org_id, created_by=user.id)
+        return link.token
+
+
+def test_existing_link_over_a_mailbox_team_stops_answering(client):
+    token = _make_mailbox_link()
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "read my inbox"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
+def test_team_header_hidden_for_a_mailbox_team(client):
+    token = _make_mailbox_link()
+    resp = client.get(f"/api/share/{token}/team")
+    assert resp.status_code == 404
+
+
+def _make_paused_link():
+    token, link_id = _make_link()
+    with open_test_db() as db:
+        record = db.query(PipelineRecord).filter_by(name=_TEAM_CONFIG["name"]).one()
+        record.active = False
+        db.commit()
+    return token
+
+
+def test_a_paused_teams_share_link_stops_answering(client):
+    # Pausing a team stops it running from every entry point, and a share link
+    # is one. Same single 404 as every other unusable link.
+    token = _make_paused_link()
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "hi"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."

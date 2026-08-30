@@ -260,6 +260,14 @@ export const api = {
       display_names?: Record<string, string>
     }>('/api/pipelines'),
   pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
+  // The customer's reversible pause on one live team: false stops it running
+  // from every entry point (manual, automatic and shared) and keeps
+  // everything else. Keyed by the stable `PipelineRecord.id`, not the name.
+  setPipelineActive: (pipelineId: number, active: boolean) =>
+    request<{ id: number; name: string; active: boolean }>(`/api/pipelines/${pipelineId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ active }),
+    }),
   createRun: (pipeline: string, input: string) =>
     request<{ run_id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ pipeline, input }) }),
   getRun: (id: string) => request<RunListItem>(`/api/runs/${id}`),

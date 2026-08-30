@@ -31,6 +31,9 @@ export const en = {
     // translated -- someone who has landed in a language they cannot read
     // needs to recognise their own by sight to get out.
     language: 'Language',
+    // The nav's account menu trigger. Its visible text is the username, so
+    // this is the accessible name rather than a label anyone reads.
+    account: 'Account',
   },
   common: {
     tryAgain: 'Try again',
@@ -356,7 +359,107 @@ export const en = {
       connectMailboxFirst: 'Connect your mailbox above before you can launch this team.',
       liveTitle: 'Your team is live 🎉',
       liveBody: '"{{name}}" is up and running and ready to take on real requests.',
-      adjust: 'Make more adjustments',
+      // Email teams only. Deploying publishes the team; it still watches
+      // nothing until the automatic-runs switch is on, and that switch is off
+      // by default.
+      liveEmailNext:
+        "One more step: switch on automatic runs below and it'll start watching your inbox.",
+      adjust: 'Make changes',
+      // The two ways off this screen. A team that answers questions is
+      // finished, so the offer is to talk to it; an email team still has its
+      // switch and limits here, so its button only closes the build.
+      tryIt: 'Try it out',
+      done: 'Done',
+    },
+  },
+  // The org's one mailbox and its one automatic team. Both components render
+  // inside the wizard's Go live step, but both are ORG-scoped rather than
+  // team-scoped -- which is what most of this copy exists to say out loud.
+  email: {
+    connect: {
+      title: 'Connect your mailbox',
+      checking: 'Checking mailbox…',
+      retry: 'Retry',
+      subtitle:
+        'This team reads and drafts email in your inbox. It only ever saves drafts for you to '
+        + 'review — it never sends. Use an app-specific password, not your account password.',
+      // Split either side of the address so it can stay bold mid-sentence in
+      // both languages' word order (there is no <Trans> in this app).
+      connectedPrefix: 'Connected as ',
+      connectedSuffix: ' on {{host}}.',
+      sharedByEveryTeam:
+        'One mailbox is connected per organisation, and it is used by every team in your '
+        + 'organisation. Reconnecting a different address moves all of them to it.',
+      reconnect: 'Reconnect',
+      disconnect: 'Disconnect',
+      disconnecting: 'Disconnecting…',
+      hostingLegend: 'How is this mailbox hosted?',
+      hostingImap: 'Standard mailbox (IMAP) — Gmail, and most providers',
+      hostingMicrosoft: 'Microsoft 365 / Outlook (Exchange Online)',
+      // Split around the literal permission name, which is not translated:
+      // the reader has to match it by sight against Azure.
+      microsoftHintBefore:
+        'Microsoft 365 no longer allows app passwords, so this connects through an app '
+        + 'registration instead. Ask your IT administrator to register an app in Azure, grant '
+        + 'it the ',
+      microsoftHintAfter:
+        ' permission with admin consent, and give it access to this mailbox in Exchange '
+        + 'Online. They will then have the three values below.',
+      emailAddress: 'Email address',
+      tenantId: 'Directory (tenant) ID',
+      clientId: 'Application (client) ID',
+      clientSecret: 'Client secret',
+      secretExpiry: 'Secret expiry date (optional)',
+      secretExpiryHint:
+        'Azure shows this beside the secret you just copied. Every client secret expires, and '
+        + 'when one does the mailbox stops working with an error that looks like a wrong '
+        + 'password — enter the date and we’ll warn you a month beforehand.',
+      imapServer: 'IMAP server',
+      imapUsername: 'Email address / username',
+      appPassword: 'App password',
+      advancedShow: '▸ Advanced settings',
+      advancedHide: '▾ Advanced settings',
+      port: 'IMAP port',
+      portHint:
+        'Almost always 993 — leave as-is unless your email provider says otherwise.',
+      draftsFolder: 'Drafts folder',
+      draftsPlaceholder: 'Leave blank',
+      draftsHint:
+        "Leave blank — we'll find your Drafts folder automatically. Only set this to force "
+        + 'a specific folder.',
+      test: 'Test connection',
+      testing: 'Testing…',
+      testOk: 'Connection works.',
+      save: 'Connect mailbox',
+      saving: 'Connecting…',
+      // The two warnings about the one-mailbox-per-org replacement: the banner
+      // while typing, then the dialog that makes it an answer.
+      switchWarning:
+        'This will switch every team over to {{address}}, because your organisation uses one '
+        + 'mailbox for all of them. Automatic runs will be turned off until you switch them on '
+        + 'again for the team you want.',
+      switchConfirmTitle: 'Switch every team to this mailbox?',
+      switchConfirmBody:
+        'Your organisation uses one mailbox for all of its teams. Saving this replaces '
+        + '{{current}} with {{address}} everywhere, and automatic runs will be turned off until '
+        + 'you switch them on again for the team you want.',
+      switchConfirmAction: 'Switch mailbox',
+    },
+    trigger: {
+      title: 'Automatic runs',
+      subtitle:
+        'Let "{{name}}" watch the inbox on its own: it checks for new email every few minutes '
+        + 'and drafts replies without you having to start it — up to {{cap}} automatic runs '
+        + 'per day. It still only ever saves drafts; it never sends.',
+      takenByOtherTeam:
+        '"{{name}}" is the team running automatically right now. Only one team per organisation '
+        + 'can, so turning this on stops "{{name}}".',
+      pausedCap:
+        "Paused — today's limit of {{cap}} automatic runs was reached. Runs resume tomorrow.",
+      turnOff: 'Turn off automatic runs',
+      turnOn: 'Run automatically when new email arrives',
+      saving: 'Saving…',
+      watching: 'On — watching for new email.',
     },
   },
   // The "My teams" page. It lives under pages/wizard/ but is its own route
@@ -380,6 +483,17 @@ export const en = {
     sharedSessions: 'Shared sessions',
     deleteTitle: 'Delete "{{name}}"?',
     deleteBody: "This can't be undone.",
+    // Pausing a live team. Resuming has no confirmation of its own -- nothing
+    // is lost by switching a team back on.
+    pause: 'Pause',
+    resume: 'Switch back on',
+    paused: 'Paused',
+    pauseTitle: 'Pause "{{name}}"?',
+    pauseBody:
+      'The team stops answering everywhere: automatic runs switch off, share '
+      + 'links stop working, and it leaves the Run a team list. Nothing is '
+      + 'deleted, and switching it back on undoes all of it.',
+    pauseAction: 'Pause the team',
   },
   // The public share-link chat (pages/ShareChatPage.tsx). The English values
   // are verbatim what the page showed before it was translated -- tests find
@@ -437,6 +551,12 @@ export const en = {
     revoke: 'Revoke',
     close: 'Close',
     copyFailed: "Couldn't copy the link automatically. Select and copy it by hand.",
+    // Shown on the My Teams card in place of the controls above. The backend
+    // refuses to mint a link for such a team (share_links_api.py).
+    notShareable:
+      "This team can read your organisation's mailbox, so it can't be shared. "
+      + 'A share link is anonymous, and anyone holding it could ask the team to '
+      + 'read your email back to them.',
   },
   // The read-only audit view beside it (components/SharedSessionsPanel.tsx).
   sharedSessions: {

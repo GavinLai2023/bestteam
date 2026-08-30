@@ -525,6 +525,13 @@ def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, ba
     )
     if record is None:
         raise ValueError(f"No deployed team named '{name}' for org {org_id}")
+    # Pausing already disables the trigger, so the poller should not reach
+    # here -- but a pause can land between that check and this build, and
+    # `retry_triggered_run` has no trigger check of its own. Refused the same
+    # way a missing team is: no build, no state advanced upstream, and the
+    # messages are released penalty-free (infrastructure class).
+    if not record.active:
+        raise ValueError(f"Deployed team '{name}' for org {org_id} is paused")
     # A trigger stays enabled across redeploys -- only a mailbox identity
     # change disables it (on_mailbox_saved). If the team
     # was redeployed to a version with no email tools/skills, dispatching

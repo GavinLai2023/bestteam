@@ -22,6 +22,7 @@ from .db.share_links import create_share_link, get_share_link, list_share_links,
 from .db.share_messages import list_messages
 from .db.share_sessions import list_share_sessions
 from .db_session import get_db
+from .email_tools import spec_uses_email
 
 router = APIRouter(prefix="/api", tags=["share-links"])
 
@@ -107,7 +108,21 @@ def create_share_link_endpoint(
     org: Organization = Depends(get_current_org),
     user: User = Depends(get_current_user),
 ) -> dict:
-    _get_deployed_pipeline_or_404(db, pipeline_id, org.id)
+    record = _get_deployed_pipeline_or_404(db, pipeline_id, org.id)
+    # A share link is anonymous by design, and this team's agents hold
+    # `email_find`/`email_read` over the org's real mailbox -- so the link
+    # would let a stranger ask it to read the inbox back to them. Same bound
+    # `deploy_validation.find_email_egress_conflicts` keeps at deploy: mail is
+    # attacker-controlled input, and it must not reach a route out.
+    if spec_uses_email(db, record.config, org.id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This team can read your organisation's mailbox, so it can't be "
+                "shared -- a share link is anonymous, and anyone holding it could "
+                "ask the team to read your email back to them."
+            ),
+        )
     link = create_share_link(
         db,
         pipeline_id=pipeline_id,

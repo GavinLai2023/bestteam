@@ -208,3 +208,53 @@ def test_share_link_timestamps_carry_a_utc_offset(client):
     link = next(item for item in listed if item["id"] == created.json()["id"])
     assert link["expires_at"].endswith("+00:00"), link["expires_at"]
     assert link["created_at"].endswith("+00:00"), link["created_at"]
+
+
+# A team holding email tools reads the org's real mailbox. Anyone with a share
+# link is anonymous, so offering one would hand a stranger `email_find` /
+# `email_read` over the org's inbox -- the same exfiltration bound
+# `deploy_validation.find_email_egress_conflicts` protects at deploy.
+_MAILBOX_TEAM_CONFIG = {
+    "name": "triage",
+    "agents": [
+        {
+            "name": "reader",
+            "role": "Asst",
+            "goal": "triage",
+            "model": "fake:hi",
+            "tools": ["email_find", "email_read"],
+        }
+    ],
+    "teams": [{"name": "tm", "agents": ["reader"], "mode": "sequential"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
+def _deploy_mailbox_team(org_name="default"):
+    with open_test_db() as db:
+        org_id = get_org_id(org_name)
+        record = PipelineRecord(
+            name=_MAILBOX_TEAM_CONFIG["name"],
+            org_id=org_id,
+            config=_MAILBOX_TEAM_CONFIG,
+            status="deployed",
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        return record.id
+
+
+def test_create_share_link_refused_for_a_team_that_reads_the_mailbox(client):
+    pipeline_id = _deploy_mailbox_team()
+    resp = client.post(f"/api/pipelines/{pipeline_id}/share-links", json={})
+    assert resp.status_code == 409
+    assert "mailbox" in resp.json()["detail"].lower()
+
+
+def test_listing_share_links_still_works_for_a_mailbox_team(client):
+    # Refusing to CREATE must not hide links an org made before this guard --
+    # they still need to be findable to be revoked.
+    pipeline_id = _deploy_mailbox_team()
+    resp = client.get(f"/api/pipelines/{pipeline_id}/share-links")
+    assert resp.status_code == 200

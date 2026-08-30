@@ -51,6 +51,13 @@ rows → `default`; admins and built-in skills stay NULL.
   against, and a fresh database gets the new names from `create_all()`. Don't
   "fix" this.
 
+  ⚠️ **`pipelines.active` is the customer's reversible pause and is NOT a
+  fourth `status`** — a paused team is still `deployed` (it has a published
+  version), it just must not run. False is enforced at every entry point:
+  `GET /api/pipelines`, `POST /api/runs`, `build_trigger_pipeline`, the
+  trigger-enable route and `share_chat`'s pipeline resolution. Migration
+  `v9w0x1y2z3a4`, `server_default="1"`, so an upgrade pauses nothing.
+
   A `pipelines` row is the **stable team head**: `current_version_id` points at
   the latest immutable `pipeline_versions` snapshot and `config` mirrors it.
   Deploy appends a version via `publish_pipeline_version` — it never overwrites

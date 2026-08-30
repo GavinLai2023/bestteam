@@ -55,6 +55,9 @@ export default function DeployPage() {
       <div className="wizard-card">
         <h2>{t('wizard.deploy.liveTitle')}</h2>
         <p className="banner banner-success">{t('wizard.deploy.liveBody', { name: spec.name })}</p>
+        {/* "Live" is true of the deployment, not yet of the work: an email team
+            watches nothing until the toggle below is on. */}
+        {session.uses_email && <p className="hint">{t('wizard.deploy.liveEmailNext')}</p>}
         {session.uses_email && <EmailConnect />}
         {session.uses_email && <EmailTriggerToggle pipelineName={spec.name} />}
         {/* This team's mail-handling settings live here, not on the Activity
@@ -62,12 +65,27 @@ export default function DeployPage() {
             EmailConnect/EmailTriggerToggle above already do. */}
         {session.uses_email && <EmailFilterSettings />}
         {session.uses_email && <EmailBudgetSettings />}
+        {/* The two kinds of team leave this screen in different states, so they
+            get different next steps. A team that answers questions is finished
+            here and the useful thing is to talk to it. An email team is
+            deployed but idle -- automatic runs are off by default -- so the
+            switch above is what actually starts it, and the button below only
+            closes the build. */}
         <div className="wizard-actions">
-          <button className="btn btn-primary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
+          {session.uses_email ? (
+            <button className="btn btn-primary" onClick={() => navigate('/teams')}>
+              {t('wizard.deploy.done')}
+            </button>
+          ) : (
+            <button
+              className="btn btn-primary"
+              onClick={() => navigate(`/run?pipeline=${encodeURIComponent(spec.name)}`)}
+            >
+              {t('wizard.deploy.tryIt')}
+            </button>
+          )}
+          <button className="btn btn-secondary" onClick={() => navigate(`/wizard/${sessionId}/confirm`)}>
             {t('wizard.deploy.adjust')}
-          </button>
-          <button className="btn btn-secondary" onClick={() => navigate(`/run?pipeline=${encodeURIComponent(spec.name)}`)}>
-            {t('nav.runTeam')}
           </button>
         </div>
       </div>
@@ -86,7 +104,7 @@ export default function DeployPage() {
       {error && <p className="banner banner-error">{error}</p>}
 
       <div className="wizard-actions">
-        <button className="btn btn-primary" onClick={deploy} disabled={busy || (session.uses_email && !emailConnected)}>
+        <button className="btn btn-hero" onClick={deploy} disabled={busy || (session.uses_email && !emailConnected)}>
           {busy ? t('wizard.deploy.launching') : t('wizard.deploy.launch')}
         </button>
       </div>

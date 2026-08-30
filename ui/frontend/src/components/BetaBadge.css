@@ -1,0 +1,16 @@
+/* Sized in `em` so it tracks whichever wordmark it follows -- the nav's is
+   smaller than the login page's. The accent trio is a coordinated set: pale
+   accent behind accent text, both redefined for dark mode. */
+.beta-badge {
+  align-self: center;
+  padding: 0.15em 0.5em;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.62em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: lowercase;
+}

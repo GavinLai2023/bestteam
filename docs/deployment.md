@@ -120,8 +120,8 @@ Edit `.env` and fill in:
   ```bash
   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   ```
-- `BESTTEAM_DEMO_WORKFLOWS` — **leave unset on a customer deployment.** It
-  exposes the shipped demo workflows in `ui/backend/workflows/`, which belong
+- `BESTTEAM_DEMO_PIPELINES` — **leave unset on a customer deployment.** It
+  exposes the shipped demo pipelines in `ui/backend/pipelines/`, which belong
   to no org, so every user would see and be able to run them. Most return
   hardcoded `fake:` text that reads like a real answer; `email_triage_demo_live`
   reads the `BESTTEAM_EMAIL_*` mailbox. Set it to `1` only on a dev or
@@ -158,7 +158,7 @@ to, and why:
 | `BESTTEAM_SECRETS_KEY` set, a real Fernet key, **different** from the signing key | WARN if unset, FAIL if equal/invalid | Required the moment a mailbox is connected; reusing the signing key would make one leak two. |
 | `BESTTEAM_CORS_ORIGINS` exact origins, no `*`, no trailing slash | FAIL | A wildcard is refused; a wrong origin means the frontend cannot call the API at all. |
 | `VITE_API_BASE` / `VITE_WS_BASE` set, `https://` / `wss://` | FAIL if unset | Baked into the frontend image at build time — wrong values mean a rebuild. |
-| `BESTTEAM_DEMO_WORKFLOWS` **off** | FAIL | Every org user would otherwise see and run the shipped demo teams. |
+| `BESTTEAM_DEMO_PIPELINES` **off** | FAIL | Every org user would otherwise see and run the shipped demo teams. |
 | `BESTTEAM_EMAIL_*` unset | WARN | Configures one process-wide mailbox; use per-org `admin set-email` instead. |
 | `BESTTEAM_RUN_RETENTION_DAYS` set (e.g. `90`) **before** creating the org | WARN | Otherwise the org keeps run history forever, and existing orgs are never retro-fitted. |
 | `BESTTEAM_SENTRY_DSN` set | WARN | Without it the container log is the only record of a failure. |
@@ -305,8 +305,8 @@ a separate org-less account for the person instead.
 
 Admin surfaces (`/api/config`, `/api/memory`) work across orgs — mutations
 target one explicitly via `?org=<name>`. Org-user surfaces (the wizard,
-running workflows) require an org account; a platform operator who wants to
-run workflows creates themselves an org user too.
+running pipelines) require an org account; a platform operator who wants to
+run pipelines creates themselves an org user too.
 
 ## 4c. Connect each org's mailbox (per-org email)
 
@@ -421,7 +421,7 @@ A trigger that starts failing now says so. Alerts appear in the app under
 
 | Condition | When it fires |
 |---|---|
-| Repeated workflow failures | after `BESTTEAM_TRIGGER_ALERT_THRESHOLD` consecutive failures (default 3, minimum 1) |
+| Repeated pipeline failures | after `BESTTEAM_TRIGGER_ALERT_THRESHOLD` consecutive failures (default 3, minimum 1) |
 | Mailbox unreachable | same threshold |
 | A run released by the stale-run watchdog | immediately — it has already been stuck for the full run timeout |
 | A Microsoft 365 client secret nearing expiry | 30 days, 7 days, and on expiry |
@@ -456,6 +456,11 @@ five attempts, after which it is marked failed and remains readable in-app.
   "created_at": "2026-08-17T09:14:00+00:00"
 }
 ```
+
+`fingerprint` is a **stored value**, and the Workflow -> Pipeline rename
+deliberately left it alone: it is compared against rows written before the
+rename, so changing the string would re-raise every alert once. The API
+paths and config keys did move.
 
 Verifying a delivery (Python):
 
@@ -542,8 +547,8 @@ customers that plainly rather than implying it works.
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok", "database": "ok"}`
   (public, no auth required; `503 {"status": "degraded", "database": "error"}`
   means the backend cannot reach its SQLite file).
-- `curl http://localhost:8000/api/workflows` → `401` (auth required).
-- `curl http://localhost:8000/api/workflows -H "Authorization: Bearer <access_token>"`
+- `curl http://localhost:8000/api/pipelines` → `401` (auth required).
+- `curl http://localhost:8000/api/pipelines -H "Authorization: Bearer <access_token>"`
   → `200`.
 - Open the frontend in a browser — you'll be redirected to `/login`. Log in
   with the user created above; you should land on a page with a "Log out"
@@ -613,8 +618,8 @@ separate and untouched.
 **One error channel, opt-in.** Set `BESTTEAM_SENTRY_DSN` (Sentry's free tier
 is enough for a beta; any Sentry-protocol collector such as GlitchTip works)
 and the backend reports exactly two kinds of event -- an *unhandled* request
-exception (the 500 the customer saw) and a *failed run* (the workflow's own
-failure or a crash on the worker thread) -- tagged with the run id, workflow
+exception (the 500 the customer saw) and a *failed run* (the pipeline's own
+failure or a crash on the worker thread) -- tagged with the run id, pipeline
 name, method and route template (never a concrete path, whose parameter can
 be a share token). The exception's type and stack go; its *message* does
 not (a parser error quotes the model's output, an HTTP error the URL a tool

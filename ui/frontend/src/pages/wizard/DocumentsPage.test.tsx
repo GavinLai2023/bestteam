@@ -237,7 +237,28 @@ describe('DocumentsPage', () => {
     await screen.findByText('Add your documents')
     await waitFor(() => expect(mockedApi.orgKnowledgeBaseCapabilities).toHaveBeenCalled())
 
+    // With a file chosen, so the capability flag is the only thing that can be
+    // hiding it -- the toggle is now gated on both.
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [new File(['x'], 'doc.txt', { type: 'text/plain' })] } })
+
     expect(screen.queryByText('Search quality')).not.toBeInTheDocument()
+  })
+
+  it('holds the search-quality toggle back until a file is chosen', async () => {
+    // With nothing to upload the choice changes nothing: it is only ever read
+    // by the upload call.
+    mockedApi.orgKnowledgeBaseCapabilities.mockResolvedValue({ smart_search_available: true })
+
+    renderPage()
+    await screen.findByText('Add your documents')
+    await waitFor(() => expect(mockedApi.orgKnowledgeBaseCapabilities).toHaveBeenCalled())
+    expect(screen.queryByText('Search quality')).not.toBeInTheDocument()
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [new File(['x'], 'doc.txt', { type: 'text/plain' })] } })
+
+    expect(screen.getByText('Search quality')).toBeInTheDocument()
   })
 
   it('defaults to Enhanced and uploads with smart search on when available', async () => {
@@ -246,12 +267,15 @@ describe('DocumentsPage', () => {
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
-    await screen.findByText('Search quality')
+    await screen.findByText('Add your documents')
 
     fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
     const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(fileInput, { target: { files: [file] } })
+    // Files first: the toggle renders only once there are some, and waiting for
+    // it here is also what settles the capabilities request.
+    await screen.findByText('Search quality')
 
     fireEvent.click(screen.getByText('Continue'))
 
@@ -266,13 +290,15 @@ describe('DocumentsPage', () => {
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
 
     renderPage()
-    await screen.findByText('Search quality')
-    fireEvent.click(screen.getByText('Standard'))
+    await screen.findByText('Add your documents')
 
     fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
     const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await screen.findByText('Search quality')
+    fireEvent.click(screen.getByText('Standard'))
 
     fireEvent.click(screen.getByText('Continue'))
 
@@ -423,12 +449,15 @@ describe('DocumentsPage', () => {
     mockedApi.uploadOwnKnowledgeBaseFiles.mockResolvedValueOnce({ name: 'policies', job_id: 1, status: 'queued' })
     mockedApi.submitSpecification.mockResolvedValue({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
     renderPage()
-    await screen.findByText('Search quality')
+    await screen.findByText('Add your documents')
 
     fireEvent.change(screen.getByLabelText(/what should we call these documents/i), { target: { value: 'Policies' } })
     const file = new File(['x'], 'doc.txt', { type: 'text/plain' })
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(fileInput, { target: { files: [file] } })
+    // The conflict dialog quotes the search quality, so wait for the toggle --
+    // which needs the files above -- before Continue reads it.
+    await screen.findByText('Search quality')
 
     fireEvent.click(screen.getByText('Continue'))
     return file

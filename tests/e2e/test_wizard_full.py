@@ -131,7 +131,9 @@ def test_t4_5_deploy_then_run_for_real(page):
     page.click("button:has-text('Launch my team')")
     page.wait_for_selector("text=Your team is live", timeout=20000)
 
-    page.click("button:has-text('Run a team')")
+    # The deployed team answers questions rather than watching a mailbox, so
+    # this screen offers "Try it out" (an email team gets "Done" instead).
+    page.click("button:has-text('Try it out')")
     page.wait_for_selector(".controls select", timeout=8000)
     page.fill("textarea", "A customer is asking about a refund.")
     page.click("button:has-text('Run')")

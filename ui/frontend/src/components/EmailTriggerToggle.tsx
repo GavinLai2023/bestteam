@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import type { EmailTrigger } from '../lib/types'
 
@@ -9,6 +10,7 @@ interface EmailTriggerToggleProps {
 // Org-level opt-in: run this deployed email team automatically on new mail.
 // Off by default; shown on the Deploy page once the team is live.
 export default function EmailTriggerToggle({ pipelineName }: EmailTriggerToggleProps) {
+  const { t } = useTranslation()
   const [trigger, setTrigger] = useState<EmailTrigger | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -35,17 +37,22 @@ export default function EmailTriggerToggle({ pipelineName }: EmailTriggerToggleP
 
   return (
     <div className="wizard-card" style={{ background: '#f9fafb' }}>
-      <h3>Automatic runs</h3>
+      <h3>{t('email.trigger.title')}</h3>
       <p className="subtitle">
-        Let "{pipelineName}" watch the inbox on its own: it checks for new email every few minutes
-        and drafts replies without you having to start it — up to {trigger.daily_cap} automatic runs
-        per day. It still only ever saves drafts; it never sends.
+        {t('email.trigger.subtitle', { name: pipelineName, cap: trigger.daily_cap })}
       </p>
 
       {error && <p className="banner banner-error">{error}</p>}
+      {/* The trigger row is unique per org, so enabling it here overwrites
+          whichever team holds it -- silently, server-side. Name that team. */}
+      {trigger.enabled && !onForThis && (
+        <p className="banner banner-error">
+          {t('email.trigger.takenByOtherTeam', { name: trigger.pipeline_name })}
+        </p>
+      )}
       {onForThis && trigger.status === 'paused_cap' && (
         <p className="banner banner-error">
-          Paused — today's limit of {trigger.daily_cap} automatic runs was reached. Runs resume tomorrow.
+          {t('email.trigger.pausedCap', { cap: trigger.daily_cap })}
         </p>
       )}
       {onForThis && trigger.status === 'error' && trigger.last_error && (
@@ -54,10 +61,12 @@ export default function EmailTriggerToggle({ pipelineName }: EmailTriggerToggleP
 
       <div className="wizard-actions">
         <button className="btn btn-secondary" onClick={toggle} disabled={busy}>
-          {busy ? 'Saving…' : onForThis ? 'Turn off automatic runs' : 'Run automatically when new email arrives'}
+          {busy
+            ? t('email.trigger.saving')
+            : t(onForThis ? 'email.trigger.turnOff' : 'email.trigger.turnOn')}
         </button>
         {onForThis && trigger.status === 'active' && (
-          <span className="hint">On — watching for new email.</span>
+          <span className="hint">{t('email.trigger.watching')}</span>
         )}
       </div>
     </div>

@@ -36,12 +36,6 @@
 .feedback-dialog textarea {
   width: 100%;
   resize: vertical;
-  font: inherit;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
 }
 
 .feedback-dialog-error {

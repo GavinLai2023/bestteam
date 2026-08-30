@@ -39,6 +39,11 @@ describe('LoginPage', () => {
     expect(container.querySelector('button[type=submit]')).toBeInTheDocument()
   })
 
+  it('marks the product as beta beside the wordmark', () => {
+    renderPage()
+    expect(screen.getByText('beta')).toBeInTheDocument()
+  })
+
   it('renders a failed login in a .banner-error, which e2e waits for', async () => {
     vi.mocked(api.login).mockRejectedValue(new Error('Invalid username or password'))
     const { container } = renderPage()
@@ -75,7 +80,7 @@ describe('LoginPage', () => {
       expect(screen.getByRole('heading', { name: '登录' })).toBeInTheDocument()
     })
     expect(screen.getByLabelText('用户名')).toBeInTheDocument()
-    expect(screen.getByText('说出需求，收获最合适的 AI 团队')).toBeInTheDocument()
+    expect(screen.getByText('一句需求，一支团队')).toBeInTheDocument()
   })
 
   it('reveals and re-hides the password', () => {

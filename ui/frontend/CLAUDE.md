@@ -78,7 +78,7 @@ shared `<Layout/>` nav shell.
 | `/` | `LandingPage` — **not a page but a router**: forwards an org member to `/activity`, or `/wizard` if the org has no deployed pipeline; `RequireOrgMember` sends an admin to `/advanced` first |
 | `/run` | `MonitorPage` — "Run a team" (a deliberate destination, not the daily home) |
 | `/activity` | `ActivityPage` — the Dashboard |
-| `/teams` | `SessionsPage` — "My teams" |
+| `/teams` | `SessionsPage` — "My teams"; each live team's Pause/Switch-back-on |
 | `/wizard/*` | the six-step Team Builder |
 | `/advanced`, `/accounts`, `/memory`, `/trace` | admin-only |
 | `/share/:token` | the one **public, unauthenticated** route |
@@ -403,6 +403,10 @@ expiry are set at creation — to change them, revoke and regenerate) and
 their own toggles**, with `SessionsPage` owning the audit one's open state, so a
 page listing many teams doesn't fire a fetch per card on load.
 
+⚠️ **A team with `uses_email` gets neither control** — one line of copy
+(`shareLinks.notShareable`) sits where they were. The backend refuses to mint a
+link for such a team, so the buttons could only fail.
+
 ## Auth and login UI
 
 `lib/api.ts` stores a bearer token in `localStorage` (`bestteam_token`), attaches
@@ -427,6 +431,11 @@ hand.**
 contract with `tests/e2e/test_smoke.py`**, which drives the real page through
 exactly those selectors. `LoginPage.test.tsx` asserts each so a rename fails in the
 unit tier instead of the e2e one.
+
+⚠️ **Language, Change password and Log out live in `Layout`'s account menu**,
+not the nav row — a closed menu renders none of them, so
+`tests/e2e/test_smoke.py` clicks `button.account-trigger` before
+`button.logout-button`. Escape and an outside `mousedown` both close it.
 
 `components/ChangePasswordDialog.tsx` posts to `POST /api/auth/password` and
 ⚠️ **swaps the returned token into `localStorage` immediately** — the change

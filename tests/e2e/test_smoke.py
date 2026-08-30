@@ -69,6 +69,9 @@ def goto_expecting_login_redirect(page, path, timeout=5000):
 
 
 def logout(page):
+    # Log out lives in the nav's account menu, which renders its items only
+    # while open -- so the button does not exist to click until this does.
+    page.click("button.account-trigger")
     page.click("button.logout-button")
     page.wait_for_url("**/login", timeout=5000)
 
@@ -333,7 +336,9 @@ def test_wizard_smoke(page):
     page.click("button:has-text('Launch my team')")
     page.wait_for_selector("text=Your team is live", timeout=20000)
 
-    page.click("button:has-text('Run a team')")
+    # The deployed team answers questions rather than watching a mailbox, so
+    # this screen offers "Try it out" (an email team gets "Done" instead).
+    page.click("button:has-text('Try it out')")
     page.wait_for_url("**/run**", timeout=8000)
     page.wait_for_selector(".controls select", timeout=8000)
     opts = page.locator(".controls select option").all_inner_texts()

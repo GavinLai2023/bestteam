@@ -102,6 +102,10 @@ to where the detail and the reasoning live.
 - **Retention**: a purge clears run *content* and keeps *accounting*. Erasure
   by data subject does not exist and won't; a purge is not a secure erase (no
   `VACUUM`). See `ui/backend/retention.py` and `docs/DECISIONS.md`.
+- **Team lifecycle**: a live team can be **paused** (`pipelines.active`,
+  reversible, keeps everything) but not deleted by the customer — a hard
+  delete exists only on the admin `/api/config` surface. See
+  `docs/superpowers/specs/2026-07-31-draft-session-deletion-design.md`.
 - **Live run state**: `RunRegistry` is not rehydrated from the DB on restart,
   so in-flight runs are lost (swept to `failed` by
   `runtime.fail_interrupted_runs`). History itself persists.

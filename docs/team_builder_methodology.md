@@ -3,7 +3,7 @@
 > **Historical planning doc — methodology, not current API reference.** This
 > describes the original phased plan; several specifics have since changed.
 > Notably: the wizard shipped as **4 customer-facing stages, not 6**; the
-> `/api/config` "advanced view" now covers **workflows/skills/knowledge_bases**
+> `/api/config` "advanced view" now covers **pipelines/skills/knowledge_bases**
 > only — the standalone **agents/teams CRUD was removed** (PR #15, nothing
 > consumed those records); and the deployment model is now **org-scoped
 > multi-tenancy** (PR #14). For current state see `docs/STATUS.md`,
@@ -15,8 +15,8 @@
 ### 产品定位
 
 `bestteam` 目前是一个**单用户、本地优先、YAML 驱动**的多 Agent 框架：配置
-（Agent/Team/Workflow/KnowledgeBase）是磁盘上的 YAML 文件，由 `core/loader.py`
-的 `load_workflow()` 解析为 `Workflow` 对象；`ui/` 提供一个只读的运行监控面板，
+（Agent/Team/Pipeline/KnowledgeBase）是磁盘上的 YAML 文件，由 `core/loader.py`
+的 `load_pipeline()` 解析为 `Pipeline` 对象；`ui/` 提供一个只读的运行监控面板，
 没有持久化、登录、多用户概念。
 
 面向客户的产品定位是：
@@ -36,9 +36,9 @@
 
 ### 现有技术基础
 
-- `core/loader.py::_build_workflow(raw, source, extra_tools)` 接受一个与 YAML
-  同构的 `dict`，产出 `Workflow`。这个 `raw dict` 结构（agents/teams/
-  knowledge_bases/workflow.steps）天然适合作为"**Specification 的机器可读
+- `core/loader.py::_build_pipeline(raw, source, extra_tools)` 接受一个与 YAML
+  同构的 `dict`，产出 `Pipeline`。这个 `raw dict` 结构（agents/teams/
+  knowledge_bases/pipeline.steps）天然适合作为"**Specification 的机器可读
   形式**"——向导最终要生产的就是这样一个 dict，并可直接复用现有的
   `ConfigurationError` 校验体系。
 - `CollaborationMode.HIERARCHICAL`（manager + 下属）**未实现**
@@ -46,7 +46,7 @@
   "manager 带领团队"是"雇佣团队"隐喻里最直观的结构，对非技术客户来说
   "有一个负责人统筹安排"远比"sequential/parallel"更容易理解，所以这是
   **整个产品故事的核心依赖**，必须优先实现。
-- `TraceEvent`（`core/trace.py`）+ `Workflow.stream()` + WebSocket 已经能实时
+- `TraceEvent`（`core/trace.py`）+ `Pipeline.stream()` + WebSocket 已经能实时
   推送每个 agent 的执行过程——这正是 **Testing 阶段"看团队干活"** 所需的数据源，
   缺的只是"翻译成人话"的展示层。
 - 当前没有持久化、没有登录、没有用量计量——这些基础设施仍然需要，但其设计
@@ -74,7 +74,7 @@ agents"**驱动——这既是最快的实现路径（复用现有 SDK），也�
 - **Solution Architect agent**：把确认后的 Requirements 转成
   **Specification**——即"团队设计草案"，**结构化输出**（见 Phase 0.5）同时
   包含：
-  - 技术字段（agents/teams/knowledge_bases/workflow.steps，匹配 loader schema）
+  - 技术字段（agents/teams/knowledge_bases/pipeline.steps，匹配 loader schema）
   - 友好字段（每个 agent 的"岗位名称"、"职责描述大白话"、团队的"工作流程图
     大白话"）
 - **(Testing 阶段) Narrator**：不一定是独立 agent，更可能是前端把
@@ -86,10 +86,10 @@ agents"**驱动——这既是最快的实现路径（复用现有 SDK），也�
 |---|---|---|---|---|
 | 1. Intent | 自由文字描述"我们的挑战/想要解决的问题"+"现在怎么做的"（可选上传现有流程文档，复用 `parse_file`） | 直接存储为 builder session 的输入 | `intent_text`, `as_is_text`, 上传文件 | — |
 | 2. Requirements | 看到一份用通俗语言总结的"需求摘要卡片"（痛点/目标/成功标准），可以打字补充/修正 | Business Analyst agent 总结 + （若信息不足）追问 1-2 个澄清问题，多轮对话直到客户确认 | `requirements` JSON（结构化但展示为卡片/要点列表） | 可随时回到阶段1补充信息 |
-| 3. Specification | 看到"认识一下你的团队"页面：每个虚拟员工的头像/岗位名/职责一句话描述，以及"团队怎么协作"的流程示意（如"经理 -> 分配给研究员/分析师 -> 经理汇总"） | Solution Architect agent 用结构化输出生成 Spec（技术字段+友好字段），后端立刻用 `_build_workflow()` 校验合法性 | `specification` = friendly view + 通过校验的 `raw` config dict | 可要求"重新设计"或针对某个角色"调整一下" -> 重新调用 architect（带上反馈） |
+| 3. Specification | 看到"认识一下你的团队"页面：每个虚拟员工的头像/岗位名/职责一句话描述，以及"团队怎么协作"的流程示意（如"经理 -> 分配给研究员/分析师 -> 经理汇总"） | Solution Architect agent 用结构化输出生成 Spec（技术字段+友好字段），后端立刻用 `_build_pipeline()` 校验合法性 | `specification` = friendly view + 通过校验的 `raw` config dict | 可要求"重新设计"或针对某个角色"调整一下" -> 重新调用 architect（带上反馈） |
 | 4. Solution | 对 Specification 的"确认/微调"视图——简单的语言化调整项（如"这个步骤改成大家一起做而不是依次做"、"这个专员还应该参考我们的XX文档"），不暴露 JSON/YAML | 用户的微调指令作为反馈再次调用 Solution Architect，或对 `raw` dict 做受限的、表单化的局部编辑（如团队模式下拉、KB 文档上传） | 更新后的 `raw` config，标记为 `status=ready_for_testing` | 可反复回到此阶段迭代 |
-| 5. Testing | "试一试你的团队"沙盒：客户输入一个真实场景的请求，看到团队成员逐步"工作"的活动流（基于 TraceEvent 的友好化展示），最后看到团队产出的结果；可以给反馈"不太对，因为…" | 用 Phase 1 的 `raw` config 通过现有 `Workflow.stream()` 真实执行；trace 经过友好化映射展示 | `runs`/`trace_events`（持久化），客户反馈文本 | 反馈可路由回阶段3/4重新设计 |
-| 6. Deployment | "团队已上线"——获得一个简单的"找你的团队办事"入口（即友好版的 `/run`），可随时再次进入向导调整 | `workflow.status = deployed`；记录上线时间 | `workflows.status` 更新 | 上线后仍可回到向导做"团队调整" |
+| 5. Testing | "试一试你的团队"沙盒：客户输入一个真实场景的请求，看到团队成员逐步"工作"的活动流（基于 TraceEvent 的友好化展示），最后看到团队产出的结果；可以给反馈"不太对，因为…" | 用 Phase 1 的 `raw` config 通过现有 `Pipeline.stream()` 真实执行；trace 经过友好化映射展示 | `runs`/`trace_events`（持久化），客户反馈文本 | 反馈可路由回阶段3/4重新设计 |
+| 6. Deployment | "团队已上线"——获得一个简单的"找你的团队办事"入口（即友好版的 `/run`），可随时再次进入向导调整 | `pipeline.status = deployed`；记录上线时间 | `pipelines.status` 更新 | 上线后仍可回到向导做"团队调整" |
 
 ## 技术基础设施分期
 
@@ -100,30 +100,30 @@ agents"**驱动——这既是最快的实现路径（复用现有 SDK），也�
   `delegate_to_<name>(task)` 工具"的 supervisor 模式，复用已有的 tool-calling
   循环（含最大迭代保护）。
 - 新增 `tests/test_hierarchical_team.py`，参考
-  `tests/test_workflow.py::test_agent_executes_tool_calls_before_producing_final_output`
+  `tests/test_pipeline.py::test_agent_executes_tool_calls_before_producing_final_output`
   的 `fake:` + 工具调用测试写法。
 - 更新 `CLAUDE.md` "Known limitations"：HIERARCHICAL 已实现，DEBATE 仍未实现。
 
 ### Phase 0.5：结构化 Specification 生成与校验（向导的技术核心）
 
 - 定义一组 Pydantic 模型，**镜像 loader 的 `raw dict` schema**
-  （`AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/`WorkflowSpec`），并为每个
+  （`AgentSpec`/`TeamSpec`/`KnowledgeBaseSpec`/`PipelineSpec`），并为每个
   agent/team 额外加 `display_name`、`friendly_description` 等纯展示字段
-  （不传给 `_build_workflow`）。
+  （不传给 `_build_pipeline`）。
 - Solution Architect agent 使用 langchain 的结构化输出
   （`model.with_structured_output(SpecificationSchema)`）生成 Spec。
 - 后端收到 Spec 后：剥离展示字段 -> 组装成 `raw dict` -> 调用
-  `_build_workflow(raw, source=<workspace_dir>, extra_tools={})` 试编译校验，
+  `_build_pipeline(raw, source=<workspace_dir>, extra_tools={})` 试编译校验，
   失败则把 `ConfigurationError` 信息**转成友好提示**反馈给 architect agent
   重新生成（自动修复循环，最多 N 次），而不是直接展示技术报错给客户。
 - 这一层是整个向导"阶段3/4"的引擎，建议作为**第一个实现的、独立可验证的
   模块**（可以先写单元测试：给定一个 fake 的 Requirements，验证生成的 Spec
-  能通过 `_build_workflow` 校验）。
+  能通过 `_build_pipeline` 校验）。
 
 ### Phase 1：持久化层
 
 - SQLAlchemy + SQLite（按客户独立部署）。核心表：
-  - `agents` / `teams` / `knowledge_bases` / `workflows`：存最终生效的
+  - `agents` / `teams` / `knowledge_bases` / `pipelines`：存最终生效的
     `raw` config（按 Spec 的技术字段落库）
   - **新增** `builder_sessions`：id, intent_text, as_is_text,
     requirements_json, specification_json（含友好字段）, status
@@ -142,11 +142,11 @@ agents"**驱动——这既是最快的实现路径（复用现有 SDK），也�
   - `POST /api/builder/sessions/{id}/specification`（生成/重新生成 Spec）
   - `POST /api/builder/sessions/{id}/solution`（提交微调反馈）
   - `POST /api/builder/sessions/{id}/test-runs`（沙盒执行，复用
-    `Workflow.stream`）
+    `Pipeline.stream`）
   - `POST /api/builder/sessions/{id}/deploy`
-- CRUD API（`agents`/`teams`/`knowledge_bases`/`workflows`）作为"高级视角"，
-  供已部署配置的精细调整，复用同一套 `_build_workflow` 校验。
-- `_get_workflow()`（`ui/backend/main.py`）改为优先从 DB 组装 `raw` 并调用
+- CRUD API（`agents`/`teams`/`knowledge_bases`/`pipelines`）作为"高级视角"，
+  供已部署配置的精细调整，复用同一套 `_build_pipeline` 校验。
+- `_get_pipeline()`（`ui/backend/main.py`）改为优先从 DB 组装 `raw` 并调用
   loader。
 
 ### Phase 3：登录 + 模型目录 + 用量计量
@@ -164,9 +164,9 @@ agents"**驱动——这既是最快的实现路径（复用现有 SDK），也�
   `/wizard/requirements`、`/wizard/team`（Specification "认识你的团队"）、
   `/wizard/refine`（Solution）、`/wizard/test`、`/wizard/deploy`）。
 - 视觉语言：用"虚拟员工卡片"（头像占位 + 岗位名 + 一句话职责）、
-  "团队协作流程图"（基于 Mermaid，复用已有 `Workflow.visualize()`/
+  "团队协作流程图"（基于 Mermaid，复用已有 `Pipeline.visualize()`/
   `to_mermaid`，但渲染时隐藏技术细节，只标注岗位名）。
-- 表单 CRUD 视图（`/agents`、`/teams`、`/knowledge-bases`、`/workflows`）
+- 表单 CRUD 视图（`/agents`、`/teams`、`/knowledge-bases`、`/pipelines`）
   作为"高级设置"入口，默认折叠/隐藏。
 
 ### Phase 5：运行记录持久化 + 友好化 Trace 展示

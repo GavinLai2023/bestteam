@@ -27,6 +27,7 @@ from .db.share_links import get_share_link_by_token, try_consume_link_turn
 from .db.share_messages import append_message, list_messages, next_turn_number
 from .db.share_sessions import create_share_session, get_share_session_by_token, try_consume_turn
 from .db_session import get_db
+from .email_tools import spec_uses_email
 from .runtime import _executor, registry, run_in_background
 from .share_auth import COOKIE_NAME, sign_session_token, verify_cookie_value
 from .share_transcript import record_share_reply
@@ -236,19 +237,7 @@ def send_share_message(
     # actually usable first means a 404 here never burns a daily-cap turn
     # for a message that was never persisted and no run that was ever
     # created (controller-ruled fix, Task 8 review finding 1a).
-    pipeline_record = (
-        db.query(PipelineRecord)
-        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
-        .one_or_none()
-    )
-    if pipeline_record is None:
-        # Same detail text as _resolve_active_link's failures -- a
-        # distinguishable message here would let a prober tell "real,
-        # active link whose team just isn't deployed" apart from
-        # "fake/revoked/expired/org-deactivated", breaking the project's
-        # single-404-message convention for invalid/unusable access
-        # (controller-ruled fix, Task 8 review finding 2).
-        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+    pipeline_record = _resolve_shareable_pipeline(db, link)
 
     # Resolved (and, on a first call, built/compiled) before any session or
     # cap side effect. A malformed team config raises a plain 400 here --
@@ -413,19 +402,38 @@ def get_share_team(token: str, db: Session = Depends(get_db)) -> dict:
     is shared; everything else stays behind `visitor_safe_event`.
     """
     link = _resolve_active_link(db, token)
-    pipeline_record = (
-        db.query(PipelineRecord)
-        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed")
-        .one_or_none()
-    )
-    if pipeline_record is None:
-        # Same detail as every other failure here -- see send_share_message.
-        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+    pipeline_record = _resolve_shareable_pipeline(db, link)
 
     return {
         "name": _display_name(pipeline_record),
         "steps": _visible_step_count(pipeline_record.config),
     }
+
+
+def _resolve_shareable_pipeline(db: Session, link: ShareLink) -> PipelineRecord:
+    """The deployed team behind a link, or the module's one 404.
+
+    Every rejection here uses `_UNAVAILABLE` verbatim. A distinguishable
+    message would let a prober tell "real, active link whose team just isn't
+    deployed" apart from "fake/revoked/expired/org-deactivated" -- and, since
+    the mailbox check below, apart from "this team reads email" as well.
+
+    A team holding email tools is refused even with an active link. The link
+    is anonymous, so answering would let whoever holds it ask the team to read
+    the org's inbox back to them; `share_links_api` refuses to mint one, and
+    this is what closes the same door on links minted before that guard.
+
+    A paused team is refused too -- a pause stops it running from every entry
+    point, and a share link is one of them.
+    """
+    record = (
+        db.query(PipelineRecord)
+        .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed", active=True)
+        .one_or_none()
+    )
+    if record is None or spec_uses_email(db, record.config, link.org_id):
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE)
+    return record
 
 
 def _display_name(pipeline_record: PipelineRecord) -> str:
