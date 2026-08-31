@@ -250,3 +250,123 @@ def test_yaml_unknown_grounding_policy_is_a_configuration_error(tmp_path):
 
     with pytest.raises(ConfigurationError, match="grounding_policy"):
         load_pipeline(path)
+
+
+# ---------------------------------------------------------------------------
+# Claim-level grading (grade_claims): one plain LLM call splits the answer
+# into factual claims and judges each against the turn's search results.
+# ---------------------------------------------------------------------------
+
+from langchain_core.language_models.fake_chat_models import FakeListChatModel  # noqa: E402
+
+from bestteam.core.grounding import (  # noqa: E402
+    GROUNDING_RETRY_INSTRUCTION,
+    MAX_CLAIMS,
+    ClaimGrading,
+    claim_retry_instruction,
+    grade_claims,
+)
+
+
+def _grader(response_text):
+    return FakeListChatModel(responses=[response_text])
+
+
+_EVIDENCE = ["[source: handbook.pdf, p.3 § Refunds]\nRefunds are processed within 14 days."]
+
+
+def test_grade_claims_parses_a_clean_json_response():
+    grading, response = grade_claims(
+        "Refunds take 14 days.",
+        _EVIDENCE,
+        _grader('{"claims": [{"text": "Refunds take 14 days.", "supported": true}]}'),
+    )
+    assert grading == ClaimGrading(claims=1, supported=1, unsupported=[])
+    assert grading.passes is True
+    assert response is not None
+
+
+def test_grade_claims_reports_unsupported_claims():
+    grading, _ = grade_claims(
+        "Refunds take 14 days. Shipping is free.",
+        _EVIDENCE,
+        _grader(
+            '{"claims": [{"text": "Refunds take 14 days.", "supported": true},'
+            ' {"text": "Shipping is free.", "supported": false}]}'
+        ),
+    )
+    assert grading.claims == 2
+    assert grading.supported == 1
+    assert grading.unsupported == ["Shipping is free."]
+    assert grading.passes is False
+
+
+def test_grade_claims_tolerates_code_fences_and_prose():
+    grading, _ = grade_claims(
+        "Answer.",
+        _EVIDENCE,
+        _grader('Here you go:\n```json\n{"claims": []}\n```'),
+    )
+    assert grading == ClaimGrading(claims=0, supported=0, unsupported=[])
+    assert grading.passes is True, "an answer with no factual claims passes"
+
+
+def test_grade_claims_skips_malformed_entries():
+    grading, _ = grade_claims(
+        "Answer.",
+        _EVIDENCE,
+        _grader(
+            '{"claims": ["not a dict", {"supported": true}, {"text": "", "supported": false},'
+            ' {"text": "Real claim.", "supported": "yes"}, {"text": "Good.", "supported": true}]}'
+        ),
+    )
+    assert grading == ClaimGrading(claims=1, supported=1, unsupported=[])
+
+
+def test_grade_claims_caps_the_claim_list():
+    entries = ", ".join(f'{{"text": "c{i}", "supported": false}}' for i in range(30))
+    grading, _ = grade_claims("Answer.", _EVIDENCE, _grader(f'{{"claims": [{entries}]}}'))
+    assert grading.claims == MAX_CLAIMS == 20
+    assert len(grading.unsupported) == 10, "unsupported reuses the MAX_UNVERIFIED bound"
+
+
+def test_grade_claims_truncates_long_claim_texts():
+    long_claim = "x" * 500
+    grading, _ = grade_claims(
+        "Answer.",
+        _EVIDENCE,
+        _grader(f'{{"claims": [{{"text": "{long_claim}", "supported": false}}]}}'),
+    )
+    assert grading.unsupported == ["x" * 200]
+
+
+def test_grade_claims_unparseable_response_returns_none_with_the_response():
+    grading, response = grade_claims("Answer.", _EVIDENCE, _grader("I cannot answer that."))
+    assert grading is None
+    assert response is not None, "the call was billed, so the caller must be able to meter it"
+
+
+def test_grade_claims_invoke_error_returns_none_none():
+    class _Boom:
+        def invoke(self, messages):
+            raise RuntimeError("provider down")
+
+    grading, response = grade_claims("Answer.", _EVIDENCE, _Boom())
+    assert grading is None
+    assert response is None
+
+
+def test_grade_claims_non_string_text_is_treated_as_empty():
+    grading, _ = grade_claims(
+        [{"type": "text", "text": "blocks"}],
+        _EVIDENCE,
+        _grader('{"claims": []}'),
+    )
+    assert grading == ClaimGrading(claims=0, supported=0, unsupported=[])
+
+
+def test_claim_retry_instruction_names_the_unsupported_claims():
+    instruction = claim_retry_instruction(["Shipping is free.", "Returns cost nothing."])
+    assert instruction.startswith(GROUNDING_RETRY_INSTRUCTION)
+    assert "Shipping is free." in instruction
+    assert "Returns cost nothing." in instruction
