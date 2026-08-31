@@ -62,3 +62,26 @@ def _fresh_login_limiter(monkeypatch):
     except ImportError:  # pragma: no cover - ui/ absent or extras missing
         return
     monkeypatch.setattr(auth_api, "_LOGIN_LIMITER", LoginRateLimiter())
+
+
+# Attribute `pytest_collection_modifyitems` below stashes the collected items'
+# markers on, for `test_marker_completeness.py` to assert over. Shared as a
+# literal rather than an import so neither file has to import the other.
+_COLLECTED_MARKERS_ATTR = "bestteam_collected_markers"
+
+
+@_pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Record every collected item's node id and marker names.
+
+    `tryfirst` is load-bearing: pytest's own mark plugin does `-m` deselection
+    in this same hook, so running first is what makes this the FULL collection
+    rather than one CI job's slice. `test_marker_completeness.py` reads it back
+    -- that used to cost a `--collect-only` subprocess (39 s, 6% of the suite)
+    to learn what this process had already collected.
+    """
+    setattr(
+        config,
+        _COLLECTED_MARKERS_ATTR,
+        [(item.nodeid, {mark.name for mark in item.iter_markers()}) for item in items],
+    )

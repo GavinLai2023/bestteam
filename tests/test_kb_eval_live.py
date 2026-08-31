@@ -13,9 +13,16 @@ these thresholds are the proof that a real embedding model closes that gap,
 which the fake:-embedding smoke tests structurally cannot show.
 
 Run it by hand before a release (CI never needs an API key -- the module
-skips without one):
+skips without the opt-in or the key):
 
+    $env:BESTTEAM_LIVE_EVAL = "1"
     .venv/Scripts/python -m pytest tests/test_kb_eval_live.py -m optional
+
+The opt-in is deliberate belt-and-braces. Skipping on a missing API key alone
+was not enough: a developer who exports `OPENAI_API_KEY` for the dev backend
+was silently enrolling every local `-m "not e2e"` sweep into the paid gates --
+this one plus `test_kb_eval_rerank_live.py`, which was 5m46s of a 10m53s run
+on its own. CI has neither the key nor the opt-in, so nothing there changes.
 
 Cost: well under $0.01. Chunk embeddings persist in the gitignored
 `.bestteam_cache/kb_eval_live.json`, so re-runs pay only the 20 query
@@ -47,6 +54,13 @@ import os
 from pathlib import Path
 
 import pytest
+
+if not os.environ.get("BESTTEAM_LIVE_EVAL"):
+    pytest.skip(
+        "BESTTEAM_LIVE_EVAL is not set -- this is a by-hand release gate that "
+        "spends real provider quota. Set BESTTEAM_LIVE_EVAL=1 to run it.",
+        allow_module_level=True,
+    )
 
 pytest.importorskip("numpy")
 pytest.importorskip("rank_bm25")

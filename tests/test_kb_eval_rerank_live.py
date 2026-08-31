@@ -28,9 +28,18 @@ of both sets, since a failure on one long or Chinese pair leaves only that
 query unreranked and the floors have the slack to pass anyway.
 
 Run it by hand before a release (CI never needs it -- the module skips
-without an API key or the `tools-rerank` extra):
+without the opt-in, an API key, or the `tools-rerank` extra):
 
+    $env:BESTTEAM_LIVE_EVAL = "1"
     .venv/Scripts/python -m pytest tests/test_kb_eval_rerank_live.py -m optional
+
+Both this file and `test_kb_eval_live.py` are release gates you run by hand,
+so they need an explicit opt-in as well as an API key -- `BESTTEAM_LIVE_EVAL`.
+Skipping on a missing key alone was not enough: a developer who exports
+`OPENAI_API_KEY` for the dev backend enrols every local `-m "not e2e"` sweep
+into a paid, model-downloading gate, and this file alone was 5m46s of a 10m53s
+run (53%) that way. CI has neither the key nor the extra, so nothing there
+changes.
 
 First run downloads the cross-encoder (~1.1 GB, cached by Hugging Face
 after that); inference is local and $0, the only API spend is the query
@@ -49,6 +58,17 @@ import os
 from pathlib import Path
 
 import pytest
+
+# Checked before the importorskips below, so a default run does not even pay
+# `sentence_transformers` (which drags in transformers and torch) to find out
+# it is going to skip.
+if not os.environ.get("BESTTEAM_LIVE_EVAL"):
+    pytest.skip(
+        "BESTTEAM_LIVE_EVAL is not set -- this is a by-hand release gate that "
+        "spends real provider quota and downloads a ~1.1 GB cross-encoder. "
+        "Set BESTTEAM_LIVE_EVAL=1 to run it.",
+        allow_module_level=True,
+    )
 
 pytest.importorskip("numpy")
 pytest.importorskip("rank_bm25")
