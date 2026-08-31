@@ -122,7 +122,9 @@ langgraph-sdk==0.4.2
 langsmith==0.11.0
     # via langchain-core
 lxml==6.1.1
-    # via python-docx
+    # via
+    #   bestteam (pyproject.toml)
+    #   python-docx
 mako==1.4.1
     # via alembic
 markdown-it-py==4.2.0

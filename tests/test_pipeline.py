@@ -254,6 +254,93 @@ def test_agent_tool_loop_is_bounded():
     assert result.output == _tool_loop_exhausted_notice("a")
 
 
+def test_a_research_agent_gets_more_than_five_tool_rounds():
+    """Search, read, search again is the normal shape of a research turn, and
+    five rounds is inside it -- the ceiling was hit by ordinary work, not only
+    by a runaway model."""
+    assert _MAX_TOOL_ITERATIONS > 5
+
+
+class _RecordingToolCallingChatModel(_FakeToolCallingChatModel):
+    """Records the messages of every call, so a test can inspect what the
+    wrap-up call was actually asked."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "seen", [])
+
+    def _generate(self, messages, *args, **kwargs):
+        self.seen.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
+
+
+def _always_calling_then(final):
+    """A model that asks for `echo_tool` on every call the loop can make, then
+    answers with `final` -- i.e. only the wrap-up call gets a text answer."""
+    ask = AIMessage(
+        content="",
+        tool_calls=[{"name": "echo_tool", "args": {"text": "hi"}, "id": "call_1"}],
+    )
+    return _RecordingToolCallingChatModel(responses=[ask] * (_MAX_TOOL_ITERATIONS + 1) + [final])
+
+
+def _run_with(model, tool):
+    agent = Agent(name="a", role="role-a", goal="goal-a", model=model, tools=[tool])
+    pipeline = Pipeline(
+        name="wf",
+        steps=[Team(name="team", agents=[agent], mode=CollaborationMode.SEQUENTIAL)],
+    )
+    return pipeline
+
+
+def test_an_exhausted_tool_loop_returns_what_the_agent_gathered(monkeypatch):
+    """Discarding the material was the real defect: a research agent that used
+    up its rounds returned a stop notice and nothing else, so every search it
+    paid for was thrown away."""
+    calls = []
+
+    def echo_tool(text: str) -> str:
+        calls.append(text)
+        return f"echoed: {text}"
+
+    model = _always_calling_then(AIMessage(content="Here is what I found so far."))
+    result = _run_with(model, echo_tool).run("research the thing")
+
+    assert result.output == "Here is what I found so far."
+    # The wrap-up call must not run an eleventh tool round of its own.
+    assert len(calls) == _MAX_TOOL_ITERATIONS
+
+
+def test_the_wrap_up_call_tells_the_model_to_stop_calling_tools():
+    def echo_tool(text: str) -> str:
+        return f"echoed: {text}"
+
+    model = _always_calling_then(AIMessage(content="Summary."))
+    _run_with(model, echo_tool).run("research the thing")
+
+    wrap_up = model.seen[-1]
+    assert len(wrap_up) > len(model.seen[-2])
+    assert "tool" in wrap_up[-1].content.lower()
+
+
+def test_the_wrap_up_call_is_metered():
+    """It is a paid provider call like any other; unmetered, an exhausted run
+    under-reports its own spend."""
+    def echo_tool(text: str) -> str:
+        return f"echoed: {text}"
+
+    final = AIMessage(
+        content="Summary.",
+        usage_metadata={"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+    )
+    events = list(_run_with(_always_calling_then(final), echo_tool).stream("research"))
+
+    completed = [e for e in events if e.type == "agent_completed"]
+    assert [
+        (u["input_tokens"], u["output_tokens"]) for u in completed[-1].usage
+    ] == [(11, 7)]
+
+
 def test_stream_yields_run_failed_event_on_configuration_error():
     broken = Agent(name="broken", role="r", goal="g", model="not-a-real-model-spec")
     pipeline = Pipeline(

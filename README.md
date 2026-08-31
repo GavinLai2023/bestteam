@@ -127,7 +127,7 @@ bestteam run code_review.yaml "def divide(a, b): return a / b"
 | `web_search(query)` | Tavily web search, LLM-optimised output | `TAVILY_API_KEY` |
 | `local_business_search(query)` | Google Places lookup — name, address, rating, review count, price level | `GOOGLE_MAPS_API_KEY` |
 | `parse_file(path)` | Extract text from PDF, Excel, Word (incl. tables), XML, or plain text | `pip install 'bestteam[tools-files]'` |
-| `http_get(url)` | HTTP GET with optional JSON headers; blocks requests to private/internal addresses | `pip install 'bestteam[tools-http]'` |
+| `http_get(url)` | HTTP GET with optional JSON headers; HTML comes back as readable text, long bodies are truncated; blocks requests to private/internal addresses | `pip install 'bestteam[tools-http]'` |
 | `calculator(expr)` | Safe arithmetic via AST — prevents hallucination | — |
 | `email_find` · `email_read` · `email_read_attachment` · `email_draft_reply` | Read a mailbox and write a **draft** reply — see below | IMAP or Microsoft Graph credentials |
 

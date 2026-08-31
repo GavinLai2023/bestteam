@@ -9,7 +9,7 @@ overview; `docs/DECISIONS.md` for reasoning; the dated specs under
 | `web_search(query, max_results=5)` | `TAVILY_API_KEY` | `bestteam[tools-search]` |
 | `local_business_search(query, max_results=5)` | `GOOGLE_MAPS_API_KEY` | `bestteam[tools-places]` |
 | `parse_file(path)` | — | `bestteam[tools-files]`; `.xml` is stdlib |
-| `http_get(url, headers_json="{}")` | — | `bestteam[tools-http]` |
+| `http_get(url, headers_json="{}")` | — | `bestteam[tools-http]` (httpx + lxml) |
 | `calculator(expression)` | — | none |
 | `email_find(query="")` | `BESTTEAM_EMAIL_BACKEND` + creds | `graph`: `bestteam[tools-email]`; `imap`: none |
 | `email_read(message_id)` | (same) | (same) |
@@ -22,6 +22,24 @@ In YAML, tools are referenced by name and resolved via `tools.REGISTRY`.
 one free-text string carrying both business type and area
 (`"electrician in Parramatta NSW"`) — no separate lat/lng/radius, matching
 `web_search`'s shape. Only 5xx is retried, matching `http_get`.
+
+## `http_get`'s response body
+
+**Two caps, because the body serves two purposes.** A `text/html` response is
+converted to visible text (`lxml.html`, with `script`/`style`/`noscript`/
+`template` stripped — `text_content()` counts those as page text) and capped at
+**8,000 characters**, the same bound an email attachment's extracted text gets:
+it is prose an agent reads. Anything else is capped at **50,000 characters** —
+it is a REST response the caller parses, and 8,000 would break the API use this
+tool has always had. Both announce the cut in the returned string; neither
+raises. Before this, a whole page of raw markup went into the model's context
+uncapped.
+
+⚠️ **lxml is optional at run time even though `tools-http` declares it.** The extra
+was httpx alone before, so an existing environment may lack it; `_html_to_text`
+returns `None` (raw body, raw cap) rather than raising. A tool that started
+failing on every HTML page would be a worse regression than the markup it used
+to return.
 
 ## Trust boundaries
 

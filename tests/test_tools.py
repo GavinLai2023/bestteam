@@ -303,6 +303,84 @@ def test_http_get_returns_status_and_body(monkeypatch):
     assert '{"ok": true}' in result
 
 
+def _patch_httpx(monkeypatch, body, content_type="application/json"):
+    """A 200 response carrying `body`, with the SSRF check satisfied."""
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = body
+    mock_response.is_redirect = False
+    mock_response.headers = {"content-type": content_type}
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get.return_value = mock_response
+    mock_httpx = MagicMock()
+    mock_httpx.Client.return_value = mock_client
+    return patch.dict("sys.modules", {"httpx": mock_httpx})
+
+
+_PAGE = (
+    "<html><head><title>T</title><style>.a{color:red}</style>"
+    "<script>var tracker = 1;</script></head>"
+    "<body><h1>Adoption report</h1><p>Adoption accelerated in Q2.</p></body></html>"
+)
+
+
+def test_http_get_returns_html_as_text_not_markup(monkeypatch):
+    """Raw markup is what made this tool useless for research: the model paid
+    for tags and boilerplate instead of the article."""
+    with _patch_httpx(monkeypatch, _PAGE, content_type="text/html; charset=utf-8"):
+        result = http_get("https://example.com/report")
+
+    assert "Adoption report" in result
+    assert "Adoption accelerated in Q2." in result
+    assert "<p>" not in result
+    # text_content() would otherwise inline both of these as page "text".
+    assert "color:red" not in result
+    assert "var tracker" not in result
+
+
+def test_http_get_truncates_extracted_html_text_and_says_so(monkeypatch):
+    from bestteam.tools.http_client import _MAX_TEXT_CHARS
+
+    body = f"<html><body><p>{'word ' * _MAX_TEXT_CHARS}</p></body></html>"
+    with _patch_httpx(monkeypatch, body, content_type="text/html"):
+        result = http_get("https://example.com/long")
+
+    assert len(result) < _MAX_TEXT_CHARS + 1000
+    assert "truncated" in result.lower()
+
+
+def test_http_get_truncates_a_huge_non_html_body_and_says_so(monkeypatch):
+    """An unbounded body is a context blow-up whatever its type, so the cap
+    applies to JSON too -- just a much larger one, since this is the shape
+    ordinary REST calls have used all along."""
+    from bestteam.tools.http_client import _MAX_RAW_CHARS
+
+    with _patch_httpx(monkeypatch, "x" * (_MAX_RAW_CHARS * 2)):
+        result = http_get("https://api.example.com/data")
+
+    assert len(result) < _MAX_RAW_CHARS + 1000
+    assert "truncated" in result.lower()
+
+
+def test_http_get_leaves_an_ordinary_json_response_byte_for_byte(monkeypatch):
+    with _patch_httpx(monkeypatch, '{"ok": true}'):
+        result = http_get("https://api.example.com/data")
+
+    assert result == '[200] https://api.example.com/data\n\n{"ok": true}'
+
+
+def test_http_get_falls_back_to_raw_html_when_lxml_is_missing(monkeypatch):
+    """Only httpx is required to install this tool. A deployment without lxml
+    must lose the extraction, not the tool."""
+    with _patch_httpx(monkeypatch, _PAGE, content_type="text/html"),          patch.dict("sys.modules", {"lxml": None, "lxml.html": None}):
+        result = http_get("https://example.com/report")
+
+    assert "<p>" in result
+
+
 # ---------------------------------------------------------------------------
 # http_get SSRF protection
 # ---------------------------------------------------------------------------

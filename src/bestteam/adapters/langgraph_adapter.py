@@ -31,15 +31,31 @@ _logger = logging.getLogger(__name__)
 # Upper bound on how many times an agent node will execute tool calls and
 # re-invoke the model in a single turn. Guards against a model that keeps
 # requesting tools and never settles on a final answer.
-_MAX_TOOL_ITERATIONS = 5
+#
+# Ten rather than five because search-read-search-again is the ordinary shape
+# of a research turn, so five was reached by legitimate work and not only by a
+# runaway model. An agent with no tools never enters the loop and one with a
+# simple task settles in a round or two, so the higher ceiling costs nothing in
+# the common case -- it only widens the worst case, which the wrap-up call
+# below now ends with an answer rather than a discarded turn.
+_MAX_TOOL_ITERATIONS = 10
+
+# Sent as the wrap-up call's final message. The model has to be told the budget
+# is gone, or it answers with another tool request and the turn is wasted twice.
+_WRAP_UP_INSTRUCTION = (
+    "You have used every tool call available for this turn. Do not request any "
+    "more tools. Answer now with what you have gathered so far, and say plainly "
+    "which parts are missing or unverified."
+)
 
 
 def _tool_loop_exhausted_notice(agent_name: str) -> str:
-    """Output returned when an agent uses up `_MAX_TOOL_ITERATIONS` without ever
-    settling on a text answer. The final tool-calling response's `content` is an
-    empty string, so returning it would make an exhausted run look like a silent
-    empty success (CR-011). This explicit notice surfaces the truncation in the
-    agent's output and the resulting `agent_completed` trace event instead."""
+    """Output returned when an agent uses up `_MAX_TOOL_ITERATIONS` and the
+    wrap-up call still produces no text. The final tool-calling response's
+    `content` is an empty string, so returning it would make an exhausted run
+    look like a silent empty success (CR-011). This explicit notice surfaces the
+    truncation in the agent's output and the resulting `agent_completed` trace
+    event instead."""
     return (
         f"[Agent '{agent_name}' stopped after {_MAX_TOOL_ITERATIONS} tool "
         "iterations without producing a final answer.]"
@@ -619,12 +635,16 @@ def _run_agent(
     # non-forwarding agent still consumes its chunks; it just drops the text.
     forward_text = streams and on_token is not None
     stream_call = (forward_text or should_cancel is not None) and _should_stream(raw_model)
+    # The wrap-up call deliberately keeps the pre-`bind_tools` model: its whole
+    # purpose is a turn the model cannot answer with another tool request.
+    wrapup_model = raw_model
     if stream_call and _supports_stream_usage(raw_model):
         # Bound after bind_tools: `.bind()` on a RunnableBinding merges kwargs,
         # so both bindings survive. Without this the aggregated chunk carries
         # no `usage_metadata` and the run's largest call goes unmetered.
         model = model.bind(stream_usage=True)
         first_call_model = first_call_model.bind(stream_usage=True)
+        wrapup_model = wrapup_model.bind(stream_usage=True)
 
     def _call(bound_model: Any, msgs: List[Any]) -> Any:
         """One model call -- streamed with deltas, or a plain `invoke`.
@@ -839,7 +859,25 @@ def _run_agent(
     if getattr(response, "tool_calls", None):
         # The loop ran out while the model was still asking for tools, so it
         # never produced a text answer -- `response.content` is empty here.
-        return _tool_loop_exhausted_notice(agent.name)
+        # Everything the tools returned is still in `messages`, though, and it
+        # was paid for: one more call with no tools bound turns that material
+        # into the answer instead of discarding the whole turn.
+        #
+        # `response` itself is deliberately NOT appended. It carries tool calls
+        # with no matching results, and providers reject that conversation
+        # shape. `messages` already ends with the last iteration's ToolMessages,
+        # so appending the instruction alone leaves it valid.
+        #
+        # The `should_cancel` guard directly above still stands between a stop
+        # and this call, so a stopped run never opens it.
+        messages.append(HumanMessage(content=_WRAP_UP_INSTRUCTION))
+        response = _call(wrapup_model, messages)
+        _record_usage(agent, response, usage_sink)
+        model_turns += 1
+        if diagnostic:
+            _emit("model_turn", _model_turn_data(model_turns, response))
+        if not str(getattr(response, "content", "") or "").strip():
+            return _tool_loop_exhausted_notice(agent.name)
     text = response.content if hasattr(response, "content") else str(response)
     if _has_knowledge_base_tool(agent):
         # Grounding-lite: how does the answer's citations compare with what

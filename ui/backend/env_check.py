@@ -177,6 +177,17 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
         else:
             ok("BESTTEAM_KB_DEFAULT_RERANK_MODEL", rerank)
 
+    # `web_search` fails at run time, not at start-up: the tool raises, the
+    # adapter turns the exception into tool-result text, and the model is free
+    # to answer from its own weights instead. The customer gets a research
+    # brief that looks finished and cites nothing.
+    if not _get(env, "TAVILY_API_KEY"):
+        warn("TAVILY_API_KEY", "unset; any team given the web_search tool degrades silently — the "
+             "tool errors mid-run and the model answers from memory instead of the web. Get a key "
+             "at https://tavily.com, or leave unset if no team searches the web")
+    else:
+        ok("TAVILY_API_KEY", "set; web_search is usable")
+
     if _get(env, "FORWARDED_ALLOW_IPS"):
         ok("FORWARDED_ALLOW_IPS", _get(env, "FORWARDED_ALLOW_IPS"))
     else:

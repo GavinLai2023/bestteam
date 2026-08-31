@@ -11,6 +11,19 @@ from ._retry import with_retry
 _TIMEOUT_SECONDS = 30
 _MAX_REDIRECTS = 5
 
+# Two limits, because the body serves two purposes. Extracted page text is
+# prose an agent reads, so it gets the same 8,000 characters an email
+# attachment does (see `email_client.py`) -- roughly a medium article. A
+# non-HTML body is a REST response the caller parses, and 8,000 would break
+# the API use this tool has had all along, so it gets a much larger cap whose
+# only job is to stop an unbounded response from blowing up the context.
+_MAX_TEXT_CHARS = 8_000
+_MAX_RAW_CHARS = 50_000
+
+# `text_content()` treats these as page text, so a page's stylesheet and its
+# analytics snippet would arrive as the "article" and eat the whole budget.
+_NON_TEXT_TAGS = ("script", "style", "noscript", "template")
+
 _BLOCKED_IP_PREDICATES = (
     "is_private",
     "is_loopback",
@@ -90,13 +103,56 @@ def _pin_to_ip(url: str, ip: str) -> tuple[str, str, str]:
     return connect_url, host_header, sni_hostname
 
 
+def _html_to_text(html: str) -> str | None:
+    """The visible text of an HTML page, or None if it can't be extracted.
+
+    None means "use the raw body": lxml is not required to install this tool
+    (`bestteam[tools-http]` is httpx alone for anyone who installed it before
+    this), and a page lxml refuses to parse is still worth returning as-is. A
+    tool that started raising on every HTML page would be a worse regression
+    than the markup it was returning.
+    """
+    try:
+        from lxml import etree, html as lxml_html
+    except ImportError:
+        return None
+
+    try:
+        root = lxml_html.fromstring(html)
+    except Exception:
+        return None
+
+    etree.strip_elements(root, *_NON_TEXT_TAGS, with_tail=False)
+    lines = [line.strip() for line in root.text_content().splitlines()]
+    # Markup indentation leaves a blank line per nested element; collapsing
+    # runs of them is what makes the character budget buy actual prose.
+    text = "\n".join(line for line in lines if line)
+    return text or None
+
+
+def _truncated(body: str, limit: int, unit: str) -> str:
+    """`body` capped at `limit`, announcing the cut so the model can relay it.
+
+    An answer built from a silently truncated page is indistinguishable from
+    one built from the whole page -- the same reason an over-long attachment
+    says so rather than just stopping.
+    """
+    if len(body) <= limit:
+        return body
+    return f"{body[:limit]}\n\n[Truncated: {len(body) - limit:,} {unit} omitted.]"
+
+
 def http_get(url: str, headers_json: str = "{}") -> str:
     """Make an HTTP GET request and return the response body as text.
 
-    Useful for calling REST APIs, fetching JSON feeds, or reading public
-    web resources. For authenticated endpoints, pass credentials via headers.
-    Automatically retries on connection errors and 5xx responses (up to 3
-    attempts, exponential backoff). 4xx responses are returned as-is.
+    Useful for calling REST APIs, fetching JSON feeds, or reading the full
+    text of a web page whose URL you already have -- for example one that a
+    web_search result listed. An HTML page is returned as readable text with
+    the markup, scripts and styling removed. For authenticated endpoints, pass
+    credentials via headers. Automatically retries on connection errors and 5xx
+    responses (up to 3 attempts, exponential backoff). 4xx responses are
+    returned as-is. A very long response is truncated, and says so where it was
+    cut.
 
     Args:
         url: The URL to fetch (must start with http:// or https://).
@@ -167,4 +223,12 @@ def http_get(url: str, headers_json: str = "{}") -> str:
     else:
         raise ConfigurationError(f"Too many redirects (>{_MAX_REDIRECTS}) while fetching '{url}'")
 
-    return f"[{response.status_code}] {current_url}\n\n{response.text}"
+    body = response.text
+    content_type = str(response.headers.get("content-type") or "").lower()
+    extracted = _html_to_text(body) if content_type.startswith("text/html") else None
+    if extracted is not None:
+        body = _truncated(extracted, _MAX_TEXT_CHARS, "characters of text")
+    else:
+        body = _truncated(body, _MAX_RAW_CHARS, "characters")
+
+    return f"[{response.status_code}] {current_url}\n\n{body}"

@@ -9,6 +9,7 @@ intent -> requirements -> spec -> solution -> testing -> deployed.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 from pathlib import Path
@@ -23,6 +24,7 @@ from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.requirements import QuestionAnswer, Requirements
 from bestteam.exceptions import BestTeamError, ConfigurationError
+from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
@@ -169,6 +171,37 @@ def _with_skill_catalog(db: Session, text: str, org_id: Optional[int] = None) ->
             spec.instructions[:80] + "..." if len(spec.instructions) > 80 else spec.instructions
         )
         lines.append(f"- {spec.name}: {desc}{tools_note}")
+    return text + "\n".join(lines)
+
+
+def _with_tool_catalog(text: str) -> str:
+    """Append the built-in tools an agent can be given, parallel to
+    `_with_skill_catalog`.
+
+    `_ARCHITECT_SYSTEM_PROMPT` tells the architect to choose tools "from the
+    ones available to the pipeline", but the list was never in the prompt: the
+    only way to discover a name was to guess a wrong one and read the real ones
+    back out of `_build_agent`'s error on a retry. A design with no tools at
+    all is valid, so the usual outcome was silent -- a research team with no
+    way to reach the web, answering from the model's own weights.
+
+    Needs no database, unlike the other three catalogs: `REGISTRY` is a
+    module-level dict of Python functions, identical for every org. Each tool's
+    docstring is already written as the LLM-facing description (the loader
+    passes it to the model verbatim), so its first line is the summary here.
+    """
+    lines = ["", "", "Available built-in tools (add the exact name to an agent's `tools` list):"]
+    for name, fn in sorted(REGISTRY.items()):
+        summary = (inspect.getdoc(fn) or "").strip().splitlines()
+        lines.append(f"- {name}: {summary[0]}" if summary else f"- {name}")
+    # Naming the email tools is what makes this reachable. Before this catalog
+    # existed the architect could not guess them, so it never built the
+    # combination `find_email_egress_conflicts` refuses at deploy time.
+    lines.append(
+        "Never give one team both an email_* tool and web_search or http_get: that "
+        "combination is refused at deployment, because anything an agent reads out of "
+        "the mailbox reaches the agent that can send it back out."
+    )
     return text + "\n".join(lines)
 
 
@@ -471,6 +504,7 @@ def _redesign_specification(
     # actually resolved, so the architect can't reference a broken one.
     kb_tools = _all_knowledge_base_tools(db, source, org_id)
     prompt = _with_model_catalog(db, prompt)
+    prompt = _with_tool_catalog(prompt)
     prompt = _with_skill_catalog(db, prompt, org_id)
     prompt = _with_knowledge_base_catalog(db, prompt, org_id, names=set(kb_tools))
     return _call_model(
@@ -578,6 +612,7 @@ def submit_specification(
         # actually resolved, so the architect can't reference a broken one.
         kb_tools = _all_knowledge_base_tools(db, source, org.id)
         requirements_text = _with_model_catalog(db, requirements_text)
+        requirements_text = _with_tool_catalog(requirements_text)
         requirements_text = _with_skill_catalog(db, requirements_text, org.id)
         requirements_text = _with_knowledge_base_catalog(db, requirements_text, org.id, names=set(kb_tools))
         chat_model = _call_model(_resolve_model, req.model)
