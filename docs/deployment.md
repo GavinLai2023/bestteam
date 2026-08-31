@@ -171,6 +171,14 @@ to, and why:
 | `BESTTEAM_SENTRY_DSN` a valid DSN | FAIL | A malformed one makes `sentry_sdk.init` raise at import -- a restart loop. |
 | `FORWARDED_ALLOW_IPS` set to your proxy | WARN | Otherwise the per-address login budget is shared by everyone behind the proxy. |
 
+**It validates shape, not correctness — read the values it echoes back, not
+only the levels.** An origin left at the `.env.example` placeholder
+(`https://app.example-customer.com`) is a well-formed origin and prints `[OK]`.
+That one hides especially well: when the frontend and the API are served from
+the same origin behind one reverse proxy, the browser skips CORS altogether, so
+a wrong `BESTTEAM_CORS_ORIGINS` breaks nothing at all until the day you split
+them — and then breaks every request at once, with nothing in the backend log.
+
 Then, once the org exists: connect its mailbox with `--test`
 (§4c), and if it is on Microsoft 365, walk `docs/email-smoke-test.md` §9
 against the live tenant with the customer before go-live. Hand the customer
@@ -570,6 +578,9 @@ is actually on the box:
 
 ```bash
 cd /opt/bestteam
+./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F).db
+
+git status                               # what has this host modified?
 git stash && git pull && git stash pop   # keeps local edits, e.g. a port binding
 
 # What this update expects that your .env may not have. Run it AFTER the pull:
@@ -583,12 +594,34 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 docker compose build
 docker compose up -d                     # migrations run themselves on start (§3)
+
+# Then confirm it landed:
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+docker compose exec backend printenv BESTTEAM_RELEASE
 ```
+
+`git status` comes first because `git stash pop` exits 1 with `No stash entries
+found` on a clean tree — harmless, but it reads like the update failed. With
+nothing modified, plain `git pull` is the whole step. A host-local edit that
+must survive every future pull (a loopback port binding, say) belongs in
+`docker-compose.override.yml`, which compose merges automatically and no git
+operation can revert.
 
 `.env` is gitignored, so the pull never touches it; the diff only tells you
 what to add. `check-env` (§1) is the backstop — it reads the environment the
 backend will actually see and exits 1 on any FAIL, so a variable you missed
 surfaces before the containers come up rather than as a crash loop.
+
+**Run `check-env` a second time after `up -d`.** Its `schema: at head
+(<revision>)` line is how you confirm the entrypoint's `alembic upgrade head`
+really ran; asked before the containers come up it names the revision you are
+*leaving*, which reads exactly like a migration that was skipped.
+
+**And keep track of which container you are asking.** `docker compose run`
+starts a fresh one against the current `.env`, so it can only tell you the file
+is right; `docker compose exec` enters the container actually serving traffic.
+Only `exec` proves the live backend picked up an edit — the same trap that hides
+a stale Sentry DSN (see "Logs and error reporting").
 
 ## Updating built-in skills on an existing deployment
 
@@ -749,6 +782,14 @@ Prune old files with whatever you already use (`find /var/backups/bestteam
 -mtime +30 -delete` in the same crontab is the simplest), and copy the
 directory off the host — a backup on the disk that fails with the database is
 not a backup.
+
+**Whoever runs the scripts has to be able to write the output directory.** A
+cron entry under `root` creates `/var/backups/bestteam` owned by `root`, and the
+same command run by hand as the deploy user then fails on its very last step
+with `permission denied` — after the copy inside the container has already been
+made, which `set -e` leaves behind at `/tmp/bestteam-backup.db`. Fix the owner
+once (`sudo chown <user> /var/backups/bestteam`) and drop the stray file
+(`docker compose exec -T backend rm -f /tmp/bestteam-backup.db`).
 
 **Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
 or secrets vault — NOT alongside the database dump). Stored mailbox passwords

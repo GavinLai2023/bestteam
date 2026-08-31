@@ -189,6 +189,13 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 | `BESTTEAM_SENTRY_DSN` 是一个合法地址 | FAIL | 格式不对会导致程序在初始化阶段直接报错，陷入"启动—崩溃—重启—再崩溃"的死循环。 |
 | `FORWARDED_ALLOW_IPS` 设成了你的反向代理地址 | WARN | 不设的话，前面提到的"按地址限流"额度会被反向代理后面的所有用户共用。 |
 
+**它只检查格式，不检查值填得对不对——要看它回显出来的内容，别只看等级。** 一
+个原封不动留着 `.env.example` 示例值的地址（`https://app.example-customer.com`）
+本身格式完全合法，照样打印 `[OK]`。这一项还特别能藏：如果前端和后端是同一个域
+名、由同一个反向代理分发的，浏览器对同源请求根本不做 CORS 检查，所以
+`BESTTEAM_CORS_ORIGINS` 填错了在那之前什么毛病都不会有——等到哪天你把前后端拆
+成两个域名，所有接口请求会在同一瞬间全部失败，而后端日志里一行记录都没有。
+
 等组织建好之后：用 `--test` 参数连上它的邮箱（§4c）；如果是 Microsoft 365，
 上线前对着真实租户走一遍 `docs/email-smoke-test.md` 第 9 节，最好客户在场一起
 确认。最后把 `docs/BETA_NOTES.md` 交给客户。
@@ -598,6 +605,9 @@ FAIL（轮询延迟超过三个轮询周期，且不低于 5 分钟），这条�
 
 ```bash
 cd /opt/bestteam
+./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F).db
+
+git status                               # 先看看这台服务器上改过哪些文件
 git stash && git pull && git stash pop   # 保住你在服务器上改过的东西（比如端口绑定）
 
 # 这次升级有没有要求填新的环境变量。这条命令要在 git pull 之后跑：
@@ -612,12 +622,33 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 
 docker compose build
 docker compose up -d                     # 数据库迁移是容器自己跑的，见第 3 节
+
+# 起来之后，确认这次升级真的落地了：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+docker compose exec backend printenv BESTTEAM_RELEASE
 ```
+
+**为什么先跑 `git status`**：服务器上要是一个文件都没改过，`git stash pop` 会
+以退出码 1 报 `No stash entries found`——无害，但看起来像是升级失败了。确认干
+净的话，这一步直接 `git pull` 就够了。另外，那种"以后每次拉代码都必须保住"的
+本机改动（典型的就是把端口绑到 127.0.0.1），更稳妥的做法是挪进
+`docker-compose.override.yml`：compose 会自动合并这个文件，任何 git 操作都抹
+不掉它。
 
 `.env` 在 `.gitignore` 里，所以 `git pull` 永远不会碰它，上面那条 diff 只是
 用来告诉你"要补哪几个变量"。真正的兜底是 `check-env`（见 §1）：它读的是后端
 实际会看到的那份环境配置，只要有一项 FAIL 就以失败状态退出——漏填的变量会在
 容器起来之前就暴露出来，而不是等到线上"启动—崩溃—重启"才发现。
+
+**`up -d` 之后要再跑一次 `check-env`。** 它那行 `schema: at head (<版本号>)`
+就是用来确认"容器启动时的 `alembic upgrade head` 确实跑过了"的。如果你只在容
+器起来之前问一次，它报的是你**正要离开**的那个版本号——看起来跟"迁移被跳过了"
+一模一样。
+
+**还要分清你问的是哪个容器。** `docker compose run` 每次都新起一个一次性容器、
+读当前的 `.env`，所以它只能证明**文件**是对的；`docker compose exec` 进的才是
+真正在对外服务的那个容器。只有 `exec` 能证明线上后端确实读到了你改的值——这正
+是让一个过期的 Sentry DSN 藏起来的同一个坑（见"日志与错误上报"）。
 
 ## 已有部署上，怎么升级"内置技能"
 
@@ -783,6 +814,14 @@ curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
 加一条 `find /var/backups/bestteam -mtime +30 -delete` 就是最简单的写法），
 并且要把这个备份目录**另外拷一份到别的地方**——一份"跟数据库放在同一台机器
 上"的备份，一旦这台机器出问题，这份备份也一起没了，那就不能算是真正的备份。
+
+**跑脚本的那个账号，必须对输出目录有写权限。** 如果定时任务是挂在 `root` 下
+的，`/var/backups/bestteam` 这个目录会是 root 建的、属主是 root；你后来用部署
+用的普通账号手动跑同一条命令，会在**最后一步**失败并报 `permission denied`
+——而这时候容器内部的那份副本其实已经做好了，脚本因为 `set -e` 直接退出，把它
+留在了容器里的 `/tmp/bestteam-backup.db`。属主改一次就好
+（`sudo chown <用户名> /var/backups/bestteam`），残留的那份顺手删掉
+（`docker compose exec -T backend rm -f /tmp/bestteam-backup.db`）。
 
 **把 `BESTTEAM_SECRETS_KEY` 单独备份，而且要放在安全的地方**（密码管理器或者
 专门的密钥保管工具——**不要**跟数据库备份放在一起）。存进数据库里的邮箱密码是
