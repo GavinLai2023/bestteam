@@ -668,6 +668,53 @@ start-up (`check-env` flags it first). `BESTTEAM_ENVIRONMENT`
 to turn reporting off. `sentry-sdk` ships in the image; on a bare
 `pip install`, it is part of the `ui` extra.
 
+**Verify it once.** `check-env` proves the DSN parses, not that events arrive.
+Send one through the real code path:
+
+```bash
+docker compose run --rm --no-deps backend python -c "import sentry_sdk; from ui.backend import error_reporting as er; print('enabled:', er.init_from_env()); er.report_message('sentry smoke test', source='manual'); sentry_sdk.flush(timeout=5); print('sent')"
+```
+
+`enabled: True` says the container read the DSN, and the issue should appear in
+Sentry within seconds -- resolve it afterwards, so the stream stays empty except
+for real faults. Do **not** paste the `sentry_sdk.init(...)` snippet Sentry's
+onboarding page offers: the backend already initialises the SDK, and that
+snippet sets `send_default_pii=True`, the opposite of everything the paragraph
+above describes.
+
+⚠️ **Editing `.env` does not change a container that is already running.**
+`docker compose run` starts a fresh one and reads the current file, so the smoke
+test can pass while the live backend still holds the old value. After any `.env`
+edit, recreate the service explicitly:
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+That holds for every variable in `.env`, not just this one.
+
+If the smoke test prints `sent` and nothing arrives, suspect the DSN first -- a
+truncated paste is the common one. Take the SDK out of the picture and read the
+HTTP status yourself; its debug output logs failures but not successes, so a
+quiet log proves less than it looks:
+
+```bash
+DSN=$(grep -E '^BESTTEAM_SENTRY_DSN=' .env | cut -d= -f2-)
+KEY=$(echo "$DSN" | sed -E 's#^https://([^@]+)@.*#\1#')
+HOST=$(echo "$DSN" | sed -E 's#^https://[^@]+@([^/]+)/.*#\1#')
+PROJ=$(echo "$DSN" | sed -E 's#.*/([0-9]+)$#\1#')
+echo "host=$HOST project=$PROJ key=${KEY:0:8}...(${#KEY} chars)"
+curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
+  -H "Content-Type: application/json" \
+  -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=$KEY, sentry_client=curl/1.0" \
+  -d '{"message":"curl smoke test","level":"error","platform":"other"}'
+```
+
+The key is 32 characters, and `project` must be the project you are actually
+looking at in Sentry. `200` with an event id means the ingest accepted it;
+`401`/`403` means the key or project id is wrong -- re-copy the whole DSN from
+the project's **Client Keys (DSN)** page rather than retyping it.
+
 ## Backup and restore
 
 A backup is **two files**, taken by two scripts, both safe to run while the

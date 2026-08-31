@@ -704,6 +704,50 @@ DSN 清空就是关闭错误上报。`sentry-sdk` 这个依赖包已经打进了
 你是直接用 `pip install` 装的（不走容器），它是 `ui` 这个可选依赖组的一部
 分。
 
+**配好之后验证一次。** `check-env` 只能证明 DSN 格式合法，证明不了事件真的送
+得到。用真实的代码路径发一条出去：
+
+```bash
+docker compose run --rm --no-deps backend python -c "import sentry_sdk; from ui.backend import error_reporting as er; print('enabled:', er.init_from_env()); er.report_message('sentry smoke test', source='manual'); sentry_sdk.flush(timeout=5); print('sent')"
+```
+
+打印出 `enabled: True` 说明容器读到了 DSN，几秒之后 Sentry 的问题列表里就该出
+现这一条。验证完把它标记成已解决，让列表平时保持是空的——以后冒出东西才是真
+的需要看。另外，Sentry 引导页上给的那段 `sentry_sdk.init(...)` 示例代码**一行
+都不要抄**：后端已经自己初始化过了，而且那段示例把 `send_default_pii` 设成了
+打开，正好和上面整段描述的策略相反。
+
+⚠️ **改了 `.env` 不会影响已经在运行的容器。** `docker compose run` 每次都是新
+起一个一次性容器、读当前的 `.env`，所以上面这个冒烟测试可能是过的，而线上那个
+后端容器里用的还是旧值。改完 `.env` 之后必须显式重建：
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+这一条对 `.env` 里的每个变量都成立，不只是 Sentry 这一项。
+
+如果冒烟测试打印了 `sent`，Sentry 那边却什么都没有，先怀疑 DSN 本身——粘贴时
+少了几位是最常见的原因。把 SDK 撇开，自己看 HTTP 响应码；SDK 的调试日志只在失
+败时打印、成功时什么都不打，所以「日志里没报错」这个信息量比看上去小：
+
+```bash
+DSN=$(grep -E '^BESTTEAM_SENTRY_DSN=' .env | cut -d= -f2-)
+KEY=$(echo "$DSN" | sed -E 's#^https://([^@]+)@.*#\1#')
+HOST=$(echo "$DSN" | sed -E 's#^https://[^@]+@([^/]+)/.*#\1#')
+PROJ=$(echo "$DSN" | sed -E 's#.*/([0-9]+)$#\1#')
+echo "host=$HOST project=$PROJ key=${KEY:0:8}...(${#KEY} chars)"
+curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
+  -H "Content-Type: application/json" \
+  -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=$KEY, sentry_client=curl/1.0" \
+  -d '{"message":"curl smoke test","level":"error","platform":"other"}'
+```
+
+`key` 应该正好 32 位，`project` 要和你在 Sentry 界面上看的那个项目对得上。返
+回 `200` 并带一个 event id，说明接收端已经收下；返回 `401` 或 `403`，说明 key
+或者项目 ID 不对——回项目的 **Client Keys (DSN)** 页面把整串重新复制一遍，别
+手敲。
+
 ## 备份与恢复
 
 一次备份是**两个文件**，由两个脚本分别生成，两个脚本在后端正在运行的时候执
