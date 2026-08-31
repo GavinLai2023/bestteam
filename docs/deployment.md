@@ -89,6 +89,16 @@ mailbox, one automated team (see `docs/BETA_NOTES.md`).
 cp .env.example .env
 ```
 
+This is a one-time step: `.env` is gitignored, so pulling or rebuilding a
+later update never touches it — do not re-run `cp` on an existing deployment,
+it would overwrite your configured `.env` with the template. Before a later
+upgrade, diff `.env.example` against the version you last deployed to see
+whether anything new needs adding to your real `.env`:
+
+```bash
+git diff <tag-or-commit-you-deployed> HEAD -- .env.example
+```
+
 Edit `.env` and fill in:
 
 - LLM provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`
@@ -694,7 +704,12 @@ if you have one, the files archive:
 It performs the steps below in order and finishes by waiting for
 `/api/health` to answer 200. **Rehearse it once before the first beta customer
 is on the box** — against a throwaway `docker compose` stack, not production —
-so the first restore you do is not the one that matters. The manual
+so the first restore you do is not the one that matters. A later code update
+does not need a fresh rehearsal by default: re-run it only if
+`scripts/restore.sh`, the backup scripts, `docker-entrypoint.sh` or
+`docker-compose.yml` changed since your last rehearsal. A new Alembic
+migration alone is already exercised by the normal auto-migrate-on-start path
+(section 2), not by the restore procedure itself. The manual
 equivalent, if you would rather see each step:
 
 1. Stop the backend so nothing writes to the database during restore:
