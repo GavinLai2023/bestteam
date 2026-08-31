@@ -176,7 +176,9 @@ what "the currently deployed version" means for a future diagnostic re-run.
 
 Only shown when the deployment has per-user memory enabled
 (`BESTTEAM_MEMORY_DB`) — otherwise the page explains how to enable it and
-stops there.
+stops there. Enabling it is an operator step on the host, not a setting in the
+UI: `docs/deployment.md` §4, "Per-user memory", has the path, the recreate, and
+what it costs per run.
 
 - Pick a user (memory is scoped by `(user_id, org_id)`, so a moved user can
   have more than one identity — a "legacy" identity with `org_id = null` is

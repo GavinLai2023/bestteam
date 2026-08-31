@@ -225,6 +225,24 @@ def test_backup_covers_the_data_volume_not_only_the_database():
     assert "backup-files.sh" in doc
 
 
+def test_backup_db_also_takes_the_per_user_memory_database():
+    # Per-user memory (BESTTEAM_MEMORY_DB) is a SECOND SQLite database. Left to
+    # backup-files.sh it would be tarred while in use -- the half-written page
+    # the two-script split exists to avoid -- so the online-backup script takes
+    # it too, beside the main file, with nothing extra in the operator's cron.
+    db = (_ROOT / "scripts" / "backup-db.sh").read_text(encoding="utf-8")
+    assert "\r" not in db
+    assert "BESTTEAM_MEMORY_DB" in db
+    assert "-memory.db" in db
+    # Both databases go through sqlite3's backup API, not a file copy.
+    assert db.count("src.backup(dst)") == 2
+    # Enabled but never written to: connecting to a missing file would CREATE an
+    # empty database and hand it over as if it were a backup.
+    assert "test -f" in db
+    doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "-memory.db" in doc
+
+
 def test_restore_script_follows_the_documented_procedure():
     restore = (_ROOT / "scripts" / "restore.sh").read_text(encoding="utf-8")
     assert "\r" not in restore
@@ -243,5 +261,14 @@ def test_restore_script_follows_the_documented_procedure():
     # shares only the data volume -- so the archive must be staged inside the
     # data directory, never /tmp, or the extraction finds nothing.
     assert "/tmp/" not in restore
+    # An optional third argument puts back the per-user memory database. It must
+    # be resolved from BESTTEAM_MEMORY_DB *before* the backend is stopped -- an
+    # unset variable that surfaced mid-restore would leave the deployment down
+    # with the database already overwritten -- and copied AFTER the files
+    # archive, whose raw-tar copy of the same file it exists to overwrite.
+    assert "[memory.db]" in restore
+    assert "BESTTEAM_MEMORY_DB" in restore
+    assert restore.index("MEM_PATH=$(") < restore.index("docker compose stop backend")
+    assert restore.index('cp "$FILES_BACKUP"') < restore.index('cp "$MEM_BACKUP"')
     doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     assert "restore.sh" in doc
