@@ -2601,21 +2601,24 @@
   G7 is conditional and operator-run: a live Microsoft 365 tenant smoke test
   (`docs/email-smoke-test.md` §9) before the first M365 customer. XML
   tree-aware chunking (PR #69) is merged and in the beta build. The build is
-  named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.2`
-  (`9afba75`, 2026-08-24), each from a `main` run with `backend-full` and
-  `e2e-full` green. Both the restore rehearsal and G7 closed 2026-08-31: run
+  named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.3`
+  (`4360545`, 2026-08-31), each an annotated tag on the merge commit of its
+  release PR, cut from a `main` run with `backend-full` and `e2e-full` green.
+  0.1.0b2 was cut as PR #90 on 2026-08-24 but deliberately never tagged, so
+  the jump is intentional and there is no `v0.1.0-beta.2` to check out.
+  **beta.3 is deployed** on the beta VPS (2026-08-31). Both the restore
+  rehearsal and G7 closed 2026-08-31: run
   on the target VPS against `v0.1.0-beta.1`, they settled the two questions a
   desk check couldn't -- `docker compose cp` into a *stopped* container does
   write through to the data volume, and the additive `tar xzf` restore is
   useful despite leaving orphaned upload directories -- and the live M365
-  tenant smoke test (`docs/email-smoke-test.md` §9) passed. `main` has moved
-  on since (four migrations past beta.2), but `scripts/restore.sh`,
-  `docker-entrypoint.sh` and the backup scripts are unchanged since beta.1,
+  tenant smoke test (`docs/email-smoke-test.md` §9) passed. Neither needed
+  repeating for beta.3: `scripts/restore.sh`, `docker-entrypoint.sh`,
+  `docker-compose.yml` and the backup scripts are all unchanged since beta.1,
   and so is the OAuth/IMAP client the M365 test exercised
   (`src/bestteam/tools/`) -- only `email_trigger.py` picked up an additive
-  backlog-alert and paused-team guard, neither on the connection path -- so
-  neither rehearsal needs repeating before shipping current `main` as the
-  next beta build. Re-rehearse restore only if those scripts change; re-walk
+  backlog-alert and paused-team guard, neither on the connection path.
+  Re-rehearse restore only if those scripts change; re-walk
   the M365 smoke test only if the mail-client/OAuth path does. Stage 1 of the review (ruff/mypy,
   `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,
   `_resolve_model` move, `STATUS.md` → `CHANGELOG.md` split, unified
