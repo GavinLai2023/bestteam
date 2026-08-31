@@ -15,6 +15,129 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ## [Unreleased]
 
+## [0.1.0b3] — 2026-08-31
+
+Third beta build. Named from a green `main` (`ee88a5a`) — the `backend-full`
+and `e2e-full` suites that run only on `main` both passed.
+
+Upgrading from `0.1.0b2`: run `alembic upgrade head` (three migrations,
+`t7u8v9w0x1y2`, `u8v9w0x1y2z3`, `v9w0x1y2z3a4`). Nothing is backfilled and the
+upgrade changes no existing behaviour — the new pause switch defaults to *not*
+paused, and the new grounding policy defaults to the 0.1.0b2 one. Two
+knowledge-base variables are worth setting before the first customer:
+`BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL` (without it, document search is
+keyword-only) and `BESTTEAM_KB_DEFAULT_RERANK_MODEL`; `check-env` now names
+both. `docs/BETA_NOTES.md` is still the one page to hand a beta customer.
+
+### Added
+
+- **The platform interviews the customer** — a sixth wizard step between
+  "your challenge" and "your documents": up to four clarifying questions the
+  analyst judges would most change the team's design, one answer box each.
+  Answering is optional — **Skip these questions** instead records the
+  assumption the analyst made, prefixed `Assumed:`, where the customer can
+  read and correct it. The Confirm page asks the still-open ones again, and
+  those answers ride that page's one "Update the team" action.
+- **Pause a live team** — My Teams gains a reversible off switch for a
+  deployed team. Previously the only lifecycle verb was deleting a
+  never-deployed draft, and the only "off" in the product suspended the whole
+  organisation. A paused team is refused at all five entry points: Run a
+  team, `POST /api/runs`, automatic runs, turning automatic runs on, and the
+  anonymous share chat. Pausing switches automatic runs off only when the
+  trigger names that team; resuming deliberately does not switch them back
+  on. Migration `v9w0x1y2z3a4`, `server_default="1"` — an upgrade pauses
+  nothing. Deleting a live team stays deferred.
+- **Report a defect or make a suggestion from inside the product** — a
+  Feedback item in the nav for members and in the share-chat header for
+  anonymous visitors (five per visitor per UTC day), and a fifth admin page
+  that collects them with a status lifecycle and a private operator note.
+  Bodies render as plain text only. Migration `u8v9w0x1y2z3`.
+- **Retry a failed upload** — "My documents" re-runs a failed or interrupted
+  ingestion over the files the server already holds, rather than asking the
+  customer to upload documents it still has. Nothing is re-metered: a failed
+  attempt was never billed, and unchanged documents still reuse their
+  existing chunks and embeddings.
+- **Grounding can refuse, per agent** — `grounding_policy: observe | retry |
+  refuse` on an agent that has a knowledge base. `observe` stays the default
+  and is byte-identical to 0.1.0b2 (record only); `retry` gives the agent one
+  more turn to cite what it actually retrieved; `refuse` replaces an
+  ungrounded answer. Opt-in per agent — nothing changes until it is set.
+- **Health metrics an outside watcher can read** — `python -m
+  ui.backend.admin check-health` reports poll lag, oldest unprocessed
+  message, 24-hour done/failed counts and detection-to-draft latency per
+  organisation, exiting 1 on a fault so cron can page on it. It is
+  deliberately the *only* watcher for a stalled poller: in-app alerts are
+  delivered **by** the poll loop, so one about the loop being wedged could
+  never leave the process. `docs/deployment.md` ("Watching the watcher") says
+  how to schedule it.
+- **A backlog alert for mail nothing is failing on** — raised once when the
+  oldest unprocessed message outlives `BESTTEAM_BACKLOG_ALERT_MINUTES`
+  (default 30), and cleared once when it drains. Covers the case where a
+  budget cap paused dispatch and no run ever *failed*, so no existing alert
+  would fire.
+- **A second process refuses to start** — the backend takes an exclusive lock
+  on the database file before its startup sweeps, so `uvicorn --workers N` or
+  a second replica fails with a clear error instead of two pollers racing
+  over one mailbox and releasing each other's claims. The OS drops the lock
+  on any exit, so a crash never blocks the next start.
+- **`check-env` covers more** — organisations that no retention policy covers
+  (they keep run history forever), an unset knowledge-base embedding default
+  (WARN: customers silently get keyword-only search), a `fake:` one (FAIL),
+  and a missing rerank default once embedding is actually on.
+- **`docs/VPS_SETUP_RUNBOOK.md`** — a step-by-step Chinese runbook for
+  standing this up on a DigitalOcean box, from a bare server to HTTPS.
+
+### Changed
+
+- **Language, password and log out became one account menu** under the
+  username, instead of a form control and two buttons sitting in the nav row.
+  Feedback stays in the row: it is an invitation, and an invitation behind a
+  menu is not one.
+- **Retrieval quality now has release gates that run against real models** —
+  a hand-run suite over two golden sets (one of them deliberately hard:
+  answers in table cells, facts buried late in long handbooks,
+  near-identical sibling documents, and Chinese queries against
+  English-only documents) under a real embedding model and a real
+  cross-encoder reranker. It needs `BESTTEAM_LIVE_EVAL=1` and an API key, so
+  CI stays free and no ordinary test run pays for inference.
+- All seven `CLAUDE.md` files — what a coding agent reading this repository
+  loads before it starts — were cut to invariants only, 315 KB down to
+  205 KB.
+
+### Fixed
+
+- **A team that reads the mailbox could be shared anonymously** — Share
+  rendered on every deployed team, including one holding email tools, so
+  whoever held the link could ask that team to read the organisation's inbox
+  back to them. Minting such a link is refused, and so is every link already
+  minted, with the same 404 an unusable link gets — a distinguishable message
+  would itself tell a prober what the team can reach.
+- **A spreadsheet or Word-table cell containing a comma or a line break
+  shifted every column after it** — `.xlsx`/`.xlsm` and `.docx` tables now
+  quote cells the way the `.csv` path already did, so the same table reads
+  the same whichever format it arrives in.
+- **A workbook that would exhaust the server is refused with a readable
+  reason** — over 300 MB unpacked (a decompression bomb) or over five
+  million declared cells (one stray formatted cell far down a sheet). A byte
+  stream that is not a workbook at all now says so instead of raising a
+  zip error.
+- **A citation was matched by parsing its label** — a document whose filename
+  contained `, p.` or ` § ` was misread by the grounding check, which now
+  compares against what the search tool actually reported, and a heading
+  containing `[` or `]` no longer truncates its own citation tag. Latent
+  while grounding only observed; load-bearing now that `refuse` can act on
+  the result.
+- **`check-health` paged for deliberately suspended organisations** — it
+  filtered on the trigger being enabled but not on the organisation being
+  active, so a suspended org's frozen poll timestamp reported a stalled
+  poller three intervals later. Its exit code is the pager, so this was a
+  false page rather than merely wrong text.
+- **`check-health`'s 24-hour window loaded an organisation's whole terminal
+  history** and filtered in Python; the bound is now in SQL, with index
+  `t7u8v9w0x1y2`.
+- **`docs/email-smoke-test.md`** still described ambient triggering as
+  planned rather than built.
+
 ## [0.1.0b2] — 2026-08-24
 
 Second beta build. Named from a green `main` (`9afba75`) — all seven CI jobs,
@@ -144,6 +267,7 @@ reasoning is in `docs/STATUS.md`; the customer-facing subset is in
   in flight is swept to `failed` at startup rather than showing as running
   forever.
 
-[Unreleased]: https://github.com/GavinLai2023/bestteam/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/GavinLai2023/bestteam/compare/v0.1.0-beta.3...HEAD
+[0.1.0b3]: https://github.com/GavinLai2023/bestteam/releases/tag/v0.1.0-beta.3
 [0.1.0b2]: https://github.com/GavinLai2023/bestteam/releases/tag/v0.1.0-beta.2
 [0.1.0b1]: https://github.com/GavinLai2023/bestteam/releases/tag/v0.1.0-beta.1
