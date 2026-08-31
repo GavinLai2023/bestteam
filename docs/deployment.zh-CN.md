@@ -108,13 +108,9 @@ cp .env.example .env
 
 这一步只需要做一次：`.env` 已经在 `.gitignore` 里，以后拉取新代码或者重新构
 建都不会碰它——**不要**在已经部署好的机器上重复执行这条 `cp`，那样会用模板文
-件把你配置好的 `.env` 整个覆盖掉。之后每次升级，对比一下 `.env.example` 相
-对你上次部署的版本有没有新增内容，把新增的手动加进你现有的 `.env`（不用整个
-重来）：
-
-```bash
-git diff <你上次部署时的 tag 或 commit> HEAD -- .env.example
-```
+件把你配置好的 `.env` 整个覆盖掉。至于"这次升级有没有要求填新的环境变量"，那
+是升级流程里的事，而且必须等新代码真的拉到服务器上之后才能查——见后面「升级一
+个已有的部署」一节。
 
 然后打开 `.env`，把下面这些填好：
 
@@ -594,6 +590,34 @@ FAIL（轮询延迟超过三个轮询周期，且不低于 5 分钟），这条�
   个组织已经有部署好的 AI 团队，会跳到 `/activity`（工作台）；如果这个组织还
   什么都没部署，会跳到 `/wizard`（搭建向导）；对平台管理员，会跳到
   `/advanced`（高级设置）。
+
+## 升级一个已有的部署
+
+升级就是在**服务器上**拉新代码、重新构建，顺序如下——顺序本身很重要，因为检查
+`.env` 这一步，只有在新代码真的拉下来之后才有意义：
+
+```bash
+cd /opt/bestteam
+git stash && git pull && git stash pop   # 保住你在服务器上改过的东西（比如端口绑定）
+
+# 这次升级有没有要求填新的环境变量。这条命令要在 git pull 之后跑：
+# pull 之前，HEAD 还是你正在跑的那份旧代码，diff 出来是空的。
+# ORIG_HEAD 是 git pull 自动记下的"拉之前你在哪个提交"，所以不用自己记上次
+# 部署的版本号（也可以写死：git diff v0.1.0-beta.1 HEAD -- .env.example）。
+git diff ORIG_HEAD HEAD -- .env.example
+
+# 如果 diff 里有新增的变量名，手动加进你现有的 .env——**不要**重新执行 cp。
+# 然后让 check-env 来把最后一道关：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+
+docker compose build
+docker compose up -d                     # 数据库迁移是容器自己跑的，见第 3 节
+```
+
+`.env` 在 `.gitignore` 里，所以 `git pull` 永远不会碰它，上面那条 diff 只是
+用来告诉你"要补哪几个变量"。真正的兜底是 `check-env`（见 §1）：它读的是后端
+实际会看到的那份环境配置，只要有一项 FAIL 就以失败状态退出——漏填的变量会在
+容器起来之前就暴露出来，而不是等到线上"启动—崩溃—重启"才发现。
 
 ## 已有部署上，怎么升级"内置技能"
 

@@ -91,13 +91,9 @@ cp .env.example .env
 
 This is a one-time step: `.env` is gitignored, so pulling or rebuilding a
 later update never touches it — do not re-run `cp` on an existing deployment,
-it would overwrite your configured `.env` with the template. Before a later
-upgrade, diff `.env.example` against the version you last deployed to see
-whether anything new needs adding to your real `.env`:
-
-```bash
-git diff <tag-or-commit-you-deployed> HEAD -- .env.example
-```
+it would overwrite your configured `.env` with the template. Checking whether
+a *later* update expects new variables belongs to the upgrade flow, after the
+new code is on the host: see "Updating an existing deployment" below.
 
 Edit `.env` and fill in:
 
@@ -565,6 +561,34 @@ customers that plainly rather than implying it works.
   link in the nav. Which page depends on the account: `/` routes an org
   member to `/activity` (the Dashboard), or to `/wizard` if the org has
   nothing deployed yet, and a platform admin to `/advanced`.
+
+## Updating an existing deployment
+
+An update is a pull and a rebuild **on the host**, in this order — the order
+is the point, because the `.env` check only means anything once the new code
+is actually on the box:
+
+```bash
+cd /opt/bestteam
+git stash && git pull && git stash pop   # keeps local edits, e.g. a port binding
+
+# What this update expects that your .env may not have. Run it AFTER the pull:
+# before it, HEAD is still the code you are already running and the diff is empty.
+# `git pull` sets ORIG_HEAD to the commit you were on, so you need not remember
+# it (or name it yourself: git diff v0.1.0-beta.1 HEAD -- .env.example).
+git diff ORIG_HEAD HEAD -- .env.example
+
+# Add any new variables to .env by hand -- never by re-running `cp` -- then:
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+
+docker compose build
+docker compose up -d                     # migrations run themselves on start (§3)
+```
+
+`.env` is gitignored, so the pull never touches it; the diff only tells you
+what to add. `check-env` (§1) is the backstop — it reads the environment the
+backend will actually see and exits 1 on any FAIL, so a variable you missed
+surfaces before the containers come up rather than as a crash loop.
 
 ## Updating built-in skills on an existing deployment
 

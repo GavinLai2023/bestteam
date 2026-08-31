@@ -584,6 +584,9 @@ docker compose restart
 
 # 升级到新版本代码
 git stash && git pull && git stash pop      # 保住你改过的端口绑定
+git diff ORIG_HEAD HEAD -- .env.example     # 这次升级要不要补新的环境变量？
+# 有新增的就手动加进 .env（别重跑 cp，会把你配好的覆盖掉），然后：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 docker compose build
 docker compose up -d
 # 数据库结构的升级是容器自己做的，不用手动执行
