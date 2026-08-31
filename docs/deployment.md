@@ -556,6 +556,57 @@ address is not stored anywhere indexed, only inside free text the model may
 have paraphrased, so matching it would both miss and over-delete. Tell
 customers that plainly rather than implying it works.
 
+### Per-user memory (optional, off by default)
+
+The platform can remember an org's end users across runs — what they asked
+before, preferences they stated — and an admin inspects, searches or prunes
+what it kept on the **Memory** page. It is off unless `BESTTEAM_MEMORY_DB`
+names a SQLite file, which is why that page on a fresh deployment says memory
+is not enabled instead of showing a list. Nothing else changes when it is off:
+runs behave exactly as they do today.
+
+To enable it, point the variable at a path **on the data volume** and recreate
+the backend:
+
+```bash
+# in .env
+BESTTEAM_MEMORY_DB=/app/ui/backend/data/memory.db
+```
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+The file is created on first use — do not create it by hand. The path matters:
+anything outside `/app/ui/backend/data` lives inside the container only and is
+gone at the next recreate, taking every stored memory with it. And editing
+`.env` alone changes nothing about a container that is already running (see the
+warning under "Logs and error reporting" below) — the recreate is the step that
+applies it.
+
+That one variable buys the cheap tier: the exchanges themselves, recalled with
+BM25 keyword search, **no extra model calls per run**. `BESTTEAM_MEMORY_MODEL`
+adds one extraction call per run, which is what turns raw exchanges into
+durable facts and preferences; leave it unset until the plain tier has shown it
+earns its keep. The remaining `BESTTEAM_MEMORY_*` settings in `.env.example`
+(embeddings for hybrid recall, query expansion, rerank) sit on top of that and
+each cost something per run as well.
+
+Three things to know before turning it on:
+
+- **A freshly enabled deployment shows an empty page.** Records appear only
+  after runs that carry a user identity — not on restart. An empty list right
+  after the recreate is the expected state, not a failure.
+- **The org's retention period does not reach it.** "Activity → Data" cleans
+  run history; memory is a separate store with its own lever,
+  `BESTTEAM_MEMORY_MAX_EPISODIC_PER_USER` (unset = keep everything). Deleting
+  an account *does* purge that account's memory — but only when the operator
+  CLI runs with the server's environment, so it can see the same store the
+  backend writes to. See `docs/ADMIN_GUIDE.md` §6.
+- **The store holds end users' own words**, the same category of content as run
+  history, which is why the page is admin-only and no org member can reach it.
+  Settle the retention story with the customer before enabling it, not after.
+
 ## 5. Verify
 
 - `curl http://localhost:8000/api/health` → `200 {"status": "ok", "database": "ok"}`
@@ -665,9 +716,12 @@ mounted at `/app/ui/backend/data` in the backend container, and survives
   collection still answers without these; they are what a re-index or a
   "which file was this" question falls back on.
 - `builder_sessions/` — per-session wizard workspace directories (the
-  `source` a session's spec is validated against; mostly empty), plus the
-  per-user memory store if the operator pointed `BESTTEAM_MEMORY_DB` into this
-  directory.
+  `source` a session's spec is validated against; mostly empty).
+- `memory.db` — the per-user memory store, only when the operator enabled it
+  by pointing `BESTTEAM_MEMORY_DB` at a path on this volume (§4, "Per-user
+  memory"); wherever it points, that is the file. Its own SQLite database,
+  separate from `bestteam.db`, which `backup-db.sh` takes as a second file
+  (see below).
 
 ## Logs and error reporting
 
@@ -750,8 +804,8 @@ the project's **Client Keys (DSN)** page rather than retyping it.
 
 ## Backup and restore
 
-A backup is **two files**, taken by two scripts, both safe to run while the
-backend is running:
+A backup is **two files** (three where per-user memory is enabled), taken by
+two scripts, both safe to run while the backend is running:
 
 ```bash
 ./scripts/backup-db.sh       # the database, via SQLite's online backup API
@@ -768,6 +822,19 @@ uploads directory is ordinary files for which `tar` is exactly right — so
 `backup-db.sh` never looks at anything else. The database alone restores a
 working deployment; the files archive restores the original documents behind
 each knowledge base (see "Data persistence" above for what lives where).
+
+**Per-user memory rides along with `backup-db.sh`** — it is a second, separate
+SQLite database and gets the same online-backup treatment, written beside the
+main file as `<output-path>-memory.db`. The script asks the *running container*
+for `BESTTEAM_MEMORY_DB` (a `.env` edit never applied with a recreate is not
+what the backend is using), so there is nothing extra to add to the cron entry:
+a deployment with memory off, or with it on but nothing written yet, just says
+so and backs up the database alone. The tar sweeps the same file up as ordinary
+data — treat *that* copy as incidental, it is exactly the raw copy of a live
+database the split above exists to avoid.
+
+That matters on the way back, so hand the good copy to `restore.sh` as its
+third argument (below) rather than letting the archive's copy stand.
 
 **Schedule both.** Nothing in the containers backs anything up on its own.
 On the Docker host, one nightly cron entry (adjust the paths; the scripts must
@@ -807,11 +874,17 @@ There is no in-place re-encrypt/rekey command yet; rotating the key means
 clearing and re-entering each org's mailbox under the new key.
 
 To restore from a backup, run the restore script with the database file and,
-if you have one, the files archive:
+if you have them, the files archive and the memory database:
 
 ```bash
-./scripts/restore.sh /path/to/backups/bestteam-2026-06-17.db /path/to/backups/bestteam-files-2026-06-17.tgz
+./scripts/restore.sh /path/to/backups/bestteam-2026-06-17.db /path/to/backups/bestteam-files-2026-06-17.tgz /path/to/backups/bestteam-2026-06-17-memory.db
 ```
+
+The third argument is optional and goes in **after** the archive is unpacked,
+overwriting the raw-tar copy of the same file with the online-backup one. Where
+it lands is `BESTTEAM_MEMORY_DB` as `.env` currently sets it — the script reads
+that before it stops anything, and refuses up front if the variable is unset,
+rather than restoring a database no running backend would ever open.
 
 It performs the steps below in order and finishes by waiting for
 `/api/health` to answer 200. **Rehearse it once before the first beta customer
@@ -841,6 +914,9 @@ equivalent, if you would rather see each step:
    ```bash
    docker compose run --rm --no-deps --user root backend chown 1000:1000 /app/ui/backend/data/bestteam.db
    ```
+   A memory database goes in exactly the same way — the same three commands
+   against `BESTTEAM_MEMORY_DB`'s path — after any files archive has been
+   unpacked, never before.
 3. Restart the backend:
    ```bash
    docker compose start backend
