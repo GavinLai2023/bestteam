@@ -14,7 +14,13 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, START, StateGraph
 
 from ..core.agent import Agent
-from ..core.grounding import GROUNDING_REFUSAL_TEXT, GROUNDING_RETRY_INSTRUCTION, check_grounding
+from ..core.grounding import (
+    GROUNDING_REFUSAL_TEXT,
+    GROUNDING_RETRY_INSTRUCTION,
+    check_grounding,
+    claim_retry_instruction,
+    grade_claims,
+)
 from ..core.team import CollaborationMode, Team
 from ..core.tool_context import tool_call_context
 from ..core.trace import TraceEvent
@@ -258,9 +264,14 @@ def _model_spec(agent: Agent) -> str:
     pre-built `BaseChatModel` instance has no such spec, so fall back to
     whatever model name it reports (or its class name).
     """
-    if isinstance(agent.model, str):
-        return agent.model
-    return getattr(agent.model, "model_name", None) or getattr(agent.model, "model", None) or type(agent.model).__name__
+    return _spec_string(agent.model)
+
+
+def _spec_string(model: Any) -> str:
+    """A best-effort spec string for any model value, for usage attribution."""
+    if isinstance(model, str):
+        return model
+    return getattr(model, "model_name", None) or getattr(model, "model", None) or type(model).__name__
 
 
 # Emitted through `on_token` when a model call that had already produced text
@@ -614,6 +625,9 @@ def _run_agent(
     kb_hit_count = 0
     kb_citations: List[str] = []
     kb_documents: List[str] = []
+    # The KB tool results' text, verbatim -- the claim grader's evidence
+    # (grounding_level: "claim"). Same material as the turn's ToolMessages.
+    kb_result_texts: List[str] = []
     first_call_model = model
     forced_first_call = False
     if all_tools:
@@ -819,6 +833,7 @@ def _run_agent(
                         kb_hit_count += int(tool_ctx.trace.get("hit_count") or 0)
                         kb_citations.extend(tool_ctx.trace.get("citations") or ())
                         kb_documents.extend(tool_ctx.trace.get("citation_documents") or ())
+                        kb_result_texts.append(str(result))
                     else:
                         extra_data = {"summary": _summarize(result)}
                     if reveal:
@@ -890,18 +905,75 @@ def _run_agent(
             text, kb_citations, documents=kb_documents, searches=kb_searches, hit_count=kb_hit_count
         )
         policy = agent.grounding_policy
+        claim_level = agent.grounding_level == "claim"
+        grading = None
+        claim_check_error = False
+        grader_model = None
+
+        def _grade(answer_text: str) -> None:
+            # One grader call: claim split + per-claim verdict against this
+            # turn's own search results. `None` grading = the check was not
+            # performed (invoke failed or unparseable) -- fail-soft to the
+            # citation-level result, never a reason to retry or refuse. The
+            # call is billed either way, so usage is metered either way.
+            nonlocal grading, claim_check_error, grader_model
+            if grader_model is None:
+                try:
+                    grader_model = (
+                        _resolve_model(agent.grounding_model) if agent.grounding_model is not None else raw_model
+                    )
+                except Exception:  # noqa: BLE001 -- deliberate fail-soft, incl. ConfigurationError:
+                    # a bad grader spec degrades the CHECK, it must never fail
+                    # the RUN (rerank/expansion precedent). Not the
+                    # BestTeamError-masking case -- nothing is re-raised as
+                    # EngineError here.
+                    _logger.warning(
+                        "Agent '%s': claim grader model could not be resolved; falling back to citation-level",
+                        agent.name,
+                        exc_info=True,
+                    )
+                    grading = None
+                    claim_check_error = True
+                    return
+            grading, grader_response = grade_claims(answer_text, kb_result_texts, grader_model)
+            claim_check_error = grading is None
+            usage = getattr(grader_response, "usage_metadata", None)
+            if usage and usage_sink is not None:
+                usage_sink.append(
+                    {
+                        "model": _spec_string(agent.grounding_model)
+                        if agent.grounding_model is not None
+                        else _model_spec(agent),
+                        "input_tokens": usage.get("input_tokens", 0),
+                        "output_tokens": usage.get("output_tokens", 0),
+                    }
+                )
+
+        if claim_level and result.passes:
+            _grade(text)
+
+        def _passes() -> bool:
+            return result.passes and (grading is None or grading.passes)
+
         retried = False
         refused = False
-        if policy in ("retry", "refuse") and not result.passes:
+        if policy in ("retry", "refuse") and not _passes():
             # One corrective call on the same conversation: the search results
             # are already in this turn's ToolMessages, so the model needs a
             # rewrite instruction, not new searches. Exactly one retry -- no
             # loop. The failing text may already have streamed to a viewer,
             # so the sink is told to discard it before fresh text arrives.
+            # A claim-level failure names the unsupported claims so the model
+            # deletes or re-grounds exactly those, keeping the rest.
             if forward_text and on_token is not None:
                 on_token(STREAM_RESET)
+            instruction = (
+                claim_retry_instruction(grading.unsupported)
+                if result.passes and grading is not None and not grading.passes
+                else GROUNDING_RETRY_INSTRUCTION
+            )
             messages.append(response)
-            messages.append(HumanMessage(content=GROUNDING_RETRY_INSTRUCTION))
+            messages.append(HumanMessage(content=instruction))
             retry_response = _call(model, messages)
             _record_usage(agent, retry_response, usage_sink)
             model_turns += 1
@@ -921,9 +993,13 @@ def _run_agent(
                     searches=kb_searches,
                     hit_count=kb_hit_count,
                 )
+                grading = None
+                claim_check_error = False
+                if claim_level and result.passes:
+                    _grade(text)
             # else: a retry that asks for more tools instead of answering is a
-            # failed retry -- the original text and result stand.
-            if policy == "refuse" and not result.passes:
+            # failed retry -- the original text, result and grading stand.
+            if policy == "refuse" and not _passes():
                 # The viewer must not keep a retried-but-still-ungrounded
                 # answer either; the authoritative refusal rides run_completed.
                 refused = True
@@ -933,6 +1009,18 @@ def _run_agent(
         data = result.as_trace_data()
         if policy != "observe":
             data.update(policy=policy, retried=retried, refused=refused)
+        if claim_level:
+            # Only the opt-in level adds keys -- the default payload stays
+            # byte-identical (the observe invariant, extended to the level).
+            data["level"] = "claim"
+            if grading is not None:
+                data["claims"] = grading.claims
+                data["claims_supported"] = grading.supported
+                data["unsupported_claims"] = list(grading.unsupported)
+            elif claim_check_error:
+                data["claim_check_error"] = True
+            # A citation-check failure means the grader never ran: no claim
+            # keys at all, distinguishable by their absence.
         _emit("grounding_checked", data)
     return text
 
