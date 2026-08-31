@@ -37,6 +37,16 @@ _ADMIN_CLI_STDIN_SAFE = (
     "from ui.backend.admin import main; sys.exit(main())"
 )
 
+# Every subprocess started below pays the full `import bestteam` cost before it
+# does any work -- ~5s in the documented dev install, but ~26s in a venv that
+# also has the `tools-rerank` extra, because sentence-transformers puts
+# transformers and torch on the path and langchain_core.language_models.base
+# imports transformers eagerly at module scope. At the old 30s budget such a
+# venv had ~2s of headroom, so provisioning died under any load with a bare
+# TimeoutExpired that named neither the import nor the extra. These guard
+# against a hung getpass prompt, not against a slow interpreter startup.
+_IMPORT_HEAVY_TIMEOUT = 120
+
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
     """Terminate proc and any processes it spawned.
@@ -82,7 +92,7 @@ def _assert_port_free(host: str, port: int) -> None:
         )
 
 
-def _wait_healthy(url: str, proc: subprocess.Popen, log_path: Path, timeout: float = 30.0) -> None:
+def _wait_healthy(url: str, proc: subprocess.Popen, log_path: Path, timeout: float = _IMPORT_HEAVY_TIMEOUT) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -107,7 +117,7 @@ def _provision_user(db_path: str, username: str, password: str, *, org: str | No
     env = {**os.environ, "BESTTEAM_DB_PATH": db_path}
     result = subprocess.run(
         args, cwd=str(REPO_ROOT), env=env, input=f"{password}\n{password}\n",
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=_IMPORT_HEAVY_TIMEOUT,
     )
     assert result.returncode == 0, f"provisioning {username} failed:\n{result.stdout}\n{result.stderr}"
 
@@ -116,7 +126,7 @@ def _promote_to_admin(db_path: str, username: str) -> None:
     env = {**os.environ, "BESTTEAM_DB_PATH": db_path}
     result = subprocess.run(
         [sys.executable, "-m", "ui.backend.admin", "promote", username],
-        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=30,
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=_IMPORT_HEAVY_TIMEOUT,
     )
     assert result.returncode == 0, f"promoting {username} failed:\n{result.stdout}\n{result.stderr}"
 
