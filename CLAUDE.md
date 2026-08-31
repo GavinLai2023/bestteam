@@ -86,7 +86,9 @@ to where the detail and the reasoning live.
   `local_folder` (BM25), `vector` (cosine), `hybrid` (RRF-fused); query
   expansion and reranking are opt-in. Ingestion is incremental, spend is
   metered, and grounding is *checked; enforcement is the opt-in per-agent
-  `grounding_policy: observe|retry|refuse`* (default observe = record only) —
+  `grounding_policy: observe|retry|refuse`* (default observe = record only),
+  depth the opt-in `grounding_level: citation|claim` (claim = one extra
+  LLM-grader call per turn; not entailment-verified evidence spans) —
   full reference in `docs/KNOWLEDGE_BASES.md`.
 - **Per-user memory**: BM25-only by default (opt-in hybrid via
   `BESTTEAM_MEMORY_EMBEDDING_MODEL`). Semantic records get dedup; procedural
