@@ -43,9 +43,10 @@ those requirements.
 
 For each agent, give it a clear name, role, goal, and (optionally) a \
 backstory, plus a friendly display_name and a one-sentence \
-friendly_description that a non-technical person would understand. Choose \
-tools from the ones available to the pipeline, and pick a model spec string \
-appropriate to the task.
+friendly_description that a non-technical person would understand. Give it \
+tools by adding their exact names to its `tools` list, using only names from \
+the "Available built-in tools" list provided in the input; never invent a tool \
+name. Pick a model spec string appropriate to the task.
 
 If skills are listed in the input, assign them to agents via each agent's \
 `skills` field (a list of skill names from the provided list). A Skill is a \

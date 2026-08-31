@@ -743,6 +743,15 @@ Thin over `db/builder_sessions.py` + `core/requirements.py`/`core/specification.
 `/solution` with blank feedback deliberately skips the architect entirely (no
 drift) and only re-pins models.
 
+**Four catalogs are appended to the architect's prompt**, at both generation
+sites: `_with_model_catalog`, `_with_tool_catalog`, `_with_skill_catalog`,
+`_with_knowledge_base_catalog`. The tool one needs no database (`REGISTRY` is
+the same for every org) and carries the **email/egress exclusion sentence** —
+naming the `email_*` tools is what first made `find_email_egress_conflicts`'s
+refusal reachable from a generated design. A missing catalog is silent: the
+architect is told to choose "tools available to the pipeline" and, shown none,
+designs a team with no tools rather than erroring.
+
 `/refine` takes the edited `requirements` draft plus free-text `feedback` and
 updates understanding *and* team in one call. The Business Analyst runs only when
 `feedback` is non-blank, with the edited draft as

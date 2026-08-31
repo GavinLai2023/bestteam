@@ -106,6 +106,12 @@ AI 团队（详见 `docs/BETA_NOTES.md`）。
 cp .env.example .env
 ```
 
+这一步只需要做一次：`.env` 已经在 `.gitignore` 里，以后拉取新代码或者重新构
+建都不会碰它——**不要**在已经部署好的机器上重复执行这条 `cp`，那样会用模板文
+件把你配置好的 `.env` 整个覆盖掉。至于"这次升级有没有要求填新的环境变量"，那
+是升级流程里的事，而且必须等新代码真的拉到服务器上之后才能查——见后面「升级一
+个已有的部署」一节。
+
 然后打开 `.env`，把下面这些填好：
 
 - 大模型服务商的密钥（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`，如果要用网络搜索
@@ -182,6 +188,13 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 | `BESTTEAM_SENTRY_DSN` 已设置 | WARN | 不设的话，出了问题只能靠翻容器日志，没有别的记录渠道。 |
 | `BESTTEAM_SENTRY_DSN` 是一个合法地址 | FAIL | 格式不对会导致程序在初始化阶段直接报错，陷入"启动—崩溃—重启—再崩溃"的死循环。 |
 | `FORWARDED_ALLOW_IPS` 设成了你的反向代理地址 | WARN | 不设的话，前面提到的"按地址限流"额度会被反向代理后面的所有用户共用。 |
+
+**它只检查格式，不检查值填得对不对——要看它回显出来的内容，别只看等级。** 一
+个原封不动留着 `.env.example` 示例值的地址（`https://app.example-customer.com`）
+本身格式完全合法，照样打印 `[OK]`。这一项还特别能藏：如果前端和后端是同一个域
+名、由同一个反向代理分发的，浏览器对同源请求根本不做 CORS 检查，所以
+`BESTTEAM_CORS_ORIGINS` 填错了在那之前什么毛病都不会有——等到哪天你把前后端拆
+成两个域名，所有接口请求会在同一瞬间全部失败，而后端日志里一行记录都没有。
 
 等组织建好之后：用 `--test` 参数连上它的邮箱（§4c）；如果是 Microsoft 365，
 上线前对着真实租户走一遍 `docs/email-smoke-test.md` 第 9 节，最好客户在场一起
@@ -585,6 +598,58 @@ FAIL（轮询延迟超过三个轮询周期，且不低于 5 分钟），这条�
   什么都没部署，会跳到 `/wizard`（搭建向导）；对平台管理员，会跳到
   `/advanced`（高级设置）。
 
+## 升级一个已有的部署
+
+升级就是在**服务器上**拉新代码、重新构建，顺序如下——顺序本身很重要，因为检查
+`.env` 这一步，只有在新代码真的拉下来之后才有意义：
+
+```bash
+cd /opt/bestteam
+./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F).db
+
+git status                               # 先看看这台服务器上改过哪些文件
+git stash && git pull && git stash pop   # 保住你在服务器上改过的东西（比如端口绑定）
+
+# 这次升级有没有要求填新的环境变量。这条命令要在 git pull 之后跑：
+# pull 之前，HEAD 还是你正在跑的那份旧代码，diff 出来是空的。
+# ORIG_HEAD 是 git pull 自动记下的"拉之前你在哪个提交"，所以不用自己记上次
+# 部署的版本号（也可以写死：git diff v0.1.0-beta.1 HEAD -- .env.example）。
+git diff ORIG_HEAD HEAD -- .env.example
+
+# 如果 diff 里有新增的变量名，手动加进你现有的 .env——**不要**重新执行 cp。
+# 然后让 check-env 来把最后一道关：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+
+docker compose build
+docker compose up -d                     # 数据库迁移是容器自己跑的，见第 3 节
+
+# 起来之后，确认这次升级真的落地了：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+docker compose exec backend printenv BESTTEAM_RELEASE
+```
+
+**为什么先跑 `git status`**：服务器上要是一个文件都没改过，`git stash pop` 会
+以退出码 1 报 `No stash entries found`——无害，但看起来像是升级失败了。确认干
+净的话，这一步直接 `git pull` 就够了。另外，那种"以后每次拉代码都必须保住"的
+本机改动（典型的就是把端口绑到 127.0.0.1），更稳妥的做法是挪进
+`docker-compose.override.yml`：compose 会自动合并这个文件，任何 git 操作都抹
+不掉它。
+
+`.env` 在 `.gitignore` 里，所以 `git pull` 永远不会碰它，上面那条 diff 只是
+用来告诉你"要补哪几个变量"。真正的兜底是 `check-env`（见 §1）：它读的是后端
+实际会看到的那份环境配置，只要有一项 FAIL 就以失败状态退出——漏填的变量会在
+容器起来之前就暴露出来，而不是等到线上"启动—崩溃—重启"才发现。
+
+**`up -d` 之后要再跑一次 `check-env`。** 它那行 `schema: at head (<版本号>)`
+就是用来确认"容器启动时的 `alembic upgrade head` 确实跑过了"的。如果你只在容
+器起来之前问一次，它报的是你**正要离开**的那个版本号——看起来跟"迁移被跳过了"
+一模一样。
+
+**还要分清你问的是哪个容器。** `docker compose run` 每次都新起一个一次性容器、
+读当前的 `.env`，所以它只能证明**文件**是对的；`docker compose exec` 进的才是
+真正在对外服务的那个容器。只有 `exec` 能证明线上后端确实读到了你改的值——这正
+是让一个过期的 Sentry DSN 藏起来的同一个坑（见"日志与错误上报"）。
+
 ## 已有部署上，怎么升级"内置技能"
 
 内置技能（比如 `email_triage_reply` 这个邮件分诊回复的技能）**只有在数据库里
@@ -670,6 +735,50 @@ DSN 清空就是关闭错误上报。`sentry-sdk` 这个依赖包已经打进了
 你是直接用 `pip install` 装的（不走容器），它是 `ui` 这个可选依赖组的一部
 分。
 
+**配好之后验证一次。** `check-env` 只能证明 DSN 格式合法，证明不了事件真的送
+得到。用真实的代码路径发一条出去：
+
+```bash
+docker compose run --rm --no-deps backend python -c "import sentry_sdk; from ui.backend import error_reporting as er; print('enabled:', er.init_from_env()); er.report_message('sentry smoke test', source='manual'); sentry_sdk.flush(timeout=5); print('sent')"
+```
+
+打印出 `enabled: True` 说明容器读到了 DSN，几秒之后 Sentry 的问题列表里就该出
+现这一条。验证完把它标记成已解决，让列表平时保持是空的——以后冒出东西才是真
+的需要看。另外，Sentry 引导页上给的那段 `sentry_sdk.init(...)` 示例代码**一行
+都不要抄**：后端已经自己初始化过了，而且那段示例把 `send_default_pii` 设成了
+打开，正好和上面整段描述的策略相反。
+
+⚠️ **改了 `.env` 不会影响已经在运行的容器。** `docker compose run` 每次都是新
+起一个一次性容器、读当前的 `.env`，所以上面这个冒烟测试可能是过的，而线上那个
+后端容器里用的还是旧值。改完 `.env` 之后必须显式重建：
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+这一条对 `.env` 里的每个变量都成立，不只是 Sentry 这一项。
+
+如果冒烟测试打印了 `sent`，Sentry 那边却什么都没有，先怀疑 DSN 本身——粘贴时
+少了几位是最常见的原因。把 SDK 撇开，自己看 HTTP 响应码；SDK 的调试日志只在失
+败时打印、成功时什么都不打，所以「日志里没报错」这个信息量比看上去小：
+
+```bash
+DSN=$(grep -E '^BESTTEAM_SENTRY_DSN=' .env | cut -d= -f2-)
+KEY=$(echo "$DSN" | sed -E 's#^https://([^@]+)@.*#\1#')
+HOST=$(echo "$DSN" | sed -E 's#^https://[^@]+@([^/]+)/.*#\1#')
+PROJ=$(echo "$DSN" | sed -E 's#.*/([0-9]+)$#\1#')
+echo "host=$HOST project=$PROJ key=${KEY:0:8}...(${#KEY} chars)"
+curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
+  -H "Content-Type: application/json" \
+  -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=$KEY, sentry_client=curl/1.0" \
+  -d '{"message":"curl smoke test","level":"error","platform":"other"}'
+```
+
+`key` 应该正好 32 位，`project` 要和你在 Sentry 界面上看的那个项目对得上。返
+回 `200` 并带一个 event id，说明接收端已经收下；返回 `401` 或 `403`，说明 key
+或者项目 ID 不对——回项目的 **Client Keys (DSN)** 页面把整串重新复制一遍，别
+手敲。
+
 ## 备份与恢复
 
 一次备份是**两个文件**，由两个脚本分别生成，两个脚本在后端正在运行的时候执
@@ -706,6 +815,14 @@ DSN 清空就是关闭错误上报。`sentry-sdk` 这个依赖包已经打进了
 并且要把这个备份目录**另外拷一份到别的地方**——一份"跟数据库放在同一台机器
 上"的备份，一旦这台机器出问题，这份备份也一起没了，那就不能算是真正的备份。
 
+**跑脚本的那个账号，必须对输出目录有写权限。** 如果定时任务是挂在 `root` 下
+的，`/var/backups/bestteam` 这个目录会是 root 建的、属主是 root；你后来用部署
+用的普通账号手动跑同一条命令，会在**最后一步**失败并报 `permission denied`
+——而这时候容器内部的那份副本其实已经做好了，脚本因为 `set -e` 直接退出，把它
+留在了容器里的 `/tmp/bestteam-backup.db`。属主改一次就好
+（`sudo chown <用户名> /var/backups/bestteam`），残留的那份顺手删掉
+（`docker compose exec -T backend rm -f /tmp/bestteam-backup.db`）。
+
 **把 `BESTTEAM_SECRETS_KEY` 单独备份，而且要放在安全的地方**（密码管理器或者
 专门的密钥保管工具——**不要**跟数据库备份放在一起）。存进数据库里的邮箱密码是
 用这把钥匙加密的，所以一份数据库备份，如果没有这把钥匙，对"恢复邮件功能"这件
@@ -731,8 +848,12 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin set-email <
 这个脚本会按顺序自动做完下面几步，最后会等着 `/api/health` 返回 200 才算结
 束。**在第一个正式客户上线之前，一定要先演练一次**——找一套"用完就扔"的
 `docker compose` 环境来练，不要直接在正式环境上试，这样真正需要恢复的那一次
-才不会是你第一次做这件事。如果你想每一步都自己手动确认一遍，对应的手动流程
-是：
+才不会是你第一次做这件事。**后续代码更新，默认不需要重新演练一遍**——只有当
+`scripts/restore.sh`、两个备份脚本、`docker-entrypoint.sh` 或
+`docker-compose.yml` 这几个文件本身有改动，才需要重新演练。单纯新增一个
+Alembic 迁移不算：那走的是第 2 节里"每次启动自动迁移"那条路径，靠正常升级流
+程就能验证，不需要靠恢复流程来验证。如果你想每一步都自己手动确认一遍，对应
+的手动流程是：
 
 1. 先停掉后端，确保恢复过程中没有任何东西还在往数据库里写：
    ```bash

@@ -33,6 +33,14 @@ def test_tools_extra_declares_httpx():
     assert any(dep.startswith("httpx") for dep in _extras()["tools"])
 
 
+def test_tools_extra_declares_lxml_for_html_extraction():
+    # Same reasoning as httpx above: `_html_to_text` imports lxml at call time
+    # and degrades to raw markup without it, so `bestteam[tools]` must declare
+    # it or every fetched page silently comes back as tags.
+    assert any(dep.startswith("lxml") for dep in _extras()["tools"])
+    assert any(dep.startswith("lxml") for dep in _extras()["tools-http"])
+
+
 def test_providers_openai_extra_declares_langchain_and_openai():
     # CR-007: real-model string resolution needs langchain + langchain-openai,
     # and interview transcription needs openai.

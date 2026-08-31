@@ -507,3 +507,13 @@ def test_agent_spec_to_raw_omits_grounding_policy_when_unset():
     )
 
     assert "grounding_policy" not in spec.to_raw()
+
+
+def test_architect_prompt_forbids_inventing_a_tool_name():
+    """Same rule the prompt already carries for skills and knowledge bases. An
+    invented tool name isn't silent -- `_build_agent` raises and the retry loop
+    feeds the real list back -- but it costs one of only three attempts."""
+    from bestteam.core.specification import _ARCHITECT_SYSTEM_PROMPT
+
+    assert "Available built-in tools" in _ARCHITECT_SYSTEM_PROMPT
+    assert "never invent" in _ARCHITECT_SYSTEM_PROMPT.lower()

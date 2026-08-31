@@ -19,6 +19,7 @@ _GOOD = {
     "FORWARDED_ALLOW_IPS": "10.0.0.2",
     "BESTTEAM_KB_DEFAULT_EMBEDDING_MODEL": "openai:text-embedding-3-small",
     "BESTTEAM_KB_DEFAULT_RERANK_MODEL": "cross-encoder:BAAI/bge-reranker-base",
+    "TAVILY_API_KEY": "tvly-not-a-real-key",
 }
 
 
@@ -96,6 +97,16 @@ def test_an_unset_kb_embedding_default_warns_that_customers_get_keyword_search_o
     # The rerank default is only meaningful once an embedding model is set, so
     # it must not add a second warning about a KB feature that cannot apply.
     assert "BESTTEAM_KB_DEFAULT_RERANK_MODEL" not in by
+    assert not has_failures(check_environment(env))
+
+
+def test_an_unset_tavily_key_warns_that_web_search_degrades_silently():
+    env = dict(_GOOD)
+    del env["TAVILY_API_KEY"]
+    by = _by_name(check_environment(env))
+    assert by["TAVILY_API_KEY"].level == "WARN"
+    assert "web_search" in by["TAVILY_API_KEY"].message
+    # A deployment with no research team has no reason to be blocked on it.
     assert not has_failures(check_environment(env))
 
 

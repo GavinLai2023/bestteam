@@ -6,6 +6,38 @@
 
 ## Done
 
+- **Web research is buildable from the wizard** (2026-08-30). Four gaps that
+  together made "collect information online and summarise it" unreachable for a
+  self-service customer:
+  1. `builder._with_tool_catalog` puts `REGISTRY`'s names and one-line
+     descriptions into the Solution Architect's prompt at both generation
+     sites. The architect was told to choose "tools available to the pipeline"
+     and never shown the list — it could only discover a name by guessing a
+     wrong one and reading `_build_agent`'s error on a retry, and a design with
+     no tools is valid, so the usual outcome was a research team answering from
+     the model's weights. The catalog carries the email/egress exclusion
+     sentence, since naming `email_*` is what makes
+     `find_email_egress_conflicts`'s refusal reachable from a generated design.
+  2. `http_get` returns HTML as text (lxml, scripts/styles stripped) capped at
+     8,000 characters, and any other body capped at 50,000 — previously the raw
+     page went into the model's context uncapped. `tools-http` declares lxml;
+     without it the tool degrades to the raw body rather than raising.
+  3. `admin check-env` WARNs on an unset `TAVILY_API_KEY`. `web_search` fails at
+     run time, the adapter turns the exception into tool-result text, and the
+     model answers from memory instead — a finished-looking brief citing
+     nothing.
+  4. `_MAX_TOOL_ITERATIONS` is 10 (search-read-search-again reached five with
+     ordinary work), and exhausting it now makes one **wrap-up call with no
+     tools bound** that turns the gathered material into the answer, instead of
+     discarding the turn for a stop notice. Metered and cancellable like any
+     call; the notice remains the fallback when the wrap-up produces no text.
+
+  Not addressed, from the same assessment: Tavily spend is still unmetered,
+  uncapped and shared across orgs on one process-wide key; `web_search` still
+  exposes no `search_depth`/`time_range`/`include_domains`/`include_raw_content`;
+  and there is still no web-research Skill or a demo pipeline that really
+  searches.
+
 - **DocumentsPage shows an existing team's KB files instead of a blank name
   field** (2026-08-26). Revisiting the wizard's "Your documents" step for a
   team that already searches a collection now detects which one from
@@ -2569,20 +2601,25 @@
   G7 is conditional and operator-run: a live Microsoft 365 tenant smoke test
   (`docs/email-smoke-test.md` §9) before the first M365 customer. XML
   tree-aware chunking (PR #69) is merged and in the beta build. The build is
-  named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.2`
-  (`9afba75`, 2026-08-24), each from a `main` run with `backend-full` and
-  `e2e-full` green. Still open: rehearse `scripts/restore.sh` once against a
-  throwaway stack -- it needs Docker, so it happens on the target VPS (being
-  provisioned as of 2026-08-24), not on a developer workstation. A desk check
-  of the script on 2026-08-24 cleared the one interaction that could be read
-  statically: `docker-entrypoint.sh` gates `alembic upgrade head` on
-  `$1 = "uvicorn"`, so restore's two `docker compose run` calls do not
-  migrate, while the closing `docker compose start backend` does -- the right
-  order for an older backup. Two things only the rehearsal can settle: that
-  `docker compose cp` into a *stopped* container writes through to the data
-  volume, and that a files archive restores usefully even though `tar xzf` is
-  additive (upload directories created after the backup survive it, orphaned
-  from a database that no longer references them). Stage 1 of the review (ruff/mypy,
+  named: `v0.1.0-beta.1` (`69adf90`, 2026-08-22) and `v0.1.0-beta.3`
+  (`4360545`, 2026-08-31), each an annotated tag on the merge commit of its
+  release PR, cut from a `main` run with `backend-full` and `e2e-full` green.
+  0.1.0b2 was cut as PR #90 on 2026-08-24 but deliberately never tagged, so
+  the jump is intentional and there is no `v0.1.0-beta.2` to check out.
+  **beta.3 is deployed** on the beta VPS (2026-08-31). Both the restore
+  rehearsal and G7 closed 2026-08-31: run
+  on the target VPS against `v0.1.0-beta.1`, they settled the two questions a
+  desk check couldn't -- `docker compose cp` into a *stopped* container does
+  write through to the data volume, and the additive `tar xzf` restore is
+  useful despite leaving orphaned upload directories -- and the live M365
+  tenant smoke test (`docs/email-smoke-test.md` §9) passed. Neither needed
+  repeating for beta.3: `scripts/restore.sh`, `docker-entrypoint.sh`,
+  `docker-compose.yml` and the backup scripts are all unchanged since beta.1,
+  and so is the OAuth/IMAP client the M365 test exercised
+  (`src/bestteam/tools/`) -- only `email_trigger.py` picked up an additive
+  backlog-alert and paused-team guard, neither on the connection path.
+  Re-rehearse restore only if those scripts change; re-walk
+  the M365 smoke test only if the mail-client/OAuth path does. Stage 1 of the review (ruff/mypy,
   `pip-audit`/Dependabot, `/api/health` alembic-head check, `/metrics`,
   `_resolve_model` move, `STATUS.md` → `CHANGELOG.md` split, unified
   settings) runs in parallel with the beta. The "single process + SQLite"

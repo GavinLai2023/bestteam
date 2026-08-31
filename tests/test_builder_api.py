@@ -16,7 +16,12 @@ from bestteam import AgentSpec, Requirements, Specification, TeamSpec, PipelineS
 from bestteam.exceptions import ConfigurationError
 from helpers import create_user_and_login, get_user_principal_id, make_concurrent_safe_engine
 from ui.backend import main as backend_main
-from ui.backend.builder import _with_knowledge_base_catalog, _with_model_catalog, _with_skill_catalog
+from ui.backend.builder import (
+    _with_knowledge_base_catalog,
+    _with_model_catalog,
+    _with_skill_catalog,
+    _with_tool_catalog,
+)
 from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db.models import KnowledgeBaseRecord
@@ -54,6 +59,38 @@ def test_with_skill_catalog_appends_skill_list(db_session):
     assert "research_skill" in result
     assert "Deep research assistant" in result
     assert "web_search" in result
+
+
+def test_with_tool_catalog_names_every_built_in_tool():
+    """Without this the architect is told to "choose tools from the ones
+    available" and never shown what they are, so it silently designs a
+    research team with no way to reach the web."""
+    from bestteam.tools import REGISTRY
+
+    result = _with_tool_catalog("Requirements here.")
+
+    assert result.startswith("Requirements here.")
+    for name in REGISTRY:
+        assert name in result
+
+
+def test_with_tool_catalog_gives_each_tool_a_one_line_description():
+    result = _with_tool_catalog("Requirements here.")
+
+    web_search_line = [ln for ln in result.splitlines() if ln.startswith("- web_search")]
+    assert len(web_search_line) == 1
+    assert "Search the web" in web_search_line[0]
+
+
+def test_with_tool_catalog_warns_that_email_and_web_tools_cannot_share_a_team():
+    """Naming the email tools is what makes this reachable: `find_email_egress_conflicts`
+    refuses the combination at deploy time, so the architect has to be told
+    before it designs one."""
+    result = _with_tool_catalog("Requirements here.")
+
+    exclusion = [ln for ln in result.splitlines() if "email_" in ln and "web_search" in ln]
+    assert exclusion, result
+    assert "http_get" in exclusion[0]
 
 
 def test_with_knowledge_base_catalog_unchanged_when_no_knowledge_bases(db_session):
@@ -196,6 +233,38 @@ def test_specification_generation_with_fake_model_returns_clear_error(client):
     resp = client.post(f"/api/builder/sessions/{sid}/specification", json={"model": "fake:ok"})
     assert resp.status_code == 400
     assert "real AI model" in resp.json()["detail"]
+
+
+def test_specification_generation_shows_the_architect_the_built_in_tools(client):
+    """The helper existing but never wired is exactly the defect being fixed,
+    so assert on the prompt the architect is actually handed."""
+    sid = client.post("/api/builder/sessions", json={"intent_text": "research the market"}).json()["id"]
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()),          patch(
+             "ui.backend.builder.generate_specification",
+             return_value=Specification.model_validate(_VALID_SPEC),
+         ) as mock_architect:
+        client.post(f"/api/builder/sessions/{sid}/specification", json={"model": "openai:gpt-4o"}).raise_for_status()
+
+    prompt = mock_architect.call_args.args[1]
+    assert "web_search" in prompt
+    assert "http_get" in prompt
+
+
+def test_solution_feedback_shows_the_architect_the_built_in_tools(client):
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "research the market"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()),          patch(
+             "ui.backend.builder.generate_specification",
+             return_value=Specification.model_validate(_VALID_SPEC),
+         ) as mock_architect:
+        client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "let them search the web", "model": "openai:gpt-4o"},
+        ).raise_for_status()
+
+    assert "web_search" in mock_architect.call_args.args[1]
 
 
 def test_deploy_stamps_pipeline_with_session_org(client):

@@ -89,6 +89,12 @@ mailbox, one automated team (see `docs/BETA_NOTES.md`).
 cp .env.example .env
 ```
 
+This is a one-time step: `.env` is gitignored, so pulling or rebuilding a
+later update never touches it — do not re-run `cp` on an existing deployment,
+it would overwrite your configured `.env` with the template. Checking whether
+a *later* update expects new variables belongs to the upgrade flow, after the
+new code is on the host: see "Updating an existing deployment" below.
+
 Edit `.env` and fill in:
 
 - LLM provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`
@@ -164,6 +170,14 @@ to, and why:
 | `BESTTEAM_SENTRY_DSN` set | WARN | Without it the container log is the only record of a failure. |
 | `BESTTEAM_SENTRY_DSN` a valid DSN | FAIL | A malformed one makes `sentry_sdk.init` raise at import -- a restart loop. |
 | `FORWARDED_ALLOW_IPS` set to your proxy | WARN | Otherwise the per-address login budget is shared by everyone behind the proxy. |
+
+**It validates shape, not correctness — read the values it echoes back, not
+only the levels.** An origin left at the `.env.example` placeholder
+(`https://app.example-customer.com`) is a well-formed origin and prints `[OK]`.
+That one hides especially well: when the frontend and the API are served from
+the same origin behind one reverse proxy, the browser skips CORS altogether, so
+a wrong `BESTTEAM_CORS_ORIGINS` breaks nothing at all until the day you split
+them — and then breaks every request at once, with nothing in the backend log.
 
 Then, once the org exists: connect its mailbox with `--test`
 (§4c), and if it is on Microsoft 365, walk `docs/email-smoke-test.md` §9
@@ -556,6 +570,59 @@ customers that plainly rather than implying it works.
   member to `/activity` (the Dashboard), or to `/wizard` if the org has
   nothing deployed yet, and a platform admin to `/advanced`.
 
+## Updating an existing deployment
+
+An update is a pull and a rebuild **on the host**, in this order — the order
+is the point, because the `.env` check only means anything once the new code
+is actually on the box:
+
+```bash
+cd /opt/bestteam
+./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F).db
+
+git status                               # what has this host modified?
+git stash && git pull && git stash pop   # keeps local edits, e.g. a port binding
+
+# What this update expects that your .env may not have. Run it AFTER the pull:
+# before it, HEAD is still the code you are already running and the diff is empty.
+# `git pull` sets ORIG_HEAD to the commit you were on, so you need not remember
+# it (or name it yourself: git diff v0.1.0-beta.1 HEAD -- .env.example).
+git diff ORIG_HEAD HEAD -- .env.example
+
+# Add any new variables to .env by hand -- never by re-running `cp` -- then:
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+
+docker compose build
+docker compose up -d                     # migrations run themselves on start (§3)
+
+# Then confirm it landed:
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+docker compose exec backend printenv BESTTEAM_RELEASE
+```
+
+`git status` comes first because `git stash pop` exits 1 with `No stash entries
+found` on a clean tree — harmless, but it reads like the update failed. With
+nothing modified, plain `git pull` is the whole step. A host-local edit that
+must survive every future pull (a loopback port binding, say) belongs in
+`docker-compose.override.yml`, which compose merges automatically and no git
+operation can revert.
+
+`.env` is gitignored, so the pull never touches it; the diff only tells you
+what to add. `check-env` (§1) is the backstop — it reads the environment the
+backend will actually see and exits 1 on any FAIL, so a variable you missed
+surfaces before the containers come up rather than as a crash loop.
+
+**Run `check-env` a second time after `up -d`.** Its `schema: at head
+(<revision>)` line is how you confirm the entrypoint's `alembic upgrade head`
+really ran; asked before the containers come up it names the revision you are
+*leaving*, which reads exactly like a migration that was skipped.
+
+**And keep track of which container you are asking.** `docker compose run`
+starts a fresh one against the current `.env`, so it can only tell you the file
+is right; `docker compose exec` enters the container actually serving traffic.
+Only `exec` proves the live backend picked up an edit — the same trap that hides
+a stale Sentry DSN (see "Logs and error reporting").
+
 ## Updating built-in skills on an existing deployment
 
 Built-in skills (e.g. `email_triage_reply`) are seeded on boot **only if the
@@ -634,6 +701,53 @@ start-up (`check-env` flags it first). `BESTTEAM_ENVIRONMENT`
 to turn reporting off. `sentry-sdk` ships in the image; on a bare
 `pip install`, it is part of the `ui` extra.
 
+**Verify it once.** `check-env` proves the DSN parses, not that events arrive.
+Send one through the real code path:
+
+```bash
+docker compose run --rm --no-deps backend python -c "import sentry_sdk; from ui.backend import error_reporting as er; print('enabled:', er.init_from_env()); er.report_message('sentry smoke test', source='manual'); sentry_sdk.flush(timeout=5); print('sent')"
+```
+
+`enabled: True` says the container read the DSN, and the issue should appear in
+Sentry within seconds -- resolve it afterwards, so the stream stays empty except
+for real faults. Do **not** paste the `sentry_sdk.init(...)` snippet Sentry's
+onboarding page offers: the backend already initialises the SDK, and that
+snippet sets `send_default_pii=True`, the opposite of everything the paragraph
+above describes.
+
+⚠️ **Editing `.env` does not change a container that is already running.**
+`docker compose run` starts a fresh one and reads the current file, so the smoke
+test can pass while the live backend still holds the old value. After any `.env`
+edit, recreate the service explicitly:
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+That holds for every variable in `.env`, not just this one.
+
+If the smoke test prints `sent` and nothing arrives, suspect the DSN first -- a
+truncated paste is the common one. Take the SDK out of the picture and read the
+HTTP status yourself; its debug output logs failures but not successes, so a
+quiet log proves less than it looks:
+
+```bash
+DSN=$(grep -E '^BESTTEAM_SENTRY_DSN=' .env | cut -d= -f2-)
+KEY=$(echo "$DSN" | sed -E 's#^https://([^@]+)@.*#\1#')
+HOST=$(echo "$DSN" | sed -E 's#^https://[^@]+@([^/]+)/.*#\1#')
+PROJ=$(echo "$DSN" | sed -E 's#.*/([0-9]+)$#\1#')
+echo "host=$HOST project=$PROJ key=${KEY:0:8}...(${#KEY} chars)"
+curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
+  -H "Content-Type: application/json" \
+  -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=$KEY, sentry_client=curl/1.0" \
+  -d '{"message":"curl smoke test","level":"error","platform":"other"}'
+```
+
+The key is 32 characters, and `project` must be the project you are actually
+looking at in Sentry. `200` with an event id means the ingest accepted it;
+`401`/`403` means the key or project id is wrong -- re-copy the whole DSN from
+the project's **Client Keys (DSN)** page rather than retyping it.
+
 ## Backup and restore
 
 A backup is **two files**, taken by two scripts, both safe to run while the
@@ -669,6 +783,14 @@ Prune old files with whatever you already use (`find /var/backups/bestteam
 directory off the host — a backup on the disk that fails with the database is
 not a backup.
 
+**Whoever runs the scripts has to be able to write the output directory.** A
+cron entry under `root` creates `/var/backups/bestteam` owned by `root`, and the
+same command run by hand as the deploy user then fails on its very last step
+with `permission denied` — after the copy inside the container has already been
+made, which `set -e` leaves behind at `/tmp/bestteam-backup.db`. Fix the owner
+once (`sudo chown <user> /var/backups/bestteam`) and drop the stray file
+(`docker compose exec -T backend rm -f /tmp/bestteam-backup.db`).
+
 **Back up `BESTTEAM_SECRETS_KEY` separately and securely** (a password manager
 or secrets vault — NOT alongside the database dump). Stored mailbox passwords
 are encrypted with it, so a database backup is useless for email without the
@@ -694,7 +816,12 @@ if you have one, the files archive:
 It performs the steps below in order and finishes by waiting for
 `/api/health` to answer 200. **Rehearse it once before the first beta customer
 is on the box** — against a throwaway `docker compose` stack, not production —
-so the first restore you do is not the one that matters. The manual
+so the first restore you do is not the one that matters. A later code update
+does not need a fresh rehearsal by default: re-run it only if
+`scripts/restore.sh`, the backup scripts, `docker-entrypoint.sh` or
+`docker-compose.yml` changed since your last rehearsal. A new Alembic
+migration alone is already exercised by the normal auto-migrate-on-start path
+(section 2), not by the restore procedure itself. The manual
 equivalent, if you would rather see each step:
 
 1. Stop the backend so nothing writes to the database during restore:

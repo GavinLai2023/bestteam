@@ -409,6 +409,11 @@ BESTTEAM_SENTRY_DSN=
 [sentry.io](https://sentry.io) 注册（免费额度对 Beta 足够），把 DSN 填进来。
 **填错格式会导致后端起不来**，所以要么正确填写，要么留空。
 
+DSN 是从 Sentry 项目的 **Client Keys (DSN)** 页面整串复制的，key 那段正好
+32 位——少几位是最常见的失误，而且不会报错，只是事件永远送不到。填完照
+`deployment.zh-CN.md` 的「一个可选的错误上报渠道」那一节发一条冒烟测试确认，
+别只看 `check-env` 显示 OK。
+
 ### 7.9 可选：邮件轮询间隔 / 每日运行上限
 
 ```
@@ -474,7 +479,9 @@ docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 > **出错了怎么办**：容器起不来先看日志——
 > `docker compose logs --tail 100 backend`。后端在配置不对时会明确说出是哪一项，
 > 不用猜。改完 `.env` 之后：
-> - 只改了非 `VITE_` 的项 → `docker compose up -d` 就够了
+> - 只改了非 `VITE_` 的项 → `docker compose up -d --force-recreate backend`
+>   （容器的环境变量是启动那一刻定死的，`--force-recreate` 是确保新值一定生效的
+>   写法；不加的话不同 compose 版本行为不一致）
 > - 改了 `VITE_API_BASE` / `VITE_WS_BASE` → 必须
 >   `docker compose build frontend && docker compose up -d`
 
@@ -579,11 +586,17 @@ cd /opt/bestteam
 docker compose logs -f backend
 docker compose logs --tail 200 backend      # 只看最近 200 行
 
-# 重启
+# 重启（注意：restart 复用同一个容器，读不到新的 .env）
 docker compose restart
+
+# 只改了 .env、想让新值生效——容器的环境变量是启动那一刻定死的
+docker compose up -d --force-recreate backend
 
 # 升级到新版本代码
 git stash && git pull && git stash pop      # 保住你改过的端口绑定
+git diff ORIG_HEAD HEAD -- .env.example     # 这次升级要不要补新的环境变量？
+# 有新增的就手动加进 .env（别重跑 cp，会把你配好的覆盖掉），然后：
+docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
 docker compose build
 docker compose up -d
 # 数据库结构的升级是容器自己做的，不用手动执行
