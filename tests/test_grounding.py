@@ -252,6 +252,31 @@ def test_yaml_unknown_grounding_policy_is_a_configuration_error(tmp_path):
         load_pipeline(path)
 
 
+def test_yaml_grounding_level_and_model_reach_the_agent(tmp_path):
+    from bestteam.core.loader import load_pipeline
+
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        _pipeline_yaml('grounding_level: claim\n    grounding_model: "fake:ok"'),
+        encoding="utf-8",
+    )
+
+    agent = load_pipeline(path).steps[0].agents[0]
+    assert agent.grounding_level == "claim"
+    assert agent.grounding_model == "fake:ok"
+
+
+def test_yaml_unknown_grounding_level_is_a_configuration_error(tmp_path):
+    from bestteam.core.loader import load_pipeline
+    from bestteam.exceptions import ConfigurationError
+
+    path = tmp_path / "p.yaml"
+    path.write_text(_pipeline_yaml("grounding_level: strict"), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="grounding_level"):
+        load_pipeline(path)
+
+
 # ---------------------------------------------------------------------------
 # Claim-level grading (grade_claims): one plain LLM call splits the answer
 # into factual claims and judges each against the turn's search results.

@@ -42,3 +42,17 @@ def test_agent_rejects_an_unknown_grounding_policy():
     message = str(exc.value)
     assert "grounding_policy" in message
     assert "observe" in message and "retry" in message and "refuse" in message
+
+
+def test_agent_grounding_level_defaults_to_citation():
+    agent = Agent(name="bot", role="Helper", goal="do things")
+    assert agent.grounding_level == "citation"
+    assert agent.grounding_model is None
+
+
+def test_agent_rejects_an_unknown_grounding_level():
+    with pytest.raises(ConfigurationError) as exc:
+        Agent(name="bot", role="Helper", goal="do things", grounding_level="entailment")
+    message = str(exc.value)
+    assert "grounding_level" in message
+    assert "citation" in message and "claim" in message

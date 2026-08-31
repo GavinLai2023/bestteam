@@ -94,6 +94,8 @@ class AgentSpec(BaseModel):
     # wizard-only presentation field: round-tripping a pipeline that sets it
     # must not drop it. Validated by `Agent.__post_init__` at compile time.
     grounding_policy: Optional[str] = None
+    grounding_level: Optional[str] = None
+    grounding_model: Optional[str] = None
     display_name: Optional[str] = None
     friendly_description: Optional[str] = None
 
@@ -107,6 +109,10 @@ class AgentSpec(BaseModel):
             raw["skills"] = list(self.skills)
         if self.grounding_policy:
             raw["grounding_policy"] = self.grounding_policy
+        if self.grounding_level:
+            raw["grounding_level"] = self.grounding_level
+        if self.grounding_model:
+            raw["grounding_model"] = self.grounding_model
         return raw
 
 
