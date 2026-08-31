@@ -117,9 +117,16 @@ to where the detail and the reasoning live.
 
 - All tests use `FakeListChatModel` / `fake:` specs — zero API cost,
   deterministic. The two live-model examples need real quota to run.
+- **The two live KB release gates need `BESTTEAM_LIVE_EVAL=1`**, on top of an
+  `OPENAI_API_KEY` and (for rerank) the `tools-rerank` extra. They are by-hand
+  pre-release gates that spend real quota; without the opt-in a dev machine
+  that merely *has* the key ran them in every sweep —
+  `test_kb_eval_rerank_live.py` alone was 5m46s of a 10m53s run.
 - **Every test file needs a `pytestmark`** (`unit`/`integration`/`e2e`/
   `optional`, optionally `slow`). `tests/test_marker_completeness.py` fails the
-  suite otherwise, so a new file can't fall outside every CI job's `-m`.
+  suite otherwise, so a new file can't fall outside every CI job's `-m`. It
+  reads `conftest.py`'s collection hook, so it only sees what the same process
+  collected — CI is the enforcement point.
 - **E2E** needs the `test` extra, `playwright install chromium`, `npm` on PATH,
   and ports 8000/5173 free (it fails loudly naming the conflict).
 - **Password hashing is deliberately cheap in tests.** `tests/conftest.py`
@@ -129,9 +136,21 @@ to where the detail and the reasoning live.
   `test_production_pbkdf2_iterations_are_unchanged` reads the literal out of
   `auth.py`'s source. `tests/e2e/` never imports conftest, so it still
   exercises genuine 260k hashing.
-- **`-n auto`** (pytest-xdist) for a fast local run: ~2m11s vs ~3m17s. Kept out
-  of `addopts` on purpose — it breaks `-x`, `--pdb` and readable tracebacks.
-  **Never** use it on `tests/e2e/` (fixed ports).
+- **`-n auto`** (pytest-xdist) for a fast local run. Kept out of `addopts` on
+  purpose — it breaks `-x`, `--pdb` and readable tracebacks. **Never** use it
+  on `tests/e2e/` (fixed ports).
+- **Baseline: 3m42s serial / 2m40s under `-n auto` for `-m "not e2e"` (2,437
+  tests, 31 Aug 2026).** If it drifts far above that, run `--durations` before
+  assuming a broad regression — twice now it was a handful of items.
+- **`import bestteam` costs 7.8s with the `tools-rerank` extra installed, 1.6s
+  without it.** `langchain_core.language_models.base` eagerly does `from
+  transformers import GPT2TokenizerFast`, and `sentence-transformers` puts
+  transformers + torch on the path. CI, Docker and the documented dev install
+  never include that extra, so nothing calls the path it enables (bestteam
+  never calls `get_num_tokens`). The tax is per process: the CLI, the dev
+  backend, pytest collection, each `-n auto` worker, and the fresh-interpreter
+  tests in `test_env_check.py` / `test_packaging.py` — now the two slowest
+  tests in the suite. Transformers 5.x dropped the `USE_TORCH=0` escape hatch.
 - **CI path filters compare differently per event**: on a *push*, against the
   previous commit (so a docs-only commit to `main` runs nothing); on a *pull
   request*, against the base branch (so the whole PR's diff decides). The
