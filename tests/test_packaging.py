@@ -85,7 +85,15 @@ def test_python_dash_m_bestteam_entry_point():
 # fail when someone edits `pyproject.toml` without regenerating the lock, or
 # installs somewhere without it.
 
-_LOCKED_EXTRAS = ("ui", "dev", "tools", "test", "interview", "providers-openai")
+_LOCKED_EXTRAS = (
+    "ui",
+    "dev",
+    "tools",
+    "test",
+    "interview",
+    "providers-openai",
+    "providers-deepseek",
+)
 
 
 def _lock_text():

@@ -29,6 +29,10 @@ tools        = ["tavily-python>=0.3", "pypdf>=4.0", "openpyxl>=3.1", "python-doc
 # (langchain string model resolution) and interview transcription (openai),
 # so the official image can execute the advertised commercial paths (CR-007).
 providers-openai = ["langchain>=0.3,<2", "langchain-openai>=0.2,<2", "openai>=1.0"]
+# DeepSeek is resolved by the same `init_chat_model` path, but through its own
+# integration package -- without it a `deepseek:` model spec in a deployment's
+# model catalog fails at call time, not at start-up.
+providers-deepseek = ["langchain>=0.3,<2", "langchain-deepseek>=1.1,<2"]
 interview    = ["openai>=1.0"]
 
 [project.scripts]

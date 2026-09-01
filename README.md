@@ -59,7 +59,7 @@ when you want to pick up newer upstream versions:
 
 ```bash
 # after editing pyproject.toml -- keeps existing pins, adds/removes what changed
-uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai -o requirements.lock
+uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai --extra providers-deepseek -o requirements.lock
 # to move every pin to the newest allowed version
 uv pip compile ... --upgrade -o requirements.lock
 ```
