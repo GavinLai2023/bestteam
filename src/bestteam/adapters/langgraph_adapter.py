@@ -917,6 +917,15 @@ def _run_agent(
             # citation-level result, never a reason to retry or refuse. The
             # call is billed either way, so usage is metered either way.
             nonlocal grading, claim_check_error, grader_model
+            if should_cancel is not None and should_cancel():
+                # Same contract as `_call`: never open a NEW provider request
+                # after a stop, and the guard before the grounding block is not
+                # enough on its own -- `should_cancel` reads a flag another
+                # thread sets, so a stop can land in the instant between the
+                # two (Codex review finding). Not a `claim_check_error`: the
+                # check did not fail, the turn ended, and the guard below
+                # discards this text anyway.
+                return
             if grader_model is None:
                 try:
                     grader_model = (
@@ -1006,6 +1015,14 @@ def _run_agent(
                 if forward_text and on_token is not None:
                     on_token(STREAM_RESET)
                 text = GROUNDING_REFUSAL_TEXT
+        if should_cancel is not None and should_cancel():
+            # A stop that landed while the grader was in flight. `grade_claims`
+            # invokes in one go -- unlike the agent's own calls it cannot be
+            # broken off mid-generation, an accepted cost bounded by the guard
+            # inside `_grade`, which keeps a stopped turn from starting one at
+            # all. What must not follow is persisting the answer it graded, so
+            # this mirrors the guards above: no output, no event.
+            return ""
         data = result.as_trace_data()
         if policy != "observe":
             data.update(policy=policy, retried=retried, refused=refused)

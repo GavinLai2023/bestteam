@@ -121,6 +121,10 @@ in the trace), never a retry/refusal. A claim-level failure's retry
 instruction names the unsupported claims (`claim_retry_instruction`). Claim
 keys ride `grounding_checked` only at claim level, so the default payload
 stays byte-identical. Bounds: one retry, two grader calls per turn.
+Cancellation: the grader is one more provider request, so a stop is polled
+immediately before it and again after the whole check — it invokes in one go
+and cannot be broken off mid-generation, so what the second guard buys is that
+a stopped turn never returns the answer it graded.
 
 ⚠️ **That forcing is insurance, not a requirement.** `_first_call` catches a
 provider that rejects it — DeepSeek's thinking mode returns
