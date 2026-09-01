@@ -509,6 +509,29 @@ def test_agent_spec_to_raw_omits_grounding_policy_when_unset():
     assert "grounding_policy" not in spec.to_raw()
 
 
+def test_agent_spec_round_trips_grounding_level_and_model():
+    spec = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+        grounding_level="claim",
+        grounding_model="fake:ok",
+    )
+    raw = spec.to_raw()
+    assert raw["grounding_level"] == "claim"
+    assert raw["grounding_model"] == "fake:ok"
+
+    default = AgentSpec(
+        name="support_agent",
+        role="Customer Support Specialist",
+        goal="Answer customer questions",
+        model="fake:hello",
+    ).to_raw()
+    assert "grounding_level" not in default
+    assert "grounding_model" not in default
+
+
 def test_architect_prompt_forbids_inventing_a_tool_name():
     """Same rule the prompt already carries for skills and knowledge bases. An
     invented tool name isn't silent -- `_build_agent` raises and the retry loop

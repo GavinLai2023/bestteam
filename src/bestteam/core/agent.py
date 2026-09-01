@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from ..exceptions import ConfigurationError
-from .grounding import GROUNDING_POLICIES
+from .grounding import GROUNDING_LEVELS, GROUNDING_POLICIES
 
 # A model spec is either a provider model name ("openai:gpt-4o-mini") resolved
 # at compile time, or a ready-made langchain BaseChatModel/Runnable instance —
@@ -30,6 +30,14 @@ class Agent:
     # What to do when this agent's answer fails the grounding check
     # (core/grounding.py). Inert for an agent without a knowledge-base tool.
     grounding_policy: str = "observe"
+    # How deep that check goes: "citation" (set membership over returned
+    # citations -- the default and the pre-existing behaviour) or "claim"
+    # (an additional LLM grader judges each factual claim against the turn's
+    # search results). Inert without a knowledge-base tool, like the policy.
+    grounding_level: str = "citation"
+    # Model for the claim grader; None means the agent's own model. Only read
+    # when grounding_level == "claim".
+    grounding_model: ModelSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -43,6 +51,12 @@ class Agent:
             raise ConfigurationError(
                 f"Agent '{self.name}' has unknown grounding_policy "
                 f"'{self.grounding_policy}'. Valid values: {valid}"
+            )
+        if self.grounding_level not in GROUNDING_LEVELS:
+            valid = ", ".join(GROUNDING_LEVELS)
+            raise ConfigurationError(
+                f"Agent '{self.name}' has unknown grounding_level "
+                f"'{self.grounding_level}'. Valid values: {valid}"
             )
 
     def system_prompt(self) -> str:

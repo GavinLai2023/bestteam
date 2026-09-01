@@ -542,10 +542,65 @@ streaming path, text that already streamed to a viewer is discarded (the
 stream-reset control code) before the corrected answer streams or the
 refusal is returned — the authoritative answer is still `run_completed`'s.
 
-What the policy still does **not** do: judge whether a cited passage actually
-supports the claim (no claim-level entailment, no grader model), check a
-pipeline's final merged output (the check is per agent turn), or pin the
-agent to one *specific* knowledge base when it carries several tools.
+What the policy still does **not** do: check a pipeline's final merged
+output (the check is per agent turn), or pin the agent to one *specific*
+knowledge base when it carries several tools. Whether a cited passage
+actually supports each claim is the opt-in claim level, below.
+
+### Grounding level: `citation` | `claim`
+
+How deep the check goes is a second, orthogonal per-agent setting
+(2026-09-01, spec `2026-09-01-claim-level-grounding-design.md`):
+
+```yaml
+agents:
+  - name: support_agent
+    role: Support Specialist
+    goal: Answer questions from the product documentation
+    model: "openai:gpt-4o-mini"
+    tools: [product_docs]
+    grounding_policy: refuse
+    grounding_level: claim          # omit for citation (the default)
+    grounding_model: "openai:gpt-4o-mini"   # optional; omit = the agent's own model
+```
+
+- **`citation`** (default): exactly the check described above — set
+  membership over returned citations, byte-for-byte unchanged.
+- **`claim`**: after the citation check passes, one extra LLM call
+  (`grade_claims`, `core/grounding.py`) splits the answer into factual
+  claims and judges each strictly against the text of this turn's own
+  search results. The combined pass bar is *citation check passes AND no
+  unsupported claims*. An answer with zero factual claims passes — an
+  honest "the knowledge base does not contain the answer" is not refused.
+
+The grader is a plain model call with tolerant JSON parsing, deliberately
+not `with_structured_output` (`fake:` models don't support it; reasoning
+models reject the forced `tool_choice` behind it). The grader model
+defaults to the agent's own model; `grounding_model` overrides it — for
+example a cheaper model as grader. The grader call is metered onto the
+agent's usage under the grader model's spec.
+
+Interaction with the policy, per turn (bounds: one retry, at most two
+grader calls):
+
+- A claim-level failure under `retry`/`refuse` extends the corrective
+  instruction with the grader-named unsupported claims: delete each one or
+  rewrite it to state only what the search results support, keeping the
+  rest — the customer gets the verifiable part, not an empty hand.
+- The rewritten answer goes through the same combined bar; `refuse`
+  returns the refusal text only when it still fails.
+- **Grader failure is fail-soft**: an unresolvable `grounding_model`, a
+  provider error, or an unparseable grading response degrades the turn to
+  the citation-level result (recorded as `claim_check_error: true`), never
+  a retry or refusal — the rerank / query-expansion precedent.
+
+At claim level the `grounding_checked` event additionally carries
+`level: "claim"` and, when the grader ran, `claims`, `claims_supported`
+and `unsupported_claims` (bounded). The default level adds no keys at all.
+
+Recommended rollout for a high-risk agent: `grounding_level: claim` with
+`grounding_policy: observe` first, watch `unsupported_claims` for grader
+false positives, then raise the policy to `retry` or `refuse`.
 
 ### What a search looks like in the trace
 
@@ -1243,13 +1298,13 @@ Hugging Face); inference is local and $0.
   `src/bestteam/core/CLAUDE.md`. Memory is not wired into knowledge base
   retrieval, or vice versa — recalling a user's memory and querying a
   knowledge base remain two independent tools.
-- **Grounding checks citations, not claims.** `grounding_checked` says
-  whether an answer's citations name passages that were retrieved; it does
-  not say the passage supports the claim. The opt-in per-agent
-  `grounding_policy` (`retry`/`refuse`, see "Grounding policy") can
-  regenerate or refuse an answer that fails the citation check, but
-  claim-level entailment, grader models and answer-level evaluation are not
-  built, and the default remains record-only.
+- **Grounding checks citations by default; claim checking is an LLM
+  grader's judgment, not entailment.** The opt-in `grounding_level: claim`
+  (see "Grounding level") has a grader model judge each factual claim
+  against the turn's search results, but there is no NLI/entailment model,
+  no evidence-span alignment, no pipeline-final-output check, and no
+  answer-level evaluation harness; grader quality is model-dependent, and
+  the default remains the citation-only, record-only behaviour.
 
 ## File reference
 

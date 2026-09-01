@@ -1243,3 +1243,198 @@ def test_retry_call_carries_the_failing_answer_and_the_corrective_instruction():
     assert retry_call[-2].content == "Uncited answer.", (
         "the failing answer must be in the conversation the retry corrects"
     )
+
+
+# ---------------------------------------------------------------------------
+# Claim-level grounding (grounding_level: "claim"): an LLM grader judges each
+# factual claim against the turn's own search results, on top of the citation
+# check. Grader failure falls back to citation-level -- never a refusal.
+# ---------------------------------------------------------------------------
+
+from bestteam.core.grounding import claim_retry_instruction  # noqa: E402
+
+_SUPPORTED_JSON = AIMessage(
+    content='{"claims": [{"text": "Refunds take 14 days.", "supported": true}]}'
+)
+_UNSUPPORTED_JSON = AIMessage(
+    content='{"claims": [{"text": "Refunds take 14 days.", "supported": true},'
+    ' {"text": "Shipping is free.", "supported": false}]}'
+)
+
+
+def _claim_agent(model, policy, grounding_model=None):
+    return Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3 § Refunds"])],
+        grounding_policy=policy,
+        grounding_level="claim",
+        grounding_model=grounding_model,
+    )
+
+
+def _run_claim(policy, responses, grounding_model=None):
+    model = _FakeToolCallingChatModel(responses=responses)
+    agent = _claim_agent(model, policy, grounding_model)
+    events = list(_single_agent_pipeline(agent).stream("refund window?"))
+    final = next(e for e in events if e.type == "agent_completed").data
+    grounding = next(e for e in events if e.type == "grounding_checked").data
+    return final, grounding
+
+
+def test_claim_level_all_supported_passes():
+    # The grader defaults to the agent's own model, so its call draws the next
+    # scripted response: [tool call, answer, grader JSON].
+    final, grounding = _run_claim("refuse", [_TOOL_CALL, AIMessage(content=_CITED), _SUPPORTED_JSON])
+    assert final == _CITED
+    assert grounding["level"] == "claim"
+    assert grounding["claims"] == 1
+    assert grounding["claims_supported"] == 1
+    assert grounding["unsupported_claims"] == []
+    assert grounding["refused"] is False
+
+
+def test_claim_level_observe_records_unsupported_claims_without_retry():
+    answer = AIMessage(content=_CITED + " Shipping is free.")
+    final, grounding = _run_claim("observe", [_TOOL_CALL, answer, _UNSUPPORTED_JSON])
+    assert final == _CITED + " Shipping is free.", "observe must not retry"
+    assert grounding["level"] == "claim"
+    assert grounding["unsupported_claims"] == ["Shipping is free."]
+    assert "policy" not in grounding, "observe keeps the policy keys out, as at citation level"
+
+
+def test_claim_level_retry_rewrites_and_passes():
+    failing = AIMessage(content=_CITED + " Shipping is free.")
+    final, grounding = _run_claim(
+        "retry",
+        # tool call, failing answer, failing grade, rewrite, passing grade
+        [_TOOL_CALL, failing, _UNSUPPORTED_JSON, AIMessage(content=_CITED), _SUPPORTED_JSON],
+    )
+    assert final == _CITED
+    assert grounding["retried"] is True
+    assert grounding["refused"] is False
+    assert grounding["unsupported_claims"] == []
+
+
+def test_claim_level_refuse_refuses_when_the_rewrite_still_fails():
+    failing = AIMessage(content=_CITED + " Shipping is free.")
+    final, grounding = _run_claim(
+        "refuse",
+        [_TOOL_CALL, failing, _UNSUPPORTED_JSON, failing, _UNSUPPORTED_JSON],
+    )
+    assert final == GROUNDING_REFUSAL_TEXT
+    assert grounding["refused"] is True
+    assert grounding["unsupported_claims"] == ["Shipping is free."]
+
+
+def test_claim_level_retry_instruction_names_the_unsupported_claims():
+    failing = AIMessage(content=_CITED + " Shipping is free.")
+    model = _MessageRecordingModel(
+        responses=[_TOOL_CALL, failing, _UNSUPPORTED_JSON, AIMessage(content=_CITED), _SUPPORTED_JSON]
+    )
+    list(_single_agent_pipeline(_claim_agent(model, "retry")).stream("refund window?"))
+    retry_call = model.recorded_calls[-2]  # -1 is the grader's second call
+    assert retry_call[-1].content == claim_retry_instruction(["Shipping is free."])
+    assert retry_call[-1].type == "human"
+
+
+def test_claim_level_grader_failure_falls_back_to_citation_level():
+    # The grader's scripted response parses to nothing -- the check was not
+    # performed, so a citation-passing answer must pass and NOT be refused.
+    final, grounding = _run_claim(
+        "refuse", [_TOOL_CALL, AIMessage(content=_CITED), AIMessage(content="not json")]
+    )
+    assert final == _CITED
+    assert grounding["level"] == "claim"
+    assert grounding["claim_check_error"] is True
+    assert "claims" not in grounding
+    assert grounding["refused"] is False
+
+
+def test_claim_level_grader_is_not_called_when_the_citation_check_fails():
+    # Citation check fails -> the grader must not burn a call; the retry uses
+    # the plain citation instruction; the rewrite passes citations and then
+    # gets graded. Scripted: tool call, uncited answer, rewrite, grader JSON.
+    model = _MessageRecordingModel(
+        responses=[_TOOL_CALL, AIMessage(content="Uncited."), AIMessage(content=_CITED), _SUPPORTED_JSON]
+    )
+    events = list(_single_agent_pipeline(_claim_agent(model, "retry")).stream("refund window?"))
+    grounding = next(e for e in events if e.type == "grounding_checked").data
+    assert grounding["claims"] == 1
+    retry_call = model.recorded_calls[2]
+    assert retry_call[-1].content == GROUNDING_RETRY_INSTRUCTION
+    assert grounding["retried"] is True
+
+
+def test_claim_level_uses_the_grounding_model_override():
+    # Override grader: the agent's model scripts only its own two calls; the
+    # grader draws from its own FakeListChatModel instance.
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    grader = FakeListChatModel(
+        responses=['{"claims": [{"text": "Refunds take 14 days.", "supported": true}]}']
+    )
+    final, grounding = _run_claim("refuse", [_TOOL_CALL, AIMessage(content=_CITED)], grounding_model=grader)
+    assert final == _CITED
+    assert grounding["claims"] == 1
+    assert grounding["refused"] is False
+
+
+def test_citation_level_payload_is_byte_identical_with_claim_machinery_present():
+    # The default level must keep the exact pre-claim payload -- no level key.
+    final, grounding = _run_policy(
+        "observe",
+        [_TOOL_CALL, AIMessage(content=_CITED)],
+    )
+    assert "level" not in grounding
+    assert "claims" not in grounding
+    assert "claim_check_error" not in grounding
+
+
+def test_claim_level_grader_usage_is_metered_with_the_grader_model_spec():
+    # A grader response carrying usage_metadata must land in the usage sink
+    # tagged with the grader model's spec (its class name for an instance with
+    # no model attribute). FakeMessagesListChatModel returns the scripted
+    # message as-is, usage_metadata included, and IS a BaseChatModel so
+    # `_resolve_model` accepts it.
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    from bestteam.adapters.langgraph_adapter import _run_agent
+
+    grader = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content='{"claims": []}',
+                usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            )
+        ]
+    )
+    model = _FakeToolCallingChatModel(responses=[_TOOL_CALL, AIMessage(content=_CITED)])
+    agent = Agent(
+        name="a",
+        role="role-a",
+        goal="goal-a",
+        model=model,
+        tools=[_stub_knowledge_base_tool(["handbook.pdf, p.3 § Refunds"])],
+        grounding_level="claim",
+        grounding_model=grader,
+    )
+    sink = []
+    _run_agent(agent, "refund window?", usage_sink=sink)
+    grader_entries = [u for u in sink if u["model"] == "FakeMessagesListChatModel"]
+    assert grader_entries == [
+        {"model": "FakeMessagesListChatModel", "input_tokens": 7, "output_tokens": 3}
+    ]
+
+
+def test_claim_level_bad_grounding_model_spec_fails_soft_not_the_run():
+    # `_resolve_model` raises ConfigurationError for an unresolvable spec; at
+    # grading time that must degrade to citation-level, never fail the run.
+    final, grounding = _run_claim(
+        "refuse", [_TOOL_CALL, AIMessage(content=_CITED)], grounding_model=12345
+    )
+    assert final == _CITED
+    assert grounding["claim_check_error"] is True
+    assert grounding["refused"] is False

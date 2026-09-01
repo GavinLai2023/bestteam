@@ -93,8 +93,24 @@
   `grounding_checked` payload byte-identical; `retry`/`refuse` add
   `policy`/`retried`/`refused` and the dashboard renders "— retried" /
   "— answer refused". Streaming sends `STREAM_RESET` so failing text never
-  survives on a viewer's screen. Still out of scope: claim-level entailment,
-  graders, pipeline-level final-output checks (`docs/DECISIONS.md`).
+  survives on a viewer's screen. Still out of scope: pipeline-level
+  final-output checks (`docs/DECISIONS.md`); claim-level grading shipped
+  2026-09-01, below.
+- **Claim-level grounding: `grounding_level: citation|claim` per agent**
+  (2026-09-01, spec
+  `docs/superpowers/specs/2026-09-01-claim-level-grounding-design.md`).
+  Opt-in depth on top of the policy: after a passing citation check, one
+  LLM grader call (`grade_claims`, plain invoke + tolerant JSON — not
+  `with_structured_output`) splits the answer into factual claims and
+  judges each against the turn's own KB tool results. Combined bar =
+  citation ∧ no unsupported claims (zero claims passes). `retry`/`refuse`
+  reuse the existing machinery with an instruction naming the unsupported
+  claims (delete or re-ground, keep the rest); `grounding_model` overrides
+  the grader (default: the agent's own model), metered under its spec;
+  grader failure fail-softs to citation level (`claim_check_error`).
+  Default `citation` keeps the `grounding_checked` payload byte-identical.
+  Still out of scope: NLI/entailment, evidence-span alignment,
+  pipeline-final-output checks, answer-level eval.
 - **User feedback: defects/suggestions from the app and share links, admin
   triage** (2026-08-26, spec
   `docs/superpowers/specs/2026-08-26-feedback-system-design.md`). One

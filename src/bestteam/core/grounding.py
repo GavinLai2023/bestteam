@@ -40,9 +40,12 @@ Such a tool loses the filename-only rule -- strictly stricter, never wrong.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+_logger = logging.getLogger(__name__)
 
 #: The tag the tool tells the model to quote (see
 #: ``knowledge_base.format_results``): ``[source: handbook.pdf, p.3 § Refunds]``.
@@ -78,6 +81,126 @@ GROUNDING_REFUSAL_TEXT = (
     "knowledge base's search results. Please rephrase the question, or "
     "consult the source documents directly."
 )
+
+#: How deep the grounding check goes (`Agent.grounding_level`). `citation`
+#: is the pre-existing set-membership check; `claim` additionally has an LLM
+#: grader split the answer into factual claims and judge each against the
+#: turn's own search results.
+GROUNDING_LEVELS = ("citation", "claim")
+
+#: Bound on how many grader-reported claims are read; anything past it is
+#: model output nobody asked for, not evidence.
+MAX_CLAIMS = 20
+
+_CLAIM_GRADER_SYSTEM_PROMPT = (
+    "You are a strict fact-checking grader. Extract every factual or business "
+    "assertion from the ANSWER (numbers, dates, durations, policies, "
+    "conditions, capabilities stated as fact), quoting each claim's text from "
+    "the answer. Judge each claim ONLY against the EVIDENCE text: supported "
+    "means the evidence states it or directly implies it. Respond with ONLY a "
+    'JSON object of the form {"claims": [{"text": "...", "supported": true}]}. '
+    "Use an empty list if the answer makes no factual claims (for example, it "
+    "only says the knowledge base has no answer). No prose outside the JSON."
+)
+
+
+def claim_retry_instruction(unsupported: Sequence[str]) -> str:
+    """The corrective instruction for a turn that failed at claim level: the
+    citation instruction plus the grader-named claims to delete or re-ground.
+    The rest of the answer is explicitly kept -- the customer gets the
+    verifiable part, not an empty hand."""
+    claims = "\n".join(f"- {claim}" for claim in unsupported)
+    return (
+        f"{GROUNDING_RETRY_INSTRUCTION}\n\n"
+        "These statements in your previous answer are NOT supported by the "
+        f"search results:\n{claims}\n"
+        "Remove each of them, or rewrite it to state only what the search "
+        "results support. Keep the rest of the answer."
+    )
+
+
+@dataclass(frozen=True)
+class ClaimGrading:
+    """What the grader made of one answer against one turn's evidence."""
+
+    #: Factual claims the grader extracted (bounded by MAX_CLAIMS).
+    claims: int
+    #: Of those, judged supported by the evidence.
+    supported: int
+    #: The rest, bounded like `GroundingResult.unverified`.
+    unsupported: List[str]
+
+    @property
+    def passes(self) -> bool:
+        """No unsupported claims. Zero claims passes: an honest "the knowledge
+        base does not contain the answer" has nothing to support and must not
+        be refused."""
+        return not self.unsupported
+
+
+def grade_claims(
+    text: str, evidence: Sequence[str], model: Any
+) -> Tuple[Optional[ClaimGrading], Optional[Any]]:
+    """One LLM call that splits `text` into factual claims and judges each
+    against `evidence` (the turn's knowledge-base tool results, verbatim).
+
+    Returns `(grading, raw_response)`. NEVER raises: an invoke failure returns
+    `(None, None)`; a response that parses to nothing usable returns
+    `(None, response)` -- the call was billed either way, so the caller can
+    still meter it (`expand_query`'s shape). `None` grading means the check
+    was not performed and the caller falls back to citation-level -- a grader
+    failure is never a reason to retry or refuse.
+
+    Deliberately NOT `with_structured_output`: `fake:` models don't support
+    it (which would make this untestable at $0), and reasoning-mode models
+    reject the forced `tool_choice` behind `function_calling` -- a plain
+    invoke plus tolerant JSON parsing sidesteps both, exactly like
+    `fusion.expand_query`.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    # Shared deliberately, like `_MARKDOWN_HEADING_RE` from `file_parser`:
+    # one definition of "tolerant JSON reply parsing", not two drifting ones.
+    from .fusion import _parse_expansion
+
+    haystack = text if isinstance(text, str) else ""
+    evidence_block = "\n\n---\n\n".join(evidence) if evidence else "(no search results)"
+    try:
+        response = model.invoke(
+            [
+                SystemMessage(content=_CLAIM_GRADER_SYSTEM_PROMPT),
+                HumanMessage(content=f"EVIDENCE:\n{evidence_block}\n\nANSWER:\n{haystack}"),
+            ]
+        )
+    except Exception:  # noqa: BLE001 -- no call succeeded, nothing billable
+        _logger.warning("Claim grading call failed; falling back to citation-level", exc_info=True)
+        return None, None
+
+    content = response.content if hasattr(response, "content") else str(response)
+    parsed = _parse_expansion(content if isinstance(content, str) else "")
+    raw_claims = parsed.get("claims") if parsed else None
+    if not isinstance(raw_claims, list):
+        _logger.warning("Claim grading response had no usable 'claims' list; falling back to citation-level")
+        return None, response
+
+    claims = 0
+    supported = 0
+    unsupported: List[str] = []
+    for entry in raw_claims:
+        if claims >= MAX_CLAIMS:
+            break
+        if not isinstance(entry, dict):
+            continue
+        claim_text = entry.get("text")
+        verdict = entry.get("supported")
+        if not isinstance(claim_text, str) or not claim_text.strip() or not isinstance(verdict, bool):
+            continue
+        claims += 1
+        if verdict:
+            supported += 1
+        else:
+            unsupported.append(" ".join(claim_text.split())[:MAX_LABEL_CHARS])
+    return ClaimGrading(claims=claims, supported=supported, unsupported=unsupported[:MAX_UNVERIFIED]), response
 
 def _normalise(label: str) -> str:
     """Collapse internal whitespace and strip the ends -- applied to both sides."""

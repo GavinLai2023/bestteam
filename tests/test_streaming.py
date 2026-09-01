@@ -456,3 +456,85 @@ def test_grounding_refusal_ends_the_stream_with_a_reset():
     assert GROUNDING_REFUSAL_TEXT not in "".join(deltas), (
         "the refusal is authoritative output, not a streamed delta"
     )
+
+
+# ---------------------------------------------------------------------------
+# grounding_level: "claim" is one more provider request per turn, so it stands
+# under the same cancellation contract as every other call (Codex review
+# finding): a stop must not open it, and a grade that did run must not hand
+# back an answer the visitor already stopped.
+# ---------------------------------------------------------------------------
+
+
+def _claim_agent(policy, responses, grader):
+    return Agent(
+        name="a", role="r", goal="g",
+        model=_ToolCallingModel(responses=responses),
+        tools=[_kb_stub_tool()],
+        grounding_policy=policy,
+        grounding_level="claim",
+        grounding_model=grader,
+    )
+
+
+class _CountingGrader(FakeListChatModel):
+    """Counts the calls that actually reached the grader model."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        object.__setattr__(self, "calls", getattr(self, "calls", 0) + 1)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def test_a_stop_landing_before_claim_grading_never_dials_the_grader(monkeypatch):
+    """The pre-grounding guard is not enough on its own: `should_cancel` reads
+    a flag another thread sets, so a stop can land in the instant between that
+    guard and the grader call."""
+    from bestteam.adapters import langgraph_adapter as adapter
+
+    stopped = {"yes": False}
+    real_check = adapter.check_grounding
+
+    def check_then_stop(*args, **kwargs):
+        result = real_check(*args, **kwargs)
+        stopped["yes"] = True  # the visitor hits Stop right here
+        return result
+
+    monkeypatch.setattr(adapter, "check_grounding", check_then_stop)
+    grader = _CountingGrader(responses=['{"claims": []}'])
+    events: List[Any] = []
+    text = _run_agent(
+        _claim_agent("observe", [_KB_TOOL_CALL, AIMessage(content=_KB_CITED)], grader),
+        "q",
+        should_cancel=lambda: stopped["yes"],
+        on_event=events.append,
+    )
+
+    assert getattr(grader, "calls", 0) == 0, "a stop must not open a new provider request"
+    assert text == "", "a stopped agent reports no output"
+    assert not [e for e in events if e.type == "grounding_checked"]
+
+
+def test_a_stop_during_claim_grading_records_no_answer():
+    """`grade_claims` invokes in one go, so a stop cannot break it off
+    mid-generation -- but the answer it graded must still not be persisted."""
+    stopped = {"yes": False}
+
+    class _StoppingGrader(FakeListChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            stopped["yes"] = True  # the stop lands while the grader is in flight
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    events: List[Any] = []
+    text = _run_agent(
+        _claim_agent(
+            "observe",
+            [_KB_TOOL_CALL, AIMessage(content=_KB_CITED)],
+            _StoppingGrader(responses=['{"claims": []}']),
+        ),
+        "q",
+        should_cancel=lambda: stopped["yes"],
+        on_event=events.append,
+    )
+
+    assert text == "", "a stopped turn must not persist the answer it had graded"
+    assert not [e for e in events if e.type == "grounding_checked"]

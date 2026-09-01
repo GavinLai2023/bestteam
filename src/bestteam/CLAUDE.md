@@ -108,6 +108,24 @@ cannot verify. Streaming: the failing text already reached the viewer, so
 `STREAM_RESET` precedes the corrected stream (and a refusal, which is never
 streamed — it rides `run_completed`).
 
+**`Agent.grounding_level: claim` (opt-in, orthogonal to the policy)** adds
+`grade_claims` after a passing citation check: one plain-invoke LLM call
+(deliberately NOT `with_structured_output` — `fake:` can't, reasoning models
+400 on its forced `tool_choice`) judging each factual claim against the
+turn's KB tool results (`kb_result_texts`). Combined bar = citation check ∧
+no unsupported claims; zero claims passes. `grounding_model` overrides the
+grader (default: the agent's own model); its usage is metered under the
+grader's spec. ⚠️ **Grader failure is fail-soft** — bad spec, invoke error or
+unparseable JSON degrades to the citation-level result (`claim_check_error`
+in the trace), never a retry/refusal. A claim-level failure's retry
+instruction names the unsupported claims (`claim_retry_instruction`). Claim
+keys ride `grounding_checked` only at claim level, so the default payload
+stays byte-identical. Bounds: one retry, two grader calls per turn.
+Cancellation: the grader is one more provider request, so a stop is polled
+immediately before it and again after the whole check — it invokes in one go
+and cannot be broken off mid-generation, so what the second guard buys is that
+a stopped turn never returns the answer it graded.
+
 ⚠️ **That forcing is insurance, not a requirement.** `_first_call` catches a
 provider that rejects it — DeepSeek's thinking mode returns
 `400 Thinking mode does not support this tool_choice`, **which arrives at call
