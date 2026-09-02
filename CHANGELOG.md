@@ -15,6 +15,16 @@ package versions written in [PEP 440](https://peps.python.org/pep-0440/) form
 
 ## [Unreleased]
 
+### Security
+
+- **A customer's team can no longer carry `parse_file`.** The tool reads any
+  path on the server with no sandbox, and organisation isolation covers
+  database rows, not the container's disk. Deploying an org team with it --
+  from the wizard or the admin config page -- is now refused with a message
+  pointing at knowledge bases, and the Solution Architect is no longer shown
+  the name. Nothing already deployed is affected; the SDK and YAML pipelines
+  keep the tool. No operator action.
+
 ## [0.1.0b3] — 2026-08-31
 
 Third beta build. Named from a green `main` (`ee88a5a`) — the `backend-full`

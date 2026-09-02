@@ -48,7 +48,11 @@ fetches any URL whose host doesn't resolve to a private/internal address**. Both
 are intentionally broad — their purpose is to read files and fetch URLs the agent
 is told to. **Callers exposing them to an LLM remain responsible** for
 constraining which paths/URLs an agent can be prompted to access, and for
-network-layer egress controls.
+network-layer egress controls. The UI backend does exactly that for
+`parse_file`: a deployed org team is refused it at both deploy points and the
+architect's tool catalog never names it (`deploy_validation.LOCAL_FILE_TOOL_NAMES`),
+because org isolation there covers database rows, not the shared container's
+disk. SDK/YAML users keep the tool.
 
 The SSRF check (`http_client.check_host_allowed`) resolves the host, rejects
 private/internal addresses, and **returns the validated IP**; `http_get` then

@@ -35,7 +35,11 @@ from bestteam.tools import REGISTRY
 
 from .auth_api import get_current_admin, get_current_user
 from .db.model_catalog import delete_entry, get_entry, list_chat_entries, list_entries, upsert_entry
-from .deploy_validation import find_email_egress_conflicts, validate_agent_models
+from .deploy_validation import (
+    find_email_egress_conflicts,
+    find_local_file_tools,
+    validate_agent_models,
+)
 from .db.models import (
     BuilderSession,
     IngestionJob,
@@ -460,9 +464,8 @@ def upsert_pipeline_config(
             )
 
         if org_id is not None:
-            egress_problems = find_email_egress_conflicts(
-                resolve_agent_tool_sets(db, raw, org_id)
-            )
+            agent_tool_sets = resolve_agent_tool_sets(db, raw, org_id)
+            egress_problems = find_email_egress_conflicts(agent_tool_sets)
             if egress_problems:
                 raise HTTPException(
                     status_code=400,
@@ -470,6 +473,16 @@ def upsert_pipeline_config(
                         "This team can't be deployed: "
                         + "; ".join(egress_problems)
                         + ". Remove the web-access tool, or move that work to a pipeline with no mailbox access."
+                    ),
+                )
+            local_file_problems = find_local_file_tools(agent_tool_sets)
+            if local_file_problems:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This team can't be deployed: "
+                        + "; ".join(local_file_problems)
+                        + ". Upload the documents to a knowledge base instead."
                     ),
                 )
 

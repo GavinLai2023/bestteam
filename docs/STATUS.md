@@ -6,6 +6,17 @@
 
 ## Done
 
+- **`parse_file` is off the customer menu on a deployed org team** (2026-09-02).
+  The tool reads any local path with no sandbox and org isolation covers rows,
+  not the shared container's disk. `deploy_validation.LOCAL_FILE_TOOL_NAMES` +
+  `find_local_file_tools` refuse it at both deploy points (`builder.deploy_session`,
+  `crud.upsert_pipeline_config`), same shape as the email/egress refusal, and
+  `_with_tool_catalog` no longer names it to the architect. Verified before
+  building: upload directories are `v_<12 random hex>`, builder-session
+  directories 32 hex, and the embedding cache holds hashes, not text -- so a
+  cross-tenant read was not practically reachable; this closes the principle,
+  not an exploit. SDK/YAML pipelines keep the tool.
+
 - **Web research is buildable from the wizard** (2026-08-30). Four gaps that
   together made "collect information online and summarise it" unreachable for a
   self-service customer:
