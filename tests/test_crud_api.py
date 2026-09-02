@@ -2427,3 +2427,58 @@ def test_org_copy_of_builtin_name_is_allowed_and_not_builtin(client):
     assert resp.status_code == 200
     item = client.get("/api/config/skills/email_triage_reply?org=default").json()
     assert item.get("builtin") is not True
+
+
+def test_skill_versions_endpoint_lists_history_newest_first(client):
+    assert client.put(
+        "/api/config/skills/hist?org=default", json={"instructions": "one"}
+    ).status_code == 200
+    assert client.put(
+        "/api/config/skills/hist?org=default", json={"instructions": "two"}
+    ).status_code == 200
+    versions = client.get("/api/config/skills/hist/versions?org=default").json()
+    assert [v["version"] for v in versions] == [2, 1]
+    assert versions[0]["current"] is True and versions[1]["current"] is False
+    assert versions[1]["config"]["instructions"] == "one"
+
+
+def test_skill_references_lists_pins(client):
+    # Deploy an org team over a platform built-in; the references endpoint
+    # must surface the pin (org, team, pinned version, currency).
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    assert client.put(
+        "/api/config/pipelines/ref_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["email_triage_reply"]}]),
+    ).status_code == 200
+
+    refs = client.get("/api/config/skills/email_triage_reply/references").json()
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref["pipeline_name"] == "ref_team"
+    assert ref["org_name"] == "default"
+    assert ref["pinned_version"] == 1
+    assert ref["is_current_deploy"] is True
+
+    # A redeploy without the skill supersedes the pin: still listed, but no
+    # longer the current deploy.
+    assert client.put(
+        "/api/config/pipelines/ref_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}]),
+    ).status_code == 200
+    refs = client.get("/api/config/skills/email_triage_reply/references").json()
+    assert len(refs) == 1
+    assert refs[0]["is_current_deploy"] is False
+
+
+def test_skill_references_empty_when_unreferenced(client):
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    assert client.get("/api/config/skills/contractor_sourcing/references").json() == []
+
+
+def test_skill_references_404_for_unknown_skill(client):
+    assert client.get("/api/config/skills/nope/references").status_code == 404
