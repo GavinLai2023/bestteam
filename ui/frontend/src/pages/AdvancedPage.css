@@ -305,3 +305,13 @@
   color: var(--text-muted);
   margin-bottom: 4px;
 }
+
+/* "Show deactivated" beside the org selector (AdvancedPage + TracePage). */
+.advanced-org-inactive {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}

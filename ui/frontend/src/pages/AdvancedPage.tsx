@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { visibleOrgOptions } from '../lib/orgs'
 import { useConfirm } from '../lib/useConfirm'
 import type { AdminOrg, ConfigItem, SkillReference, SkillVersionInfo } from '../lib/types'
 import '../components/WizardLayout.css'
@@ -83,6 +84,7 @@ export default function AdvancedPage() {
   const [uploadNotice, setUploadNotice] = useState<string | null>(null)
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null)
+  const [showInactiveOrgs, setShowInactiveOrgs] = useState(false)
   // Skills tab only: the selected skill's immutable version history, the
   // deployed teams pinning it, and which historical version (if any) is being
   // viewed read-only. null = the editable head.
@@ -380,12 +382,22 @@ export default function AdvancedPage() {
             Organisation
             <select value={org ?? ''} onChange={(e) => selectOrg(e.target.value)}>
               {kind.orgScope === 'optional' && <option value={PLATFORM_TIER}>Platform (built-ins)</option>}
-              {orgs.map((o) => (
+              {visibleOrgOptions(orgs, showInactiveOrgs, org).map((o) => (
                 <option key={o.name} value={o.name}>
                   {o.display_name || o.name}
                 </option>
               ))}
             </select>
+          </label>
+        )}
+        {kind.orgScope !== 'none' && orgs.some((o) => !o.active) && (
+          <label className="advanced-org-inactive">
+            <input
+              type="checkbox"
+              checked={showInactiveOrgs}
+              onChange={(e) => setShowInactiveOrgs(e.target.checked)}
+            />
+            Show deactivated
           </label>
         )}
       </header>
