@@ -20,10 +20,36 @@
   "Copy to organisation" flow, a version-history dropdown with read-only
   historical views, and a per-skill "referenced by deployed teams" list from
   `GET /api/config/skills/{name}/references`). Admin org dropdowns
-  (Advanced/Trace) now default to active organisations with a "Show
-  deactivated" checkbox. Spec:
+  (Advanced/Trace) now default to active organisations, with a "Show
+  deactivated" checkbox always offered beside them, and the Skills tab opens
+  on the platform tier so the built-ins are what an admin lands on. Spec:
   `docs/superpowers/specs/2026-09-02-skills-drop-vn-suffix-design.md`.
   Rollout on the VPS: backup, `alembic upgrade head`, start new code.
+- **Two operator scripts, so an upgrade and the poller watchdog are each one
+  command** (2026-09-02). `scripts/deploy.sh` is `docs/deployment.md`'s
+  "Updating an existing deployment" in order -- backup, pull with a stash
+  around host-local edits, `.env.example` diff (pauses for the operator),
+  `check-env` before any rebuild (FAIL stops with the old containers still
+  serving), build, `up -d`, health wait, second `check-env` via `exec` (the
+  container serving traffic, not a fresh one), rollback hint on a failed
+  health wait. `scripts/check-health-cron.sh` is the drills runbook's 5.1.3
+  script shipped as a file, plus an optional `BESTTEAM_OPS_WEBHOOK_URL` POST
+  (`text` + `content` keys, best-effort, exit code unchanged). Pointers added
+  in `deployment.md`, `deployment.zh-CN.md`, `VPS_SETUP_RUNBOOK.md` and
+  `PRELAUNCH_DRILLS_RUNBOOK.md`; `BETA_NOTES.md`'s stale "M365 unverified"
+  line fixed. Not done: a CI deploy job -- deployment stays a deliberate
+  operator action.
+
+- **`parse_file` is off the customer menu on a deployed org team** (2026-09-02).
+  The tool reads any local path with no sandbox and org isolation covers rows,
+  not the shared container's disk. `deploy_validation.LOCAL_FILE_TOOL_NAMES` +
+  `find_local_file_tools` refuse it at both deploy points (`builder.deploy_session`,
+  `crud.upsert_pipeline_config`), same shape as the email/egress refusal, and
+  `_with_tool_catalog` no longer names it to the architect. Verified before
+  building: upload directories are `v_<12 random hex>`, builder-session
+  directories 32 hex, and the embedding cache holds hashes, not text -- so a
+  cross-tenant read was not practically reachable; this closes the principle,
+  not an exploit. SDK/YAML pipelines keep the tool.
 
 - **Web research is buildable from the wizard** (2026-08-30). Four gaps that
   together made "collect information online and summarise it" unreachable for a

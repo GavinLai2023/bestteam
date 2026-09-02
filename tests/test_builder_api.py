@@ -66,11 +66,12 @@ def test_with_tool_catalog_names_every_built_in_tool():
     available" and never shown what they are, so it silently designs a
     research team with no way to reach the web."""
     from bestteam.tools import REGISTRY
+    from ui.backend.deploy_validation import LOCAL_FILE_TOOL_NAMES
 
     result = _with_tool_catalog("Requirements here.")
 
     assert result.startswith("Requirements here.")
-    for name in REGISTRY:
+    for name in set(REGISTRY) - LOCAL_FILE_TOOL_NAMES:
         assert name in result
 
 
@@ -91,6 +92,16 @@ def test_with_tool_catalog_warns_that_email_and_web_tools_cannot_share_a_team():
     exclusion = [ln for ln in result.splitlines() if "email_" in ln and "web_search" in ln]
     assert exclusion, result
     assert "http_get" in exclusion[0]
+
+
+def test_with_tool_catalog_does_not_offer_parse_file():
+    """`parse_file` reads any path on the server with no sandbox and a deployed
+    customer team is refused it, so the architect must not be told the name --
+    it would only design a team the deploy gate rejects."""
+    result = _with_tool_catalog("Requirements here.")
+
+    assert "parse_file" not in result
+    assert "- calculator:" in result  # the catalog itself is still there
 
 
 def test_with_knowledge_base_catalog_unchanged_when_no_knowledge_bases(db_session):
@@ -910,6 +921,18 @@ def test_deploy_rejects_agent_with_empty_model(client):
     client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": bad_spec})
     resp = client.post(f"/api/builder/sessions/{sid}/deploy")
     assert resp.status_code == 400
+
+
+def test_deploy_rejects_agent_with_parse_file(client):
+    # `parse_file` has no path sandbox and org isolation covers rows, not the
+    # filesystem, so a customer team is refused it at deploy -- the same shape
+    # as the email/egress refusal. It stays an SDK/YAML tool.
+    bad_spec = {**_VALID_SPEC, "agents": [{**_VALID_SPEC["agents"][0], "tools": ["parse_file"]}]}
+    sid = client.post("/api/builder/sessions", json={"intent_text": "bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{sid}/specification", json={"specification": bad_spec})
+    resp = client.post(f"/api/builder/sessions/{sid}/deploy")
+    assert resp.status_code == 400
+    assert "parse_file" in resp.json()["detail"]
 
 
 def test_test_run_rejects_stored_spec_with_absolute_kb_cache_path(client, tmp_path):

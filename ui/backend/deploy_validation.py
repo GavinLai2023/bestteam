@@ -101,6 +101,34 @@ def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
     ]
 
 
+# Tools that read the server's own filesystem. `parse_file` takes any local
+# path with no sandbox (its docstring says so), and the org-isolation
+# guarantee covers database rows, not the disk: every org's uploads sit under
+# one directory inside one container. The tool stays available to SDK/YAML
+# users, who chose the paths themselves; a deployed org team is refused it.
+LOCAL_FILE_TOOL_NAMES = frozenset({"parse_file"})
+
+
+def find_local_file_tools(agent_tool_sets) -> List[str]:
+    """Return one problem string per agent carrying a local-file tool.
+
+    Same input shape as `find_email_egress_conflicts`: `(agent_name, tools)`
+    pairs with each agent's tools already resolved through its skills. Empty
+    list means no agent reads the server's disk. Uploaded documents reach a
+    team through a knowledge base, which never hands the model a path -- so
+    nothing a customer legitimately builds is refused here.
+    """
+    problems: List[str] = []
+    for name, tools in agent_tool_sets:
+        found = sorted(set(tools) & LOCAL_FILE_TOOL_NAMES)
+        if found:
+            problems.append(
+                f"agent '{name}' uses {', '.join(found)}, which reads files on the "
+                "server's own disk rather than the documents you uploaded"
+            )
+    return problems
+
+
 def find_kb_tool_collisions(
     raw_spec: Dict[str, Any],
     standalone_kb_names: Iterable[str],

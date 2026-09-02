@@ -2,7 +2,7 @@
 
 *One page for beta customers and the operator running their instance. Every
 item here is a known, deliberate limit of the beta build — not a bug to
-report — and each links to where it is decided. Last revised 2026-08-29.*
+report — and each links to where it is decided. Last revised 2026-09-02.*
 
 ## Your account and organisation
 
@@ -33,9 +33,11 @@ report — and each links to where it is decided. Last revised 2026-08-29.*
 - **At most four things run at once on the whole server** (automatic runs,
   manual runs and share-link chats share the pool). A fifth waits — this is
   fine for a beta and is the first thing that changes after it.
-- **Microsoft 365 mailboxes are supported but were not yet verified against a
-  live tenant** at the time of writing. If yours is on M365, the operator runs
-  the smoke test in `docs/email-smoke-test.md` §9 with you before go-live.
+- **Microsoft 365 mailboxes are supported** — the connection was verified
+  against a live tenant on 2026-08-31. If yours is on M365, your IT grants the
+  app permission once (the operator sends the steps; that is usually the slow
+  part), and the operator walks the connection with you before go-live
+  (`docs/email-smoke-test.md` §9).
 
 ## Your documents ("My documents" / knowledge bases)
 

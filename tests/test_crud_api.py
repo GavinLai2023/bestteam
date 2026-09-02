@@ -1423,6 +1423,20 @@ def test_pipeline_put_rejects_invalid_config(client):
     assert "unknown agent" in resp.json()["detail"]
 
 
+def test_pipeline_put_rejects_agent_with_parse_file(client):
+    # Same rule as the wizard's deploy: an org team can't carry `parse_file`,
+    # which reads any path on the server. Refused at save, nothing persisted.
+    bad_config = {
+        **_VALID_PIPELINE_CONFIG,
+        "agents": [{**_VALID_PIPELINE_CONFIG["agents"][0], "tools": ["parse_file"]}],
+    }
+
+    resp = client.put("/api/config/pipelines/file_reader?org=default", json=bad_config)
+
+    assert resp.status_code == 400
+    assert "parse_file" in resp.json()["detail"]
+
+
 def test_pipeline_put_non_list_knowledge_bases_returns_400(client):
     # Regression: a malformed non-list `knowledge_bases` value must be rejected
     # with 400 by the pipeline validator, not crash the request with an

@@ -534,6 +534,14 @@ FAIL（轮询延迟超过三个轮询周期，且不低于 5 分钟），这条�
   python -m ui.backend.admin check-health || <这里换成你自己的通知方式>
 ```
 
+`scripts/check-health-cron.sh` 就是这条定时任务的脚本版，已经按 cron 的脾气写好
+（`-T`、`docker` 用绝对路径、退出码原样传出、只在失败时往
+`/var/log/bestteam-health.log` 写一段）。在 crontab 那一行里设上
+`BESTTEAM_OPS_WEBHOOK_URL`，失败时还会把一条 JSON（同时带 `text` 和 `content`
+两个字段）POST 过去，Slack、Discord 这类 incoming webhook 不用改就能显示。接好
+之后要故意停一次后端、看到日志里真的落下一段，这条链路才算验证过
+（`docs/PRELAUNCH_DRILLS_RUNBOOK.md` §5.1.5）。
+
 它只是读数据，不会写：如果数据库文件根本还不存在，它会直接说明这一点，然后以
 成功状态（0）退出，不会自己去创建一个空数据库。
 
@@ -646,6 +654,11 @@ BM25 关键词检索召回，**不会产生任何额外的模型调用**。再�
   `/advanced`（高级设置）。
 
 ## 升级一个已有的部署
+
+**`./scripts/deploy.sh` 把下面整套步骤合成一条命令**：备份、拉代码、列出
+`.env.example` 新增的变量、`check-env`（有 FAIL 就停在这一步，旧容器照常服务）、
+构建、启动、等健康检查通过、再跑一次 `check-env`。下面把步骤写开，是为了让你知道
+它在做什么，以及它中途停下时该怎么手动接着做。
 
 升级就是在**服务器上**拉新代码、重新构建，顺序如下——顺序本身很重要，因为检查
 `.env` 这一步，只有在新代码真的拉下来之后才有意义：
