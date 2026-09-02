@@ -16,7 +16,7 @@ COPY alembic ./alembic
 # `requirements.lock` pins every transitive dependency (`uv pip compile`, see
 # README "Updating the lockfile"), so a rebuild reproduces the same versions a
 # previous build ran on -- the beta hot-fix contract (STATUS.md, G1).
-RUN pip install --no-cache-dir -c requirements.lock ".[ui,tools,providers-openai]"
+RUN pip install --no-cache-dir -c requirements.lock ".[ui,tools,providers-openai,providers-deepseek]"
 COPY docker-entrypoint.sh ./
 RUN chmod 0755 docker-entrypoint.sh     && mkdir -p ui/backend/data     && chown -R app:app ui/backend/data
 USER app
