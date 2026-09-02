@@ -29,7 +29,12 @@ from bestteam.tools import REGISTRY
 from .auth_api import get_current_org, get_current_user
 from .db.builder_sessions import append_feedback, create_session, delete_session, get_session, list_sessions, update_session
 from .db.model_catalog import list_chat_entries, to_prompt_text
-from .deploy_validation import find_email_egress_conflicts, validate_agent_models
+from .deploy_validation import (
+    LOCAL_FILE_TOOL_NAMES,
+    find_email_egress_conflicts,
+    find_local_file_tools,
+    validate_agent_models,
+)
 from .db.models import BuilderSession, KnowledgeBaseRecord, Organization, PipelineRecord, User, iso_utc
 from .db.pipelines import publish_pipeline_version
 from .db_session import get_db
@@ -192,6 +197,10 @@ def _with_tool_catalog(text: str) -> str:
     """
     lines = ["", "", "Available built-in tools (add the exact name to an agent's `tools` list):"]
     for name, fn in sorted(REGISTRY.items()):
+        if name in LOCAL_FILE_TOOL_NAMES:
+            # Refused at deploy (`find_local_file_tools`), so naming it here
+            # would only have the architect design a team the gate rejects.
+            continue
         summary = (inspect.getdoc(fn) or "").strip().splitlines()
         lines.append(f"- {name}: {summary[0]}" if summary else f"- {name}")
     # Naming the email tools is what makes this reachable. Before this catalog
@@ -895,7 +904,8 @@ def deploy_session(
                     + ". Pick a model from the catalog."
                 ),
             )
-        egress_problems = find_email_egress_conflicts(resolve_agent_tool_sets(db, raw, org.id))
+        agent_tool_sets = resolve_agent_tool_sets(db, raw, org.id)
+        egress_problems = find_email_egress_conflicts(agent_tool_sets)
         if egress_problems:
             raise HTTPException(
                 status_code=400,
@@ -903,6 +913,16 @@ def deploy_session(
                     "This team can't be deployed: "
                     + "; ".join(egress_problems)
                     + ". Remove the web-access tool, or move that work to a pipeline with no mailbox access."
+                ),
+            )
+        local_file_problems = find_local_file_tools(agent_tool_sets)
+        if local_file_problems:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This team can't be deployed: "
+                    + "; ".join(local_file_problems)
+                    + ". Upload the documents to a knowledge base instead."
                 ),
             )
         # spec.to_raw() deliberately omits display_name/friendly_description

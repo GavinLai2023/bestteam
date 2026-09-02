@@ -748,9 +748,14 @@ sites: `_with_model_catalog`, `_with_tool_catalog`, `_with_skill_catalog`,
 `_with_knowledge_base_catalog`. The tool one needs no database (`REGISTRY` is
 the same for every org) and carries the **email/egress exclusion sentence** —
 naming the `email_*` tools is what first made `find_email_egress_conflicts`'s
-refusal reachable from a generated design. A missing catalog is silent: the
-architect is told to choose "tools available to the pipeline" and, shown none,
-designs a team with no tools rather than erroring.
+refusal reachable from a generated design. It **omits
+`deploy_validation.LOCAL_FILE_TOOL_NAMES`** (`parse_file`): that tool reads any
+path on the server and org isolation covers rows, not the disk, so
+`find_local_file_tools` refuses it on an org team at both deploy points and
+naming it would only have the architect design a team the gate rejects. A
+missing catalog is silent: the architect is told to choose "tools available to
+the pipeline" and, shown none, designs a team with no tools rather than
+erroring.
 
 `/refine` takes the edited `requirements` draft plus free-text `feedback` and
 updates understanding *and* team in one call. The Business Analyst runs only when

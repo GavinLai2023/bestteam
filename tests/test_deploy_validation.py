@@ -156,3 +156,40 @@ def test_the_conflict_is_reported_once_for_the_whole_pipeline():
     ])
     assert len(problems) == 1
     assert "http_get" in problems[0] and "web_search" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# A shared instance must not let a customer's team read the server's disk.
+#
+# `parse_file` reads whatever local path it is given, with no sandbox, and the
+# org isolation guarantee covers database rows, not the filesystem -- every
+# org's uploads sit under one directory inside one container. The tool stays
+# available to SDK/YAML users, who chose the paths; a deployed customer team
+# is refused it.
+# ---------------------------------------------------------------------------
+
+from ui.backend.deploy_validation import LOCAL_FILE_TOOL_NAMES, find_local_file_tools
+
+
+def test_parse_file_on_an_agent_is_flagged():
+    problems = find_local_file_tools([("reader", {"parse_file", "calculator"})])
+    assert len(problems) == 1
+    assert "reader" in problems[0] and "parse_file" in problems[0]
+
+
+def test_agents_without_a_local_file_tool_pass():
+    assert find_local_file_tools([("a", {"calculator"}), ("b", {"web_search", "http_get"})]) == []
+
+
+def test_every_agent_carrying_parse_file_is_named():
+    problems = find_local_file_tools([("a", {"parse_file"}), ("b", {"parse_file"}), ("c", set())])
+    assert len(problems) == 2
+    assert "a" in problems[0] and "b" in problems[1]
+
+
+def test_local_file_tool_names_are_registered_names():
+    # The deploy gate and the architect catalog both key on this set, so it
+    # has to spell the tool exactly as `REGISTRY` does.
+    from bestteam.tools import REGISTRY
+
+    assert LOCAL_FILE_TOOL_NAMES <= set(REGISTRY)
