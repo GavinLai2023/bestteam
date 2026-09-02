@@ -592,7 +592,7 @@ docker compose restart
 # 只改了 .env、想让新值生效——容器的环境变量是启动那一刻定死的
 docker compose up -d --force-recreate backend
 
-# 升级到新版本代码
+# 升级到新版本代码：./scripts/deploy.sh 把下面几步合成一条命令；手动做就照下面来
 git stash && git pull && git stash pop      # 保住你改过的端口绑定
 git diff ORIG_HEAD HEAD -- .env.example     # 这次升级要不要补新的环境变量？
 # 有新增的就手动加进 .env（别重跑 cp，会把你配好的覆盖掉），然后：

@@ -527,6 +527,8 @@ no failures, 0 warning(s)
 
 crontab 里的一行有几个专坑新手的地方：`%` 有特殊含义、引号和 `$(...)` 容易被吃掉、写错了没法单独测。**做成脚本这些问题一个都不存在**，而且可以先手动跑一遍确认它好使。
 
+> 这个脚本现在随代码一起发布：`scripts/check-health-cron.sh`，内容和下面一样，只多了一个可选的 webhook 通知（设了 `BESTTEAM_OPS_WEBHOOK_URL` 就在失败时 POST 一条）。直接 `sudo cp scripts/check-health-cron.sh /usr/local/bin/bestteam-health-check.sh` 就行，不必手打；下面的说明照样适用。
+
 ```bash
 sudo tee /usr/local/bin/bestteam-health-check.sh >/dev/null <<'EOF'
 #!/usr/bin/env bash

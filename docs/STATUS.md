@@ -6,6 +6,21 @@
 
 ## Done
 
+- **Two operator scripts, so an upgrade and the poller watchdog are each one
+  command** (2026-09-02). `scripts/deploy.sh` is `docs/deployment.md`'s
+  "Updating an existing deployment" in order -- backup, pull with a stash
+  around host-local edits, `.env.example` diff (pauses for the operator),
+  `check-env` before any rebuild (FAIL stops with the old containers still
+  serving), build, `up -d`, health wait, second `check-env` via `exec` (the
+  container serving traffic, not a fresh one), rollback hint on a failed
+  health wait. `scripts/check-health-cron.sh` is the drills runbook's 5.1.3
+  script shipped as a file, plus an optional `BESTTEAM_OPS_WEBHOOK_URL` POST
+  (`text` + `content` keys, best-effort, exit code unchanged). Pointers added
+  in `deployment.md`, `deployment.zh-CN.md`, `VPS_SETUP_RUNBOOK.md` and
+  `PRELAUNCH_DRILLS_RUNBOOK.md`; `BETA_NOTES.md`'s stale "M365 unverified"
+  line fixed. Not done: a CI deploy job -- deployment stays a deliberate
+  operator action.
+
 - **Web research is buildable from the wizard** (2026-08-30). Four gaps that
   together made "collect information online and summarise it" unreachable for a
   self-service customer:
