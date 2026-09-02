@@ -408,14 +408,17 @@ the very card explaining their cap.
 ## Property Maintenance Inbox (`automation_results.py`)
 
 A two-agent SEQUENTIAL template built from three platform Skills
-(`email_input_security_core_v1`, `property_maintenance_intake_v2`,
-`property_maintenance_response_v1`). `_intake_v1` is still seeded but
-unreferenced — attachment reading shipped as a new *version* so a team pinned to
-`_v1` keeps what it deployed with. Deliberately **not** a `Case`/work-item
-entity — see `docs/DECISIONS.md`. Spec:
-`specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`.
+(`email_input_security_core`, `property_maintenance_intake`,
+`property_maintenance_response`). Built-in names are suffix-free: history
+lives in `skill_versions`, seeding publishes a changed `DEFAULT_SKILLS`
+definition as a new version (head moves; pinned teams keep theirs), and the
+platform tier is locked against in-place admin edits — customisation is an
+org-tier copy that shadows by name. Deliberately **not** a `Case`/work-item
+entity — see `docs/DECISIONS.md`. Specs:
+`specs/2026-08-02-property-maintenance-inbox-phase-1-development-plan.md`,
+`specs/2026-09-02-skills-drop-vn-suffix-design.md`.
 
-`email_input_security_core_v1` is attached to **both** agents. The Response
+`email_input_security_core` is attached to **both** agents. The Response
 Coordinator never reads the mailbox, but it drafts from the Intake Analyst's
 free-text write-up, which can quote injected instructions from the original email.
 
@@ -440,7 +443,7 @@ It only proceeds if `result_type == "property_maintenance_email_batch"`; any
 other `trigger_context` run is left untouched. A run that crashed before
 producing JSON looks identical from the output alone, so `_start_triggered_run`
 stamps `trigger_context["result_contract"]` at dispatch whenever the deployed
-config gives an agent `property_maintenance_response_v1` **and** that name still
+config gives an agent `property_maintenance_response` **and** that name still
 resolves to the platform-tier row, not an org skill shadowing it (advisory only,
 never blocks dispatch). `retry_triggered_run` **re-derives** this against the
 pipeline as currently deployed rather than carrying the marker forward.
