@@ -559,6 +559,16 @@ export interface ActivityOverview {
   team_counts: TeamCount[]
 }
 
+// What became of the platform's reply drafts over the last `window_days`:
+// sent (seen in the Sent folder), handled (left Drafts with no send evidence),
+// pending (still sitting in Drafts).
+export interface DraftOutcomeCounts {
+  sent: number
+  handled: number
+  pending: number
+  window_days: number
+}
+
 // One message the filter skipped before any model read it. `reason` is the
 // sentence to show; `decision` is the raw rule code, for debugging only.
 export interface FilteredMessage {

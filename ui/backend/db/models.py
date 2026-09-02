@@ -676,6 +676,48 @@ class AutomationItemResult(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class DraftOutcome(Base):
+    """What the mailbox eventually did with one platform-written draft.
+
+    One row per confirmed draft (creation evidence is
+    `automation_results.already_drafted_uids`, never the model's claim).
+    `source_key` alone is globally unique -- it encodes credential id,
+    uidvalidity and UID -- so a retry family collapses to one row by
+    construction. Statuses only ever move forward from `pending`; `sent`,
+    `handled` and `unknown` are terminal. Contains no message content
+    (accounting in the retention sense, like `automation_item_results`'s
+    status/source_key). See docs/superpowers/specs/
+    2026-09-03-draft-outcome-tracking-design.md.
+    """
+
+    __tablename__ = "draft_outcomes"
+    __table_args__ = (
+        UniqueConstraint("source_key", name="uq_draft_outcomes_source_key"),
+        Index("ix_draft_outcomes_org_id_status", "org_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    source_key: Mapped[str]
+    # pending | sent | handled | unknown
+    status: Mapped[str] = mapped_column(default="pending")
+    # source_key_header | in_reply_to -- how a `sent` verdict was reached.
+    # Doubles as the live answer to the "does the X- header survive a client
+    # send?" spike the design could not run against a real mailbox.
+    evidence: Mapped[Optional[str]] = mapped_column(default=None)
+    # RFC Message-ID of the customer email the draft replies to, fetched
+    # lazily from INBOX the first time the In-Reply-To fallback needs it.
+    origin_message_id: Mapped[Optional[str]] = mapped_column(default=None)
+    # Consecutive reconcile cycles the draft was in neither Drafts nor Sent;
+    # `handled` only at the threshold, so a just-pressed Send whose message
+    # hasn't reached the Sent folder yet isn't misread as deleted.
+    miss_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    checked_at: Mapped[Optional[datetime]] = mapped_column(default=None)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(default=None)
+
+
 class TraceEventRecord(Base):
     """One `TraceEvent` (core/trace.py) emitted during a `Run`, in order."""
 

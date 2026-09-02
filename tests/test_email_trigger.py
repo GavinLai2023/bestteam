@@ -2817,3 +2817,29 @@ def test_rotating_a_password_leaves_the_backlog_claimable(db):
 
     assert db.query(InboxEvent).filter_by(external_id="7").one().status == "pending"
     assert trigger.enabled is True
+
+
+def test_poll_once_reconciles_draft_outcomes_per_org(db, monkeypatch):
+    """The poll cycle is what walks pending draft_outcomes rows against the
+    mailbox -- once per enabled org, after poll_org (same slot as the backlog
+    health check)."""
+    a = get_or_create_org(db, "org_a")
+    b = get_or_create_org(db, "org_b")
+    for org in (a, b):
+        set_email_credentials(db, org.id, host="h", username="u", password="p")
+        upsert_email_trigger(db, org.id, pipeline_name="w", enabled=True,
+                             last_uid=0, uidvalidity=1)
+    monkeypatch.setattr(email_trigger, "poll_org", lambda *a, **k: None)
+    reconciled = []
+    monkeypatch.setattr(
+        email_trigger.draft_outcomes, "reconcile_org",
+        lambda session, trigger: reconciled.append(trigger.org_id),
+    )
+
+    class _Factory:
+        def __call__(self): return self
+        def __enter__(self): return db
+        def __exit__(self, *exc): return False
+
+    poll_once(_no_pipeline, session_factory=_Factory())
+    assert reconciled == [a.id, b.id]

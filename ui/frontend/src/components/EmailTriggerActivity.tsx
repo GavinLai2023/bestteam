@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/dateFormat'
-import type { EmailTrigger, FilteredMessage } from '../lib/types'
+import type { DraftOutcomeCounts, EmailTrigger, FilteredMessage } from '../lib/types'
 
 interface EmailTriggerActivityProps {
   onViewRuns?: () => void
@@ -36,6 +36,9 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
   const [trigger, setTrigger] = useState<EmailTrigger | undefined>(undefined) // undefined = still loading
   const [statusFailed, setStatusFailed] = useState(false)
   const [filtered, setFiltered] = useState<FilteredMessage[]>([])
+  // null = nothing to show (still loading, failed, or no draft tracked yet) --
+  // in all three cases the line is simply absent rather than a row of zeros.
+  const [outcomes, setOutcomes] = useState<DraftOutcomeCounts | null>(null)
   const [filteredFailed, setFilteredFailed] = useState(false)
   const [releaseError, setReleaseError] = useState<string | null>(null)
   // Ids released during this session. The list is re-polled below, and a
@@ -46,6 +49,14 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
   useEffect(() => {
     const load = () => {
       api.getEmailTrigger().then(setTrigger).catch(() => setStatusFailed(true))
+      api
+        .getDraftOutcomes()
+        .then((counts) =>
+          setOutcomes(counts.sent + counts.handled + counts.pending > 0 ? counts : null),
+        )
+        // Absent, not an error banner: the card's own status is the load-
+        // bearing content; this line is a bonus metric.
+        .catch(() => setOutcomes(null))
       api
         .listFilteredMessages()
         .then((data) => {
@@ -110,6 +121,12 @@ export default function EmailTriggerActivity({ onViewRuns }: EmailTriggerActivit
         </div>
         <p className="subtitle">{meta.text}</p>
         <p className="hint">Triggers when new email arrives in the connected mailbox.</p>
+        {outcomes && (
+          <p className="hint">
+            Drafts in the last {outcomes.window_days} days: {outcomes.sent} sent ·{' '}
+            {outcomes.handled} handled · {outcomes.pending} awaiting action
+          </p>
+        )}
         {trigger.last_checked_at && (
           <p className="hint">
             Last checked: {formatDateTime(trigger.last_checked_at)}

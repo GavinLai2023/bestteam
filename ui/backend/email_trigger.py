@@ -35,7 +35,7 @@ from bestteam.core.trace import TraceEvent
 from bestteam.exceptions import ConfigurationError
 from bestteam.tools.email_client import make_email_tools
 
-from . import email_budget, email_filter, secret_store, trigger_health, trigger_metrics
+from . import draft_outcomes, email_budget, email_filter, secret_store, trigger_health, trigger_metrics
 from .automation_results import RESULT_TYPE_BATCH_MARKER, already_drafted_uids, normalize_run_result
 from .db.email_budget_settings import get_budget_caps, spent_this_month
 from .db.email_credentials import AUTH_MICROSOFT_OAUTH, get_email_credentials
@@ -1525,6 +1525,10 @@ def poll_once(get_pipeline: Callable, session_factory=None) -> None:
             try:
                 poll_org(db, trigger, get_pipeline)
                 _apply_backlog_health(db, trigger)
+                # What the customer did with each platform draft (B1). Its own
+                # isolation boundary, and free when nothing is pending -- see
+                # draft_outcomes.reconcile_org.
+                draft_outcomes.reconcile_org(db, trigger)
             except Exception:  # noqa: BLE001 -- the loop must outlive any org's failure
                 # Roll back BEFORE touching `trigger` again: a failed flush leaves
                 # the session's objects expired, so logging trigger.org_id first

@@ -10,6 +10,7 @@ vi.mock('../lib/api', () => ({
     listRuns: vi.fn(),
     getActivityOverview: vi.fn(),
     getEmailTrigger: vi.fn(),
+    getDraftOutcomes: vi.fn(),
     emailTriggerActivity: vi.fn(),
     createWsTicket: vi.fn(),
     getRunTrace: vi.fn(),
@@ -36,6 +37,7 @@ describe('ActivityPage', () => {
     vi.clearAllMocks()
     mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf-a', 'wf-b'] })
     mockedApi.getEmailTrigger.mockResolvedValue({ enabled: false, pipeline_name: null, status: 'off', daily_cap: 0 })
+    mockedApi.getDraftOutcomes.mockResolvedValue({ sent: 0, handled: 0, pending: 0, window_days: 30 })
     // The page now always opens on Overview (it works the same whether or
     // not the org uses automation), so every test that needs a different
     // tab clicks its way there explicitly.
