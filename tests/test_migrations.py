@@ -1103,3 +1103,171 @@ def test_the_ingestion_chunk_parameter_columns_upgrade_and_downgrade(tmp_path, m
         assert "chunk_overlap" not in columns
     finally:
         engine.dispose()
+
+
+# Revision just before the built-in skill rename (the previous head).
+_PRE_SKILL_RENAME = "v9w0x1y2z3a4"
+
+
+def test_builtin_skill_suffix_rename_merges_and_rewrites(tmp_path, monkeypatch):
+    """w0x1y2z3a4b5: platform skills lose their _vN suffix, intake _v1+_v2
+    merge into one skill (snapshot ids untouched, renumbered by created_at),
+    every stored config/dependency reference is rewritten -- except inside an
+    org that shadows an old name with its own skill."""
+    db_path = tmp_path / "skills_rename.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+    command.upgrade(cfg, _PRE_SKILL_RENAME)
+
+    engine = make_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO organizations (id, name, display_name, created_at, active) "
+            "VALUES (7, 'acme', '', CURRENT_TIMESTAMP, 1), (8, 'shadow_co', '', CURRENT_TIMESTAMP, 1)"
+        ))
+        # Platform intake _v1 + _v2 with one snapshot each; shadow_co owns a
+        # skill under a built-in's old name (must survive untouched).
+        conn.execute(sa.text(
+            "INSERT INTO skills (id, name, org_id, config, created_at, updated_at, current_version_id) VALUES "
+            "(1, 'property_maintenance_intake_v1', NULL, "
+            " '{\"name\": \"property_maintenance_intake_v1\", \"instructions\": \"old\"}', "
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL), "
+            "(2, 'property_maintenance_intake_v2', NULL, "
+            " '{\"name\": \"property_maintenance_intake_v2\", \"instructions\": \"new\"}', "
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL), "
+            "(3, 'contractor_sourcing_v1', NULL, "
+            " '{\"name\": \"contractor_sourcing_v1\", \"instructions\": \"c\"}', "
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL), "
+            "(4, 'property_maintenance_response_v1', 8, "
+            " '{\"name\": \"property_maintenance_response_v1\", \"instructions\": \"org own\"}', "
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO skill_versions (id, skill_id, version_number, config, created_by, created_at) VALUES "
+            "(11, 1, 1, '{\"name\": \"property_maintenance_intake_v1\", \"instructions\": \"old\"}', NULL, '2026-01-01'), "
+            "(12, 2, 1, '{\"name\": \"property_maintenance_intake_v2\", \"instructions\": \"new\"}', NULL, '2026-01-02'), "
+            "(13, 3, 1, '{\"name\": \"contractor_sourcing_v1\", \"instructions\": \"c\"}', NULL, '2026-01-01'), "
+            "(14, 4, 1, '{\"name\": \"property_maintenance_response_v1\", \"instructions\": \"org own\"}', NULL, '2026-01-03')"
+        ))
+        conn.execute(sa.text("UPDATE skills SET current_version_id = 11 WHERE id = 1"))
+        conn.execute(sa.text("UPDATE skills SET current_version_id = 12 WHERE id = 2"))
+        conn.execute(sa.text("UPDATE skills SET current_version_id = 13 WHERE id = 3"))
+        conn.execute(sa.text("UPDATE skills SET current_version_id = 14 WHERE id = 4"))
+        # acme: deployed team pinned to intake _v2's snapshot; config names old skills.
+        acme_cfg = (
+            '{"name": "team", "agents": [{"name": "a", "role": "r", "goal": "g", '
+            '"model": "fake:ok", "skills": ["property_maintenance_intake_v2", "contractor_sourcing_v1"]}], '
+            '"teams": [], "pipeline": {"steps": []}}'
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pipelines (id, name, org_id, config, status, created_at, updated_at) "
+                "VALUES (21, 'team', 7, :cfg, 'deployed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"cfg": acme_cfg},
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pipeline_versions (id, pipeline_id, version_number, config, created_by, created_at) "
+                "VALUES (31, 21, 1, :cfg, NULL, CURRENT_TIMESTAMP)"
+            ),
+            {"cfg": acme_cfg},
+        )
+        conn.execute(sa.text("UPDATE pipelines SET current_version_id = 31 WHERE id = 21"))
+        conn.execute(sa.text(
+            "INSERT INTO pipeline_dependencies "
+            "(id, pipeline_version_id, resource_kind, resource_name, resource_id, resource_version_id) VALUES "
+            "(41, 31, 'skill', 'property_maintenance_intake_v2', 2, 12), "
+            "(42, 31, 'skill', 'contractor_sourcing_v1', 3, 13)"
+        ))
+        # shadow_co: its OWN skill uses a built-in old name; its team keeps the old name.
+        shadow_cfg = (
+            '{"name": "steam", "agents": [{"name": "a", "role": "r", "goal": "g", '
+            '"model": "fake:ok", "skills": ["property_maintenance_response_v1"]}], '
+            '"teams": [], "pipeline": {"steps": []}}'
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pipelines (id, name, org_id, config, status, created_at, updated_at) "
+                "VALUES (22, 'steam', 8, :cfg, 'deployed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"cfg": shadow_cfg},
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pipeline_versions (id, pipeline_id, version_number, config, created_by, created_at) "
+                "VALUES (32, 22, 1, :cfg, NULL, CURRENT_TIMESTAMP)"
+            ),
+            {"cfg": shadow_cfg},
+        )
+        conn.execute(sa.text("UPDATE pipelines SET current_version_id = 32 WHERE id = 22"))
+        conn.execute(sa.text(
+            "INSERT INTO pipeline_dependencies "
+            "(id, pipeline_version_id, resource_kind, resource_name, resource_id, resource_version_id) "
+            "VALUES (43, 32, 'skill', 'property_maintenance_response_v1', 4, 14)"
+        ))
+        # A wizard draft referencing old names must be rewritten like the head config.
+        conn.execute(
+            sa.text(
+                "INSERT INTO builder_sessions (id, intent_text, as_is_text, specification_json, "
+                "status, org_id, feedback_history, created_at, updated_at) "
+                "VALUES ('sess-1', 'hi', '', :cfg, 'spec', 7, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"cfg": acme_cfg},
+        )
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = make_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            names = {r[0] for r in conn.execute(sa.text("SELECT name FROM skills WHERE org_id IS NULL"))}
+            assert "property_maintenance_intake" in names
+            assert "contractor_sourcing" in names
+            assert not any(n.endswith("_v1") or n.endswith("_v2") for n in names)
+            # Merge: one intake row; _v1's snapshot re-pointed with its id kept,
+            # renumbered 1; _v2's snapshot is version 2 and remains the head.
+            merged = conn.execute(sa.text(
+                "SELECT id, current_version_id FROM skills "
+                "WHERE name = 'property_maintenance_intake' AND org_id IS NULL"
+            )).one()
+            versions = conn.execute(
+                sa.text(
+                    "SELECT id, version_number, config FROM skill_versions "
+                    "WHERE skill_id = :sid ORDER BY version_number"
+                ),
+                {"sid": merged.id},
+            ).fetchall()
+            assert [(v.id, v.version_number) for v in versions] == [(11, 1), (12, 2)]
+            assert merged.current_version_id == 12
+            # Snapshot-internal names tidied to the new skill name.
+            assert all('"property_maintenance_intake"' in v.config for v in versions)
+            # The org's own same-named skill is untouched.
+            assert conn.execute(sa.text(
+                "SELECT COUNT(*) FROM skills WHERE org_id = 8 AND name = 'property_maintenance_response_v1'"
+            )).scalar() == 1
+            # acme config + dependencies rewritten; pins (resource_version_id) untouched.
+            for query in (
+                "SELECT config FROM pipelines WHERE id = 21",
+                "SELECT config FROM pipeline_versions WHERE id = 31",
+                "SELECT specification_json FROM builder_sessions WHERE id = 'sess-1'",
+            ):
+                blob = conn.execute(sa.text(query)).scalar()
+                assert "property_maintenance_intake_v2" not in blob
+                assert '"property_maintenance_intake"' in blob
+                assert "contractor_sourcing_v1" not in blob
+                assert '"contractor_sourcing"' in blob
+            dep = conn.execute(sa.text(
+                "SELECT resource_name, resource_id, resource_version_id "
+                "FROM pipeline_dependencies WHERE id = 41"
+            )).one()
+            assert dep.resource_name == "property_maintenance_intake"
+            assert dep.resource_id == merged.id and dep.resource_version_id == 12
+            # shadow_co keeps the old name everywhere (config + dependency row).
+            shadow = conn.execute(sa.text("SELECT config FROM pipelines WHERE id = 22")).scalar()
+            assert "property_maintenance_response_v1" in shadow
+            assert conn.execute(sa.text(
+                "SELECT resource_name FROM pipeline_dependencies WHERE id = 43"
+            )).scalar() == "property_maintenance_response_v1"
+    finally:
+        engine.dispose()
