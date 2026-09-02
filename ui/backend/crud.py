@@ -187,7 +187,9 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 "config": item.config,
                 **(
                     {
-                        "version": _skill_version_number(db, item)
+                        "version": _skill_version_number(db, item),
+                        "builtin": item.org_id is None
+                        and item.name in _BUILTIN_SKILL_NAMES,
                     }
                     if name == "skills" else {}
                 ),
@@ -206,6 +208,9 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         payload = {"name": item.name, "org": org, "config": item.config}
         if name == "skills":
             payload["version"] = _skill_version_number(db, item)
+            payload["builtin"] = (
+                item.org_id is None and item.name in _BUILTIN_SKILL_NAMES
+            )
         return payload
 
     @sub.put("/{item_name}")
@@ -217,6 +222,19 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         admin: User = Depends(get_current_admin),
     ) -> Dict[str, Any]:
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
+        if name == "skills" and org_id is None and item_name in _BUILTIN_SKILL_NAMES:
+            # The platform tier stays pristine so seed_default_skills can
+            # update it unconditionally on release. Customisation lives in the
+            # org tier, where a same-named copy shadows the built-in.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{item_name}' is a platform built-in and can't be edited "
+                    "in place -- save a copy under an organisation (?org=...) "
+                    "to customise it; the copy shadows the built-in on "
+                    "redeploy."
+                ),
+            )
         if name == "knowledge_bases":
             _validate_kb_paths(config)
             _reject_builtin_kb_name(item_name)

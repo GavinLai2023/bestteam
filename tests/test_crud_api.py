@@ -2395,3 +2395,35 @@ def test_public_model_catalog_hides_embedding_tier(client):
     # The admin CRUD listing still shows it -- somebody has to maintain its price.
     admin_specs = [entry["spec"] for entry in client.get("/api/config/model-catalog").json()]
     assert "openai:text-embedding-3-small" in admin_specs
+
+
+def test_platform_builtin_skill_put_is_locked(client):
+    # The platform tier stays pristine so seeding can update it on release;
+    # customisation is a copy into an org (same-name shadowing in load_skills).
+    resp = client.put(
+        "/api/config/skills/email_triage_reply",
+        json={"instructions": "hand edit"},
+    )
+    assert resp.status_code == 409
+    assert "org" in resp.json()["detail"].lower()
+
+
+def test_platform_builtin_skill_flagged_in_listing(client):
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    items = client.get("/api/config/skills").json()
+    flagged = {i["name"]: i.get("builtin") for i in items if i["org"] is None}
+    assert flagged.get("email_triage_reply") is True
+    detail = client.get("/api/config/skills/email_triage_reply").json()
+    assert detail["builtin"] is True
+
+
+def test_org_copy_of_builtin_name_is_allowed_and_not_builtin(client):
+    resp = client.put(
+        "/api/config/skills/email_triage_reply?org=default",
+        json={"instructions": "org customisation"},
+    )
+    assert resp.status_code == 200
+    item = client.get("/api/config/skills/email_triage_reply?org=default").json()
+    assert item.get("builtin") is not True
