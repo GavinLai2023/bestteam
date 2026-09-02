@@ -19,4 +19,9 @@ describe('visibleOrgOptions', () => {
   it('keeps a selected inactive org visible so the selection cannot vanish', () => {
     expect(visibleOrgOptions(orgs, false, 'b').map((o) => o.name)).toEqual(['a', 'b'])
   })
+
+  it('treats a payload without the flag as active rather than hiding the org', () => {
+    const legacy = [{ name: 'c' } as AdminOrg]
+    expect(visibleOrgOptions(legacy, false).map((o) => o.name)).toEqual(['c'])
+  })
 })

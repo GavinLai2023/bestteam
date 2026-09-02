@@ -95,7 +95,10 @@ def list_organizations(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
     self-service provisioning surface -- it only lets an admin target an
     existing org on the `?org=`-scoped item routes below.
     """
-    return [{"name": org.name, "display_name": org.display_name} for org in list_orgs(db)]
+    return [
+        {"name": org.name, "display_name": org.display_name, "active": org.active}
+        for org in list_orgs(db)
+    ]
 
 
 @router.get("/tools")

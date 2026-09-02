@@ -2482,3 +2482,10 @@ def test_skill_references_empty_when_unreferenced(client):
 
 def test_skill_references_404_for_unknown_skill(client):
     assert client.get("/api/config/skills/nope/references").status_code == 404
+
+
+def test_config_orgs_reports_active_flag(client):
+    # The Advanced/Trace org selectors filter on `active`; omitting the flag
+    # made the filter hide every org (caught by the e2e smoke journey).
+    orgs = client.get("/api/config/orgs").json()
+    assert orgs and all(isinstance(o.get("active"), bool) for o in orgs)

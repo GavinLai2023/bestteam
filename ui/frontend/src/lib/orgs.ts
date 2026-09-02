@@ -10,5 +10,6 @@ export function visibleOrgOptions(
   selected?: string | null,
 ): AdminOrg[] {
   if (showInactive) return orgs
-  return orgs.filter((o) => o.active || o.name === selected)
+  // `!== false` on purpose: a payload without the flag must not hide the org.
+  return orgs.filter((o) => o.active !== false || o.name === selected)
 }
