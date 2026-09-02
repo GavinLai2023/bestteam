@@ -511,6 +511,14 @@ the exit code to whatever the operator already watches, e.g.:
   python -m ui.backend.admin check-health || <notify yourself>
 ```
 
+`scripts/check-health-cron.sh` is that entry as a file, written for cron
+(`-T`, an absolute `docker` path, the exit code passed through, a line in
+`/var/log/bestteam-health.log` only on failure). Set `BESTTEAM_OPS_WEBHOOK_URL`
+on the crontab line and a failure is also POSTed there as JSON with `text` and
+`content` keys, which a Slack- or Discord-style incoming webhook renders as-is.
+Prove the chain once by stopping the backend and watching a line land
+(`docs/PRELAUNCH_DRILLS_RUNBOOK.md` §5.1.5).
+
 It only reads: on a box whose database does not exist yet it says so and
 exits 0 without creating one.
 
@@ -622,6 +630,12 @@ Three things to know before turning it on:
   nothing deployed yet, and a platform admin to `/advanced`.
 
 ## Updating an existing deployment
+
+**`./scripts/deploy.sh` runs the whole sequence below as one command** —
+backup, pull, the `.env.example` diff, `check-env` (it stops there on a FAIL,
+with the old containers still serving), build, start, the health wait and the
+second `check-env`. The steps are spelled out so you know what it does and
+what to do by hand when it stops.
 
 An update is a pull and a rebuild **on the host**, in this order — the order
 is the point, because the `.env` check only means anything once the new code
