@@ -163,7 +163,10 @@ what it's built from, then read-only reference":
 
 Use the organisation selector at the top to scope pipelines/knowledge bases
 to a specific org, or the platform tier (skills only) when `orgScope` is
-`optional`/`none`. The selector lists **active** organisations by default;
+`optional`/`none`. The Skills tab opens on the platform tier, since the
+built-ins are what you normally come here to read; pick an organisation from
+the same selector to see that org's own copies. The selector lists **active**
+organisations by default;
 tick "Show deactivated" beside it to include suspended ones (the Trace page's
 selector behaves the same; the Accounts page always shows everything, since
 that's where reactivation lives).

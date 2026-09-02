@@ -197,15 +197,18 @@ export default function AdvancedPage() {
     setCopyOrg('')
   }
 
-  // Switching tabs keeps whatever organisation the user has selected -- it
-  // should never silently jump back to a default. The one exception: the
-  // platform tier (only offered on the Skills tab) isn't a valid choice on an
-  // organisation-required tab, so that case falls back to the last real
-  // organisation the user picked, or the usual default if there isn't one.
+  // The Skills tab opens on the platform tier: the built-ins are what an admin
+  // comes here to read, and an organisation owns a skill only once someone
+  // copies one. Other tabs keep whatever organisation is selected -- except
+  // that the platform tier isn't a valid choice on an organisation-required
+  // tab, so that case falls back to the last real organisation the user
+  // picked, or the usual default if there isn't one.
   const selectKind = (k: Kind) => {
     if (k.key === activeKey) return
     setActiveKey(k.key)
-    if (k.orgScope === 'required' && (org === null || org === PLATFORM_TIER)) {
+    if (k.orgScope === 'optional') {
+      setOrg(PLATFORM_TIER)
+    } else if (k.orgScope === 'required' && (org === null || org === PLATFORM_TIER)) {
       setOrg(lastRealOrgRef.current ?? defaultOrgFor(k, orgs))
     }
     resetSelection()
@@ -390,7 +393,7 @@ export default function AdvancedPage() {
             </select>
           </label>
         )}
-        {kind.orgScope !== 'none' && orgs.some((o) => !o.active) && (
+        {kind.orgScope !== 'none' && (
           <label className="advanced-org-inactive">
             <input
               type="checkbox"

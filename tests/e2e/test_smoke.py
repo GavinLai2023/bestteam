@@ -157,12 +157,10 @@ def test_smoke_journey(page):
     assert "Agents" not in labels and "Teams" not in labels
 
     open_advanced_tab(page, "Skills")
-    # Org state persists across tabs (AdvancedPage only forces a default when
-    # switching *into* an org-required tab) and the initial mount-time
-    # default resolves to the first real org, not the platform tier -- so
-    # explicitly select the platform tier before seeding a built-in skill,
-    # rather than relying on the org state still being unset at this point.
-    page.select_option(".advanced-org select", value="__platform__")
+    # Skills opens on the platform tier -- the built-ins are what an admin
+    # comes here to read (AdvancedPage's selectKind), so a built-in skill can
+    # be seeded without selecting the tier by hand.
+    pw_expect(page.locator(".advanced-org select")).to_have_value("__platform__")
     SEED = f"seed_{int(time.time())}"
     page.fill(".advanced-new input", SEED)
     page.click(".advanced-new button:has-text('New')")
@@ -200,13 +198,10 @@ def test_smoke_journey(page):
     page.wait_for_selector(".banner-success", timeout=5000)
     open_advanced_tab(page, "Knowledge bases")
     # Knowledge bases requires a real org, so switching to it while on the
-    # platform tier force-substitutes the last real org selected (see
-    # AdvancedPage's selectKind) -- and that substitution persists after
-    # switching back to Skills, since Skills (org-optional) doesn't force it
-    # back. Re-select the platform tier explicitly so the still-platform-tier
-    # SKILL is visible again.
+    # platform tier force-substitutes the last real org selected; switching
+    # back to Skills returns to the platform tier, where the SKILL lives.
     open_advanced_tab(page, "Skills")
-    page.select_option(".advanced-org select", value="__platform__")
+    pw_expect(page.locator(".advanced-org select")).to_have_value("__platform__")
     page.click(f".advanced-list button:has-text('{SKILL}')")
     val = json.loads(page.locator(".advanced-editor textarea").input_value())
     assert val.get("description") == "Formal email writing style"

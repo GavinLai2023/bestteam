@@ -247,16 +247,14 @@ export default function TracePage() {
           ))}
         </select>
       </label>
-      {orgs.some((o) => !o.active) && (
-        <label className="advanced-org-inactive">
-          <input
-            type="checkbox"
-            checked={showInactiveOrgs}
-            onChange={(e) => setShowInactiveOrgs(e.target.checked)}
-          />
-          Show deactivated
-        </label>
-      )}
+      <label className="advanced-org-inactive">
+        <input
+          type="checkbox"
+          checked={showInactiveOrgs}
+          onChange={(e) => setShowInactiveOrgs(e.target.checked)}
+        />
+        Show deactivated
+      </label>
 
       <div className="trace-tabs">
         <button type="button" className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>

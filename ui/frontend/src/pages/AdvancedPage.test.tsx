@@ -221,7 +221,6 @@ describe('AdvancedPage skills tab: locked built-ins, version history, references
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
     fireEvent.click(screen.getByText('Skills'))
-    fireEvent.change(screen.getByLabelText('Organisation'), { target: { value: '__platform__' } })
     await screen.findByText('email_triage_reply')
     fireEvent.click(screen.getByText('email_triage_reply'))
     await waitFor(() => expect(mockedApi.skillVersions).toHaveBeenCalledWith('email_triage_reply', undefined))
@@ -293,5 +292,33 @@ describe('AdvancedPage skills tab: locked built-ins, version history, references
     await screen.findByText('email_triage_reply')
     fireEvent.click(screen.getByText('email_triage_reply'))
     await screen.findByText('No deployments reference this skill.')
+  })
+})
+
+describe('AdvancedPage organisation selector', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.listOrgs.mockResolvedValue([{ name: 'acme', display_name: 'Acme', active: true }])
+    mockedApi.listConfig.mockResolvedValue([])
+  })
+
+  it('opens the Skills tab on the platform tier, and restores the organisation on an org-scoped tab', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
+
+    fireEvent.click(screen.getByText('Skills'))
+    expect(screen.getByLabelText('Organisation')).toHaveValue('__platform__')
+    await waitFor(() => expect(mockedApi.listConfig).toHaveBeenCalledWith('skills', undefined))
+
+    fireEvent.click(screen.getByText('Pipelines'))
+    expect(screen.getByLabelText('Organisation')).toHaveValue('acme')
+  })
+
+  it('offers "Show deactivated" even when every organisation is active', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
+
+    const toggle = screen.getByLabelText('Show deactivated')
+    expect(toggle).not.toBeChecked()
   })
 })
