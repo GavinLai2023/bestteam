@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import AdvancedPage from './AdvancedPage'
 import { api } from '../lib/api'
 
@@ -12,6 +12,9 @@ vi.mock('../lib/api', () => ({
     listConfig: vi.fn(),
     uploadKnowledgeBaseFiles: vi.fn(),
     knowledgeBaseUploadJob: vi.fn(),
+    putConfigItem: vi.fn(),
+    skillVersions: vi.fn(),
+    skillReferences: vi.fn(),
   },
 }))
 
@@ -184,5 +187,111 @@ describe('AdvancedPage item filter', () => {
     fireEvent.click(screen.getByText('Skills'))
 
     await waitFor(() => expect(screen.getByPlaceholderText('Filter…')).toHaveValue(''))
+  })
+})
+
+
+describe('AdvancedPage skills tab: locked built-ins, version history, references', () => {
+  const builtinRow = {
+    name: 'email_triage_reply',
+    org: null,
+    config: { name: 'email_triage_reply', instructions: 'triage', tools: [] },
+    version: 2,
+    builtin: true,
+  }
+  const versionRows = [
+    { version: 2, config: { instructions: 'triage v2' }, created_by: null, created_at: '2026-09-01T00:00:00Z', current: true },
+    { version: 1, config: { instructions: 'triage v1' }, created_by: 'admin', created_at: '2026-08-01T00:00:00Z', current: false },
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedApi.listOrgs.mockResolvedValue([
+      { name: 'acme', display_name: 'Acme', active: true },
+      { name: 'ghost', display_name: 'Ghost', active: false },
+    ])
+    mockedApi.listConfig.mockImplementation((kind: string) =>
+      Promise.resolve(kind === 'skills' ? [builtinRow] : []),
+    )
+    mockedApi.skillVersions.mockResolvedValue(versionRows)
+    mockedApi.skillReferences.mockResolvedValue([])
+  })
+
+  const openBuiltinSkill = async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('Organisation')).toHaveValue('acme'))
+    fireEvent.click(screen.getByText('Skills'))
+    fireEvent.change(screen.getByLabelText('Organisation'), { target: { value: '__platform__' } })
+    await screen.findByText('email_triage_reply')
+    fireEvent.click(screen.getByText('email_triage_reply'))
+    await waitFor(() => expect(mockedApi.skillVersions).toHaveBeenCalledWith('email_triage_reply', undefined))
+  }
+
+  it('locks a platform built-in: read-only editor, no Save/Delete, copy-to-org instead', async () => {
+    await openBuiltinSkill()
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    expect(textarea).toHaveAttribute('readonly')
+    expect(screen.queryByText('Save')).not.toBeInTheDocument()
+    expect(screen.queryByText('Delete')).not.toBeInTheDocument()
+    expect(screen.getByText(/Platform built-in/)).toBeInTheDocument()
+
+    // Only active organisations are offered as copy targets.
+    const copySelect = screen.getByLabelText('Copy to organisation')
+    expect(copySelect).toBeInTheDocument()
+    expect(within(copySelect).queryByRole('option', { name: 'Ghost' })).not.toBeInTheDocument()
+    expect(within(copySelect).getByRole('option', { name: 'Acme' })).toBeInTheDocument()
+
+    fireEvent.change(copySelect, { target: { value: 'acme' } })
+    fireEvent.click(screen.getByText('Copy to organisation'))
+    await waitFor(() =>
+      expect(mockedApi.putConfigItem).toHaveBeenCalledWith(
+        'skills',
+        'email_triage_reply',
+        expect.objectContaining({ instructions: 'triage' }),
+        'acme',
+      ),
+    )
+    await screen.findByText(/Copied to acme/)
+  })
+
+  it('shows a historical version read-only when picked from the version dropdown', async () => {
+    await openBuiltinSkill()
+
+    const versionSelect = screen.getByLabelText('Version')
+    expect(versionSelect).toHaveValue('head')
+    fireEvent.change(versionSelect, { target: { value: '1' } })
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    expect(textarea.value).toBe(JSON.stringify({ instructions: 'triage v1' }, null, 2))
+    expect(textarea).toHaveAttribute('readonly')
+    expect(screen.getByText(/Historical version/)).toBeInTheDocument()
+  })
+
+  it('lists the deployed teams pinning the skill, and an empty state otherwise', async () => {
+    mockedApi.skillReferences.mockResolvedValue([
+      {
+        org_name: 'acme', org_display_name: 'Acme', org_active: true,
+        pipeline_name: 'maintenance_inbox', pipeline_version: 3,
+        pinned_version: 1, is_current_deploy: true,
+      },
+      {
+        org_name: 'acme', org_display_name: 'Acme', org_active: true,
+        pipeline_name: 'maintenance_inbox', pipeline_version: 2,
+        pinned_version: 1, is_current_deploy: false,
+      },
+    ])
+    await openBuiltinSkill()
+
+    await screen.findByText(/Acme .+ maintenance_inbox .+ pinned v1 .+ current deploy/)
+    expect(screen.getByText(/superseded version/)).toBeInTheDocument()
+
+    mockedApi.skillReferences.mockResolvedValue([])
+    // Re-select to refetch: deselect by switching tab and back.
+    fireEvent.click(screen.getByText('Pipelines'))
+    fireEvent.click(screen.getByText('Skills'))
+    await screen.findByText('email_triage_reply')
+    fireEvent.click(screen.getByText('email_triage_reply'))
+    await screen.findByText('No deployments reference this skill.')
   })
 })

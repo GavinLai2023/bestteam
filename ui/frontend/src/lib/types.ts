@@ -303,6 +303,28 @@ export interface MemoryRecord {
 // accepts, not a form with known fields.
 export type ConfigItem = Record<string, unknown>
 
+// One immutable entry of a skill's version history
+// (GET /api/config/skills/{name}/versions). `current` marks the head.
+export interface SkillVersionInfo {
+  version: number
+  config: ConfigItem
+  created_by: string | null
+  created_at: string
+  current: boolean
+}
+
+// One deployed pipeline version pinning a skill
+// (GET /api/config/skills/{name}/references).
+export interface SkillReference {
+  org_name: string | null
+  org_display_name: string | null
+  org_active: boolean | null
+  pipeline_name: string
+  pipeline_version: number
+  pinned_version: number | null
+  is_current_deploy: boolean
+}
+
 // The wizard's DocumentsPage polls this after uploadOwnKnowledgeBaseFiles --
 // the upload endpoint now queues ingestion asynchronously and returns
 // immediately with a job id. `config` is only populated once `status ==

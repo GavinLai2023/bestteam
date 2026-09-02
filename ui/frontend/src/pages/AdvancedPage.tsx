@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
 import { useConfirm } from '../lib/useConfirm'
-import type { AdminOrg, ConfigItem } from '../lib/types'
+import type { AdminOrg, ConfigItem, SkillReference, SkillVersionInfo } from '../lib/types'
 import '../components/WizardLayout.css'
 import './AdvancedPage.css'
 
@@ -83,6 +83,14 @@ export default function AdvancedPage() {
   const [uploadNotice, setUploadNotice] = useState<string | null>(null)
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null)
+  // Skills tab only: the selected skill's immutable version history, the
+  // deployed teams pinning it, and which historical version (if any) is being
+  // viewed read-only. null = the editable head.
+  const [skillVersions, setSkillVersions] = useState<SkillVersionInfo[]>([])
+  const [skillReferences, setSkillReferences] = useState<SkillReference[]>([])
+  const [viewVersion, setViewVersion] = useState<number | null>(null)
+  // Target organisation for "Copy to organisation" on a locked built-in.
+  const [copyOrg, setCopyOrg] = useState('')
 
   const kind = KINDS.find((k) => k.key === activeKey)!
   const activeKeyRef = useRef(activeKey)
@@ -109,6 +117,14 @@ export default function AdvancedPage() {
       ? items.filter((it) => it.org == null)
       : items
   const selectedItem = visibleItems.find((it) => itemId(kind, it) === selectedId)
+  // A platform built-in is locked here (seeding owns its content); an org
+  // copy or org skill stays editable. Viewing a historical version is always
+  // read-only -- the history is immutable by design.
+  const isBuiltinSkill = activeKey === 'skills' && selectedItem?.builtin === true
+  const viewedVersion =
+    viewVersion == null ? null : skillVersions.find((v) => v.version === viewVersion) ?? null
+  const editorReadOnly = isBuiltinSkill || viewedVersion != null
+  const editorText = viewedVersion ? JSON.stringify(viewedVersion.config, null, 2) : jsonText
   // Filtering is display-only: `visibleItems` remains the org-scoping decision
   // above, so a hidden row can never become a mutation target.
   const filteredItems = filter.trim()
@@ -173,6 +189,10 @@ export default function AdvancedPage() {
     setCreateMode('manual')
     setUploadFiles([])
     setFilter('')
+    setSkillVersions([])
+    setSkillReferences([])
+    setViewVersion(null)
+    setCopyOrg('')
   }
 
   // Switching tabs keeps whatever organisation the user has selected -- it
@@ -201,6 +221,16 @@ export default function AdvancedPage() {
     setMessage(null)
     setError(null)
     setJsonText(JSON.stringify(item ? editableJson(kind, item) : {}, null, 2))
+    setViewVersion(null)
+    setCopyOrg('')
+    if (activeKey === 'skills' && item) {
+      // Best-effort side panels: the editor must keep working if either
+      // lookup fails (e.g. a just-created, not-yet-saved skill has neither).
+      setSkillVersions([])
+      setSkillReferences([])
+      api.skillVersions(id, apiOrg).then(setSkillVersions).catch(() => {})
+      api.skillReferences(id, apiOrg).then(setSkillReferences).catch(() => {})
+    }
   }
 
   const startNew = () => {
@@ -277,6 +307,36 @@ export default function AdvancedPage() {
       await api.putConfigItem(activeKey, selectedId!, parsed, apiOrg)
       setMessage('Saved.')
       if (activeKeyRef.current === startedFor) loadItems()
+      if (activeKey === 'skills' && selectedId) {
+        api.skillVersions(selectedId, apiOrg).then(setSkillVersions).catch(() => {})
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Locked built-ins can't be edited in place; customisation is a copy into
+  // an organisation, where the same-named copy shadows the built-in on that
+  // org's next deploy (load_skills' fold order).
+  const copyToOrg = async () => {
+    if (!selectedId || !copyOrg) return
+    let parsed: ConfigItem
+    try {
+      parsed = JSON.parse(jsonText)
+    } catch (e) {
+      setError(t('advanced.invalidJson', { detail: (e as Error).message }))
+      return
+    }
+    setSaving(true)
+    setError(null)
+    setMessage(null)
+    try {
+      await api.putConfigItem('skills', selectedId, parsed, copyOrg)
+      setMessage(
+        `Copied to ${copyOrg}. The copy shadows the built-in on that organisation's next deploy.`,
+      )
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -430,26 +490,113 @@ export default function AdvancedPage() {
             <>
               <h2>
                 {selectedId}
-                {activeKey === 'skills' && selectedItem?.version != null && ` · v${selectedItem.version}`}
+                {activeKey === 'skills' && skillVersions.length > 0 ? (
+                  <select
+                    className="advanced-version-select"
+                    aria-label="Version"
+                    value={viewVersion ?? 'head'}
+                    onChange={(e) =>
+                      setViewVersion(e.target.value === 'head' ? null : Number(e.target.value))
+                    }
+                  >
+                    {skillVersions.map((v) => (
+                      <option key={v.version} value={v.current ? 'head' : v.version}>
+                        v{v.version}
+                        {v.current ? ' (current)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  activeKey === 'skills' && selectedItem?.version != null && ` · v${selectedItem.version}`
+                )}
               </h2>
-              {activeKey === 'skills' && (
+              {activeKey === 'skills' && !isBuiltinSkill && (
                 <p className="hint">
                   Saving appends a version. Deployed teams keep their pinned version until you redeploy them.
                 </p>
               )}
+              {isBuiltinSkill && (
+                <p className="hint">
+                  Platform built-in — updated by platform releases and locked here. To customise it
+                  for one organisation, copy it: the organisation&apos;s copy shadows the built-in
+                  the next time a team is deployed.
+                </p>
+              )}
+              {viewedVersion && (
+                <p className="hint">
+                  Historical version — read-only. Deployed teams pinned to it keep receiving exactly
+                  this content.
+                </p>
+              )}
               {error && <p className="banner banner-error">{error}</p>}
               {message && <p className="banner banner-success">{message}</p>}
-              <textarea rows={18} value={jsonText} onChange={(e) => setJsonText(e.target.value)} spellCheck={false} />
-              <div className="wizard-actions">
-                <button className="btn btn-primary" onClick={save} disabled={saving}>
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-                {/* Never the same visual weight as Save: this one is not
-                    reachable by muscle memory (F15). */}
-                <button className="btn btn-danger-outline" onClick={remove} disabled={saving}>
-                  Delete
-                </button>
-              </div>
+              <textarea
+                rows={18}
+                value={editorText}
+                onChange={(e) => {
+                  if (!editorReadOnly) setJsonText(e.target.value)
+                }}
+                readOnly={editorReadOnly}
+                spellCheck={false}
+              />
+              {isBuiltinSkill ? (
+                <div className="wizard-actions">
+                  <select
+                    aria-label="Copy to organisation"
+                    value={copyOrg}
+                    onChange={(e) => setCopyOrg(e.target.value)}
+                  >
+                    <option value="">Choose organisation…</option>
+                    {orgs
+                      .filter((o) => o.active)
+                      .map((o) => (
+                        <option key={o.name} value={o.name}>
+                          {o.display_name || o.name}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={copyToOrg}
+                    disabled={!copyOrg || saving}
+                  >
+                    Copy to organisation
+                  </button>
+                </div>
+              ) : (
+                <div className="wizard-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={save}
+                    disabled={saving || viewedVersion != null}
+                  >
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                  {/* Never the same visual weight as Save: this one is not
+                      reachable by muscle memory (F15). */}
+                  <button className="btn btn-danger-outline" onClick={remove} disabled={saving}>
+                    Delete
+                  </button>
+                </div>
+              )}
+              {activeKey === 'skills' && (
+                <div className="advanced-skill-references">
+                  <h3>Referenced by deployed teams</h3>
+                  {skillReferences.length === 0 ? (
+                    <p className="hint">No deployments reference this skill.</p>
+                  ) : (
+                    <ul>
+                      {skillReferences.map((r, i) => (
+                        <li key={i}>
+                          {(r.org_display_name ?? 'platform') + ' · ' + r.pipeline_name}
+                          {' · pinned v' + String(r.pinned_version ?? '?') + ' · '}
+                          {r.is_current_deploy ? 'current deploy' : 'superseded version'}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

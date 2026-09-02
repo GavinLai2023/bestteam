@@ -273,3 +273,35 @@
 .btn-danger-outline:hover:not(:disabled) {
   background: var(--danger-bg);
 }
+
+/* Skills tab: the version dropdown lives inside the item heading. */
+.advanced-version-select {
+  margin-left: 10px;
+  font-size: 0.65em;
+  font-weight: normal;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.advanced-skill-references {
+  margin-top: 18px;
+}
+
+.advanced-skill-references h3 {
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+}
+
+.advanced-skill-references ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.advanced-skill-references li {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
