@@ -39,7 +39,8 @@ customer's IT for anything).
 | 12 | Install the nightly backup cron, and copy backups off the host | "Backup and restore" |
 | 13 | Store `BESTTEAM_SECRETS_KEY` in a password manager, **not** beside the backups | "Backup and restore" |
 | 14 | Rehearse `scripts/restore.sh` on a throwaway stack — once, before the customer is live | "Backup and restore" |
-| 15 | Hand the customer `docs/BETA_NOTES.md` | — |
+| 15 | Hand the customer `docs/BETA_NOTES.md` and the connection guide for
+their mailbox (§0a) | — |
 
 Steps 12–14 are the ones that get skipped under time pressure and are the ones
 that cost the most when skipped. A restore script that has never been run is
@@ -82,6 +83,31 @@ nslookup -type=mx example.com
 
 Whatever the answer, the customer only ever needs one mailbox: one org, one
 mailbox, one automated team (see `docs/BETA_NOTES.md`).
+
+**Three customer-facing guides cover the paths a customer walks themselves.**
+Send the link, never a copy: each is published in English at `/setup/...` and
+in Chinese at `/zh/setup/...`, and the page's own language link switches
+between them.
+
+- <https://bestteam.online/setup/gmail> — the customer does this alone in
+  about ten minutes.
+- <https://bestteam.online/setup/m365> — **not a self-service path.** It needs
+  a Global Administrator in the customer's own tenant and one step only
+  PowerShell can do, so the page is written as the script for a screen share
+  you run with them. Send it ahead so they can find out who holds that
+  account; that is what takes days, not the setup.
+- <https://bestteam.online/setup/m365-it> — the same setup for a customer who
+  *does* have IT, or whose tenant is held by a reseller: forward it to them
+  and they work unattended. It leads with the permission spec, answers "is
+  this basic auth?" and "why `FullAccess`?" before they ask, and covers
+  egress, auditing, rotation and revocation. **Pick one of the two M365
+  guides per customer** — sending an IT department the screen-share script
+  wastes their time, and sending a non-technical owner the spec sheet loses
+  them on the first table.
+
+They live in the `bestteam-website` repository under `src/pages/setup/`, not
+in this one. One copy of each, so a change to the wizard's mailbox step cannot
+leave a customer following an instruction that no longer matches the screen.
 
 ## 1. Configure environment
 
