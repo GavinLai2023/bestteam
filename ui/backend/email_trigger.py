@@ -578,12 +578,12 @@ def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, ba
 # skills.py / ui/backend/pipelines/property_maintenance_inbox_demo.yaml). Used
 # only to stamp `trigger_context["result_contract"]` below -- advisory metadata,
 # never anything build_trigger_pipeline's actual run depends on.
-_PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response_v1"
+_PROPERTY_MAINTENANCE_RESPONSE_SKILL = "property_maintenance_response"
 
 
 def _declares_property_maintenance_contract(db: Session, org_id: int, pipeline_name: str) -> bool:
     """Best-effort: does this deployed pipeline's config give any agent the
-    ACTUAL platform `property_maintenance_response_v1` skill?
+    ACTUAL platform `property_maintenance_response` skill?
 
     A run's own trace/output can't tell us this after the fact for a run that
     crashed before producing any JSON (`_normalize` can then only see a plain
@@ -600,7 +600,7 @@ def _declares_property_maintenance_contract(db: Session, org_id: int, pipeline_n
     A name match alone isn't enough: `load_skills` intentionally lets an
     org's own skill shadow a same-named platform built-in, so an org that
     happens to name (or repurpose) its own skill
-    `property_maintenance_response_v1` would otherwise get its unrelated
+    `property_maintenance_response` would otherwise get its unrelated
     runs wrongly redacted and stamped with synthetic maintenance error rows
     (Codex review finding). `_resolves_to_platform_skill` re-applies
     `load_skills`' own shadowing precedence to confirm the name still

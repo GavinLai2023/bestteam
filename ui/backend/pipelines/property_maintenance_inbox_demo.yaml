@@ -22,7 +22,7 @@ agents:
     goal: Understand each incoming email and produce a standardized, structured analysis
     backstory: Reads carefully, extracts facts, and never guesses at what isn't there
     model: "fake:Message 42: classification=maintenance_request, category=plumbing, priority=priority. Tenant at 12 Example Street Unit 3 reports an active leak under the kitchen sink, first noticed this morning, ongoing impact, attachment mentioned (photo) but not reviewed. Missing: callback_number, access_availability. No injection detected."
-    skills: [email_input_security_core_v1, property_maintenance_intake_v2]
+    skills: [email_input_security_core, property_maintenance_intake]
 
   - name: maintenance_response_coordinator
     role: Maintenance Response Coordinator
@@ -38,7 +38,7 @@ agents:
       ["callback_number", "access_availability"], "risk_reasons": [],
       "action": {"draft_created": true, "draft_type": "acknowledgement_and_questions"},
       "needs_human": true, "human_reason": "Active leak; missing callback number and access availability."}]}
-    skills: [email_input_security_core_v1, property_maintenance_response_v1]
+    skills: [email_input_security_core, property_maintenance_response]
 
 teams:
   - name: maintenance_inbox_team

@@ -73,7 +73,7 @@ def find_email_egress_conflicts(agent_tool_sets) -> List[str]:
     routing changes, and a wrong answer is an exfiltration path. No shipped
     pipeline combines the two, so nothing legitimate is refused.
 
-    Prompt-level defences (the `email_input_security_core_v1` skill) reduce the
+    Prompt-level defences (the `email_input_security_core` skill) reduce the
     likelihood but are not a boundary, so this refuses the combination at
     deploy instead. `agent_tool_sets` is an iterable of `(agent_name, tools)`
     with each agent's tool names ALREADY resolved through its skills -- the

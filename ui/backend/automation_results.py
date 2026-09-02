@@ -3,7 +3,7 @@
 
 The Maintenance Response Coordinator agent is instructed to end its turn with
 a strict JSON envelope (see `pipelines/property_maintenance_inbox_demo.yaml`
-and the platform skill `property_maintenance_response_v1`). This module never
+and the platform skill `property_maintenance_response`). This module never
 trusts that JSON for identity: `org_id`/`run_id`/`source_key` are always
 derived from the run's own persisted `trigger_context` (the poller-detected
 UID batch), never from the model's claimed `message_id` set. See
@@ -484,7 +484,7 @@ def _normalize(
     if raw is None or raw.get("result_type") != RESULT_TYPE_BATCH_MARKER:
         if trigger_context.get("result_contract") == RESULT_TYPE_BATCH_MARKER:
             # This run WAS dispatched against a pipeline whose Response agent
-            # carries the property_maintenance_response_v1 skill (stamped into
+            # carries the property_maintenance_response skill (stamped into
             # trigger_context at dispatch time -- see
             # email_trigger._declares_property_maintenance_contract), so an
             # unparseable output -- including a plain failure string from a

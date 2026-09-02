@@ -6,6 +6,25 @@
 
 ## Done
 
+- **Built-in skills lost their `_vN` name suffixes** (2026-09-02). Migration
+  `w0x1y2z3a4b5` renames the platform tier (`email_input_security_core`,
+  `property_maintenance_intake` — the former `_v2` content, with `_v1`'s
+  snapshot merged in as version 1 —, `property_maintenance_response`,
+  `contractor_sourcing`) and rewrites every stored reference (pipeline
+  head/version configs, builder drafts, `pipeline_dependencies.resource_name`),
+  skipping any org that shadows an old name with its own skill; snapshot ids
+  are untouched so deployed pins keep serving. From here: `seed_default_skills`
+  publishes a changed `DEFAULT_SKILLS` definition as a new version on start-up
+  (platform tier is 409-locked against in-place admin edits; customisation is
+  an org-tier copy that shadows by name — the Advanced page grew a
+  "Copy to organisation" flow, a version-history dropdown with read-only
+  historical views, and a per-skill "referenced by deployed teams" list from
+  `GET /api/config/skills/{name}/references`). Admin org dropdowns
+  (Advanced/Trace) now default to active organisations, with a "Show
+  deactivated" checkbox always offered beside them, and the Skills tab opens
+  on the platform tier so the built-ins are what an admin lands on. Spec:
+  `docs/superpowers/specs/2026-09-02-skills-drop-vn-suffix-design.md`.
+  Rollout on the VPS: backup, `alembic upgrade head`, start new code.
 - **Two operator scripts, so an upgrade and the poller watchdog are each one
   command** (2026-09-02). `scripts/deploy.sh` is `docs/deployment.md`'s
   "Updating an existing deployment" in order -- backup, pull with a stash

@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional, Type
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from bestteam import KnowledgeBaseSpec, SkillSpec
@@ -98,7 +99,10 @@ def list_organizations(db: Session = Depends(get_db)) -> list[Dict[str, Any]]:
     self-service provisioning surface -- it only lets an admin target an
     existing org on the `?org=`-scoped item routes below.
     """
-    return [{"name": org.name, "display_name": org.display_name} for org in list_orgs(db)]
+    return [
+        {"name": org.name, "display_name": org.display_name, "active": org.active}
+        for org in list_orgs(db)
+    ]
 
 
 @router.get("/tools")
@@ -191,7 +195,9 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                 "config": item.config,
                 **(
                     {
-                        "version": _skill_version_number(db, item)
+                        "version": _skill_version_number(db, item),
+                        "builtin": item.org_id is None
+                        and item.name in _BUILTIN_SKILL_NAMES,
                     }
                     if name == "skills" else {}
                 ),
@@ -210,6 +216,9 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         payload = {"name": item.name, "org": org, "config": item.config}
         if name == "skills":
             payload["version"] = _skill_version_number(db, item)
+            payload["builtin"] = (
+                item.org_id is None and item.name in _BUILTIN_SKILL_NAMES
+            )
         return payload
 
     @sub.put("/{item_name}")
@@ -221,6 +230,19 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
         admin: User = Depends(get_current_admin),
     ) -> Dict[str, Any]:
         org_id = _resolve_org_id(db, org, allow_platform=allow_platform)
+        if name == "skills" and org_id is None and item_name in _BUILTIN_SKILL_NAMES:
+            # The platform tier stays pristine so seed_default_skills can
+            # update it unconditionally on release. Customisation lives in the
+            # org tier, where a same-named copy shadows the built-in.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{item_name}' is a platform built-in and can't be edited "
+                    "in place -- save a copy under an organisation (?org=...) "
+                    "to customise it; the copy shadows the built-in on "
+                    "redeploy."
+                ),
+            )
         if name == "knowledge_bases":
             _validate_kb_paths(config)
             _reject_builtin_kb_name(item_name)
@@ -339,6 +361,65 @@ def _make_component_router(name: str, record_cls: Type, spec_cls: Type[BaseModel
                     "current": version.id == item.current_version_id,
                 }
                 for version in versions
+            ]
+
+        @sub.get("/{item_name}/references")
+        def list_skill_references(
+            item_name: str,
+            org: Optional[str] = Query(None),
+            db: Session = Depends(get_db),
+        ) -> list[Dict[str, Any]]:
+            """Every deployed pipeline version pinning this skill -- current
+            and superseded -- so an admin can judge whether a definition is
+            still served. Matches by resolved resource_id, falling back to
+            resource_name for legacy rows that predate id resolution."""
+            org_id = _resolve_org_id(db, org, allow_platform=True)
+            item = db.query(SkillRecord).filter_by(
+                name=item_name, org_id=org_id
+            ).one_or_none()
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"Unknown skill '{item_name}'")
+            rows = (
+                db.query(
+                    PipelineDependency, PipelineVersion, PipelineRecord,
+                    Organization, SkillVersion,
+                )
+                .join(PipelineVersion, PipelineDependency.pipeline_version_id == PipelineVersion.id)
+                .join(PipelineRecord, PipelineVersion.pipeline_id == PipelineRecord.id)
+                .outerjoin(Organization, PipelineRecord.org_id == Organization.id)
+                .outerjoin(SkillVersion, PipelineDependency.resource_version_id == SkillVersion.id)
+                .filter(PipelineDependency.resource_kind == "skill")
+                .filter(
+                    or_(
+                        PipelineDependency.resource_id == item.id,
+                        and_(
+                            PipelineDependency.resource_id.is_(None),
+                            PipelineDependency.resource_name == item.name,
+                        ),
+                    )
+                )
+                .order_by(PipelineRecord.name, PipelineVersion.version_number.desc())
+                .all()
+            )
+            return [
+                {
+                    "org_name": org_record.name if org_record else None,
+                    "org_display_name": (
+                        (org_record.display_name or org_record.name)
+                        if org_record else None
+                    ),
+                    "org_active": org_record.active if org_record else None,
+                    "pipeline_name": pipeline.name,
+                    "pipeline_version": version.version_number,
+                    "pinned_version": (
+                        skill_version.version_number if skill_version else None
+                    ),
+                    "is_current_deploy": (
+                        pipeline.status == "deployed"
+                        and pipeline.current_version_id == version.id
+                    ),
+                }
+                for _dep, version, pipeline, org_record, skill_version in rows
             ]
 
     return sub

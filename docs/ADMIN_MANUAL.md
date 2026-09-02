@@ -156,14 +156,20 @@ what it's built from, then read-only reference":
 | Tab | Org-scoped? | Editable? |
 |-----|:-----------:|:---------:|
 | **Pipelines** | yes (`?org=`) | Deploy/edit the JSON config directly — this *is* what the Team Builder wizard and a customer's "My teams" produce. |
-| **Skills** | optional (platform-tier if omitted) | Yes. |
+| **Skills** | optional (platform-tier if omitted) | Org skills, yes. **Platform built-ins are read-only**: their content is owned by platform releases (`DEFAULT_SKILLS` + seeding), so the editor offers **Copy to organisation** instead of Save — the org's same-named copy shadows the built-in on that org's next deploy. Every skill shows a version dropdown (older versions render read-only; deployed teams pinned to one keep receiving exactly that content) and a "Referenced by deployed teams" list — org · team · pinned version · current/superseded — so you can judge whether an old definition is still being served. |
 | **Knowledge bases** | yes | Yes — either edit JSON directly, or **create from files**: upload documents and the page polls the resulting ingestion job (up to ~1 minute) until it's ready or fails. |
 | **Tools** | none | Read-only reference list of the built-in tools. |
 | **Model catalog** | none | Edit pricing/availability entries; this is where a model becomes selectable in the wizard and in raw pipeline config. |
 
 Use the organisation selector at the top to scope pipelines/knowledge bases
 to a specific org, or the platform tier (skills only) when `orgScope` is
-`optional`/`none`.
+`optional`/`none`. The Skills tab opens on the platform tier, since the
+built-ins are what you normally come here to read; pick an organisation from
+the same selector to see that org's own copies. The selector lists **active**
+organisations by default;
+tick "Show deactivated" beside it to include suspended ones (the Trace page's
+selector behaves the same; the Accounts page always shows everything, since
+that's where reactivation lives).
 
 Editing a pipeline's config here has the same effect as a customer
 redeploying it, or the Team Builder wizard's Deploy step — including

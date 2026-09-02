@@ -8,6 +8,7 @@ import type {
   DiagnoseRunResult,
   OrgEmailConnectPayload, OrgEmailStatus, OrgExportBundle, OrgKnowledgeBase, RetentionSettings, RunListItem,
   QuestionAnswer, Requirements, ShareLink, ShareMessage, ShareSessionSummary,
+  SkillReference, SkillVersionInfo,
   UsageRecord, PipelineAnalyticsDetail, PipelineAnalyticsSummary,
 } from './types'
 
@@ -391,6 +392,10 @@ export const api = {
     }),
   deleteConfigItem: (kind: string, name: string, org?: string) =>
     request<void>(`/api/config/${kind}/${encodeURIComponent(name)}${orgQuery(org)}`, { method: 'DELETE' }),
+  skillVersions: (name: string, org?: string) =>
+    request<SkillVersionInfo[]>(`/api/config/skills/${encodeURIComponent(name)}/versions${orgQuery(org)}`),
+  skillReferences: (name: string, org?: string) =>
+    request<SkillReference[]>(`/api/config/skills/${encodeURIComponent(name)}/references${orgQuery(org)}`),
   uploadKnowledgeBaseFiles: (name: string, files: File[], org?: string) =>
     uploadFiles<{ name: string; job_id: number; status: string }>(
       `/api/config/knowledge_bases/${encodeURIComponent(name)}/upload${orgQuery(org)}`,

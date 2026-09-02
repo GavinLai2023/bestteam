@@ -4,7 +4,7 @@ import pytest
 from bestteam import validate_specification
 from bestteam.core.specification import AgentSpec, Specification, TeamSpec, PipelineSpec
 from bestteam.tools import REGISTRY
-from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
+from ui.backend.db import SkillRecord, SkillVersion, init_db, make_engine, session_factory
 from ui.backend.skills import DEFAULT_SKILLS, load_skills, seed_default_skills
 
 
@@ -57,7 +57,7 @@ def test_triage_playbook_says_when_to_read_an_attachment(db_session):
     assert "only makes sense with one" in lowered
     assert "not every attachment on every message" in lowered
     # The refusal path is stated, and the same never-overclaim discipline as
-    # property_maintenance_intake_v2 carries over.
+    # property_maintenance_intake carries over.
     assert "unsupported type" in lowered
     assert "never describe contents beyond what" in lowered
     # The step is ordered before drafting, or it cannot inform the draft.
@@ -71,16 +71,49 @@ def test_seed_is_idempotent(db_session):
     assert count == 1
 
 
-def test_seed_never_overwrites_admin_edits(db_session):
+def test_seed_updates_a_changed_head_and_keeps_history(db_session):
+    # The platform tier is locked against hand edits (crud rejects them), so
+    # seeding treats any drift between the stored head and DEFAULT_SKILLS as
+    # a platform release: append a version, move the head, keep the old
+    # content reachable as history (deployed teams stay pinned to it).
     seed_default_skills(db_session)
     record = db_session.query(SkillRecord).filter_by(name="email_triage_reply").one()
-    edited = {**record.config, "instructions": "Custom playbook edited by admin."}
-    record.config = edited
+    record.config = {**record.config, "instructions": "An older platform release."}
     db_session.commit()
+    old_head_id = record.current_version_id
 
     seed_default_skills(db_session)
+
     record = db_session.query(SkillRecord).filter_by(name="email_triage_reply").one()
-    assert record.config["instructions"] == "Custom playbook edited by admin."
+    canonical = next(s for s in DEFAULT_SKILLS if s.name == "email_triage_reply").to_raw()
+    assert record.config == canonical
+    versions = (
+        db_session.query(SkillVersion)
+        .filter_by(skill_id=record.id)
+        .order_by(SkillVersion.version_number)
+        .all()
+    )
+    assert versions[-1].id == record.current_version_id
+    assert versions[-1].created_by is None  # a seeded release, not an admin save
+    assert record.current_version_id != old_head_id
+
+
+def test_seed_is_a_noop_when_content_matches(db_session):
+    seed_default_skills(db_session)
+    before = {
+        (v.skill_id, v.version_number) for v in db_session.query(SkillVersion).all()
+    }
+    seed_default_skills(db_session)
+    after = {
+        (v.skill_id, v.version_number) for v in db_session.query(SkillVersion).all()
+    }
+    assert before == after
+
+
+def test_no_builtin_name_carries_a_version_suffix():
+    # The _vN suffix era is over: history lives in skill_versions, updates
+    # arrive via seeding, and customisation is an org-tier copy.
+    assert not any(s.name.endswith(("_v1", "_v2")) for s in DEFAULT_SKILLS)
 
 
 def test_default_skill_tools_resolve_against_registry():
@@ -161,63 +194,44 @@ def test_maintenance_skills_are_seeded(db_session):
         for (name,) in db_session.query(SkillRecord.name).filter(SkillRecord.org_id.is_(None)).all()
     }
     assert {
-        "email_input_security_core_v1",
-        "property_maintenance_intake_v1",
-        "property_maintenance_intake_v2",
-        "property_maintenance_response_v1",
+        "email_input_security_core",
+        "property_maintenance_intake",
+        "property_maintenance_response",
     } <= names
 
 
 def test_intake_skill_grants_only_read_tools_never_draft(db_session):
     """WP1 acceptance (spec section 7): the Intake Analyst must never be able
-    to reach email_draft_reply -- in either version of the skill."""
+    to reach email_draft_reply."""
     seed_default_skills(db_session)
     skills = load_skills(db_session)
-    assert set(skills["property_maintenance_intake_v1"].tools) == {
-        "email_find", "email_read",
-    }
-    assert set(skills["property_maintenance_intake_v2"].tools) == {
+    assert set(skills["property_maintenance_intake"].tools) == {
         "email_find", "email_read", "email_read_attachment",
     }
-    security = skills["email_input_security_core_v1"]
+    security = skills["email_input_security_core"]
     assert security.tools == []
-
-
-def test_intake_v1_is_frozen_exactly_as_it_shipped(db_session):
-    # The versioning rule (see skills.py's own comment): a new behaviour ships
-    # as `_v2`, never a silent edit of `_v1`, so a team pinned to `_v1` keeps
-    # the behaviour it was deployed with. Phase 4b is the first use of it, and
-    # this is what stops the next change quietly editing `_v1` instead.
-    seed_default_skills(db_session)
-    v1 = load_skills(db_session)["property_maintenance_intake_v1"]
-
-    assert set(v1.tools) == {"email_find", "email_read"}
-    assert "email_read_attachment" not in v1.instructions
-    assert "You cannot read attachments" in v1.instructions
-    assert "Never claim to have seen an attachment." in v1.instructions
 
 
 def test_every_email_reading_skill_grants_attachment_reading(db_session):
     # Attachment reading is on by default for every email team, with no per-org
     # switch -- so a seeded skill withholding the tool is the only thing that
     # could make that false, silently, for the customers who use the templates.
-    # `_v1` is excluded on purpose: it is frozen, and the template points at
-    # `_v2`. The draft-only Response Coordinator is excluded too -- giving it
+    # The draft-only Response Coordinator is excluded on purpose -- giving it
     # any read tool would break the "Response never re-reads mail" boundary.
     seed_default_skills(db_session)
     skills = load_skills(db_session)
-    for name in ("email_triage_reply", "property_maintenance_intake_v2"):
+    for name in ("email_triage_reply", "property_maintenance_intake"):
         assert "email_read_attachment" in skills[name].tools, name
-    assert "email_read_attachment" not in skills["property_maintenance_response_v1"].tools
+    assert "email_read_attachment" not in skills["property_maintenance_response"].tools
 
 
-def test_intake_v2_describes_attachment_reading_without_overclaiming(db_session):
-    # `_v1`'s paragraph stated the capability did not exist. `_v2` must say the
-    # opposite -- while keeping every guarantee `_v1` got right, since a model
+def test_intake_describes_attachment_reading_without_overclaiming(db_session):
+    # An earlier release's paragraph stated the capability did not exist. The
+    # current one must say the opposite -- keeping every guarantee, since a model
     # that reads a PDF and then embellishes it is exactly the failure that
     # wording was guarding against.
     seed_default_skills(db_session)
-    instructions = load_skills(db_session)["property_maintenance_intake_v2"].instructions
+    instructions = load_skills(db_session)["property_maintenance_intake"].instructions
     lowered = instructions.lower()
 
     assert "cannot read attachments" not in lowered
@@ -237,7 +251,7 @@ def test_response_skill_grants_only_draft_tool_never_read_tools(db_session):
     Analyst's write-up, never re-reading the mailbox itself)."""
     seed_default_skills(db_session)
     skills = load_skills(db_session)
-    response = skills["property_maintenance_response_v1"]
+    response = skills["property_maintenance_response"]
     assert response.tools == ["email_draft_reply"]
 
 
@@ -246,7 +260,7 @@ def test_response_skill_grants_only_draft_tool_never_read_tools(db_session):
 
 def test_seed_creates_contractor_sourcing_skill(db_session):
     seed_default_skills(db_session)
-    record = db_session.query(SkillRecord).filter_by(name="contractor_sourcing_v1").one()
+    record = db_session.query(SkillRecord).filter_by(name="contractor_sourcing").one()
     assert record.config["tools"] == ["local_business_search"]
     assert record.config["instructions"]
 
@@ -257,7 +271,7 @@ def test_contractor_sourcing_skill_never_books_or_contacts(db_session):
     # must never fabricate licensing/insurance status the tool doesn't return.
     seed_default_skills(db_session)
     instructions = (
-        db_session.query(SkillRecord).filter_by(name="contractor_sourcing_v1").one().config["instructions"]
+        db_session.query(SkillRecord).filter_by(name="contractor_sourcing").one().config["instructions"]
     ).lower()
     assert "never" in instructions
     assert "book" in instructions or "contact" in instructions
@@ -267,7 +281,7 @@ def test_contractor_sourcing_skill_never_books_or_contacts(db_session):
 def test_contractor_sourcing_skill_builds_into_pipeline(db_session, tmp_path):
     seed_default_skills(db_session)
     skills = load_skills(db_session)
-    assert "contractor_sourcing_v1" in skills
+    assert "contractor_sourcing" in skills
 
     spec = Specification(
         name="sourcing_pipeline",
@@ -277,7 +291,7 @@ def test_contractor_sourcing_skill_builds_into_pipeline(db_session, tmp_path):
                 role="Contractor Sourcing Assistant",
                 goal="Find and compare local tradespeople for a maintenance job",
                 model="fake:done",
-                skills=["contractor_sourcing_v1"],
+                skills=["contractor_sourcing"],
             )
         ],
         teams=[TeamSpec(name="sourcing_team", agents=["sourcing_agent"], mode="sequential")],
@@ -314,8 +328,8 @@ def test_property_maintenance_inbox_demo_pipeline_enforces_tool_boundary(db_sess
     assert response_tools == {"email_draft_reply"}
     # The Response Coordinator drafts from the Intake Analyst's write-up,
     # which can itself quote injected instructions from the original email --
-    # it needs the same prompt-injection defenses email_input_security_core_v1
-    # gives the Intake Analyst, not just property_maintenance_response_v1's
+    # it needs the same prompt-injection defenses email_input_security_core
+    # gives the Intake Analyst, not just property_maintenance_response's
     # drafting policy (Codex review finding).
     assert "SECURITY RULES FOR EMAIL INPUT" in response_agent.backstory
     assert "SECURITY RULES FOR EMAIL INPUT" in intake_agent.backstory

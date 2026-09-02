@@ -335,7 +335,7 @@ def test_poll_org_stamps_result_contract_when_pipeline_declares_the_maintenance_
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
@@ -351,7 +351,7 @@ def test_poll_org_stamps_result_contract_when_pipeline_declares_the_maintenance_
 def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_platform_one(db, monkeypatch):
     """`load_skills` intentionally lets an org's own skill shadow a same-named
     platform built-in. A name-only check can't tell the two apart, so an org
-    that names its own, unrelated skill `property_maintenance_response_v1`
+    that names its own, unrelated skill `property_maintenance_response`
     would otherwise get this run wrongly redacted and stamped with synthetic
     maintenance error rows (Codex review finding) -- the org-shadowed skill
     must NOT count as the platform contract."""
@@ -360,12 +360,12 @@ def test_poll_org_does_not_stamp_result_contract_when_org_skill_shadows_the_plat
 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     db.add(SkillRecord(
-        name="property_maintenance_response_v1", org_id=org.id,
+        name="property_maintenance_response", org_id=org.id,
         config={"description": "unrelated org skill", "instructions": "do something else"},
     ))
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
@@ -467,7 +467,7 @@ def test_start_triggered_run_normalizes_a_declared_batch_when_submit_raises(db, 
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
@@ -499,7 +499,7 @@ def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit
     org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     db.commit()
     monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 45, [42, 45]))
@@ -1068,7 +1068,7 @@ def test_retry_recomputes_result_contract_from_the_currently_deployed_pipeline(d
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     run_row = _completed_triggered_run(db, org, uidvalidity=3)
     run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}
@@ -1097,7 +1097,7 @@ def test_retry_picks_up_a_newly_added_maintenance_contract_on_the_retried_pipeli
     assert "result_contract" not in run_row.trigger_context
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     db.commit()
 
@@ -1147,7 +1147,7 @@ def test_retry_normalizes_before_publishing_run_failed_when_submit_raises(db, mo
     org, trigger = _org_with_trigger(db, last_uid=45, uidvalidity=3)
     publish_pipeline_version(
         db, org_id=org.id, name="triage",
-        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response_v1"]}]},
+        config={"agents": [{"name": "responder", "skills": ["property_maintenance_response"]}]},
     )
     run_row = _completed_triggered_run(db, org, uids=(42, 43), uidvalidity=3)
     run_row.trigger_context = {**run_row.trigger_context, "result_contract": "property_maintenance_email_batch"}

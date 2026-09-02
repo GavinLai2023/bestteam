@@ -2409,3 +2409,97 @@ def test_public_model_catalog_hides_embedding_tier(client):
     # The admin CRUD listing still shows it -- somebody has to maintain its price.
     admin_specs = [entry["spec"] for entry in client.get("/api/config/model-catalog").json()]
     assert "openai:text-embedding-3-small" in admin_specs
+
+
+def test_platform_builtin_skill_put_is_locked(client):
+    # The platform tier stays pristine so seeding can update it on release;
+    # customisation is a copy into an org (same-name shadowing in load_skills).
+    resp = client.put(
+        "/api/config/skills/email_triage_reply",
+        json={"instructions": "hand edit"},
+    )
+    assert resp.status_code == 409
+    assert "org" in resp.json()["detail"].lower()
+
+
+def test_platform_builtin_skill_flagged_in_listing(client):
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    items = client.get("/api/config/skills").json()
+    flagged = {i["name"]: i.get("builtin") for i in items if i["org"] is None}
+    assert flagged.get("email_triage_reply") is True
+    detail = client.get("/api/config/skills/email_triage_reply").json()
+    assert detail["builtin"] is True
+
+
+def test_org_copy_of_builtin_name_is_allowed_and_not_builtin(client):
+    resp = client.put(
+        "/api/config/skills/email_triage_reply?org=default",
+        json={"instructions": "org customisation"},
+    )
+    assert resp.status_code == 200
+    item = client.get("/api/config/skills/email_triage_reply?org=default").json()
+    assert item.get("builtin") is not True
+
+
+def test_skill_versions_endpoint_lists_history_newest_first(client):
+    assert client.put(
+        "/api/config/skills/hist?org=default", json={"instructions": "one"}
+    ).status_code == 200
+    assert client.put(
+        "/api/config/skills/hist?org=default", json={"instructions": "two"}
+    ).status_code == 200
+    versions = client.get("/api/config/skills/hist/versions?org=default").json()
+    assert [v["version"] for v in versions] == [2, 1]
+    assert versions[0]["current"] is True and versions[1]["current"] is False
+    assert versions[1]["config"]["instructions"] == "one"
+
+
+def test_skill_references_lists_pins(client):
+    # Deploy an org team over a platform built-in; the references endpoint
+    # must surface the pin (org, team, pinned version, currency).
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    assert client.put(
+        "/api/config/pipelines/ref_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g",
+                            "model": "fake:hi", "skills": ["email_triage_reply"]}]),
+    ).status_code == 200
+
+    refs = client.get("/api/config/skills/email_triage_reply/references").json()
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref["pipeline_name"] == "ref_team"
+    assert ref["org_name"] == "default"
+    assert ref["pinned_version"] == 1
+    assert ref["is_current_deploy"] is True
+
+    # A redeploy without the skill supersedes the pin: still listed, but no
+    # longer the current deploy.
+    assert client.put(
+        "/api/config/pipelines/ref_team?org=default",
+        json=_deployed_wf([{"name": "a", "role": "r", "goal": "g", "model": "fake:hi"}]),
+    ).status_code == 200
+    refs = client.get("/api/config/skills/email_triage_reply/references").json()
+    assert len(refs) == 1
+    assert refs[0]["is_current_deploy"] is False
+
+
+def test_skill_references_empty_when_unreferenced(client):
+    from ui.backend.skills import seed_default_skills
+    with open_test_db() as db:
+        seed_default_skills(db)
+    assert client.get("/api/config/skills/contractor_sourcing/references").json() == []
+
+
+def test_skill_references_404_for_unknown_skill(client):
+    assert client.get("/api/config/skills/nope/references").status_code == 404
+
+
+def test_config_orgs_reports_active_flag(client):
+    # The Advanced/Trace org selectors filter on `active`; omitting the flag
+    # made the filter hide every org (caught by the e2e smoke journey).
+    orgs = client.get("/api/config/orgs").json()
+    assert orgs and all(isinstance(o.get("active"), bool) for o in orgs)

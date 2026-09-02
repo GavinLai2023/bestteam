@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../lib/api'
+import { visibleOrgOptions } from '../lib/orgs'
 import { formatDateTime } from '../lib/dateFormat'
 import { RUN_STATUSES, useRunStatusLabel } from '../lib/runStatus'
 import AdminRunDetail from '../components/AdminRunDetail'
@@ -60,6 +61,7 @@ export default function TracePage() {
   const [tab, setTab] = useState<'runs' | 'analytics' | 'models'>('runs')
   const [orgs, setOrgs] = useState<AdminOrg[]>([])
   const [org, setOrg] = useState<string | null>(null) // null = all organisations
+  const [showInactiveOrgs, setShowInactiveOrgs] = useState(false)
 
   useEffect(() => {
     api
@@ -238,12 +240,20 @@ export default function TracePage() {
         Organisation
         <select value={org ?? ''} onChange={(e) => setOrg(e.target.value || null)}>
           <option value="">All organisations</option>
-          {orgs.map((o) => (
+          {visibleOrgOptions(orgs, showInactiveOrgs, org).map((o) => (
             <option key={o.name} value={o.name}>
               {o.display_name || o.name}
             </option>
           ))}
         </select>
+      </label>
+      <label className="advanced-org-inactive">
+        <input
+          type="checkbox"
+          checked={showInactiveOrgs}
+          onChange={(e) => setShowInactiveOrgs(e.target.checked)}
+        />
+        Show deactivated
       </label>
 
       <div className="trace-tabs">
