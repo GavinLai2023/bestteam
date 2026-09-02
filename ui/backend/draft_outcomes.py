@@ -12,13 +12,18 @@ cycles → handled. The `evidence` column doubles as the live answer to the
 "does the header survive a client send?" spike the design could not run
 against a real mailbox. See docs/superpowers/specs/
 2026-09-03-draft-outcome-tracking-design.md.
+
+The tallies are read back on the admin analytics view only. No customer-
+facing surface exposes them: to the customer, "the platform knows whether you
+sent it" undercuts the same trust story that "only drafts, never sends" is
+there to tell.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Any, Dict, Iterable, List
 
 from sqlalchemy.orm import Session
 
@@ -224,23 +229,47 @@ def reconcile_org(db: Session, trigger) -> None:
         )
 
 
-def summary(db: Session, org_id: int, *, now: datetime | None = None) -> Dict[str, int]:
-    """Counts for the Automations tab: rows created inside the window, by
-    status. `unknown` is deliberately excluded -- it means "we can no longer
-    tell", which is not a number worth a customer's attention."""
-    now = now or _utcnow()
-    cutoff = now - timedelta(days=WINDOW_DAYS)
-    counts = {STATUS_SENT: 0, STATUS_HANDLED: 0, STATUS_PENDING: 0}
+_STATUSES = (STATUS_SENT, STATUS_HANDLED, STATUS_PENDING, STATUS_UNKNOWN)
+_EVIDENCE = (EVIDENCE_SOURCE_KEY_HEADER, EVIDENCE_IN_REPLY_TO)
+
+
+def counts_by_run(db: Session, run_ids: Iterable[str]) -> Dict[str, Dict[str, int]]:
+    """Per-run draft tallies: statuses, plus which evidence proved each send.
+
+    Keyed by run id; a run that wrote no draft is absent, so the caller sees
+    the difference between "no drafts" and "drafts, all still pending".
+    """
+    ids = list(run_ids)
+    if not ids:
+        return {}
     rows = (
-        db.query(DraftOutcome.status)
-        .filter(
-            DraftOutcome.org_id == org_id,
-            DraftOutcome.created_at >= cutoff,
-            DraftOutcome.status.in_(list(counts)),
-        )
+        db.query(DraftOutcome.run_id, DraftOutcome.status, DraftOutcome.evidence)
+        .filter(DraftOutcome.run_id.in_(ids))
         .all()
     )
-    for (status,) in rows:
-        counts[status] += 1
-    counts["window_days"] = WINDOW_DAYS
-    return counts
+    per_run: Dict[str, Dict[str, int]] = {}
+    for run_id, status, evidence in rows:
+        bucket = per_run.setdefault(run_id, {key: 0 for key in _STATUSES + _EVIDENCE})
+        if status in bucket:
+            bucket[status] += 1
+        if evidence in _EVIDENCE:
+            bucket[evidence] += 1
+    return per_run
+
+
+def aggregate(per_run: Iterable[Dict[str, int]]) -> Dict[str, Any]:
+    """Sum `counts_by_run` buckets into the analytics API's shape.
+
+    Always the full shape, zeros included: "this pipeline drafted nothing" is
+    a fact the operator should be able to read off the row, not a missing key
+    the frontend has to guess about.
+    """
+    totals = {key: 0 for key in _STATUSES + _EVIDENCE}
+    for counts in per_run:
+        for key, value in counts.items():
+            if key in totals:
+                totals[key] += value
+    return {
+        **{status: totals[status] for status in _STATUSES},
+        "by_evidence": {evidence: totals[evidence] for evidence in _EVIDENCE},
+    }

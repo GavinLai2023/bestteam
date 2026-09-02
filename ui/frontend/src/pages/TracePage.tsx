@@ -8,6 +8,7 @@ import AdminRunDetail from '../components/AdminRunDetail'
 import RunsPager from '../components/RunsPager'
 import type {
   AdminOrg,
+  DraftOutcomeTally,
   ModelAnalyticsSummary,
   RunListItem,
   PipelineAnalyticsDetail,
@@ -46,6 +47,17 @@ function formatTokens(value: number): string {
 
 function formatCost(value: number | null): string {
   return value == null ? '—' : `$${value.toFixed(4)}`
+}
+
+function draftTotal(tally: DraftOutcomeTally): number {
+  return tally.sent + tally.handled + tally.pending + tally.unknown
+}
+
+// A pipeline that drafts nothing gets a dash, not three zeros -- "no drafts
+// here" and "drafts, none resolved yet" are different readings.
+function formatDraftTally(tally: DraftOutcomeTally): string {
+  if (draftTotal(tally) === 0) return '—'
+  return `${tally.sent} / ${tally.handled} / ${tally.pending}`
 }
 
 // Platform-admin technical trace/analytics view: a superset of the
@@ -381,6 +393,7 @@ export default function TracePage() {
                     <th>Total in</th>
                     <th>Total out</th>
                     <th>Total cost</th>
+                    <th>Drafts (sent/handled/pending)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -400,6 +413,7 @@ export default function TracePage() {
                       <td>{formatTokens(s.total_input_tokens)}</td>
                       <td>{formatTokens(s.total_output_tokens)}</td>
                       <td>{formatCost(s.total_cost_estimate)}</td>
+                      <td>{formatDraftTally(s.draft_outcomes)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -466,6 +480,32 @@ export default function TracePage() {
                           {f.event_type} · {f.count} of failures ({formatPct(f.pct_of_failures)})
                         </li>
                       ))}
+                    </ul>
+                  )}
+
+                  <h3>Draft outcomes</h3>
+                  {draftTotal(detail.draft_outcomes) === 0 ? (
+                    <p className="hint">No drafts written by this pipeline in this scope.</p>
+                  ) : (
+                    <ul className="trace-agent-stats">
+                      <li>
+                        <span className="status-badge">sent</span>
+                        {detail.draft_outcomes.sent} ·{' '}
+                        {detail.draft_outcomes.by_evidence.source_key_header} by our own header,{' '}
+                        {detail.draft_outcomes.by_evidence.in_reply_to} by reply threading
+                      </li>
+                      <li>
+                        <span className="status-badge">handled</span>
+                        {detail.draft_outcomes.handled} · left the Drafts folder with no sign of a send
+                      </li>
+                      <li>
+                        <span className="status-badge">pending</span>
+                        {detail.draft_outcomes.pending} · still sitting in Drafts
+                      </li>
+                      <li>
+                        <span className="status-badge">unknown</span>
+                        {detail.draft_outcomes.unknown} · mailbox re-keyed, or older than the tracking window
+                      </li>
                     </ul>
                   )}
                 </>

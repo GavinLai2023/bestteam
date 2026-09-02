@@ -23,6 +23,11 @@ const ORGS = [
   { name: 'org_b', display_name: 'Org B', active: true },
 ]
 
+const NO_DRAFTS = {
+  sent: 0, handled: 0, pending: 0, unknown: 0,
+  by_evidence: { source_key_header: 0, in_reply_to: 0 },
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockedApi.listOrgs.mockResolvedValue(ORGS)
@@ -85,11 +90,13 @@ describe('TracePage', () => {
           org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: NO_DRAFTS,
         },
       ],
     })
     mockedApi.getPipelineAnalytics.mockResolvedValue({
       org_id: 1, pipeline: 'wf', per_agent: [], per_model: [], common_failure_points: [],
+      draft_outcomes: NO_DRAFTS,
     })
     const scrollIntoView = vi.fn()
     Element.prototype.scrollIntoView = scrollIntoView
@@ -125,6 +132,7 @@ describe('TracePage', () => {
           org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: NO_DRAFTS,
         },
       ],
     })
@@ -133,6 +141,7 @@ describe('TracePage', () => {
       per_agent: [{ agent: 'agent-a', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05, avg_duration_seconds: 4 }],
       per_model: [],
       common_failure_points: [],
+      draft_outcomes: NO_DRAFTS,
     })
 
     render(<TracePage />)
@@ -156,6 +165,7 @@ describe('TracePage', () => {
           org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 300, total_output_tokens: 60, total_cost_estimate: 0.4,
+          draft_outcomes: NO_DRAFTS,
         },
       ],
     })
@@ -164,6 +174,7 @@ describe('TracePage', () => {
       per_agent: [],
       per_model: [{ model: 'openai:gpt-4o-mini', run_count: 3, avg_input_tokens: 100, avg_output_tokens: 20, avg_cost_estimate: 0.05 }],
       common_failure_points: [],
+      draft_outcomes: NO_DRAFTS,
     })
 
     render(<TracePage />)
@@ -186,6 +197,7 @@ describe('TracePage', () => {
           org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 2, failed: 1, cancelled: 0,
           running: 0, success_rate: 0.67, avg_duration_seconds: 12.5,
           total_input_tokens: 98497, total_output_tokens: 3928, total_cost_estimate: 0.0171,
+          draft_outcomes: NO_DRAFTS,
         },
       ],
     })
@@ -207,6 +219,7 @@ describe('TracePage', () => {
           org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
           running: 0, success_rate: 1, avg_duration_seconds: null,
           total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: NO_DRAFTS,
         },
       ],
     })
@@ -218,6 +231,113 @@ describe('TracePage', () => {
 
     await screen.findByText('wf')
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+  })
+
+  it('renders the draft outcome breakdown in the summary table', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
+        {
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 3, failed: 0, cancelled: 0,
+          running: 0, success_rate: 1, avg_duration_seconds: null,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: {
+            sent: 5, handled: 2, pending: 3, unknown: 1,
+            by_evidence: { source_key_header: 4, in_reply_to: 1 },
+          },
+        },
+      ],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+
+    expect(await screen.findByText('5 / 2 / 3')).toBeInTheDocument()
+  })
+
+  it('renders a dash in the drafts column for a pipeline that wrote none', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
+        {
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
+          running: 0, success_rate: 1, avg_duration_seconds: 3,
+          total_input_tokens: 10, total_output_tokens: 5, total_cost_estimate: 0.5,
+          draft_outcomes: NO_DRAFTS,
+        },
+      ],
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+
+    await screen.findByText('wf')
+    expect(screen.queryByText(/0 \/ 0 \/ 0/)).not.toBeInTheDocument()
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+  })
+
+  it('renders the draft outcome detail with its evidence split', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
+        {
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 3, completed: 3, failed: 0, cancelled: 0,
+          running: 0, success_rate: 1, avg_duration_seconds: null,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: {
+            sent: 5, handled: 2, pending: 3, unknown: 1,
+            by_evidence: { source_key_header: 4, in_reply_to: 1 },
+          },
+        },
+      ],
+    })
+    mockedApi.getPipelineAnalytics.mockResolvedValue({
+      org_id: 1, pipeline: 'wf', per_agent: [], per_model: [], common_failure_points: [],
+      draft_outcomes: {
+        sent: 5, handled: 2, pending: 3, unknown: 1,
+        by_evidence: { source_key_header: 4, in_reply_to: 1 },
+      },
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByText('wf'))
+    })
+
+    expect(await screen.findByText('Draft outcomes')).toBeInTheDocument()
+    expect(screen.getByText(/4 by our own header/)).toBeInTheDocument()
+    expect(screen.getByText(/1 by reply threading/)).toBeInTheDocument()
+  })
+
+  it('says so plainly when the selected pipeline wrote no drafts', async () => {
+    mockedApi.listPipelineAnalytics.mockResolvedValue({
+      pipelines: [
+        {
+          org_id: 1, org: 'org_a', pipeline: 'wf', total_runs: 1, completed: 1, failed: 0, cancelled: 0,
+          running: 0, success_rate: 1, avg_duration_seconds: null,
+          total_input_tokens: 0, total_output_tokens: 0, total_cost_estimate: null,
+          draft_outcomes: NO_DRAFTS,
+        },
+      ],
+    })
+    mockedApi.getPipelineAnalytics.mockResolvedValue({
+      org_id: 1, pipeline: 'wf', per_agent: [], per_model: [], common_failure_points: [],
+      draft_outcomes: NO_DRAFTS,
+    })
+
+    render(<TracePage />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analytics'))
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByText('wf'))
+    })
+
+    expect(await screen.findByText(/no drafts written by this pipeline/i)).toBeInTheDocument()
   })
 
   it('switching to the By model tab fetches cross-org model totals by default', async () => {

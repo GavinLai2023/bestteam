@@ -230,9 +230,11 @@ neither for 2 consecutive cycles → `handled` (never on the first miss — a
 just-pressed Send is in neither folder). Generation mismatch or >30 days →
 `unknown`, terminal. **Free when nothing is pending** — no credential decrypt,
 no IMAP. Statuses never move backwards. `source_key` is globally unique, so a
-retry family collapses to one row. `GET /api/org/email-trigger/draft-outcomes`
-serves the 30-day counts (`unknown` excluded). Spec:
-`specs/2026-09-03-draft-outcome-tracking-design.md`.
+retry family collapses to one row. **Read surface is admin-only** — the
+tallies ride `/api/admin/analytics` (`counts_by_run` + `aggregate`, scoped by
+the same org/date filters); no `RequireOrgMember` surface shows them, because
+"the platform knows whether you sent it" undercuts the never-sends guarantee.
+Spec: `specs/2026-09-03-draft-outcome-tracking-design.md`.
 
 ### Pre-LLM filtering (`email_filter.py`)
 

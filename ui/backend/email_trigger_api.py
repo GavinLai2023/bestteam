@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import draft_outcomes, email_filter, secret_store
+from . import email_filter, secret_store
 from .auth_api import get_current_org
 from .db.email_credentials import get_email_credentials
 from .db.email_triggers import get_email_trigger, upsert_email_trigger
@@ -207,15 +207,6 @@ def trigger_activity(
             for r in rows
         ]
     }
-
-
-@router.get("/email-trigger/draft-outcomes")
-def draft_outcome_counts(
-    db: Session = Depends(get_db), org: Organization = Depends(get_current_org)
-) -> Dict[str, int]:
-    """What became of the platform's drafts (last 30 days): sent / handled /
-    pending counts for the Automations tab. See draft_outcomes.py."""
-    return draft_outcomes.summary(db, org.id)
 
 
 @router.get("/email-trigger/filtered")

@@ -2509,7 +2509,9 @@
   `In-Reply-To` / gone), but whether Outlook or Gmail preserve either header on
   a real send has never been observed. The `draft_outcomes.evidence` column
   answers that from live data; check it once the first customer has sent a few
-  drafts. See `docs/superpowers/specs/2026-09-03-draft-outcome-tracking-design.md`.
+  drafts — Trace page → Analytics → pick the pipeline → **Draft outcomes**.
+  Admin-only by design; no customer-facing surface shows these counts. See
+  `docs/superpowers/specs/2026-09-03-draft-outcome-tracking-design.md`.
 
 - **`_active_kb_dir` (tests/test_crud_api.py) resolves the active KB version
   by `max(st_mtime)`**, which is theoretically ambiguous: Windows file

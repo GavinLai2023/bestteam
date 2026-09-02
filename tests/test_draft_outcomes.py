@@ -15,12 +15,13 @@ pytest.importorskip("sqlalchemy")
 from ui.backend import draft_outcomes
 from ui.backend.draft_outcomes import (
     MISS_THRESHOLD,
+    aggregate,
+    counts_by_run,
     RECONCILE_BATCH,
     WINDOW_DAYS,
     reconcile,
     reconcile_org,
     record_outcomes_for_run,
-    summary,
 )
 from ui.backend.db import init_db, make_engine, session_factory
 from ui.backend.db.models import DraftOutcome, Run, TraceEventRecord
@@ -355,24 +356,56 @@ def test_reconcile_org_swallows_mailbox_failure(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# summary
+# admin analytics tallies
 # ---------------------------------------------------------------------------
 
 
-def test_summary_counts_recent_rows_by_status(db):
+def test_counts_by_run_tallies_status_and_evidence(db):
     org = get_or_create_org(db, "acme")
-    other = get_or_create_org(db, "globex")
-    _row(db, org_id=org.id, uid="1", status="sent")
-    _row(db, org_id=org.id, uid="2", status="sent")
-    _row(db, org_id=org.id, uid="3", status="handled")
-    _row(db, org_id=org.id, uid="4", status="pending")
-    _row(db, org_id=org.id, uid="5", status="unknown")
-    _row(db, org_id=org.id, uid="6", status="sent",
-         created_at=_NOW - timedelta(days=WINDOW_DAYS + 1))
-    _row(db, org_id=other.id, uid="7", status="sent")
+    _row(db, org_id=org.id, uid="1", run_id="r1", status="sent",
+         evidence="source_key_header")
+    _row(db, org_id=org.id, uid="2", run_id="r1", status="sent",
+         evidence="in_reply_to")
+    _row(db, org_id=org.id, uid="3", run_id="r1", status="pending")
+    _row(db, org_id=org.id, uid="4", run_id="r2", status="handled")
+    _row(db, org_id=org.id, uid="5", run_id="r2", status="unknown")
 
-    assert summary(db, org.id, now=_NOW) == {
-        "sent": 2, "handled": 1, "pending": 1, "window_days": WINDOW_DAYS,
+    assert counts_by_run(db, ["r1", "r2"]) == {
+        "r1": {"sent": 2, "handled": 0, "pending": 1, "unknown": 0,
+               "source_key_header": 1, "in_reply_to": 1},
+        "r2": {"sent": 0, "handled": 1, "pending": 0, "unknown": 1,
+               "source_key_header": 0, "in_reply_to": 0},
+    }
+
+
+def test_counts_by_run_omits_runs_without_drafts(db):
+    org = get_or_create_org(db, "acme")
+    _row(db, org_id=org.id, uid="1", run_id="r1", status="sent")
+
+    assert counts_by_run(db, ["r1", "r2"]).keys() == {"r1"}
+    assert counts_by_run(db, []) == {}
+
+
+def test_aggregate_sums_per_run_tallies():
+    assert aggregate(
+        [
+            {"sent": 2, "handled": 0, "pending": 1, "unknown": 0,
+             "source_key_header": 1, "in_reply_to": 1},
+            {"sent": 0, "handled": 1, "pending": 0, "unknown": 1,
+             "source_key_header": 0, "in_reply_to": 0},
+        ]
+    ) == {
+        "sent": 2, "handled": 1, "pending": 1, "unknown": 1,
+        "by_evidence": {"source_key_header": 1, "in_reply_to": 1},
+    }
+
+
+def test_aggregate_of_nothing_is_all_zero():
+    """A pipeline that writes no drafts still gets the full shape -- the UI
+    decides how to render an all-zero row, the API never omits the key."""
+    assert aggregate([]) == {
+        "sent": 0, "handled": 0, "pending": 0, "unknown": 0,
+        "by_evidence": {"source_key_header": 0, "in_reply_to": 0},
     }
 
 

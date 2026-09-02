@@ -1,15 +1,19 @@
 # Draft Outcome Tracking (B1)
 
 **Date:** 2026-09-03
-**Status:** Approved (decision authority delegated for this session; every
-ruling below is recorded so it can be reversed on review).
+**Status:** Approved (decision authority delegated for the first pass; every
+ruling below is recorded so it can be reversed on review). Revised the same
+day after review: the read surface moved from the customer's Automations tab
+to the admin Analytics tab — see "Who sees it".
 
 ## Problem
 
 BestTeam's email automation only ever *creates* drafts. What happens to a
 draft afterwards — sent as-is, edited then sent, deleted, or ignored — is
 never observed. For a drafting product that number is both the only ROI
-metric ("last week N drafts, M sent") and the only quality signal.
+metric ("last week N drafts, M sent") and the only quality signal. It is
+what the operator needs to judge whether the beta is landing — see
+"Who sees it" for why it is not shown to the customer.
 
 Every platform-written draft already carries a deterministic
 `X-BestTeam-Source-Key` header (`mailbox:{cred}:uidvalidity:{gen}:uid:{uid}`),
@@ -130,27 +134,63 @@ via XOAUTH2 IMAP); `_GraphBackend` is not on this path and gets nothing.
 All read-only (folders SELECTed readonly), each method owns its
 connection, matching the file's existing style.
 
+## Who sees it
+
+**Admin only.** The first customer-facing draft of this feature put the
+counts on the customer's own Automations tab; that was reversed before
+merge. To a customer, a line reading "we know whether you sent it" says the
+platform watches their mailbox, which undercuts the same trust the
+"only drafts, never sends" guarantee exists to establish. The counts stay
+where their actual purpose lives: an operator judging how the beta is
+landing.
+
+Nothing about collection changed — rows are still written on every trigger
+run and reconciled on every poll cycle. Only the read surface moved.
+
 ## API
 
-`GET /api/email-trigger/draft-outcomes` (same router/auth as the other
-trigger endpoints, org-scoped): `{"sent": n, "handled": n, "pending": n,
-"window_days": 30}`. Counts cover rows created in the last 30 days;
-`unknown` is deliberately excluded from the headline. No cost or model
-information — customer-facing surface.
+The tallies ride the existing admin analytics endpoints
+(`/api/admin/analytics`, `get_current_admin`), as one more aggregate over
+the same scoped run set — so the org filter and the `since`/`until` window
+apply to them for free, and no fixed 30-day window is needed on the read
+side.
+
+Both endpoints carry a `draft_outcomes` object of the same shape:
+
+```json
+{"sent": 5, "handled": 2, "pending": 3, "unknown": 1,
+ "by_evidence": {"source_key_header": 4, "in_reply_to": 1}}
+```
+
+- `GET /pipelines` — one per `(org, pipeline)` row, aggregated over that
+  group's runs. Never null: an all-zero object is the honest answer for a
+  pipeline that drafts nothing.
+- `GET /pipelines/{name}` — the same object for the selected pipeline.
+
+`draft_outcomes.counts_by_run()` does the single query (per-run tallies,
+runs without drafts absent); `aggregate()` sums a group's buckets into the
+shape above. The customer-facing `summary()` was deleted with its endpoint.
 
 ## UI
 
-`EmailTriggerActivity.tsx` ("Automatic runs" card, Automations tab): one
-line, fetched alongside the existing loads on the same 30s refresh —
-"Drafts in the last 30 days: X sent · Y handled · Z awaiting action."
-Hidden when the endpoint fails or all counts are zero (a mailbox with no
-drafts yet should not show a row of zeros). English copy, consistent with
-the component today; translation is item B4, separately scheduled.
+Trace page → **Analytics** tab (`TracePage.tsx`):
+
+- Summary table gains a **Drafts (sent/handled/pending)** column, rendered
+  `5 / 2 / 3`. A pipeline with no drafts at all shows `—`, not `0 / 0 / 0`:
+  "wrote none" and "wrote some, none resolved" are different readings.
+- The pipeline drill-down gains a **Draft outcomes** block: one line per
+  status, with the `sent` line carrying the evidence split ("4 by our own
+  header, 1 by reply threading"). **The evidence split appears here and
+  nowhere else** — it is the live answer to the spike above, and it is for
+  the operator, not the customer.
 
 ## Out of scope
 
 - Edit detection by content diff — draft bodies are deliberately never
   stored; `evidence=in_reply_to` is the cheap proxy.
+- Any customer-facing view of the counts. If one is ever wanted, it needs
+  its own decision about what the customer is being told, not a revival of
+  the line removed here.
 - Graph backend support; outcome rows for non-trigger (interactive) runs.
 - Retention/erasure changes; alerting on outcome ratios.
 - Backfill: drafts created before this ships have no rows and are never
@@ -167,5 +207,10 @@ Stub mailbox backend + in-memory SQLite throughout, $0:
   untouched, no raise; zero-pending short-circuit makes no backend calls.
 - IMAP methods: folder resolution fallback, header search shapes (mocked
   `imaplib` conn, matching `test_email_tools.py` style).
-- API: counts, org scoping (org A never sees org B).
-- frontend: line renders with counts; hidden on zero/failure.
+- tallies: per-run counts and their aggregate, including the all-zero
+  shape.
+- API: grouped per `(org, pipeline)` so one org's sends never land on
+  another's row; scoped by `since`/`until` like every other column;
+  evidence split present on the drill-down.
+- frontend: the Drafts column and its dash; the detail block and its
+  evidence line; the "wrote no drafts" empty state.

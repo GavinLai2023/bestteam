@@ -1,6 +1,8 @@
 """Admin pipeline-run analytics API (`/api/admin/analytics`) -- aggregate
 stats over runs/trace_events/usage_records for the admin Trace page."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -13,7 +15,7 @@ from fastapi.testclient import TestClient
 from helpers import create_user_and_login, get_org_id, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import Run, TraceEventRecord, UsageRecord
+from ui.backend.db.models import DraftOutcome, Run, TraceEventRecord, UsageRecord
 from ui.backend.db_session import get_db
 
 
@@ -103,6 +105,16 @@ def test_pipelines_summary_groups_by_org_and_pipeline_not_name_alone(rig):
     assert rows[("org_b", "wf")]["success_rate"] == 1.0
 
 
+def _add_draft_outcome(db, *, run_id, org_id, uid, status, evidence=None):
+    db.add(
+        DraftOutcome(
+            org_id=org_id, run_id=run_id, status=status, evidence=evidence,
+            source_key=f"mailbox:1:uidvalidity:3:uid:{uid}",
+        )
+    )
+    db.commit()
+
+
 def test_pipelines_summary_org_filter_scopes_to_one_org(rig):
     client, headers = rig
     org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
@@ -154,6 +166,88 @@ def test_pipelines_summary_null_cost_when_no_usage_has_cost(rig):
     resp = client.get("/api/admin/analytics/pipelines", params={"org": "org_a"}, headers=headers["op"])
     row = next(r for r in resp.json()["pipelines"] if r["pipeline"] == "wf")
     assert row["total_cost_estimate"] is None
+
+
+def test_pipelines_summary_draft_outcomes_are_grouped_per_org_and_pipeline(rig):
+    """The admin's read on whether drafts are actually being used. Grouped
+    like every other column -- one org's sends never land on another's row."""
+    client, headers = rig
+    org_a, org_b = get_org_id("org_a"), get_org_id("org_b")
+    with open_test_db() as db:
+        _add_run_with_events(db, run_id="a-1", org_id=org_a, pipeline="wf", status="completed")
+        _add_run_with_events(db, run_id="a-2", org_id=org_a, pipeline="wf", status="completed")
+        _add_run_with_events(db, run_id="b-1", org_id=org_b, pipeline="wf", status="completed")
+        _add_draft_outcome(db, run_id="a-1", org_id=org_a, uid="1", status="sent",
+                           evidence="source_key_header")
+        _add_draft_outcome(db, run_id="a-2", org_id=org_a, uid="2", status="sent",
+                           evidence="in_reply_to")
+        _add_draft_outcome(db, run_id="a-2", org_id=org_a, uid="3", status="pending")
+        _add_draft_outcome(db, run_id="b-1", org_id=org_b, uid="4", status="handled")
+
+    rows = client.get("/api/admin/analytics/pipelines", headers=headers["op"]).json()["pipelines"]
+    by_org = {r["org"]: r["draft_outcomes"] for r in rows}
+    assert by_org["org_a"] == {
+        "sent": 2, "handled": 0, "pending": 1, "unknown": 0,
+        "by_evidence": {"source_key_header": 1, "in_reply_to": 1},
+    }
+    assert by_org["org_b"]["handled"] == 1
+    assert by_org["org_b"]["sent"] == 0
+
+
+def test_pipelines_summary_draft_outcomes_are_zero_for_a_pipeline_with_no_drafts(rig):
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(db, run_id="a-1", org_id=org_a, pipeline="wf", status="completed")
+
+    rows = client.get("/api/admin/analytics/pipelines", headers=headers["op"]).json()["pipelines"]
+    assert rows[0]["draft_outcomes"] == {
+        "sent": 0, "handled": 0, "pending": 0, "unknown": 0,
+        "by_evidence": {"source_key_header": 0, "in_reply_to": 0},
+    }
+
+
+def test_pipelines_summary_draft_outcomes_respect_the_time_window(rig):
+    """Rows follow their run, so `since`/`until` scope them for free -- no
+    separate fixed window like the retired customer-facing summary had."""
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(db, run_id="old", org_id=org_a, pipeline="wf", status="completed")
+        _add_run_with_events(db, run_id="new", org_id=org_a, pipeline="wf", status="completed")
+        db.query(Run).filter(Run.id == "old").update(
+            {"created_at": datetime(2020, 1, 1, tzinfo=timezone.utc).replace(tzinfo=None)}
+        )
+        db.commit()
+        _add_draft_outcome(db, run_id="old", org_id=org_a, uid="1", status="sent")
+        _add_draft_outcome(db, run_id="new", org_id=org_a, uid="2", status="sent")
+
+    rows = client.get(
+        "/api/admin/analytics/pipelines",
+        params={"since": "2021-01-01T00:00:00"},
+        headers=headers["op"],
+    ).json()["pipelines"]
+    assert rows[0]["draft_outcomes"]["sent"] == 1
+
+
+def test_pipeline_detail_includes_draft_outcomes_with_evidence(rig):
+    """The evidence split is the answer to "does a real client keep our
+    header on send" -- admin-only, and only on the drill-down."""
+    client, headers = rig
+    org_a = get_org_id("org_a")
+    with open_test_db() as db:
+        _add_run_with_events(db, run_id="a-1", org_id=org_a, pipeline="wf", status="completed")
+        _add_draft_outcome(db, run_id="a-1", org_id=org_a, uid="1", status="sent",
+                           evidence="source_key_header")
+        _add_draft_outcome(db, run_id="a-1", org_id=org_a, uid="2", status="sent",
+                           evidence="in_reply_to")
+        _add_draft_outcome(db, run_id="a-1", org_id=org_a, uid="3", status="unknown")
+
+    body = client.get("/api/admin/analytics/pipelines/wf", headers=headers["op"]).json()
+    assert body["draft_outcomes"] == {
+        "sent": 2, "handled": 0, "pending": 0, "unknown": 1,
+        "by_evidence": {"source_key_header": 1, "in_reply_to": 1},
+    }
 
 
 def test_pipeline_detail_requires_org_when_ambiguous(rig):

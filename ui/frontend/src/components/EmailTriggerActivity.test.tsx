@@ -8,7 +8,6 @@ vi.mock('../lib/api', () => ({
     getEmailTrigger: vi.fn(),
     listFilteredMessages: vi.fn(),
     releaseFilteredMessage: vi.fn(),
-    getDraftOutcomes: vi.fn(),
   },
 }))
 
@@ -27,7 +26,6 @@ describe('EmailTriggerActivity', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockedApi.listFilteredMessages.mockResolvedValue({ filtered: [] })
-    mockedApi.getDraftOutcomes.mockResolvedValue({ sent: 0, handled: 0, pending: 0, window_days: 30 })
     mockedApi.releaseFilteredMessage.mockResolvedValue({ released: true })
   })
 
@@ -304,38 +302,3 @@ describe('EmailTriggerActivity', () => {
   })
 })
 
-describe('draft outcomes', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockedApi.listFilteredMessages.mockResolvedValue({ filtered: [] })
-    mockedApi.getEmailTrigger.mockResolvedValue(ACTIVE_TRIGGER)
-  })
-
-  it('shows the counts once any draft has an outcome', async () => {
-    mockedApi.getDraftOutcomes.mockResolvedValue({ sent: 3, handled: 1, pending: 2, window_days: 30 })
-
-    render(<EmailTriggerActivity />)
-
-    expect(
-      await screen.findByText(/drafts in the last 30 days: 3 sent · 1 handled · 2 awaiting action/i),
-    ).toBeInTheDocument()
-  })
-
-  it('shows nothing when no draft has been tracked yet', async () => {
-    mockedApi.getDraftOutcomes.mockResolvedValue({ sent: 0, handled: 0, pending: 0, window_days: 30 })
-
-    render(<EmailTriggerActivity />)
-
-    await screen.findByText(/wf-a/)
-    expect(screen.queryByText(/drafts in the last/i)).not.toBeInTheDocument()
-  })
-
-  it('shows nothing when the counts fail to load', async () => {
-    mockedApi.getDraftOutcomes.mockRejectedValue(new Error('boom'))
-
-    render(<EmailTriggerActivity />)
-
-    await screen.findByText(/wf-a/)
-    expect(screen.queryByText(/drafts in the last/i)).not.toBeInTheDocument()
-  })
-})

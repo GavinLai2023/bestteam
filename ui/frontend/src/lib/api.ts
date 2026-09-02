@@ -1,6 +1,6 @@
 import type {
   ActivityOverview,
-  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, DraftOutcomeCounts,
+  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem,
   EmailBudget, EmailBudgetInput,
   EmailFilterSettings, EmailTrigger, FeedbackItem, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
@@ -569,8 +569,6 @@ export const api = {
   setEmailTrigger: (payload: { pipeline_name: string; enabled: boolean }) =>
     request<EmailTrigger>('/api/org/email-trigger', { method: 'PUT', body: JSON.stringify(payload) }),
   emailTriggerActivity: () => request<unknown>('/api/org/email-trigger/activity'),
-  getDraftOutcomes: () =>
-    request<DraftOutcomeCounts>('/api/org/email-trigger/draft-outcomes'),
 
   // Pre-LLM mail filter and per-org automation budgets (Phase 4a).
   getEmailFilter: () => request<EmailFilterSettings>('/api/org/email-filter'),

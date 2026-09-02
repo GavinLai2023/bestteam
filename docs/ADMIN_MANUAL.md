@@ -76,6 +76,23 @@ that pipeline — the last one is the fastest way to see *which agent, which
 event type* accounts for most of a pipeline's failures before you drill into
 one run.
 
+The **Drafts (sent/handled/pending)** column answers the question a drafting
+product lives or dies on: are the drafts actually being used? *Sent* means the
+reply was found in the mailbox's Sent folder; *handled* means it left Drafts
+with no sign of a send (edited elsewhere, deleted, filed); *pending* means it
+is still sitting in Drafts. A pipeline that writes no drafts shows a dash. The
+drill-down's **Draft outcomes** block adds the fourth state (*unknown* — the
+mailbox was re-keyed, or the draft outlived the 30-day tracking window) and,
+on the *sent* line, **how** each send was recognised: by our own
+`X-BestTeam-Source-Key` header, or by reply threading when the mail client
+rebuilt the message and dropped it. That split is worth reading early in a
+deployment — it tells you which detection path a given customer's mail client
+actually exercises.
+
+These counts are deliberately admin-only. The customer never sees them: on
+their side of the product, "the platform knows whether you sent it" reads as
+mailbox surveillance and undercuts the never-sends guarantee.
+
 ### 2.4 By model tab
 
 The same total-tokens/total-cost view, but grouped by model spec instead of
