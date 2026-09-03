@@ -230,6 +230,25 @@ _MAILBOX_TEAM_CONFIG = {
 }
 
 
+# The same capability, reached through a skill rather than inline tools -- so a
+# deployed version can pin an email-capable skill the current catalog no longer
+# has.
+_SKILL_MAILBOX_TEAM_CONFIG = {
+    "name": "triage-by-skill",
+    "agents": [
+        {
+            "name": "reader",
+            "role": "Asst",
+            "goal": "triage",
+            "model": "fake:hi",
+            "skills": ["email_triage_reply"],
+        }
+    ],
+    "teams": [{"name": "tm", "agents": ["reader"], "mode": "sequential"}],
+    "pipeline": {"steps": ["tm"]},
+}
+
+
 def _deploy_mailbox_team(org_name="default"):
     with open_test_db() as db:
         org_id = get_org_id(org_name)
@@ -247,6 +266,43 @@ def _deploy_mailbox_team(org_name="default"):
 
 def test_create_share_link_refused_for_a_team_that_reads_the_mailbox(client):
     pipeline_id = _deploy_mailbox_team()
+    resp = client.post(f"/api/pipelines/{pipeline_id}/share-links", json={})
+    assert resp.status_code == 409
+    assert "mailbox" in resp.json()["detail"].lower()
+
+
+def test_create_share_link_refused_when_only_the_deployed_pin_reads_the_mailbox(client):
+    # The gate must read the skill versions pinned at deploy -- the ones a run
+    # actually executes with (`main._get_pipeline`) -- not the current catalog.
+    # An admin editing the email tools out of a skill after deploy would
+    # otherwise reopen exactly the door this guard closes: the link gets minted
+    # while the deployed version still holds email_find/email_read.
+    from ui.backend.db.pipelines import publish_pipeline_version
+    from ui.backend.db.skills import publish_skill_version
+    from ui.backend.skills import seed_default_skills
+
+    with open_test_db() as db:
+        seed_default_skills(db)
+        record, _version = publish_pipeline_version(
+            db,
+            org_id=get_org_id("default"),
+            name="triage-by-skill",
+            config=_SKILL_MAILBOX_TEAM_CONFIG,
+        )
+        db.commit()
+        pipeline_id = record.id
+        publish_skill_version(
+            db,
+            org_id=None,
+            name="email_triage_reply",
+            config={
+                "name": "email_triage_reply",
+                "instructions": "No longer an email skill.",
+                "tools": [],
+            },
+        )
+        db.commit()
+
     resp = client.post(f"/api/pipelines/{pipeline_id}/share-links", json={})
     assert resp.status_code == 409
     assert "mailbox" in resp.json()["detail"].lower()

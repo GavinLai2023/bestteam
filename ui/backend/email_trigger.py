@@ -537,8 +537,13 @@ def build_trigger_pipeline(name: str, db: Session, org_id: int, allowed_uids, ba
     # was redeployed to a version with no email tools/skills, dispatching
     # would consume this cycle's UIDs and daily cap launching an unrelated
     # team with an email-triage prompt, so refuse the same way a missing
-    # team does (no build, no state advanced upstream).
-    if not spec_uses_email(db, record.config, org_id):
+    # team does (no build, no state advanced upstream). Checked against the
+    # skill versions pinned at deploy -- the ones `load_skills` below actually
+    # builds with -- so a platform/org skill edited after deploy cannot make
+    # this gate disagree with the pipeline it is gating.
+    if not spec_uses_email(
+        db, record.config, org_id, pipeline_version_id=record.current_version_id
+    ):
         raise ValueError(f"Deployed team '{name}' for org {org_id} no longer uses email")
     source = _PIPELINES_DIR / f"{name}.yaml"
     kb_tools = load_knowledge_base_tools(db, record.config, source, org_id=org_id)

@@ -431,7 +431,11 @@ def _resolve_shareable_pipeline(db: Session, link: ShareLink) -> PipelineRecord:
         .filter_by(id=link.pipeline_id, org_id=link.org_id, status="deployed", active=True)
         .one_or_none()
     )
-    if record is None or spec_uses_email(db, record.config, link.org_id):
+    # Capability is read against the versions pinned at deploy, matching what
+    # the run executes with -- see the same check in `share_links_api`.
+    if record is None or spec_uses_email(
+        db, record.config, link.org_id, pipeline_version_id=record.current_version_id
+    ):
         raise HTTPException(status_code=404, detail=_UNAVAILABLE)
     return record
 

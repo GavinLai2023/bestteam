@@ -113,8 +113,13 @@ def create_share_link_endpoint(
     # `email_find`/`email_read` over the org's real mailbox -- so the link
     # would let a stranger ask it to read the inbox back to them. Same bound
     # `deploy_validation.find_email_egress_conflicts` keeps at deploy: mail is
-    # attacker-controlled input, and it must not reach a route out.
-    if spec_uses_email(db, record.config, org.id):
+    # attacker-controlled input, and it must not reach a route out. Read
+    # against the skill versions pinned at deploy -- the ones a run executes
+    # with (`main._get_pipeline`) -- so editing the email tools out of a skill
+    # after deploy cannot mint a link over a version that still holds them.
+    if spec_uses_email(
+        db, record.config, org.id, pipeline_version_id=record.current_version_id
+    ):
         raise HTTPException(
             status_code=409,
             detail=(

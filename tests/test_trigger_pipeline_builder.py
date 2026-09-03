@@ -163,6 +163,56 @@ def test_build_trigger_pipeline_refuses_team_redeployed_without_email(db, monkey
         email_trigger.build_trigger_pipeline("triage", db, org.id, {1}, backend)
 
 
+def test_build_trigger_pipeline_checks_email_capability_against_the_deployed_pin(db, monkeypatch):
+    # The capability gate above must read the same skill versions the build ten
+    # lines below it executes -- the ones pinned when this version was deployed
+    # -- not the current catalog. A platform skill edited after deploy would
+    # otherwise silently stop the trigger dispatching a team whose deployed
+    # version still has the email tools it is about to run with.
+    from ui.backend.db.skills import publish_skill_version
+    from ui.backend.db.pipelines import publish_pipeline_version
+    from ui.backend.skills import seed_default_skills
+
+    seed_default_skills(db)
+    org = get_or_create_org(db, "acme")
+    set_email_credentials(
+        db, org.id, host="imap.acme.com", username="u@acme.com", password="pw"
+    )
+    _head, deployed = publish_pipeline_version(
+        db, org_id=org.id, name="triage", config=_TEAM
+    )
+    db.commit()
+    # The current catalog loses the email tools; the deployed pin keeps them.
+    publish_skill_version(
+        db,
+        org_id=None,
+        name="email_triage_reply",
+        config={
+            "name": "email_triage_reply",
+            "instructions": "No longer an email skill.",
+            "tools": [],
+        },
+    )
+    db.commit()
+    monkeypatch.setattr(
+        email_trigger,
+        "make_email_tools",
+        lambda backend, allowed_uids=None, draft_marker_prefix=None: {
+            "email_find": lambda q="": "",
+            "email_read": lambda m: "",
+            "email_draft_reply": lambda m, b: "",
+        },
+    )
+
+    backend = email_tools.build_org_imap_backend(db, org.id)
+    pipeline, version_id = email_trigger.build_trigger_pipeline(
+        "triage", db, org.id, {42}, backend
+    )
+
+    assert pipeline is not None
+    assert version_id == deployed.id
+
+
 def test_batch_size_default_and_override(monkeypatch):
     monkeypatch.delenv("BESTTEAM_TRIGGER_BATCH_SIZE", raising=False)
     assert email_trigger.batch_size() == 20
