@@ -886,3 +886,86 @@ def test_subscribe_replays_history_then_receives_live_events():
         assert queue.get_nowait()["type"] == "agent_completed"
 
     asyncio.run(go())
+
+
+# --- A provider's own error text must not reach a customer surface ----------
+
+
+_PROVIDER_FAILURE = (
+    "Pipeline execution failed: Error calling model 'gemini-3.7-flash' "
+    "(RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, "
+    "'message': 'Your prepayment credits are depleted. Please go to AI Studio "
+    "at https://ai.studio/projects to manage your project and billing.'}}"
+)
+
+
+class _ProviderFailurePipeline:
+    """Yields the run_failed event `Pipeline.stream()` produces when the engine
+    wrapped a third-party exception -- diagnosed live on beta, 2026-09-03."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(type="run_started", pipeline="wf", data=None)
+        yield TraceEvent(type="run_failed", pipeline="wf", data=_PROVIDER_FAILURE)
+
+
+def test_provider_error_text_never_reaches_subscribers_or_the_run_row(tmp_path):
+    """A provider's raw refusal names the model, the provider and the customer's
+    billing state. `RunDetail.tsx` renders a terminal event's `data` outside the
+    "show technical" fold, so this text is customer-facing on both channels the
+    backend owns: the live publish and the persisted `runs.output`."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ProviderFailurePipeline(), "in", engine=engine)
+
+    stored = runtime.registry.get(run.id)
+    failures = [e for e in stored.events if e["type"] == "run_failed"]
+    assert len(failures) == 1
+    for leak in ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED"):
+        assert leak not in failures[0]["data"]
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.status == "failed"
+        for leak in ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED"):
+            assert leak not in (row.output or "")
+
+
+class _ConfigErrorPipeline:
+    """Yields the run_failed event `Pipeline.stream()` produces for one of our
+    OWN errors -- a `BestTeamError` the adapter re-raises unwrapped."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(
+            type="run_failed",
+            pipeline="wf",
+            data="Team 'Support' uses hierarchical mode and requires a 'manager' agent",
+        )
+
+
+def test_our_own_configuration_error_still_reaches_the_customer(tmp_path):
+    """Only the engine's wrapper around a THIRD-PARTY exception is sanitized.
+    A `BestTeamError` is our own wording, carries no provider detail, and tells
+    the customer something they can act on -- blanket-sanitizing would lose it."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ConfigErrorPipeline(), "in", engine=engine)
+
+    failures = [e for e in runtime.registry.get(run.id).events if e["type"] == "run_failed"]
+    assert "requires a 'manager' agent" in failures[0]["data"]

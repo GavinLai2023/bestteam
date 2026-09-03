@@ -19,7 +19,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from bestteam import MemoryManager, Pipeline, SqliteBM25Memory
-from bestteam.adapters.langgraph_adapter import STREAM_RESET
+from bestteam.adapters.langgraph_adapter import ENGINE_FAILURE_PREFIX, STREAM_RESET
 from bestteam.core.trace import TraceEvent
 
 from . import error_reporting
@@ -292,6 +292,12 @@ def _safe_record_usage(db: Session, **kwargs: Any) -> None:
         except Exception:  # noqa: BLE001
             pass
 
+
+# What a customer is told when a run failed for a reason that is ours to read,
+# not theirs: an internal defect, or a provider's own refusal. Shared by the two
+# places that produce it (the stream loop's run_failed sanitizer and the
+# worker-thread fallback) so neither can drift into saying more than the other.
+_RUN_FAILED_MESSAGE = "The run failed due to an internal error."
 
 _TRIGGER_RUN_FAILED_MESSAGE = (
     "The last automatic run didn't finish successfully. Automatic runs will keep "
@@ -914,6 +920,21 @@ def run_in_background(
                     # buffered-cancellation logic's sibling set above (Codex review
                     # finding).
                     event.data = {**event.data, "unverified": []}
+                if event.type == "run_failed" and str(event.data or "").startswith(
+                    ENGINE_FAILURE_PREFIX
+                ):
+                    # The engine wrapped a third-party exception, so `data` is
+                    # the provider's own text -- it can name the model, the
+                    # provider and the account's billing state, and
+                    # `RunDetail.tsx` renders a terminal event's data outside
+                    # the "show technical" fold. Same sanitized/logged split
+                    # the worker-thread fallback below already makes, applied
+                    # here so it also covers the path where the SDK turned the
+                    # failure into an event instead of raising. Only this
+                    # prefix: a `BestTeamError` is re-raised unwrapped, and its
+                    # wording is ours and worth showing.
+                    _logger.error("Run %s failed: %s", run_id, event.data)
+                    event.data = _RUN_FAILED_MESSAGE
                 payload = dataclasses.asdict(event)
                 if (
                     event.type == "tool_completed"
@@ -1088,7 +1109,7 @@ def run_in_background(
         _logger.exception("Run %s failed on the worker thread", run_id)
         error_reporting.report_exception(exc, run_id=run_id, pipeline=getattr(pipeline, "name", ""))
         if not terminal_seen:
-            message = "The run failed due to an internal error."
+            message = _RUN_FAILED_MESSAGE
             failed_event = TraceEvent(type="run_failed", pipeline=getattr(pipeline, "name", ""), data=message)
             # Persist status + normalize BEFORE publish/trace-record (not
             # after, as this used to do) -- same ordering rationale as the

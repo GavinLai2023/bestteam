@@ -66,21 +66,33 @@ _SESSIONS_DIR = Path(__file__).parent / "data" / "builder_sessions"
 
 _T = TypeVar("_T")
 
+# Shown when the provider itself failed. Deliberately says nothing about which
+# model, which provider, or why -- see `_call_model`.
+_MODEL_CALL_FAILED_MESSAGE = (
+    "The AI model could not be reached. Please try again in a moment."
+)
+
 
 def _call_model(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     """Run a `generate_*`/`_resolve_model` call, translating failures into HTTP errors.
 
     `BestTeamError` (e.g. an unresolvable model spec, or a Solution Architect
-    that couldn't self-correct) becomes a 400 with the original message; any
+    that couldn't self-correct) becomes a 400 with the original message -- that
+    wording is ours, and it tells the customer something they can act on. Any
     other exception (e.g. a real provider call failing without an API key)
-    becomes a 502 -- it's the model provider, not the request, that's at fault.
+    becomes a 502 -- it's the model provider, not the request, that's at fault --
+    and its text is the provider's, so it can name the model, the provider or the
+    account's billing state. The wizard renders `detail` verbatim, so the 502
+    says a fixed sentence and the real text is logged on-box only. Same
+    sanitized/logged split as `runtime.py`'s `run_failed` branch.
     """
     try:
         return fn(*args, **kwargs)
     except BestTeamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Model call failed: {exc}") from exc
+        logger.exception("Builder model call failed")
+        raise HTTPException(status_code=502, detail=_MODEL_CALL_FAILED_MESSAGE) from exc
 
 
 def _session_to_dict(
