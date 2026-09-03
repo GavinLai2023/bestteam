@@ -1271,3 +1271,33 @@ def test_builtin_skill_suffix_rename_merges_and_rewrites(tmp_path, monkeypatch):
             )).scalar() == "property_maintenance_response_v1"
     finally:
         engine.dispose()
+
+
+def test_the_runs_internal_error_column_upgrades_and_downgrades(tmp_path, monkeypatch):
+    db_path = tmp_path / "internal_error.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "x1y2z3a4b5c6")
+    engine = make_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO runs (id, pipeline, input, output, status, created_at) "
+                "VALUES ('r1', 'support', 'in', 'out', 'failed', CURRENT_TIMESTAMP)"
+            ))
+
+        command.upgrade(cfg, "y2z3a4b5c6d7")
+        with engine.connect() as conn:
+            value = conn.execute(sa.text(
+                "SELECT internal_error FROM runs WHERE id = 'r1'"
+            )).scalar()
+        # No backfill: a run that failed before this migration keeps the only
+        # copy of its reason it ever had, in the container log.
+        assert value is None
+
+        command.downgrade(cfg, "x1y2z3a4b5c6")
+        with engine.connect() as conn:
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("runs")}
+        assert "internal_error" not in columns
+    finally:
+        engine.dispose()

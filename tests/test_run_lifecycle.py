@@ -969,3 +969,48 @@ def test_our_own_configuration_error_still_reaches_the_customer(tmp_path):
 
     failures = [e for e in runtime.registry.get(run.id).events if e["type"] == "run_failed"]
     assert "requires a 'manager' agent" in failures[0]["data"]
+
+
+def test_provider_error_text_is_kept_for_an_admin_on_the_run_row(tmp_path):
+    """The customer's copy is sanitized, but an operator still has to be able to
+    say WHY a run failed. `runs.internal_error` is that copy: admin-only on the
+    API, and purged as content like `input`/`output`."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ProviderFailurePipeline(), "in", engine=engine)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.internal_error == _PROVIDER_FAILURE
+
+
+def test_a_worker_crash_is_also_kept_for_an_admin(tmp_path):
+    """The other failure path: the SDK raised instead of yielding run_failed.
+    Its message is sanitized for the same reason, so it needs the same
+    operator-only copy -- otherwise an internal crash leaves admin with nothing
+    but the container log."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("boom_wf", "in")
+
+    runtime.run_in_background(run.id, _BoomPipeline(), "in", engine=engine)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.status == "failed"
+        assert "internal compile detail" in (row.internal_error or "")
+        assert "internal compile detail" not in (row.output or "")

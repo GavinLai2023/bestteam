@@ -593,6 +593,12 @@ class Run(Base):
     pipeline: Mapped[str]
     input: Mapped[str]
     output: Mapped[Optional[str]] = mapped_column(nullable=True)
+    # Why the run really failed, for an operator only: the provider's own
+    # exception text, or ours. `output` carries the customer's sanitized copy
+    # because it can name a model, a provider or an account's billing state
+    # (see runtime.py). Served only to a platform admin, and purged with the
+    # other content fields -- it is content, not accounting.
+    internal_error: Mapped[Optional[str]] = mapped_column(nullable=True)
     # running | completed | failed
     status: Mapped[str] = mapped_column(default="running")
     builder_session_id: Mapped[Optional[str]] = mapped_column(

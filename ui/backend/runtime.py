@@ -892,6 +892,7 @@ def run_in_background(
                     # when the buffer is empty, which is every non-final event.
                     token_sink.flush()
                 raw_run_completed_output: Optional[str] = None
+                raw_failure_text: Optional[str] = None
                 if is_pm_contract_run and (
                     event.type in _PM_REDACTED_EVENT_TYPES or _is_delegate_tool_completed(event)
                 ):
@@ -933,7 +934,14 @@ def run_in_background(
                     # failure into an event instead of raising. Only this
                     # prefix: a `BestTeamError` is re-raised unwrapped, and its
                     # wording is ours and worth showing.
+                    #
+                    # Kept, not dropped: an operator still has to be able to say
+                    # why the run failed, so the real text goes to the log AND
+                    # to `runs.internal_error` (admin-only, purged as content),
+                    # written in the terminal branch with the other run_row
+                    # fields -- same shape as `raw_run_completed_output`.
                     _logger.error("Run %s failed: %s", run_id, event.data)
+                    raw_failure_text = event.data
                     event.data = _RUN_FAILED_MESSAGE
                 payload = dataclasses.asdict(event)
                 if (
@@ -1007,6 +1015,8 @@ def run_in_background(
                     if run_row is not None:
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
                         run_row.output = event.data  # already redacted above for a PM-contract run
+                        if raw_failure_text is not None:
+                            run_row.internal_error = raw_failure_text
                         # Committed, and normalization run, BEFORE both
                         # `terminal_seen = True` below and the terminal event's
                         # publish further down -- the former so a commit
@@ -1124,6 +1134,9 @@ def run_in_background(
                     db.rollback()
                     run_row.status = "failed"
                     run_row.output = message
+                    # Operator-only copy, same reason as the stream loop's
+                    # sanitizer: `message` says nothing an admin can act on.
+                    run_row.internal_error = f"{type(exc).__name__}: {exc}"
                     db.add(run_row)
                     db.commit()
                     # A triggered run that fails before pipeline.stream() ever

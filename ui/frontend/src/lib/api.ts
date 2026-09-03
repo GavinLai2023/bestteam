@@ -317,6 +317,9 @@ export const api = {
       events: import('./types').TraceEvent[]
       usage?: UsageRecord[]
       content_purged_at?: string | null
+      // Present only for a platform admin, and only when the run failed: why
+      // it really failed, before runtime.py sanitized the customer's copy.
+      internal_error?: string | null
     }>(`/api/runs/${id}/trace`),
 
   // Admin: cross-org pipeline-run analytics (Trace page).

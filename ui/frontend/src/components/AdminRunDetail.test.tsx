@@ -164,4 +164,20 @@ describe('AdminRunDetail', () => {
     expect(screen.getByText(/"result": "full excerpt text"/)).toBeInTheDocument()
     expect(screen.getByText(/"role": "R"/).closest('details')).toBeNull()
   })
+
+  it('shows the operator-only reason a run really failed', async () => {
+    // The customer's copy is a fixed sentence (runtime.py sanitizes a
+    // provider's own text, which can name the model, the provider and the
+    // account's billing state). This is the other half: the endpoint returns
+    // `internal_error` only to a platform admin, and this is where it lands.
+    mockedApi.getRunTrace.mockResolvedValue({
+      events: [{ type: 'run_failed', agent: undefined, data: 'The run failed due to an internal error.' }],
+      usage: [],
+      internal_error: "Pipeline execution failed: Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED)",
+    })
+
+    render(<AdminRunDetail runId="run-3" status="failed" />)
+
+    expect(await screen.findByText(/RESOURCE_EXHAUSTED/)).toBeInTheDocument()
+  })
 })

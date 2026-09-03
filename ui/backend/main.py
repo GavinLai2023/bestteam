@@ -817,7 +817,7 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
         .all()
     )
     usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id == run_id).all()
-    return {
+    payload: Dict[str, Any] = {
         "events": [
             {
                 "seq": row.seq,
@@ -848,6 +848,14 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
             iso_utc(run.content_purged_at) if run.content_purged_at else None
         ),
     }
+    if is_platform_admin and run.internal_error:
+        # Operator-only: why the run REALLY failed. `runs.output` carries the
+        # customer's sanitized copy because a provider's own text can name the
+        # model, the provider and the account's billing state (see runtime.py).
+        # Absent, not null, for everyone else -- this endpoint serves both
+        # RunDetail.tsx and AdminRunDetail.tsx, so the gate belongs here.
+        payload["internal_error"] = run.internal_error
+    return payload
 
 
 @app.post("/api/runs/{run_id}/cancel")

@@ -353,3 +353,34 @@ def test_list_runs_filters_by_manual_pipeline_and_status(client):
     assert {r["id"] for r in runs} == {"r-manual", "r-auto", "r-other-wf"}
     auto_row = next(r for r in runs if r["id"] == "r-auto")
     assert auto_row["autonomous"] is True
+
+
+def test_only_a_platform_admin_sees_a_runs_internal_error(client):
+    """`runs.internal_error` is the operator's copy of why a run failed -- a
+    provider's own text, which the customer's `output` deliberately no longer
+    carries (see runtime.py). The endpoint is shared by RunDetail.tsx and
+    AdminRunDetail.tsx, so the gate has to be here, not in the component."""
+    org_id = get_org_id()
+    with open_test_db() as db:
+        db.add(
+            Run(
+                id="r-boom", pipeline="wf-a", input="in",
+                output="The run failed due to an internal error.",
+                internal_error="Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED)",
+                status="failed", org_id=org_id, username="test",
+            )
+        )
+        db.commit()
+
+    member = client.get("/api/runs/r-boom/trace")
+    assert member.status_code == 200
+    assert "internal_error" not in member.json()
+
+    admin_token = create_user_and_login(client, username="op", org=None, admin=True)
+    admin = client.get(
+        "/api/runs/r-boom/trace", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert admin.status_code == 200
+    assert admin.json()["internal_error"] == (
+        "Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED)"
+    )

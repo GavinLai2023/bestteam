@@ -358,3 +358,32 @@ def test_purge_releases_the_runs_knowledge_generation_references(db):
 
     assert db.query(RunKnowledgeGeneration).filter_by(run_id=run.id).count() == 0
     assert "run_knowledge_generations" not in PURGED_FIELDS
+
+
+def test_purge_clears_the_operator_error_copy_but_the_export_never_carries_it(db):
+    """`runs.internal_error` pulls in two directions. A provider's exception can
+    quote the prompt or the model's output, so a purge has to clear it like any
+    other content. But the export is the CUSTOMER's way out, and this field is
+    the one thing on the run they were deliberately never shown -- it can name
+    the model, the provider and the account's billing state. So: purged, not
+    exported, and kept out of PURGED_FIELDS (whose contract is the opposite)."""
+    from ui.backend.retention import (
+        PURGED_FIELDS,
+        PURGED_OPERATOR_FIELDS,
+        export_org_runs,
+        purge_run,
+    )
+
+    org = create_org(db, "acme")
+    run = _run(db, org.id, run_id="r1", status="failed")
+    run.internal_error = "Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED)"
+    db.commit()
+
+    exported = export_org_runs(db, org_id=org.id)["runs"][0]
+    assert "internal_error" not in exported
+    assert "internal_error" not in PURGED_FIELDS["runs"]
+    assert "internal_error" in PURGED_OPERATOR_FIELDS["runs"]
+
+    assert purge_run(db, run) is True
+    db.commit()
+    assert run.internal_error is None
