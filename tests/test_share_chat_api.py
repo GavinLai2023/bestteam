@@ -1024,6 +1024,63 @@ def _make_mailbox_link():
         return link.token
 
 
+def _make_pinned_mailbox_link():
+    """A link over a team whose email capability comes from the skill version
+    pinned at deploy, after the current catalog dropped those tools."""
+    from ui.backend.db.pipelines import publish_pipeline_version
+    from ui.backend.db.skills import publish_skill_version
+    from ui.backend.skills import seed_default_skills
+
+    with open_test_db() as db:
+        seed_default_skills(db)
+        org_id = get_org_id()
+        user = create_user(db, "pinned-mailbox-owner", "pw", org_id=org_id)
+        record, _version = publish_pipeline_version(
+            db,
+            org_id=org_id,
+            name="triage-by-skill",
+            config={
+                "name": "triage-by-skill",
+                "agents": [
+                    {
+                        "name": "reader",
+                        "role": "Asst",
+                        "goal": "triage",
+                        "model": "fake:hello!",
+                        "skills": ["email_triage_reply"],
+                    }
+                ],
+                "teams": [{"name": "tm", "agents": ["reader"], "mode": "sequential"}],
+                "pipeline": {"steps": ["tm"]},
+            },
+        )
+        db.commit()
+        publish_skill_version(
+            db,
+            org_id=None,
+            name="email_triage_reply",
+            config={
+                "name": "email_triage_reply",
+                "instructions": "No longer an email skill.",
+                "tools": [],
+            },
+        )
+        db.commit()
+        link = create_share_link(db, pipeline_id=record.id, org_id=org_id, created_by=user.id)
+        return link.token
+
+
+def test_link_stops_answering_when_only_the_deployed_pin_reads_the_mailbox(client):
+    # The gate must read the skill versions pinned at deploy -- the ones the run
+    # executes with -- not the current catalog. Editing the email tools out of a
+    # skill after deploy must not bring an anonymous link back to life over a
+    # deployed version that still holds email_find/email_read.
+    token = _make_pinned_mailbox_link()
+    resp = client.post(f"/api/share/{token}/messages", json={"content": "read my inbox"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "This share link is no longer available."
+
+
 def test_existing_link_over_a_mailbox_team_stops_answering(client):
     token = _make_mailbox_link()
     resp = client.post(f"/api/share/{token}/messages", json={"content": "read my inbox"})
