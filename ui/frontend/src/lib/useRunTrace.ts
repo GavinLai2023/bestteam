@@ -26,7 +26,9 @@ interface RunTrace {
 //
 // `usage` (per-agent token/cost) only ever comes from the historical fetch --
 // the live WS stream carries events only, matching the same
-// no-live/historical-merge design already used for automation results.
+// no-live/historical-merge design already used for automation results. The
+// endpoint serves it to a platform admin only (it names the model and prices
+// the run), so a customer's fetch leaves it an empty list.
 export function useRunTrace(runId: string, status: string): RunTrace {
   const [events, setEvents] = useState<TraceEvent[]>([])
   const [usage, setUsage] = useState<UsageRecord[]>([])

@@ -944,6 +944,18 @@ def run_in_background(
                     raw_failure_text = event.data
                     event.data = _RUN_FAILED_MESSAGE
                 payload = dataclasses.asdict(event)
+                if payload.get("usage"):
+                    # Every entry is tagged with the agent's model spec
+                    # (langgraph_adapter._record_usage), and the published copy
+                    # feeds three customer-reachable readers: the run stream's
+                    # live delivery, its replay, and `GET /api/runs/{id}`, which
+                    # returns the registry record whole. A customer surface must
+                    # carry neither a model name nor a cost. Stripped from the
+                    # PAYLOAD only -- `event.usage` is what the metering below
+                    # reads, and `usage_records` is the ledger the admin trace
+                    # view is served from. Same redact-before-publish shape as
+                    # the PM-contract branch above.
+                    payload["usage"] = []
                 if (
                     event.type == "tool_completed"
                     and isinstance(event.data, dict)

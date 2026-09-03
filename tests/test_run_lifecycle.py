@@ -1014,3 +1014,51 @@ def test_a_worker_crash_is_also_kept_for_an_admin(tmp_path):
         assert row.status == "failed"
         assert "internal compile detail" in (row.internal_error or "")
         assert "internal compile detail" not in (row.output or "")
+
+
+class _UsagePipeline:
+    """Yields an `agent_completed` carrying usage, the way a real (billable)
+    agent does -- `fake:` models report none, so this has to be synthesised."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(
+            type="agent_completed", pipeline="wf", agent="a", data="the answer",
+            usage=[{"model": "openai:gpt-4o", "input_tokens": 123, "output_tokens": 45}],
+        )
+        yield TraceEvent(type="run_completed", pipeline="wf", data="the answer")
+
+
+def test_a_published_event_never_carries_the_model_name(tmp_path):
+    """`langgraph_adapter._record_usage` tags every usage entry with the agent's
+    model spec, and the published copy feeds three customer-reachable readers:
+    the run stream's live delivery, its replay, and `GET /api/runs/{id}`, which
+    returns the registry record whole. A customer surface must carry neither a
+    model name nor a cost, so it is stripped once here, before publish.
+
+    The event object keeps it: that is what the metering below reads, and
+    `usage_records` stays the ledger the admin trace view is served from."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import UsageRecord
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _UsagePipeline(), "in", engine=engine)
+
+    stored = runtime.registry.get(run.id)
+    completed = [e for e in stored.events if e["type"] == "agent_completed"]
+    assert completed[0]["data"] == "the answer"  # the org's own output still flows
+    assert completed[0]["usage"] == []
+
+    # Metering is unaffected -- the ledger still knows which model was billed.
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        rows = db.query(UsageRecord).filter_by(run_id=run.id).all()
+        assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [
+            ("openai:gpt-4o", 123, 45)
+        ]

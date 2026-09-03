@@ -137,9 +137,12 @@ def test_get_run_trace_returns_persisted_events_in_seq_order(client, tmp_path):
     assert agent_completed["data"] == "done"
 
 
-def test_get_run_trace_includes_per_agent_usage(client):
-    # Additive field for the admin trace view -- the existing customer
-    # RunDetail.tsx only reads `events` and ignores this.
+def test_per_agent_usage_is_admin_only(client):
+    """`usage` names the model and prices the run. Its only consumer has always
+    been the admin trace view (AdminRunDetail); the customer's RunDetail never
+    read it -- but the endpoint served it to any org member all the same, so it
+    was one devtools tab away from a surface that must show neither a model name
+    nor a cost. Absent for them now, like `internal_error`."""
     org_id = get_org_id()
     with open_test_db() as db:
         db.add(Run(id="r-1", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"))
@@ -151,11 +154,16 @@ def test_get_run_trace_includes_per_agent_usage(client):
         )
         db.commit()
 
-    resp = client.get("/api/runs/r-1/trace")
+    member = client.get("/api/runs/r-1/trace")
+    assert member.status_code == 200
+    assert "usage" not in member.json()
 
-    assert resp.status_code == 200
-    usage = resp.json()["usage"]
-    assert usage == [
+    admin_token = create_user_and_login(client, username="op-usage", org=None, admin=True)
+    admin = client.get(
+        "/api/runs/r-1/trace", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert admin.status_code == 200
+    assert admin.json()["usage"] == [
         {"agent": "agent-a", "model": "fake:x", "input_tokens": 10, "output_tokens": 5, "cost_estimate": 0.01}
     ]
 
