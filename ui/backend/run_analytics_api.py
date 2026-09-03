@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from . import draft_outcomes
 from .auth_api import get_current_admin
 from .db.models import Organization, Run, TraceEventRecord, UsageRecord
 from .db.orgs import get_org_by_name
@@ -151,6 +152,8 @@ def list_pipeline_analytics(
         if u.cost_estimate is not None:
             bucket["cost"].append(u.cost_estimate)
 
+    draft_counts = draft_outcomes.counts_by_run(db, run_by_id)
+
     summaries = []
     for (group_org_id, pipeline), group_runs in groups.items():
         statuses = Counter(r.status for r in group_runs)
@@ -176,6 +179,10 @@ def list_pipeline_analytics(
                 "total_input_tokens": usage["input"],
                 "total_output_tokens": usage["output"],
                 "total_cost_estimate": sum(usage["cost"]) if usage["cost"] else None,
+                # Admin-only, deliberately: see draft_outcomes.py's docstring.
+                "draft_outcomes": draft_outcomes.aggregate(
+                    draft_counts[r.id] for r in group_runs if r.id in draft_counts
+                ),
             }
         )
     summaries.sort(key=lambda s: (s["org"] or "", s["pipeline"]))
@@ -274,6 +281,9 @@ def get_pipeline_analytics(
         "per_agent": per_agent,
         "per_model": per_model,
         "common_failure_points": common_failure_points(failed_events),
+        "draft_outcomes": draft_outcomes.aggregate(
+            draft_outcomes.counts_by_run(db, run_ids).values()
+        ),
     }
 
 

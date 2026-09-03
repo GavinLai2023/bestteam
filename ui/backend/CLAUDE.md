@@ -217,6 +217,25 @@ submit-failure path **double-charges `messages_today`** (the CAS commits,
 `release_events` returns the messages, a later cycle charges again); and a
 `completed` run whose output failed *normalisation* has no retry path at all.
 
+### Draft outcome tracking (`draft_outcomes.py`)
+
+What the customer did with each platform draft. One row per **confirmed**
+draft (`already_drafted_uids`, never the model's claim), written at run
+finalization (`runtime._safe_record_draft_outcomes`); `poll_once` reconciles
+pending rows per org after `poll_org`, isolated like the health checks.
+Ladder: in Drafts → `pending`; in Sent by source-key header or `In-Reply-To`
+→ `sent` (the `evidence` column records which — it answers the untested
+"does a client send preserve the header?" question from live data); in
+neither for 2 consecutive cycles → `handled` (never on the first miss — a
+just-pressed Send is in neither folder). Generation mismatch or >30 days →
+`unknown`, terminal. **Free when nothing is pending** — no credential decrypt,
+no IMAP. Statuses never move backwards. `source_key` is globally unique, so a
+retry family collapses to one row. **Read surface is admin-only** — the
+tallies ride `/api/admin/analytics` (`counts_by_run` + `aggregate`, scoped by
+the same org/date filters); no `RequireOrgMember` surface shows them, because
+"the platform knows whether you sent it" undercuts the never-sends guarantee.
+Spec: `specs/2026-09-03-draft-outcome-tracking-design.md`.
+
 ### Pre-LLM filtering (`email_filter.py`)
 
 A **pure** evaluator — no I/O, clock or DB, so every rule is testable by calling

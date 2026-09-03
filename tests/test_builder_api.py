@@ -828,6 +828,168 @@ def test_reject_unsafe_kb_paths_contains_relative_cache_path():
     assert spec.knowledge_bases[0].cache_path == "_kb_cache/embeddings.json"
 
 
+def test_architect_gets_actionable_feedback_when_it_redeclares_a_knowledge_base(client):
+    """A wizard session's workspace only ever holds `pipeline.yaml`, so an inline
+    `knowledge_bases:` entry from the Solution Architect is fabricated by
+    definition. The loader rejected it with a filesystem message ("path does not
+    exist or is not a directory: .../builder_sessions/<id>/<name>") and the retry
+    loop fed exactly that back as self-correction feedback -- a missing server
+    directory the architect has no power to create, so it kept resubmitting the
+    same fabrication until all three attempts burned. The retry is only worth an
+    LLM call if the feedback names a remedy the architect can actually apply.
+    """
+    fabricated = Specification.model_validate(
+        {
+            **_VALID_SPEC,
+            "knowledge_bases": [
+                {
+                    "name": "certificated_agreements_and_awards",
+                    "path": "certificated_agreements_and_awards",
+                }
+            ],
+        }
+    )
+    corrected = Specification.model_validate(_VALID_SPEC)
+    seen_messages = []
+
+    class _FakeArchitectChatModel:
+        def __init__(self):
+            self.responses = [fabricated, corrected]
+
+        def with_structured_output(self, schema, **kwargs):
+            def invoke(messages):
+                seen_messages.append(list(messages))
+                return self.responses.pop(0)
+
+            return SimpleNamespace(invoke=invoke)
+
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "read our agreements"}
+    ).json()["id"]
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/specification",
+            json={"model": "deepseek:architect"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["specification_json"]["knowledge_bases"] == []
+
+    # The correction handed to the architect on its second attempt.
+    feedback = seen_messages[1][-1].content
+    assert "certificated_agreements_and_awards" in feedback
+    assert "is not a directory" not in feedback
+    assert "builder_sessions" not in feedback
+
+
+def test_refining_a_spec_keeps_its_existing_inline_knowledge_base(client, tmp_path):
+    """A spec submitted through the API may legitimately declare an inline
+    knowledge base with an absolute path (`check_path_traversal` allows those;
+    only `..` is refused). Refining that design must not treat the architect
+    faithfully preserving the entry as a fabrication."""
+    docs = tmp_path / "agreements"
+    docs.mkdir()
+    (docs / "a.txt").write_text("an agreement", encoding="utf-8")
+    kb_entry = {"name": "agreements_kb", "path": str(docs)}
+    spec_with_kb = {**_VALID_SPEC, "knowledge_bases": [kb_entry]}
+
+    class _FakeArchitectChatModel:
+        def with_structured_output(self, schema, **kwargs):
+            return SimpleNamespace(
+                invoke=lambda messages: Specification.model_validate(spec_with_kb)
+            )
+
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "read our agreements"}
+    ).json()["id"]
+    stored = client.post(
+        f"/api/builder/sessions/{session_id}/specification",
+        json={"specification": spec_with_kb},
+    )
+    assert stored.status_code == 200, stored.text
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "Make replies friendlier", "model": "deepseek:architect"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert [kb["name"] for kb in resp.json()["specification_json"]["knowledge_bases"]] == ["agreements_kb"]
+
+
+def test_refining_rejects_repointing_an_existing_knowledge_base_at_another_path(client, tmp_path):
+    """Preserving the design's own knowledge base is allowed; keeping its name
+    while swapping the directory is not. Otherwise a refine round would let the
+    architect aim a familiar KB name at any readable path on the server."""
+    docs = tmp_path / "agreements"
+    docs.mkdir()
+    (docs / "a.txt").write_text("an agreement", encoding="utf-8")
+    elsewhere = tmp_path / "secrets"
+    elsewhere.mkdir()
+    (elsewhere / "b.txt").write_text("not for agents", encoding="utf-8")
+
+    spec_with_kb = {**_VALID_SPEC, "knowledge_bases": [{"name": "agreements_kb", "path": str(docs)}]}
+    repointed = {**_VALID_SPEC, "knowledge_bases": [{"name": "agreements_kb", "path": str(elsewhere)}]}
+
+    class _FakeArchitectChatModel:
+        def with_structured_output(self, schema, **kwargs):
+            return SimpleNamespace(invoke=lambda messages: Specification.model_validate(repointed))
+
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "read our agreements"}
+    ).json()["id"]
+    client.post(
+        f"/api/builder/sessions/{session_id}/specification", json={"specification": spec_with_kb}
+    ).raise_for_status()
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/solution",
+            json={"feedback": "Make replies friendlier", "model": "deepseek:architect"},
+        )
+
+    assert resp.status_code == 400
+    assert "cannot declare its own knowledge bases" in resp.json()["detail"]
+
+
+def test_repeated_knowledge_base_fabrication_fails_without_leaking_a_server_path(client):
+    """When the architect never stops fabricating, the customer-facing 400 must
+    name the knowledge base and the remedy -- not an internal container path."""
+    fabricated = Specification.model_validate(
+        {
+            **_VALID_SPEC,
+            "knowledge_bases": [
+                {
+                    "name": "certificated_agreements_and_awards",
+                    "path": "certificated_agreements_and_awards",
+                }
+            ],
+        }
+    )
+
+    class _FakeArchitectChatModel:
+        def with_structured_output(self, schema, **kwargs):
+            return SimpleNamespace(invoke=lambda messages: fabricated)
+
+    session_id = client.post(
+        "/api/builder/sessions", json={"intent_text": "read our agreements"}
+    ).json()["id"]
+
+    with patch("ui.backend.builder._resolve_model", return_value=_FakeArchitectChatModel()):
+        resp = client.post(
+            f"/api/builder/sessions/{session_id}/specification",
+            json={"model": "deepseek:architect"},
+        )
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "certificated_agreements_and_awards" in detail
+    assert "builder_sessions" not in detail
+    assert "is not a directory" not in detail
+
+
 def test_submit_specification_rejects_absolute_kb_cache_path(client, tmp_path):
     # CR-001: the builder specification endpoint is a third API boundary that
     # accepts caller-supplied KB paths (via the specification dict). An absolute

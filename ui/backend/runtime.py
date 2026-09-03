@@ -30,6 +30,7 @@ from .automation_results import (
     already_drafted_uids,
     normalize_run_result,
 )
+from .draft_outcomes import record_outcomes_for_run
 from .db.inbox_events import (
     EVENT_CLAIMED,
     claimed_events,
@@ -440,6 +441,28 @@ def _safe_complete_inbox_events(db: Session, run_row) -> None:
             pass
 
 
+def _safe_record_draft_outcomes(db: Session, run_row) -> None:
+    """One `draft_outcomes` row per draft this run demonstrably wrote, so the
+    poll cycle can start watching what the customer does with it (B1).
+
+    Runs after `normalize_run_result` on purpose: `already_drafted_uids`
+    unions trace evidence with the result rows normalization just wrote.
+    Isolated like `_safe_complete_inbox_events` -- bookkeeping must never
+    break a run.
+    """
+    try:
+        record_outcomes_for_run(db, run_row)
+    except Exception:  # noqa: BLE001 -- bookkeeping must never break a run
+        _logger.warning(
+            "Draft outcome recording failed for run %s; run unaffected",
+            run_row.id, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _safe_record_trace_event(db: Session, *, run_id: str, seq: int, event: TraceEvent) -> None:
     """Persist one TraceEvent as a `trace_events` row, isolating failures from
     run status -- same rationale as `_safe_record_usage`. `data` is always
@@ -751,6 +774,7 @@ def run_in_background(
             # own status is already committed by the time this runs.
             _safe_record_trigger_health(db, run_row)
             _safe_complete_inbox_events(db, run_row)
+            _safe_record_draft_outcomes(db, run_row)
 
     def _maybe_record_share_reply(output: Optional[str]) -> None:
         # Share-chat turns (share_chat.py) are regular runs stamped with

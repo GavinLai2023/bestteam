@@ -1,6 +1,7 @@
 import type {
   ActivityOverview,
-  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem, EmailBudget, EmailBudgetInput,
+  AdminOrg, AdminUser, AutomationResult, BuilderSession, ConfigItem,
+  EmailBudget, EmailBudgetInput,
   EmailFilterSettings, EmailTrigger, FeedbackItem, FilteredMessage,
   IngestionJobStatus, KnowledgeBaseCapabilities, KnowledgeBaseSearchResponse,
   Me, MemoryRecord, MemoryUserSummary, ModelAnalyticsSummary,

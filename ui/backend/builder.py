@@ -19,7 +19,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from bestteam import Specification, generate_requirements, generate_specification, validate_specification
+from bestteam import (
+    KnowledgeBaseSpec,
+    Specification,
+    generate_requirements,
+    generate_specification,
+    validate_specification,
+)
 from bestteam.adapters.langgraph_adapter import _resolve_model
 from bestteam.core.knowledge_base import make_knowledge_base_tool
 from bestteam.core.requirements import QuestionAnswer, Requirements
@@ -294,6 +300,50 @@ def _reject_unsafe_kb_paths(spec: Specification) -> None:
             kb.cache_path = checked_contained_cache_path(kb.cache_path)
 
 
+def _reject_fabricated_knowledge_bases(
+    spec: Specification, existing: Optional[List[KnowledgeBaseSpec]] = None
+) -> None:
+    """Refuse an inline `knowledge_bases:` entry the architect introduced itself.
+
+    A wizard session's workspace (`_source_for`) only ever holds `pipeline.yaml`
+    -- nothing puts document folders there -- so a relative KB path the architect
+    invents can never resolve. The loader catches that, but only as a missing
+    directory ("path does not exist or is not a directory: <workspace>/<name>").
+    The retry loop hands that message back as self-correction feedback, and the
+    architect has no way to create a directory on the server -- so it resubmits
+    the same design until every attempt is spent, and the customer sees a server
+    path. Name the remedy instead: reference an existing knowledge base by name,
+    or design without one. The prompt already says this; this enforces it.
+
+    `existing` is the design being refined, whose entries came through the
+    caller-supplied-spec boundary (`_validate_spec_payload`) and already built
+    once -- an absolute `path` is legitimate there (`check_path_traversal`
+    refuses only `..`). Preserving one of those is not a fabrication; changing
+    its path, or adding an entry that wasn't there, is.
+    """
+    kept = {(kb.name, kb.path) for kb in existing or []}
+    fabricated = [kb for kb in spec.knowledge_bases if (kb.name, kb.path) not in kept]
+    if not fabricated:
+        return
+    names = ", ".join(f"'{kb.name}'" for kb in fabricated)
+    raise ConfigurationError(
+        f"A specification cannot declare its own knowledge bases ({names}). "
+        "Use a knowledge base only by adding its exact name to an agent's "
+        "tools list, and only if it appears in the available knowledge bases "
+        "listed in the input. Remove the knowledge_bases entry; if none of the "
+        "available knowledge bases fits, design the team without one."
+    )
+
+
+def _prepare_architect_candidate(
+    spec: Specification, source: Path, existing: Optional[List[KnowledgeBaseSpec]] = None
+) -> None:
+    """`pre_validate` for a model-generated candidate: reject what the architect
+    may not declare at all, then contain what it may."""
+    _reject_fabricated_knowledge_bases(spec, existing)
+    _prepare_generated_specification(spec, source)
+
+
 def _prepare_generated_specification(spec: Specification, source: Path) -> None:
     """Contain an untrusted model candidate before SDK validation builds it."""
     try:
@@ -523,7 +573,11 @@ def _redesign_specification(
         source=source,
         extra_tools=kb_tools,
         extra_skills=load_skills(db, org_id),
-        pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+        # `current`'s own inline knowledge bases are not fabrications -- see
+        # `_reject_fabricated_knowledge_bases`.
+        pre_validate=lambda candidate: _prepare_architect_candidate(
+            candidate, source, current.knowledge_bases
+        ),
     )
 
 
@@ -632,7 +686,7 @@ def submit_specification(
             source=source,
             extra_tools=kb_tools,
             extra_skills=load_skills(db, org.id),
-            pre_validate=lambda candidate: _prepare_generated_specification(candidate, source),
+            pre_validate=lambda candidate: _prepare_architect_candidate(candidate, source),
         )
     else:
         raise HTTPException(status_code=400, detail="Provide either 'specification' or 'model'")

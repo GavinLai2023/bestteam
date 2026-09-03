@@ -144,6 +144,20 @@ export interface UsageRecord {
   cost_estimate: number | null
 }
 
+// What became of the platform's reply drafts, tallied over the runs in
+// scope. Admin-only: no customer-facing surface shows these -- see
+// ui/backend/draft_outcomes.py.
+export interface DraftOutcomeTally {
+  sent: number
+  handled: number
+  pending: number
+  unknown: number
+  by_evidence: {
+    source_key_header: number
+    in_reply_to: number
+  }
+}
+
 export interface PipelineAnalyticsSummary {
   org_id: number | null
   org: string | null
@@ -158,6 +172,7 @@ export interface PipelineAnalyticsSummary {
   total_input_tokens: number
   total_output_tokens: number
   total_cost_estimate: number | null
+  draft_outcomes: DraftOutcomeTally
 }
 
 export interface AgentAnalytics {
@@ -190,6 +205,7 @@ export interface PipelineAnalyticsDetail {
   per_agent: AgentAnalytics[]
   per_model: ModelAnalytics[]
   common_failure_points: FailurePoint[]
+  draft_outcomes: DraftOutcomeTally
 }
 
 export interface ModelAnalyticsSummary {

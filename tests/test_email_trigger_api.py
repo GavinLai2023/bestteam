@@ -415,3 +415,4 @@ def test_releasing_another_orgs_message_is_404_not_403(client, other_org_event_i
     assert client.post(
         f"/api/org/email-trigger/filtered/{other_org_event_id}/release"
     ).status_code == 404
+

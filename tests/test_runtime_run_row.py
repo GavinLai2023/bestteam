@@ -457,3 +457,55 @@ def test_a_successful_run_announces_the_recovery(tmp_path, monkeypatch):
     assert [n.fingerprint for n in emitted] == ["recovered", "workflow"]
     assert trigger.alerted_fingerprint is None
     assert trigger.consecutive_faults == 0
+
+
+# --- draft outcomes: recorded at finalization --------------------------------
+
+
+def test_a_terminal_triggered_run_records_draft_outcomes(tmp_path, monkeypatch):
+    from ui.backend import runtime
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+    run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        s.add(_triggered_run_row(run.id, org_id))
+        s.commit()
+
+    recorded = []
+    monkeypatch.setattr(
+        runtime, "record_outcomes_for_run", lambda db, row: recorded.append(row.id)
+    )
+    run_in_background(
+        run.id, _pipeline(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+    assert recorded == [run.id]
+
+
+def test_a_draft_outcome_failure_never_breaks_the_run(tmp_path, monkeypatch):
+    from ui.backend import runtime
+
+    engine = _engine(tmp_path)
+    Session = session_factory(engine)
+    with Session() as s:
+        org, _ = _org_with_trigger(s)
+        org_id = org.id
+    run = registry.create("w", "in", org_id=org_id, username="email-trigger")
+    with Session() as s:
+        s.add(_triggered_run_row(run.id, org_id))
+        s.commit()
+
+    def _explode(*a, **k):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(runtime, "record_outcomes_for_run", _explode)
+    run_in_background(
+        run.id, _pipeline(tmp_path), "in",
+        engine=engine, org_id=org_id, username="email-trigger",
+    )
+    with Session() as s:
+        assert s.get(Run, run.id).status == "completed"

@@ -2503,10 +2503,15 @@
   directory-wide read over every app registration in the customer's tenant,
   which is far broader than the single-mailbox `IMAP.AccessAsApp` the
   connection itself uses — a permission a customer's IT should refuse.
-- **Draft outcomes are never observed** — nothing records whether a human sent,
-  edited or discarded a generated draft, so there is no quality signal and no
-  ROI evidence. The `X-BestTeam-Source-Key` header added in Phase 0 is what a
-  future Sent-folder reconciliation would key on.
+- **Draft outcome tracking is unverified against a real mail client** — the
+  poll cycle now reconciles each confirmed draft against the mailbox (still in
+  Drafts / found in Sent by the `X-BestTeam-Source-Key` header or by
+  `In-Reply-To` / gone), but whether Outlook or Gmail preserve either header on
+  a real send has never been observed. The `draft_outcomes.evidence` column
+  answers that from live data; check it once the first customer has sent a few
+  drafts — Trace page → Analytics → pick the pipeline → **Draft outcomes**.
+  Admin-only by design; no customer-facing surface shows these counts. See
+  `docs/superpowers/specs/2026-09-03-draft-outcome-tracking-design.md`.
 
 - **`_active_kb_dir` (tests/test_crud_api.py) resolves the active KB version
   by `max(st_mtime)`**, which is theoretically ambiguous: Windows file
