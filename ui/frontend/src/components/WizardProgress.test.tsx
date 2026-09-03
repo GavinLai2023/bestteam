@@ -31,10 +31,10 @@ describe('WizardProgress', () => {
 
     const labels = screen.getAllByText(/./, { selector: '.wizard-step-label' }).map((el) => el.textContent)
     expect(labels).toEqual([
-      'Your challenge',
-      'A few questions',
-      'Your documents',
-      'Meet your team',
+      'Challenge',
+      'Questions',
+      'Documents',
+      'Your team',
       'Confirm',
       'Go live',
     ])
@@ -43,7 +43,7 @@ describe('WizardProgress', () => {
   it('links the questions step once a session exists', () => {
     renderBar()
 
-    expect(screen.getByText('A few questions').closest('a')).not.toBeNull()
+    expect(screen.getByText('Questions').closest('a')).not.toBeNull()
   })
 
   it('locks the questions step without a session', () => {
@@ -53,7 +53,7 @@ describe('WizardProgress', () => {
       </MemoryRouter>,
     )
 
-    expect(screen.getByText('A few questions').closest('a')).toBeNull()
+    expect(screen.getByText('Questions').closest('a')).toBeNull()
   })
 
   // Leaving mid-update is how a customer publishes a team they have not seen:
@@ -63,6 +63,6 @@ describe('WizardProgress', () => {
     renderBar(true)
 
     expect(screen.getByText('Go live').closest('a')).toBeNull()
-    expect(screen.getByText('Your challenge').closest('a')).toBeNull()
+    expect(screen.getByText('Challenge').closest('a')).toBeNull()
   })
 })
