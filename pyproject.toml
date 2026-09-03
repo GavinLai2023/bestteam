@@ -33,6 +33,10 @@ providers-openai = ["langchain>=0.3,<2", "langchain-openai>=0.2,<2", "openai>=1.
 # integration package -- without it a `deepseek:` model spec in a deployment's
 # model catalog fails at call time, not at start-up.
 providers-deepseek = ["langchain>=0.3,<2", "langchain-deepseek>=1.1,<2"]
+# Gemini resolves through the same `init_chat_model` path, via its own
+# integration package -- without it a `google_genai:` model spec in a
+# deployment's model catalog fails at call time, not at start-up.
+providers-google = ["langchain>=0.3,<2", "langchain-google-genai>=4.4,<5"]
 interview    = ["openai>=1.0"]
 
 [project.scripts]

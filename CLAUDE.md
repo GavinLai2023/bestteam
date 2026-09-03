@@ -34,7 +34,7 @@ Windows).
 # Install / update the environment (the lockfile pins what CI and Docker use)
 .\.venv\Scripts\python.exe -m pip install -c requirements.lock -e ".[ui,dev,tools,test]"
 # After changing a dependency in pyproject.toml, regenerate the lockfile
-uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai --extra providers-deepseek -o requirements.lock
+uv pip compile pyproject.toml --universal --python-version 3.10 --extra ui --extra dev --extra tools --extra test --extra interview --extra providers-openai --extra providers-deepseek --extra providers-google -o requirements.lock
 
 # Tests
 .\.venv\Scripts\python.exe -m pytest

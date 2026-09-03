@@ -93,6 +93,7 @@ _LOCKED_EXTRAS = (
     "interview",
     "providers-openai",
     "providers-deepseek",
+    "providers-google",
 )
 
 
