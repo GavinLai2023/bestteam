@@ -3,11 +3,10 @@ import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { API_BASE, WS_BASE, api } from '../lib/api'
 import {
-  EVENT_LABELS,
   FRIENDLY_EVENT_TYPES,
   RESULT_LABELS,
   TERMINAL_TYPES,
-  renderEventData,
+  useDetailedEventLine,
   useFriendlyEventTitle,
 } from '../lib/traceEvents'
 import type { TraceEvent } from '../lib/types'
@@ -28,6 +27,7 @@ function MonitorPage() {
   // `team_display_name` while this select showed the raw slug, so one screen
   // called one team two things (audit finding F4).
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({})
+  const [agentDisplayNames, setAgentDisplayNames] = useState<Record<string, Record<string, string>>>({})
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -51,6 +51,7 @@ function MonitorPage() {
       .then((data) => {
         setPipelines(data.pipelines)
         setDisplayNames(data.display_names ?? {})
+        setAgentDisplayNames(data.agent_display_names ?? {})
         // Clear a previous unreachable banner, but never stomp on a run that
         // is currently in flight or has already reached a terminal state.
         setStatus((current) => (current === 'unreachable' ? 'idle' : current))
@@ -198,7 +199,9 @@ function MonitorPage() {
   // whatever the engine emitted; there is no specification on this page to map
   // it against, so it passes through -- the friendly view's value is the
   // sentence around it, not the name itself.
-  const friendlyTitle = useFriendlyEventTitle((agentName) => agentName)
+  const displayNameFor = (agentName: string) => agentDisplayNames[selected]?.[agentName] ?? agentName
+  const friendlyTitle = useFriendlyEventTitle(displayNameFor)
+  const detailedLine = useDetailedEventLine(displayNameFor)
   const friendlyEvents = events.filter((e) => FRIENDLY_EVENT_TYPES.includes(e.type))
 
   return (
@@ -320,20 +323,23 @@ function MonitorPage() {
         <div className="trace-header">
           <h2>{t('run.progress')}</h2>
           <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
-            {traceExpanded ? t('run.hideTechnical') : t('run.showTechnical')}
+            {traceExpanded ? t('run.hideDetails') : t('run.showDetails')}
           </button>
         </div>
         {events.length === 0 ? (
           <p className="hint">{t('run.noRunYet')}</p>
         ) : traceExpanded ? (
           <ul>
-            {events.map((event, i) => (
-              <li key={i} className={`event event-${event.type}`}>
-                <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
-                {event.agent && <span className="event-agent">{event.agent}</span>}
-                <p className="event-data">{renderEventData(event)}</p>
-              </li>
-            ))}
+            {events.map((event, i) => {
+              const line = detailedLine(event)
+              if (!line) return null
+              return (
+                <li key={i} className={`event event-${event.type}`}>
+                  <span className="event-type">{line.title}</span>
+                  {line.detail && <p className="event-data">{line.detail}</p>}
+                </li>
+              )
+            })}
           </ul>
         ) : (
           <ul>

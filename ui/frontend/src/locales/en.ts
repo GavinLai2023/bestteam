@@ -112,6 +112,44 @@ export const en = {
     failed: 'Something went wrong',
     cancelled: 'Stopped',
   },
+  // The customer's expanded run view (see lib/traceEvents.ts). Says what the
+  // team did, in the words a customer would use: no tool identifiers, no
+  // timings, and nothing about the platform's own machinery. The technical
+  // register lives in EVENT_LABELS and is admin-only.
+  traceDetail: {
+    agentStarted: '{{agent}} got started',
+    delegated: '{{from}} asked {{to}} to help',
+    delegationDone: '{{from}} got an answer back from {{to}}',
+    // A knowledge base is named by the collection the customer created, never
+    // by the tool identifier the engine generated for it. Three literal keys
+    // rather than i18next plurals: the key space is typed against this file.
+    knowledgeBase: 'Looked through “{{name}}” and found {{count}} passages',
+    knowledgeBaseOne: 'Looked through “{{name}}” and found 1 passage',
+    knowledgeBaseEmpty: 'Looked through “{{name}}” and found nothing relevant',
+    // A tool this team declared itself, so the name is the customer's own.
+    customTool: 'Used “{{tool}}”',
+    customToolFailed: 'Tried to use “{{tool}}”, without success',
+    tools: {
+      emailFind: 'Looked for messages',
+      emailFindFailed: 'Tried to look for messages, without success',
+      emailRead: 'Read the message',
+      emailReadFailed: 'Tried to read the message, without success',
+      emailReadAttachment: 'Read an attachment',
+      emailReadAttachmentFailed: 'Tried to read an attachment, without success',
+      emailDraftReply: 'Drafted a reply',
+      emailDraftReplyFailed: 'Tried to draft a reply, without success',
+      webSearch: 'Searched the web',
+      webSearchFailed: 'Tried to search the web, without success',
+      parseFile: 'Read a document',
+      parseFileFailed: 'Tried to read a document, without success',
+      httpGet: 'Fetched a web page',
+      httpGetFailed: 'Tried to fetch a web page, without success',
+      calculator: 'Worked out a calculation',
+      calculatorFailed: 'Tried to work out a calculation, without success',
+      localBusinessSearch: 'Searched for local businesses',
+      localBusinessSearchFailed: 'Tried to search for local businesses, without success',
+    },
+  },
   run: {
     title: 'Run a team',
     subtitle: 'Choose a team, give it a task, and follow its progress.',
@@ -141,8 +179,8 @@ export const en = {
     stale: 'No update for {{seconds}}s — still working, this can take a while for longer tasks.',
     runAgain: 'Run again',
     progress: 'Progress',
-    showTechnical: 'Show technical trace',
-    hideTechnical: 'Hide technical trace',
+    showDetails: 'Show details',
+    hideDetails: 'Hide details',
     noRunYet: 'No run yet — pick a team and hit Run.',
   },
   activity: {

@@ -298,26 +298,26 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.getByText('Stop')).toBeInTheDocument()
   })
 
-  it('shows the result before the technical trace, collapsed by default, once the run completes', async () => {
+  it('shows the result above the progress list once the run completes', async () => {
     const ws = await startARun()
 
     await act(async () => {
-      ws!.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'a', data: 'agent step output', usage: [] })
+      ws!.emit({ type: 'agent_started', pipeline: 'wf', agent: 'a', data: { role: 'Researcher' }, usage: [] })
     })
     await act(async () => {
       ws!.emit({ type: 'run_completed', pipeline: 'wf', agent: null, data: 'the final answer', usage: [] })
     })
 
     expect(await screen.findByText('the final answer')).toBeInTheDocument()
-    // Collapsed: the trace's own event list (which would otherwise duplicate
-    // the same final text a second time) isn't rendered until expanded.
-    expect(screen.queryByText('agent step output')).not.toBeInTheDocument()
+    // Collapsed: only the milestones, so an agent starting isn't listed yet.
+    expect(screen.queryByText('a got started')).not.toBeInTheDocument()
 
     const bodyText = document.body.textContent || ''
     expect(bodyText.indexOf('Final output')).toBeLessThan(bodyText.indexOf('Progress'))
 
-    fireEvent.click(screen.getByText('Show technical trace'))
-    expect(screen.getByText('agent step output')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Show details'))
+    expect(screen.getByText('a got started')).toBeInTheDocument()
+    expect(screen.getByText('Researcher')).toBeInTheDocument()
   })
 
   it('lets you copy the final result text', async () => {
@@ -382,7 +382,7 @@ describe('MonitorPage run waiting UX', () => {
     expect(mockedApi.createRun).toHaveBeenCalledWith('wf', 'do the thing')
   })
 
-  it('renders object-shaped tool_completed data without crashing', async () => {
+  it("names a team's own tool without leaking how the platform ran it", async () => {
     const ws = await startARun()
 
     await act(async () => {
@@ -395,31 +395,41 @@ describe('MonitorPage run waiting UX', () => {
       })
     })
 
-    // A tool call is detail, so it lives in the technical trace rather than
-    // the friendly feed a customer sees by default.
-    fireEvent.click(screen.getByText('Show technical trace'))
+    // A tool call is detail, so it lives behind the toggle rather than in the
+    // feed a customer sees by default.
+    fireEvent.click(screen.getByText('Show details'))
 
-    expect(screen.getByText(/echo_tool · success · 12ms — echoed: hi/)).toBeInTheDocument()
+    // The tool's own name is the customer's -- they declared it. The timing
+    // and the raw result summary are the platform's and stay off this screen.
+    expect(screen.getByText('Used “echo_tool”')).toBeInTheDocument()
+    const shown = document.body.textContent || ''
+    expect(shown).not.toContain('12ms')
+    expect(shown).not.toContain('echoed: hi')
   })
 
-  // The default view narrates the run the way the wizard's preview does,
-  // instead of showing `✓ agent done` and raw agent names (F8).
-  it('shows friendly progress by default and the technical trace on demand', async () => {
+  // Both registers a customer can reach are written in their own words (F8).
+  // The technical one (`✓ agent done`, tool identifiers, timings) is now the
+  // admin trace page's alone.
+  it('never shows the technical register, expanded or collapsed', async () => {
     const ws = await startARun()
 
     await act(async () => {
       ws!.emit({ type: 'run_started', pipeline: 'wf', agent: null, data: null, usage: [] })
       ws!.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'researcher', data: 'done', usage: [] })
+      ws!.emit({ type: 'agent_progress', pipeline: 'wf', agent: 'researcher', data: { note: 'iteration 2 of 8' }, usage: [] })
     })
 
     expect(screen.getByText('Your team got started')).toBeInTheDocument()
     expect(screen.getByText('researcher finished their part')).toBeInTheDocument()
     expect(screen.queryByText('✓ agent done')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByText('Show technical trace'))
+    fireEvent.click(screen.getByText('Show details'))
 
-    expect(screen.getByText('✓ agent done')).toBeInTheDocument()
-    expect(screen.queryByText('Your team got started')).not.toBeInTheDocument()
+    // Still the customer's words, and the engine's own iteration counter is
+    // dropped rather than relabelled.
+    expect(screen.getByText('Your team got started')).toBeInTheDocument()
+    expect(screen.queryByText('✓ agent done')).not.toBeInTheDocument()
+    expect(document.body.textContent || '').not.toContain('iteration 2 of 8')
   })
 })
 

@@ -260,6 +260,11 @@ export const api = {
       pipelines: string[]
       pipeline_ids?: Record<string, number>
       display_names?: Record<string, string>
+      // Per team, its agents' friendly names keyed by the technical name the
+      // engine puts in every TraceEvent. Absent for a team deployed before
+      // these were persisted, and an agent without one is simply missing --
+      // both cases fall back to the technical name.
+      agent_display_names?: Record<string, Record<string, string>>
     }>('/api/pipelines'),
   pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
   // The customer's reversible pause on one live team: false stops it running

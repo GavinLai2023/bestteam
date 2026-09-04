@@ -4,6 +4,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailConnect from '../../components/EmailConnect'
 import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
+import { TERMINAL_TYPES, useDetailedEventLine } from '../../lib/traceEvents'
 import type { TraceEvent, WizardOutletContext } from '../../lib/types'
 
 type Status = 'idle' | 'running' | 'completed' | 'failed'
@@ -20,6 +21,18 @@ export default function PreviewPage() {
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => () => wsRef.current?.close(), [])
+
+  // Resolves an agent's technical name to the one the wizard gave it. Reads
+  // the session directly rather than the `spec` local below, because a hook
+  // cannot sit after this component's early returns.
+  const friendlyName = (agentName: string) =>
+    (session?.specification_json?.agents ?? []).find((a) => a.name === agentName)?.display_name ||
+    agentName
+  // Shared with the Activity page's expanded run view, so the wizard's test
+  // run and every run after it are narrated the same way. It also returns null
+  // for the platform's own machinery, which this feed used to render as a raw
+  // type string with `JSON.stringify(event.data)` underneath.
+  const detailedLine = useDetailedEventLine(friendlyName)
 
   if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
@@ -39,27 +52,6 @@ export default function PreviewPage() {
   }
 
   const spec = session.specification_json
-  const agentsByName = Object.fromEntries((spec.agents ?? []).map((a) => [a.name, a]))
-
-  const friendlyName = (agentName: string) => {
-    const agent = agentsByName[agentName]
-    return agent?.display_name || agentName
-  }
-
-  const titleFor = (event: TraceEvent) => {
-    switch (event.type) {
-      case 'run_started':
-        return t('traceEvents.started')
-      case 'agent_completed':
-        return t('traceEvents.agentDone', { agent: friendlyName(event.agent ?? '') })
-      case 'run_completed':
-        return t('traceEvents.completed')
-      case 'run_failed':
-        return t('traceEvents.failed')
-      default:
-        return event.type
-    }
-  }
 
   const run = async () => {
     if (!input.trim() || status === 'running') return
@@ -138,21 +130,23 @@ export default function PreviewPage() {
 
       {events.length > 0 && (
         <ul className="activity-feed" style={{ marginTop: 16 }}>
-          {events.map((event, i) => (
-            <li key={i} className={`activity-card ${event.type}`}>
-              <p className="activity-title">{titleFor(event)}</p>
-              {/* Stringifies rather than crashes if `event.data` is ever a non-string
-                  object here (unverified in practice) -- unlike MonitorPage/RunDetail's
-                  `data as string` cast, which is safe because it only renders `data` for
-                  terminal events, where the backend's event-emission contract guarantees
-                  a string. */}
-              {event.data && (
-                <p className="activity-body">
-                  {typeof event.data === 'string' ? event.data : JSON.stringify(event.data)}
-                </p>
-              )}
-            </li>
-          ))}
+          {events.map((event, i) => {
+            const line = detailedLine(event)
+            if (!line) return null
+            // A terminal event's `data` IS the run's answer, which is the whole
+            // point of a test run; every other event's body comes from the
+            // narrator, never from the raw payload.
+            const body =
+              TERMINAL_TYPES.includes(event.type) && typeof event.data === 'string'
+                ? event.data
+                : line.detail
+            return (
+              <li key={i} className={`activity-card ${event.type}`}>
+                <p className="activity-title">{line.title}</p>
+                {body && <p className="activity-body">{body}</p>}
+              </li>
+            )
+          })}
         </ul>
       )}
 

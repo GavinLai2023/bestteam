@@ -29,9 +29,13 @@ does **not** pin a language, because English is already the default.
 
 Two shared modules exist so copy cannot drift between surfaces:
 `lib/runStatus.ts` (wire status → readable label; **an unrecognised status
-renders as-is rather than being hidden**) and `lib/traceEvents.ts`'s
-`useFriendlyEventTitle` (customer-facing narration, alongside the technical
-`EVENT_LABELS`).
+renders as-is rather than being hidden**) and `lib/traceEvents.ts`, which holds **three
+registers of the same event stream**: `useFriendlyEventTitle` (the collapsed
+customer view: milestones only), `useDetailedEventLine` (**"Show details"** --
+the same run step by step, still in the customer's words, dropping every event
+that is platform machinery and returning `null` for it) and `EVENT_LABELS` +
+`renderEventData` (the technical register, **admin trace page only** -- it names
+tool identifiers, times calls in ms and reports memory/grounding).
 
 ## Styling (`index.css`)
 

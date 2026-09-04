@@ -138,7 +138,7 @@ def test_t4_5_deploy_then_run_for_real(page):
     page.fill("textarea", "A customer is asking about a refund.")
     page.click("button:has-text('Run')")
     # MonitorPage hides its live trace <ul> once a terminal event lands
-    # unless "Show technical trace" is toggled on -- the result banner
+    # unless "Show details" is toggled on -- the result banner
     # (.result-<event.type>, e.g. .result-run_completed) is the reliable
     # signal a run finished, not the old .event.event-run_completed
     # list-item selector (confirmed against MonitorPage.tsx and by

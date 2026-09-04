@@ -40,6 +40,152 @@ export function useFriendlyEventTitle(displayNameFor: (agentName: string) => str
   }
 }
 
+// One line of the customer's expanded run view. `detail` is the optional
+// second line (an agent's role, a delegated task) -- absent, not empty, when
+// there is nothing worth a second line.
+export interface DetailedEventLine {
+  title: string
+  detail?: string
+}
+
+type Translate = ReturnType<typeof useTranslation>['t']
+
+// The tool the adapter generates for each subordinate a manager can delegate
+// to (`langgraph_adapter._delegation_tools` names it `delegate_to_<agent>`).
+// Its tool_completed is a platform-internal identifier AND a duplicate of the
+// delegation_started/completed pair, so the detailed view drops it.
+const DELEGATION_TOOL_PREFIX = 'delegate_to_'
+
+// A built-in tool's line, or null if this team declared the tool itself.
+// A switch on literal keys rather than a computed `t()` argument: the key
+// space is typed against locales/en.ts, so only literals type-check -- and a
+// tool added to tools/__init__.py without a line here falls through to the
+// custom-tool wording rather than leaking its identifier as a label.
+function builtInToolTitle(t: Translate, tool: string, success: boolean): string | null {
+  switch (tool) {
+    case 'email_find':
+      return success ? t('traceDetail.tools.emailFind') : t('traceDetail.tools.emailFindFailed')
+    case 'email_read':
+      return success ? t('traceDetail.tools.emailRead') : t('traceDetail.tools.emailReadFailed')
+    case 'email_read_attachment':
+      return success
+        ? t('traceDetail.tools.emailReadAttachment')
+        : t('traceDetail.tools.emailReadAttachmentFailed')
+    case 'email_draft_reply':
+      return success
+        ? t('traceDetail.tools.emailDraftReply')
+        : t('traceDetail.tools.emailDraftReplyFailed')
+    case 'web_search':
+      return success ? t('traceDetail.tools.webSearch') : t('traceDetail.tools.webSearchFailed')
+    case 'parse_file':
+      return success ? t('traceDetail.tools.parseFile') : t('traceDetail.tools.parseFileFailed')
+    case 'http_get':
+      return success ? t('traceDetail.tools.httpGet') : t('traceDetail.tools.httpGetFailed')
+    case 'calculator':
+      return success ? t('traceDetail.tools.calculator') : t('traceDetail.tools.calculatorFailed')
+    case 'local_business_search':
+      return success
+        ? t('traceDetail.tools.localBusinessSearch')
+        : t('traceDetail.tools.localBusinessSearchFailed')
+    default:
+      return null
+  }
+}
+
+// A knowledge-base tool's own event carries the retrieval counts
+// (`_kb_tool_trace_data`), which no other tool's does, and its `tool` is the
+// collection's customer-chosen name (`knowledge_base.py` sets the wrapper's
+// __name__ to it). The query itself stays out: what was searched for is the
+// agent's working detail, not a step the customer needs narrated.
+//
+// Success is not a parameter: the adapter builds this shape only on the
+// success path, so a failed search has no `hit_count` and never reaches here.
+// It falls to the custom-tool wording below, which names the collection too.
+function knowledgeBaseTitle(t: Translate, name: string, hits: number): string {
+  if (hits === 0) return t('traceDetail.knowledgeBaseEmpty', { name })
+  if (hits === 1) return t('traceDetail.knowledgeBaseOne', { name })
+  return t('traceDetail.knowledgeBase', { name, count: hits })
+}
+
+// Narrates one event for the customer's expanded run view, or returns null
+// for an event that view deliberately does not show.
+//
+// This is the third register in this file, and the one a customer sees when
+// they ask for more than the collapsed summary. It exists because the only
+// expanded view used to be `EVENT_LABELS` + `renderEventData`, which is
+// written for an operator: it names the platform's tool identifiers, times
+// each call in milliseconds, counts a tool-calling agent's iterations, and
+// reports the memory and grounding machinery -- none of which is the
+// customer's to read, and some of which is ours. That register stays exactly
+// as it is for the admin trace page (AdminRunDetail.tsx).
+//
+// `displayNameFor` resolves an agent's technical name to the friendly one the
+// wizard gave it (GET /api/pipelines' `agent_display_names`), passing the
+// technical name through when a team has none.
+export function useDetailedEventLine(displayNameFor: (agentName: string) => string) {
+  const { t } = useTranslation()
+  return (event: TraceEvent): DetailedEventLine | null => {
+    const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<
+      string,
+      unknown
+    >
+    const agent = displayNameFor(event.agent ?? '')
+
+    switch (event.type) {
+      case 'run_queued':
+        return { title: t('traceEvents.queued') }
+      case 'run_started':
+        return { title: t('traceEvents.started') }
+      case 'run_completed':
+        return { title: t('traceEvents.completed') }
+      case 'run_failed':
+        return { title: t('traceEvents.failed') }
+      case 'run_cancelled':
+        return { title: t('traceEvents.cancelled') }
+      case 'agent_started':
+        return {
+          title: t('traceDetail.agentStarted', { agent }),
+          detail: (data.role as string | undefined) || undefined,
+        }
+      case 'agent_completed':
+        return { title: t('traceEvents.agentDone', { agent }) }
+      case 'delegation_started':
+        return {
+          title: t('traceDetail.delegated', { from: agent, to: displayNameFor(data.to as string) }),
+          detail: (data.task_summary as string | undefined) || undefined,
+        }
+      case 'delegation_completed':
+        // No summary line: the subordinate's answer is working material the
+        // manager then acts on, and printing it here says the same thing
+        // twice by the time the run's own output lands.
+        return {
+          title: t('traceDetail.delegationDone', { from: agent, to: displayNameFor(data.to as string) }),
+        }
+      case 'tool_completed': {
+        const tool = data.tool as string | undefined
+        if (!tool || tool.startsWith(DELEGATION_TOOL_PREFIX)) return null
+        const success = data.success !== false
+        if ('hit_count' in data) {
+          return { title: knowledgeBaseTitle(t, tool, Number(data.hit_count) || 0) }
+        }
+        const builtIn = builtInToolTitle(t, tool, success)
+        if (builtIn) return { title: builtIn }
+        return {
+          title: success
+            ? t('traceDetail.customTool', { tool })
+            : t('traceDetail.customToolFailed', { tool }),
+        }
+      }
+      default:
+        // tool_started (its completion says the same thing), agent_progress
+        // (an iteration counter), subagent_* (the delegation pair seen from
+        // the other side), memory_* and grounding_checked (platform
+        // machinery), and the admin-only diagnostic types.
+        return null
+    }
+  }
+}
+
 // The event types the friendly view knows how to narrate. Anything else is
 // detail that belongs in the technical trace, not on a customer's screen.
 export const FRIENDLY_EVENT_TYPES = [
