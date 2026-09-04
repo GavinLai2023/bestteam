@@ -10,6 +10,7 @@ available) before transcription.
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import shutil
 import subprocess
@@ -29,6 +30,21 @@ router = APIRouter(
     prefix="/api/builder/interview",
     tags=["builder"],
     dependencies=[Depends(get_current_user)],
+)
+
+_logger = logging.getLogger(__name__)
+
+# Every 502 below is a third party failing, so its exception text is the
+# provider's and can name the model, the provider or the account's billing
+# state. This endpoint is a wizard step any logged-in customer can reach, so
+# they get a fixed sentence and the real text is logged on-box only -- same
+# sanitized/logged split as `builder.py::_call_model` and `runtime.py`'s
+# `run_failed` branch. The 400s keep their text: those are ours.
+_MODEL_RESOLUTION_FAILED_MESSAGE = (
+    "Model resolution failed. Please try again in a moment."
+)
+_TRANSCRIPTION_FAILED_MESSAGE = (
+    "Transcription failed. Please try again in a moment."
 )
 
 _WHISPER_FORMATS = {"mp3", "mp4", "m4a", "wav", "webm", "mpeg", "mpga"}
@@ -176,7 +192,10 @@ def transcribe_interview(
     except BestTeamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Model resolution failed: {exc}") from exc
+        _logger.exception("Interview: model resolution failed")
+        raise HTTPException(
+            status_code=502, detail=_MODEL_RESOLUTION_FAILED_MESSAGE
+        ) from exc
 
     import openai  # deferred so the module loads without openai installed and patching is easy
 
@@ -193,7 +212,10 @@ def transcribe_interview(
                 response = oa.audio.transcriptions.create(model="whisper-1", file=audio_file)
             transcript = response.text
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Transcription failed: {exc}") from exc
+            _logger.exception("Interview: transcription failed")
+            raise HTTPException(
+                status_code=502, detail=_TRANSCRIPTION_FAILED_MESSAGE
+            ) from exc
         finally:
             if tmp_path:
                 try:
@@ -215,8 +237,9 @@ def transcribe_interview(
                         response = oa.audio.transcriptions.create(model="whisper-1", file=audio_file)
                     parts.append(response.text)
                 except Exception as exc:
+                    _logger.exception("Interview: transcription failed on a chunk")
                     raise HTTPException(
-                        status_code=502, detail=f"Transcription failed on chunk: {exc}"
+                        status_code=502, detail=_TRANSCRIPTION_FAILED_MESSAGE
                     ) from exc
             transcript = "\n".join(parts)
         finally:

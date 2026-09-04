@@ -320,3 +320,39 @@ def test_ffmpeg_failure_returns_502(client):
             files={"file": ("long.mp3", large_data, "audio/mpeg")},
         )
     assert resp.status_code == 502
+
+
+def test_provider_failure_does_not_show_the_customer_the_providers_own_text(client):
+    """`/api/builder/interview/transcribe` is a wizard step any logged-in
+    customer can reach, and its 502s carried the provider's own exception text
+    verbatim -- which can name the model, the provider and the account's billing
+    state (diagnosed live on beta, 2026-09-03)."""
+    provider_error = RuntimeError(
+        "Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED): 429 "
+        "RESOURCE_EXHAUSTED. 'Your prepayment credits are depleted. Please go "
+        "to AI Studio at https://ai.studio/projects'"
+    )
+    leaks = ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED")
+
+    with patch("openai.OpenAI") as mock_cls, \
+         patch("ui.backend.interview._resolve_model", return_value=MagicMock()):
+        mock_cls.return_value.audio.transcriptions.create.side_effect = provider_error
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+    assert resp.status_code == 502
+    for leak in leaks:
+        assert leak not in resp.json()["detail"]
+
+    # Same for the model-resolution step, which runs before any audio is sent.
+    with patch("ui.backend.interview._resolve_model", side_effect=provider_error):
+        resp = client.post(
+            "/api/builder/interview/transcribe",
+            data={"model": "fake:hello"},
+            files={"file": ("interview.mp3", _SMALL_MP3, "audio/mpeg")},
+        )
+    assert resp.status_code == 502
+    for leak in leaks:
+        assert leak not in resp.json()["detail"]

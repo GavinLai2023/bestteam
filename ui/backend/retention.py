@@ -38,6 +38,18 @@ PURGED_FIELDS: dict[str, tuple[str, ...]] = {
     "automation_item_results": ("payload",),
 }
 
+# Purged like the fields above, and deliberately NOT exported -- which is why
+# it cannot live in `PURGED_FIELDS`, whose whole contract is the opposite.
+# `runs.internal_error` is the operator's copy of why a run failed: a provider's
+# own exception text, which can name the model, the provider and the account's
+# billing state, and which the customer was deliberately never shown (see
+# runtime.py). The export is the CUSTOMER's way out of their own data; this is
+# not theirs. It is still purged, because a provider's message can quote the
+# prompt or the model's output.
+PURGED_OPERATOR_FIELDS: dict[str, tuple[str, ...]] = {
+    "runs": ("internal_error",),
+}
+
 _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
 
@@ -70,6 +82,7 @@ def purge_run(db: Session, run: Run) -> bool:
 
     run.input = ""
     run.output = None
+    run.internal_error = None  # PURGED_OPERATOR_FIELDS -- purged, never exported
     run.content_purged_at = _utcnow()
     db.flush()
 

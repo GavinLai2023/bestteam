@@ -1825,3 +1825,27 @@ def test_refine_requires_an_existing_team(client):
     )
 
     assert resp.status_code == 400
+
+
+def test_provider_failure_does_not_show_the_customer_the_providers_own_text(client):
+    """`_call_model`'s 502 branch is, by its own docstring, "a real provider call
+    failing" -- so `exc` is a third party's text and can name the model, the
+    provider and the account's billing state (diagnosed live on beta, 2026-09-03).
+    The wizard renders `detail` verbatim (ConfirmPage.test.tsx). The sibling 400
+    branch is unaffected: a `BestTeamError` is our own wording."""
+    sid = client.post("/api/builder/sessions", json={"intent_text": "handle my email"}).json()["id"]
+    provider_error = RuntimeError(
+        "Error calling model 'gemini-3.7-flash' (RESOURCE_EXHAUSTED): 429 "
+        "RESOURCE_EXHAUSTED. {'error': {'message': 'Your prepayment credits are "
+        "depleted. Please go to AI Studio at https://ai.studio/projects'}}"
+    )
+
+    with patch("ui.backend.builder._resolve_model", return_value=object()), patch(
+        "ui.backend.builder.generate_specification", side_effect=provider_error
+    ):
+        resp = client.post(f"/api/builder/sessions/{sid}/specification", json={"model": "openai:gpt-4o"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    for leak in ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED"):
+        assert leak not in detail

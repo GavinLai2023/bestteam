@@ -281,6 +281,14 @@ def _spec_string(model: Any) -> str:
 # docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
 STREAM_RESET = "\x00bestteam:reset"
 
+# Prefix of the `EngineError` raised when execute()/stream() wrapped an
+# exception that was NOT one of ours -- in practice a provider SDK's. Its text
+# is the third party's, so it can name a model, a provider or an account's
+# billing state; a `BestTeamError` is re-raised unwrapped and never carries
+# this prefix. Exported because a multi-tenant host has to tell the two apart
+# before showing either to a customer (ui/backend/runtime.py).
+ENGINE_FAILURE_PREFIX = "Pipeline execution failed: "
+
 
 def _supports_stream_usage(model: Any) -> bool:
     """True if this model reports token usage while streaming.
@@ -1423,7 +1431,7 @@ class LangGraphAdapter(EngineAdapter):
             # masking it behind a generic "engine execution failed".
             raise
         except Exception as exc:
-            raise EngineError(f"Pipeline execution failed: {exc}") from exc
+            raise EngineError(f"{ENGINE_FAILURE_PREFIX}{exc}") from exc
 
         steps = [
             {"agent": name, "output": text}
@@ -1483,4 +1491,4 @@ class LangGraphAdapter(EngineAdapter):
         except BestTeamError:
             raise
         except Exception as exc:
-            raise EngineError(f"Pipeline execution failed: {exc}") from exc
+            raise EngineError(f"{ENGINE_FAILURE_PREFIX}{exc}") from exc

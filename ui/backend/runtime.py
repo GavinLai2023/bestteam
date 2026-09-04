@@ -19,7 +19,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from bestteam import MemoryManager, Pipeline, SqliteBM25Memory
-from bestteam.adapters.langgraph_adapter import STREAM_RESET
+from bestteam.adapters.langgraph_adapter import ENGINE_FAILURE_PREFIX, STREAM_RESET
 from bestteam.core.trace import TraceEvent
 
 from . import error_reporting
@@ -292,6 +292,12 @@ def _safe_record_usage(db: Session, **kwargs: Any) -> None:
         except Exception:  # noqa: BLE001
             pass
 
+
+# What a customer is told when a run failed for a reason that is ours to read,
+# not theirs: an internal defect, or a provider's own refusal. Shared by the two
+# places that produce it (the stream loop's run_failed sanitizer and the
+# worker-thread fallback) so neither can drift into saying more than the other.
+_RUN_FAILED_MESSAGE = "The run failed due to an internal error."
 
 _TRIGGER_RUN_FAILED_MESSAGE = (
     "The last automatic run didn't finish successfully. Automatic runs will keep "
@@ -886,6 +892,7 @@ def run_in_background(
                     # when the buffer is empty, which is every non-final event.
                     token_sink.flush()
                 raw_run_completed_output: Optional[str] = None
+                raw_failure_text: Optional[str] = None
                 if is_pm_contract_run and (
                     event.type in _PM_REDACTED_EVENT_TYPES or _is_delegate_tool_completed(event)
                 ):
@@ -914,7 +921,41 @@ def run_in_background(
                     # buffered-cancellation logic's sibling set above (Codex review
                     # finding).
                     event.data = {**event.data, "unverified": []}
+                if event.type == "run_failed" and str(event.data or "").startswith(
+                    ENGINE_FAILURE_PREFIX
+                ):
+                    # The engine wrapped a third-party exception, so `data` is
+                    # the provider's own text -- it can name the model, the
+                    # provider and the account's billing state, and
+                    # `RunDetail.tsx` renders a terminal event's data outside
+                    # the "show technical" fold. Same sanitized/logged split
+                    # the worker-thread fallback below already makes, applied
+                    # here so it also covers the path where the SDK turned the
+                    # failure into an event instead of raising. Only this
+                    # prefix: a `BestTeamError` is re-raised unwrapped, and its
+                    # wording is ours and worth showing.
+                    #
+                    # Kept, not dropped: an operator still has to be able to say
+                    # why the run failed, so the real text goes to the log AND
+                    # to `runs.internal_error` (admin-only, purged as content),
+                    # written in the terminal branch with the other run_row
+                    # fields -- same shape as `raw_run_completed_output`.
+                    _logger.error("Run %s failed: %s", run_id, event.data)
+                    raw_failure_text = event.data
+                    event.data = _RUN_FAILED_MESSAGE
                 payload = dataclasses.asdict(event)
+                if payload.get("usage"):
+                    # Every entry is tagged with the agent's model spec
+                    # (langgraph_adapter._record_usage), and the published copy
+                    # feeds three customer-reachable readers: the run stream's
+                    # live delivery, its replay, and `GET /api/runs/{id}`, which
+                    # returns the registry record whole. A customer surface must
+                    # carry neither a model name nor a cost. Stripped from the
+                    # PAYLOAD only -- `event.usage` is what the metering below
+                    # reads, and `usage_records` is the ledger the admin trace
+                    # view is served from. Same redact-before-publish shape as
+                    # the PM-contract branch above.
+                    payload["usage"] = []
                 if (
                     event.type == "tool_completed"
                     and isinstance(event.data, dict)
@@ -986,6 +1027,8 @@ def run_in_background(
                     if run_row is not None:
                         run_row.status = "completed" if event.type == "run_completed" else "failed"
                         run_row.output = event.data  # already redacted above for a PM-contract run
+                        if raw_failure_text is not None:
+                            run_row.internal_error = raw_failure_text
                         # Committed, and normalization run, BEFORE both
                         # `terminal_seen = True` below and the terminal event's
                         # publish further down -- the former so a commit
@@ -1088,7 +1131,7 @@ def run_in_background(
         _logger.exception("Run %s failed on the worker thread", run_id)
         error_reporting.report_exception(exc, run_id=run_id, pipeline=getattr(pipeline, "name", ""))
         if not terminal_seen:
-            message = "The run failed due to an internal error."
+            message = _RUN_FAILED_MESSAGE
             failed_event = TraceEvent(type="run_failed", pipeline=getattr(pipeline, "name", ""), data=message)
             # Persist status + normalize BEFORE publish/trace-record (not
             # after, as this used to do) -- same ordering rationale as the
@@ -1103,6 +1146,9 @@ def run_in_background(
                     db.rollback()
                     run_row.status = "failed"
                     run_row.output = message
+                    # Operator-only copy, same reason as the stream loop's
+                    # sanitizer: `message` says nothing an admin can act on.
+                    run_row.internal_error = f"{type(exc).__name__}: {exc}"
                     db.add(run_row)
                     db.commit()
                     # A triggered run that fails before pipeline.stream() ever

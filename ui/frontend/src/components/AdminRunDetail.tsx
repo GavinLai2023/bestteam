@@ -69,7 +69,7 @@ export default function AdminRunDetail({
   onDiagnosed,
   onOpenRun,
 }: AdminRunDetailProps) {
-  const { events, usage, error } = useRunTrace(runId, status)
+  const { events, usage, internalError, error } = useRunTrace(runId, status)
   const [diagnosing, setDiagnosing] = useState(false)
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null)
   const groups = groupByAgent(events)
@@ -94,6 +94,15 @@ export default function AdminRunDetail({
   return (
     <div className="admin-run-detail">
       {error && <p className="banner banner-error">{error}</p>}
+      {internalError && (
+        // Served to a platform admin only. The customer's `run_failed` event
+        // says a fixed sentence, because a provider's own text can name the
+        // model, the provider and the account's billing state (runtime.py).
+        <section className="admin-run-detail-internal-error">
+          <h3>Why it failed</h3>
+          <pre>{internalError}</pre>
+        </section>
+      )}
       {diagnosticOfRunId ? (
         <div className="banner banner-info admin-run-detail-diagnostic">
           <p>

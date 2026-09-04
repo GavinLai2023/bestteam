@@ -817,7 +817,7 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
         .all()
     )
     usage_rows = db.query(UsageRecord).filter(UsageRecord.run_id == run_id).all()
-    return {
+    payload: Dict[str, Any] = {
         "events": [
             {
                 "seq": row.seq,
@@ -828,18 +828,6 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
             }
             for row in rows
         ],
-        # Per-agent token/cost usage for this run -- additive; the existing
-        # customer-facing RunDetail.tsx only reads `events` and ignores this.
-        "usage": [
-            {
-                "agent": row.agent,
-                "model": row.model,
-                "input_tokens": row.input_tokens,
-                "output_tokens": row.output_tokens,
-                "cost_estimate": row.cost_estimate,
-            }
-            for row in usage_rows
-        ],
         # Phase 3b: a purged run has no trace events left, which is
         # indistinguishable from a run that never recorded any. Without this
         # the UI can only show an empty timeline, which reads as a bug rather
@@ -848,6 +836,31 @@ def get_run_trace(run_id: str, db: Session = Depends(get_db), user: User = Depen
             iso_utc(run.content_purged_at) if run.content_purged_at else None
         ),
     }
+    if is_platform_admin:
+        # Per-agent token/cost usage. Operator-only: it names the model and
+        # prices the run, and a customer surface must show neither. Its only
+        # consumer is AdminRunDetail.tsx -- the customer's RunDetail never read
+        # it -- but until this gate the endpoint served it to any org member,
+        # which put both a model name and a cost estimate one devtools tab away
+        # from the Activity page.
+        payload["usage"] = [
+            {
+                "agent": row.agent,
+                "model": row.model,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cost_estimate": row.cost_estimate,
+            }
+            for row in usage_rows
+        ]
+    if is_platform_admin and run.internal_error:
+        # Operator-only: why the run REALLY failed. `runs.output` carries the
+        # customer's sanitized copy because a provider's own text can name the
+        # model, the provider and the account's billing state (see runtime.py).
+        # Absent, not null, for everyone else -- this endpoint serves both
+        # RunDetail.tsx and AdminRunDetail.tsx, so the gate belongs here.
+        payload["internal_error"] = run.internal_error
+    return payload
 
 
 @app.post("/api/runs/{run_id}/cancel")

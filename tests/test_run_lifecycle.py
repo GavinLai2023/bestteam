@@ -886,3 +886,179 @@ def test_subscribe_replays_history_then_receives_live_events():
         assert queue.get_nowait()["type"] == "agent_completed"
 
     asyncio.run(go())
+
+
+# --- A provider's own error text must not reach a customer surface ----------
+
+
+_PROVIDER_FAILURE = (
+    "Pipeline execution failed: Error calling model 'gemini-3.7-flash' "
+    "(RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, "
+    "'message': 'Your prepayment credits are depleted. Please go to AI Studio "
+    "at https://ai.studio/projects to manage your project and billing.'}}"
+)
+
+
+class _ProviderFailurePipeline:
+    """Yields the run_failed event `Pipeline.stream()` produces when the engine
+    wrapped a third-party exception -- diagnosed live on beta, 2026-09-03."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(type="run_started", pipeline="wf", data=None)
+        yield TraceEvent(type="run_failed", pipeline="wf", data=_PROVIDER_FAILURE)
+
+
+def test_provider_error_text_never_reaches_subscribers_or_the_run_row(tmp_path):
+    """A provider's raw refusal names the model, the provider and the customer's
+    billing state. `RunDetail.tsx` renders a terminal event's `data` outside the
+    "show technical" fold, so this text is customer-facing on both channels the
+    backend owns: the live publish and the persisted `runs.output`."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ProviderFailurePipeline(), "in", engine=engine)
+
+    stored = runtime.registry.get(run.id)
+    failures = [e for e in stored.events if e["type"] == "run_failed"]
+    assert len(failures) == 1
+    for leak in ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED"):
+        assert leak not in failures[0]["data"]
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.status == "failed"
+        for leak in ("gemini-3.7-flash", "ai.studio", "prepayment credits", "RESOURCE_EXHAUSTED"):
+            assert leak not in (row.output or "")
+
+
+class _ConfigErrorPipeline:
+    """Yields the run_failed event `Pipeline.stream()` produces for one of our
+    OWN errors -- a `BestTeamError` the adapter re-raises unwrapped."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(
+            type="run_failed",
+            pipeline="wf",
+            data="Team 'Support' uses hierarchical mode and requires a 'manager' agent",
+        )
+
+
+def test_our_own_configuration_error_still_reaches_the_customer(tmp_path):
+    """Only the engine's wrapper around a THIRD-PARTY exception is sanitized.
+    A `BestTeamError` is our own wording, carries no provider detail, and tells
+    the customer something they can act on -- blanket-sanitizing would lose it."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ConfigErrorPipeline(), "in", engine=engine)
+
+    failures = [e for e in runtime.registry.get(run.id).events if e["type"] == "run_failed"]
+    assert "requires a 'manager' agent" in failures[0]["data"]
+
+
+def test_provider_error_text_is_kept_for_an_admin_on_the_run_row(tmp_path):
+    """The customer's copy is sanitized, but an operator still has to be able to
+    say WHY a run failed. `runs.internal_error` is that copy: admin-only on the
+    API, and purged as content like `input`/`output`."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _ProviderFailurePipeline(), "in", engine=engine)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.internal_error == _PROVIDER_FAILURE
+
+
+def test_a_worker_crash_is_also_kept_for_an_admin(tmp_path):
+    """The other failure path: the SDK raised instead of yielding run_failed.
+    Its message is sanitized for the same reason, so it needs the same
+    operator-only copy -- otherwise an internal crash leaves admin with nothing
+    but the container log."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import Run
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("boom_wf", "in")
+
+    runtime.run_in_background(run.id, _BoomPipeline(), "in", engine=engine)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        row = db.get(Run, run.id)
+        assert row.status == "failed"
+        assert "internal compile detail" in (row.internal_error or "")
+        assert "internal compile detail" not in (row.output or "")
+
+
+class _UsagePipeline:
+    """Yields an `agent_completed` carrying usage, the way a real (billable)
+    agent does -- `fake:` models report none, so this has to be synthesised."""
+
+    name = "wf"
+
+    def stream(self, *args, **kwargs):
+        yield TraceEvent(
+            type="agent_completed", pipeline="wf", agent="a", data="the answer",
+            usage=[{"model": "openai:gpt-4o", "input_tokens": 123, "output_tokens": 45}],
+        )
+        yield TraceEvent(type="run_completed", pipeline="wf", data="the answer")
+
+
+def test_a_published_event_never_carries_the_model_name(tmp_path):
+    """`langgraph_adapter._record_usage` tags every usage entry with the agent's
+    model spec, and the published copy feeds three customer-reachable readers:
+    the run stream's live delivery, its replay, and `GET /api/runs/{id}`, which
+    returns the registry record whole. A customer surface must carry neither a
+    model name nor a cost, so it is stripped once here, before publish.
+
+    The event object keeps it: that is what the metering below reads, and
+    `usage_records` stays the ledger the admin trace view is served from."""
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db
+    from ui.backend.db.models import UsageRecord
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    run = runtime.registry.create("wf", "in")
+
+    runtime.run_in_background(run.id, _UsagePipeline(), "in", engine=engine)
+
+    stored = runtime.registry.get(run.id)
+    completed = [e for e in stored.events if e["type"] == "agent_completed"]
+    assert completed[0]["data"] == "the answer"  # the org's own output still flows
+    assert completed[0]["usage"] == []
+
+    # Metering is unaffected -- the ledger still knows which model was billed.
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        rows = db.query(UsageRecord).filter_by(run_id=run.id).all()
+        assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [
+            ("openai:gpt-4o", 123, 45)
+        ]

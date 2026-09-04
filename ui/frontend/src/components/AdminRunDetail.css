@@ -72,3 +72,31 @@
 .admin-run-detail-raw-details .admin-run-detail-raw {
   max-height: 480px;
 }
+
+/* Operator-only: why a failed run really failed. Bordered in --danger because
+   it only ever appears on a failure, and monospaced/scrollable like the raw
+   payload blocks above -- a provider's exception can be one very long line. */
+.admin-run-detail-internal-error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-bg);
+}
+
+.admin-run-detail-internal-error h3 {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.admin-run-detail-internal-error pre {
+  margin: 0;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}

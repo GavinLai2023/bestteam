@@ -273,6 +273,13 @@ Deleting a KB cascades to all four tables (`delete_kb_ingestion_data`).
   mailbox/UIDVALIDITY/UID batch; `retry_of_run_id` links a retry back to the run
   it retried — **a retry always inserts a new row, never mutates the original**;
   `diagnostic_of_run_id` does the same for an admin diagnostic re-run.
+  ⚠️ **`output` and `internal_error` are two different audiences for one
+  failure**: a provider's own text can name the model, the provider and the
+  account's billing state, so `output` carries the customer's sanitized copy
+  and `internal_error` the operator's real one. It is served only to a platform
+  admin, and it is **purged as content but never exported** — hence
+  `retention.PURGED_OPERATOR_FIELDS`, separate from `PURGED_FIELDS`, whose
+  contract is that the export covers everything the purge clears.
 
 - **`automation_item_results`** — one immutable row per input item per Run for a
   vertical solution template. **Deliberately not a `Case`/work-item table** — no
