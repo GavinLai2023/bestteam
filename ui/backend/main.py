@@ -645,6 +645,11 @@ def list_pipelines(
     # to run now. A team whose spec has no display_name is simply absent, and
     # the caller falls back to the technical name.
     display_by_name = {}
+    # Per-agent friendly names, so the customer's run detail can narrate a run
+    # with the names the wizard gave its agents rather than the technical ones
+    # the engine emits in each TraceEvent. Same current-config source and same
+    # absent-means-fall-back-to-the-technical-name contract as above.
+    agent_display_by_name: Dict[str, Dict[str, str]] = {}
     for row in db.query(PipelineRecord.name, PipelineRecord.id, PipelineRecord.config).filter(
         PipelineRecord.org_id == org.id,
         PipelineRecord.status == "deployed",
@@ -658,6 +663,13 @@ def list_pipelines(
         display_name = teams[0].get("display_name") if teams else None
         if display_name:
             display_by_name[row.name] = display_name
+        agent_names = {
+            agent["name"]: agent["display_name"]
+            for agent in ((row.config or {}).get("agents") or [])
+            if agent.get("display_name")
+        }
+        if agent_names:
+            agent_display_by_name[row.name] = agent_names
 
     db_names = set(id_by_name)
     yaml_names = (
@@ -667,6 +679,7 @@ def list_pipelines(
         "pipelines": sorted(db_names | yaml_names),
         "pipeline_ids": id_by_name,
         "display_names": display_by_name,
+        "agent_display_names": agent_display_by_name,
     }
 
 

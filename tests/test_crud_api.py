@@ -2334,6 +2334,33 @@ def test_list_pipelines_reports_the_teams_friendly_display_name(client):
     assert "unnamed" not in body["display_names"]
 
 
+def test_list_pipelines_reports_each_agents_friendly_display_name(client):
+    # The customer's run-detail view narrates a team's steps agent by agent.
+    # Without this map it can only print the technical agent name, which is
+    # exactly the platform-internal wording that view exists to keep off a
+    # customer's screen. An agent with no display_name is absent from its
+    # team's map, and the caller falls back to the technical name.
+    with open_test_db() as db:
+        db.add(
+            PipelineRecord(
+                name="crew", org_id=get_org_id(), status="deployed",
+                config={
+                    "name": "crew",
+                    "agents": [
+                        {"name": "triage_agent", "display_name": "Triage Assistant"},
+                        {"name": "plain_agent"},
+                    ],
+                    "teams": [{"name": "t", "agents": ["triage_agent", "plain_agent"]}],
+                    "pipeline": {"steps": []},
+                },
+            )
+        )
+        db.commit()
+
+    body = client.get("/api/pipelines", headers=_org_user_headers(client)).json()
+    assert body["agent_display_names"]["crew"] == {"triage_agent": "Triage Assistant"}
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 (0.6): deploy refuses email + egress on one agent.
 # ---------------------------------------------------------------------------

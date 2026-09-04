@@ -148,6 +148,15 @@ def _build_agent(spec: Dict[str, Any], tool_lookup: Dict[str, Any], skill_lookup
             )
         resolved_skills.append(skill_lookup[name])
 
+    # Presentation fields, carried in the persisted config so the UI can name
+    # an agent the way its author did (ui/backend/builder.py merges them back
+    # after Specification.to_raw() strips them). The engine has no use for
+    # them, and `Agent(**spec)` below would reject them as unknown kwargs --
+    # a `teams:` entry's own display_name is already ignored for free, since
+    # `Team(...)` is built from named fields.
+    spec.pop("display_name", None)
+    spec.pop("friendly_description", None)
+
     raw_tools = list(spec.pop("tools", []) or [])
     for skill in resolved_skills:
         for name in skill.tools:

@@ -540,3 +540,40 @@ def test_architect_prompt_forbids_inventing_a_tool_name():
 
     assert "Available built-in tools" in _ARCHITECT_SYSTEM_PROMPT
     assert "never invent" in _ARCHITECT_SYSTEM_PROMPT.lower()
+
+
+def test_loader_ignores_an_agents_presentation_fields(tmp_path):
+    """A team entry has carried `display_name` in the persisted config since
+    the run cards needed it, and `Team(...)` is built from named fields so the
+    extra key is simply unused. An agent is built as `Agent(**spec)`, so the
+    same key was a TypeError instead -- and the customer's run view needs those
+    names persisted the same way. The engine ignores both presentation fields
+    here rather than the wizard hiding them somewhere the loader can't see."""
+    from bestteam.core.loader import load_pipeline
+
+    config = tmp_path / "p.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "name: support_pipeline",
+                "agents:",
+                "  - name: support_agent",
+                "    role: Customer Support Specialist",
+                "    goal: Answer customer questions",
+                "    model: 'fake:hello'",
+                "    display_name: Support Specialist",
+                "    friendly_description: Answers customer questions.",
+                "teams:",
+                "  - name: support_team",
+                "    agents: [support_agent]",
+                "    display_name: Support Team",
+                "pipeline:",
+                "  steps: [support_team]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(config)
+
+    assert [agent.name for agent in pipeline.steps[0].agents] == ["support_agent"]

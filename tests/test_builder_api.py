@@ -1440,6 +1440,22 @@ def test_deployed_config_preserves_team_display_name(client):
     assert config["teams"][0]["friendly_description"] == "The support specialist handles every request."
 
 
+def test_deployed_config_preserves_agent_display_names(client):
+    # Same reason as the team display_name above, one level down: the customer
+    # trace view narrates each step with the agent's friendly name, and it
+    # reads them out of this persisted config. to_raw() strips them, so the
+    # deploy has to merge them back the way it already does for a team.
+    session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
+    client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})
+
+    assert client.post(f"/api/builder/sessions/{session_id}/deploy").status_code == 200
+
+    config = client.get(
+        "/api/config/pipelines/support_pipeline?org=default", headers=_admin_headers(client)
+    ).json()["config"]
+    assert config["agents"][0]["display_name"] == "Support Specialist"
+
+
 def test_deployed_pipeline_can_be_run_via_get_pipeline(client):
     session_id = client.post("/api/builder/sessions", json={"intent_text": "We need a support bot"}).json()["id"]
     client.post(f"/api/builder/sessions/{session_id}/specification", json={"specification": _VALID_SPEC})

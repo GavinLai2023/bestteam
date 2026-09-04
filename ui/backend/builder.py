@@ -991,6 +991,13 @@ def deploy_session(
                 team_raw["display_name"] = team_spec.display_name
             if team_spec.friendly_description:
                 team_raw["friendly_description"] = team_spec.friendly_description
+        # Same for each agent's own display_name: the customer's run-detail
+        # view narrates a run step by step and reads these out of the persisted
+        # config (main.py's list_pipelines). Only display_name -- nothing reads
+        # an agent's friendly_description outside the wizard's own session.
+        for agent_raw, agent_spec in zip(raw.get("agents", []), spec.agents):
+            if agent_spec.display_name:
+                agent_raw["display_name"] = agent_spec.display_name
 
         record, _version = publish_pipeline_version(
             db,
