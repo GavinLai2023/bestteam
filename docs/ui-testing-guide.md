@@ -268,11 +268,12 @@ from `/advanced`).
    pre-selected.
 3. Enter an input and Run → output in the Live trace.
 
-### T4-7 · Wizard progress bar shows five steps
+### T4-7 · Wizard progress bar shows six steps
 1. On any wizard page, look at the progress bar.
-2. **Expected:** **Your challenge → Your documents → Meet your team →
-   Confirm → Go live**. Steps unlock on data presence, so revisiting an
-   earlier step after deploying must not re-lock the later ones.
+2. **Expected:** **Challenge → Questions → Documents → Your team →
+   Confirm → Go live**, all six on one line with no label truncated. Steps
+   unlock on data presence, so revisiting an earlier step after deploying
+   must not re-lock the later ones.
 
 ---
 

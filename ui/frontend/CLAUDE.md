@@ -187,9 +187,11 @@ precisely to record that a draft does exist.
 
 ## Wizard (`/wizard`)
 
-**Six steps** (`components/WizardProgress.tsx`'s `STEPS`): Your challenge
-(`IntentPage`) → A few questions (`QuestionsPage`) → Your documents → Meet your
-team (`preview`) → Confirm → Go live (`deploy`).
+**Six steps** (`components/WizardProgress.tsx`'s `STEPS`): Challenge
+(`IntentPage`) → Questions (`QuestionsPage`) → Documents → Your team
+(`preview`) → Confirm → Go live (`deploy`). The step labels are short on
+purpose -- six of them plus their chrome have to fit the wizard's 832px
+content width without ellipsis.
 
 ⚠️ **A step is unlocked by DATA PRESENCE** (`session.requirements_json` /
 `specification_json`), **not by the session's `status` string**, so revisiting an
