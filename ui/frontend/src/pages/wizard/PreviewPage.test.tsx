@@ -117,6 +117,13 @@ describe('PreviewPage Continue button while a test run is in flight', () => {
     })
 
     expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
+    // `.activity-card.run_completed` is a contract with tests/e2e/
+    // test_wizard_full.py, which waits on exactly this selector to know the
+    // test run finished. Asserted here so a change to this feed fails in the
+    // unit tier rather than the e2e one -- the same reason LoginPage.test.tsx
+    // pins its own selectors.
+    expect(document.querySelector('.activity-card.run_completed')).not.toBeNull()
+    expect(screen.getByText('done')).toBeInTheDocument()
   })
 
   it('re-enables Continue if the run fails', async () => {
@@ -127,5 +134,39 @@ describe('PreviewPage Continue button while a test run is in flight', () => {
     })
 
     expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
+  })
+
+  // The wizard's test run is the first time a customer watches their team
+  // work. It used to render every event, titling an unrecognised one with its
+  // raw type and dumping `JSON.stringify(event.data)` underneath -- so a tool
+  // call showed its identifier and timing, and a grounding check showed the
+  // platform's own retrieval counts. It now narrates the same stream the way
+  // the Activity page's expanded view does (lib/traceEvents.ts).
+  it('narrates the run without exposing the platform behind it', async () => {
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({
+        type: 'tool_completed',
+        pipeline: 'support_team',
+        agent: 'support_agent',
+        data: { tool: 'email_read', success: true, duration_ms: 42, summary: 'Read a message' },
+        usage: [],
+      })
+      ws!.emit({
+        type: 'grounding_checked',
+        pipeline: 'support_team',
+        agent: 'support_agent',
+        data: { searches: 1, hit_count: 3, cited: 2, verified: 2, unverified: [] },
+        usage: [],
+      })
+    })
+
+    expect(screen.getByText('Read the message')).toBeInTheDocument()
+    const shown = document.body.textContent || ''
+    expect(shown).not.toContain('email_read')
+    expect(shown).not.toContain('42')
+    expect(shown).not.toContain('grounding_checked')
+    expect(shown).not.toContain('hit_count')
   })
 })

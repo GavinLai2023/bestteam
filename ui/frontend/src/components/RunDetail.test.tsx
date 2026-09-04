@@ -259,25 +259,42 @@ describe('RunDetail', () => {
   // default, with the raw feed one click away (audit finding F8) -- this run
   // detail view skipped that and always showed the jargon register, which is
   // what a non-technical customer sees for every run on the Activity page.
-  it('narrates the trace in plain language by default, with the technical feed one click away', async () => {
+  it('narrates the trace in plain language, and expands to the steps in between', async () => {
     mockedApi.getRunTrace.mockResolvedValue({
       events: [
         { type: 'run_started', agent: undefined, data: null },
+        { type: 'agent_started', agent: 'triage', data: { role: 'Intake Officer', goal: 'g' } },
+        { type: 'tool_completed', agent: 'triage', data: { tool: 'email_read', success: true, duration_ms: 12 } },
         { type: 'agent_completed', agent: 'triage', data: null },
         { type: 'run_completed', agent: undefined, data: 'done' },
       ],
     })
 
-    render(<RunDetail runId="run-1" status="completed" autonomous={false} />)
+    render(
+      <RunDetail
+        runId="run-1"
+        status="completed"
+        autonomous={false}
+        agentDisplayNames={{ triage: 'Triage Assistant' }}
+      />,
+    )
 
+    // Collapsed: the milestones only.
     expect(await screen.findByText('Your team got started')).toBeInTheDocument()
-    expect(screen.getByText('triage finished their part')).toBeInTheDocument()
-    expect(screen.queryByText('▶ started')).not.toBeInTheDocument()
+    expect(screen.getByText('Triage Assistant finished their part')).toBeInTheDocument()
+    expect(screen.queryByText('Read the message')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /show technical trace/i }))
+    fireEvent.click(screen.getByRole('button', { name: /show details/i }))
 
-    expect(screen.getByText('▶ started')).toBeInTheDocument()
-    expect(screen.queryByText('Your team got started')).not.toBeInTheDocument()
+    // Expanded adds the steps in between -- still in the customer's own words,
+    // with no tool identifier, no timing and no technical agent name.
+    expect(screen.getByText('Triage Assistant got started')).toBeInTheDocument()
+    expect(screen.getByText('Intake Officer')).toBeInTheDocument()
+    expect(screen.getByText('Read the message')).toBeInTheDocument()
+    const expanded = document.body.textContent || ''
+    expect(expanded).not.toContain('email_read')
+    expect(expanded).not.toContain('12ms')
+    expect(expanded).not.toContain('▶ started')
   })
 
   it('says the content was removed rather than showing an empty timeline', async () => {
@@ -329,12 +346,12 @@ describe('RunDetail', () => {
     mockedApi.purgeRun.mockResolvedValue({ purged: true })
 
     render(<RunDetail runId="r1" status="completed" autonomous={false} />)
-    // The friendly view (default) doesn't repeat event data, so switch to the
-    // technical trace to check both render sites clear on purge.
-    fireEvent.click(await screen.findByRole('button', { name: /show technical trace/i }))
-    // Twice: once in the event timeline, once as the final output.
+    // Expand, so the check covers the event timeline as well as the final
+    // output and the automation result -- all three must clear on purge.
+    fireEvent.click(await screen.findByRole('button', { name: /show details/i }))
     expect(await screen.findByText('Final output')).toBeInTheDocument()
-    expect(screen.getAllByText('Drafted a reply to alice@example.com')).toHaveLength(2)
+    expect(screen.getByText('All done!')).toBeInTheDocument()
+    expect(screen.getByText('Drafted a reply to alice@example.com')).toBeInTheDocument()
     expect(await screen.findByText('Tenant reports a leak.')).toBeInTheDocument()
 
     await act(async () => {
@@ -345,6 +362,7 @@ describe('RunDetail', () => {
     })
 
     expect(screen.queryAllByText('Drafted a reply to alice@example.com')).toHaveLength(0)
+    expect(screen.queryByText('All done!')).not.toBeInTheDocument()
     expect(screen.queryByText('Final output')).not.toBeInTheDocument()
     expect(screen.queryByText('Tenant reports a leak.')).not.toBeInTheDocument()
     // The result row itself stays: its status is what stops a retry

@@ -36,6 +36,10 @@ interface SelectedRun {
   id: string
   status: string
   autonomous: boolean
+  // Which team ran, so the detail view can look up that team's agent display
+  // names. Unknown for a run opened from Needs-attention before its row is
+  // fetched, which just means the panel narrates technical agent names.
+  pipeline?: string
 }
 
 function runsQueryParams(filters: Filters) {
@@ -64,6 +68,7 @@ export default function ActivityPage() {
   // review finding).
   const [unreadAlerts, setUnreadAlerts] = useState(0)
   const [pipelines, setPipelines] = useState<string[]>([])
+  const [agentDisplayNames, setAgentDisplayNames] = useState<Record<string, Record<string, string>>>({})
   const [runs, setRuns] = useState<RunListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -112,6 +117,7 @@ export default function ActivityPage() {
       .listPipelines()
       .then((d) => {
         setPipelines(d.pipelines)
+        setAgentDisplayNames(d.agent_display_names ?? {})
       })
       .catch(() => {})
   }, [])
@@ -188,8 +194,12 @@ export default function ActivityPage() {
         runId={selected.id}
         status={selected.status}
         autonomous={selected.autonomous}
-        // A retry always dispatches a new autonomous email-triggered run.
-        onRetried={(newRunId) => setSelectedRun({ id: newRunId, status: 'running', autonomous: true })}
+        agentDisplayNames={agentDisplayNames[selected.pipeline ?? row?.pipeline ?? ''] ?? {}}
+        // A retry always dispatches a new autonomous email-triggered run, on
+        // the same team as the run it retries.
+        onRetried={(newRunId) =>
+          setSelectedRun({ id: newRunId, status: 'running', autonomous: true, pipeline: selected.pipeline })
+        }
       />
     </section>
   )
@@ -250,7 +260,12 @@ export default function ActivityPage() {
               api
                 .listRuns({ run_id: runId, limit: 1 })
                 .then((d) => {
-                  setSelectedRun({ id: runId, status: d.runs[0]?.status ?? 'completed', autonomous: true })
+                  setSelectedRun({
+                    id: runId,
+                    status: d.runs[0]?.status ?? 'completed',
+                    autonomous: true,
+                    pipeline: d.runs[0]?.pipeline,
+                  })
                 })
                 .catch(() => setSelectedRun({ id: runId, status: 'completed', autonomous: true }))
             }}
@@ -314,7 +329,14 @@ export default function ActivityPage() {
                 <li key={run.id}>
                   <button
                     className="wizard-card session-card"
-                    onClick={() => setSelectedRun({ id: run.id, status: run.status, autonomous: run.autonomous })}
+                    onClick={() =>
+                      setSelectedRun({
+                        id: run.id,
+                        status: run.status,
+                        autonomous: run.autonomous,
+                        pipeline: run.pipeline,
+                      })
+                    }
                   >
                     <h2>{run.team_display_name ?? run.pipeline}</h2>
                     <div className="session-card-footer">

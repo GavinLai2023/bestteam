@@ -52,7 +52,11 @@ backend restart.
 
 Every event in the timeline has a label (`EVENT_LABELS` in
 `lib/traceEvents.ts`) and a one-line summary, with the full JSON payload
-available inline (or, for diagnostic-only events, behind a "Full payload"
+available inline. **This technical register is this page's alone** — a
+customer's own run view narrates the same stream in their words and drops
+every event that is platform machinery (`useDetailedEventLine`), so a tool
+identifier, a call's duration and the memory/grounding events appear here and
+nowhere else (or, for diagnostic-only events, behind a "Full payload"
 toggle — see §2.5). The event types you'll see on an ordinary run:
 
 | Event | What it tells you |

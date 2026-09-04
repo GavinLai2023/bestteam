@@ -4,11 +4,10 @@ import { api } from '../lib/api'
 import { useConfirm } from '../lib/useConfirm'
 import { formatDateTime } from '../lib/dateFormat'
 import {
-  EVENT_LABELS,
   FRIENDLY_EVENT_TYPES,
   RESULT_LABELS,
   TERMINAL_TYPES,
-  renderEventData,
+  useDetailedEventLine,
   useFriendlyEventTitle,
 } from '../lib/traceEvents'
 import { useRunTrace } from '../lib/useRunTrace'
@@ -19,6 +18,9 @@ interface RunDetailProps {
   runId: string
   status: string
   autonomous: boolean
+  // This team's agents' friendly names, keyed by the technical name each
+  // TraceEvent carries. Empty for a team deployed before they were persisted.
+  agentDisplayNames?: Record<string, string>
   onRetried?: (newRunId: string) => void
 }
 
@@ -27,7 +29,13 @@ type RetryState = 'idle' | 'retrying' | 'error'
 // A run's event timeline, for the Activity page's Runs tab. See
 // lib/useRunTrace.ts for the live-WS-vs-historical-fetch mechanics (shared
 // with the admin Trace page's AdminRunDetail).
-export default function RunDetail({ runId, status, autonomous, onRetried }: RunDetailProps) {
+export default function RunDetail({
+  runId,
+  status,
+  autonomous,
+  agentDisplayNames = {},
+  onRetried,
+}: RunDetailProps) {
   const { t } = useTranslation()
   const [confirmNode, confirm] = useConfirm()
   const { events, contentPurgedAt, error } = useRunTrace(runId, status)
@@ -38,9 +46,9 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
   const [purging, setPurging] = useState(false)
   const [purgeError, setPurgeError] = useState<string | null>(null)
   const [traceExpanded, setTraceExpanded] = useState(false)
-  // No TeamSpec is loaded here, so there is no friendly display name to
-  // resolve an agent name against -- same passthrough MonitorPage uses.
-  const friendlyTitle = useFriendlyEventTitle((agentName) => agentName)
+  const displayNameFor = (agentName: string) => agentDisplayNames[agentName] ?? agentName
+  const friendlyTitle = useFriendlyEventTitle(displayNameFor)
+  const detailedLine = useDetailedEventLine(displayNameFor)
   const friendlyEvents = events.filter((e) => FRIENDLY_EVENT_TYPES.includes(e.type))
 
   // Property Maintenance Inbox: this run's structured results, if any (most
@@ -134,18 +142,21 @@ export default function RunDetail({ runId, status, autonomous, onRetried }: RunD
               jargon feed is one click away for whoever wants it. */}
           <div className="trace-header">
             <button type="button" className="btn-link" onClick={() => setTraceExpanded((x) => !x)}>
-              {traceExpanded ? t('run.hideTechnical') : t('run.showTechnical')}
+              {traceExpanded ? t('run.hideDetails') : t('run.showDetails')}
             </button>
           </div>
           {traceExpanded ? (
             <ul className="run-detail-events">
-              {events.map((event, i) => (
-                <li key={i} className={`event event-${event.type}`}>
-                  <span className="event-type">{EVENT_LABELS[event.type] ?? event.type}</span>
-                  {event.agent && <span className="event-agent">{event.agent}</span>}
-                  <p className="event-data">{renderEventData(event)}</p>
-                </li>
-              ))}
+              {events.map((event, i) => {
+                const line = detailedLine(event)
+                if (!line) return null
+                return (
+                  <li key={i} className={`event event-${event.type}`}>
+                    <span className="event-type">{line.title}</span>
+                    {line.detail && <p className="event-data">{line.detail}</p>}
+                  </li>
+                )
+              })}
             </ul>
           ) : (
             <ul className="run-detail-events">
