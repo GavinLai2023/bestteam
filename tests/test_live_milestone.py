@@ -128,3 +128,39 @@ def test_no_sink_means_no_change():
         "agent_completed",
         "run_completed",
     ]
+
+
+@pytest.mark.integration
+def test_a_run_publishes_agent_working_transiently_and_persists_nothing_for_it(tmp_path, monkeypatch):
+    """End to end through the real worker: node -> SDK sink -> registry."""
+    from bestteam import AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification
+    from helpers import make_concurrent_safe_engine
+    from ui.backend.db import init_db, session_factory
+    from ui.backend.db.models import TraceEventRecord
+    from ui.backend.runtime import registry, run_in_background
+
+    engine = make_concurrent_safe_engine(tmp_path)
+    init_db(engine)
+    Session = session_factory(engine)
+
+    spec = Specification(
+        name="w",
+        agents=[AgentSpec(name="a", role="R", goal="g", model="fake:hello")],
+        teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
+        pipeline=PipelineSpec(steps=["t"]),
+    )
+    pipeline = validate_specification(spec, source=tmp_path / "w.yaml")
+
+    transient: list[dict] = []
+    monkeypatch.setattr(registry, "publish_transient", lambda run_id, event: transient.append(event))
+
+    run = registry.create("w", "in", username="someone")
+    run_in_background(run.id, pipeline, "in", engine=engine, username="someone")
+
+    assert [(e["type"], e["agent"], e["data"]) for e in transient] == [
+        ("agent_working", "a", {"kind": "agent", "state": "started"})
+    ]
+    # The durable path is untouched.
+    assert all(e["type"] != "agent_working" for e in registry.get(run.id).events)
+    with Session() as session:
+        assert session.query(TraceEventRecord).filter(TraceEventRecord.type == "agent_working").count() == 0

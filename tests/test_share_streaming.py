@@ -133,7 +133,9 @@ def test_a_non_share_run_gets_no_sink(tmp_path, monkeypatch):
     run = registry.create("w", "in")
     run_in_background(run.id, pipeline, "in", engine=engine)
 
-    assert transient == []
+    # The live agent_working milestone (2026-09-05) publishes for every run;
+    # only the token sink itself is share-only.
+    assert [e for e in transient if e["type"] in ("reply_delta", "reply_reset")] == []
 
 
 def test_the_first_flush_of_a_reply_waits_for_the_character_threshold(published):

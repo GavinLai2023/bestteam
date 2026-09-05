@@ -27,6 +27,9 @@ memory; `tools/CLAUDE.md` for built-in tools.
 
 `Pipeline.stream()` / `EngineAdapter.stream()` take optional
 `on_token: Callable[[str], None]` and `should_cancel: Callable[[], bool]`.
+`on_live_event: Callable[[TraceEvent], None]` is the third, for the live
+`agent_working` milestone (who is working right now); same rule — never
+yielded, never persisted.
 
 ⚠️ **They have to be a side channel** because `LangGraphAdapter.stream()` is built
 on `stream_mode="updates"` and therefore only yields at *node* boundaries —

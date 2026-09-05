@@ -876,6 +876,13 @@ def run_in_background(
                 (run_row.trigger_context or {}).get("share_session_id") if run_row is not None else None
             )
             token_sink = _TokenSink(run_id) if share_session_id is not None else None
+
+            def _publish_live(event: TraceEvent) -> None:
+                # The live milestone: fanned out to live subscribers only,
+                # never persisted -- registry.publish_transient records nothing
+                # (spec 2026-09-05-live-agent-milestone-design.md).
+                registry.publish_transient(run_id, dataclasses.asdict(event))
+
             stream_iter = pipeline.stream(
                 input,
                 user_id=user_id,
@@ -883,6 +890,7 @@ def run_in_background(
                 diagnostic=diagnostic,
                 on_token=token_sink,
                 should_cancel=(lambda: registry.cancel_requested(run_id)) if token_sink else None,
+                on_live_event=_publish_live,
             )
             for event in stream_iter:
                 if token_sink is not None:
