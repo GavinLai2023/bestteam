@@ -196,12 +196,17 @@ class Pipeline:
 
         last_output = ""
         try:
-            # Passed only when actually in use. The two arguments are part of
-            # the `EngineAdapter` ABC, but sending them unconditionally would
-            # raise TypeError on an adapter written against the older
-            # signature -- and this is a documented extension seam, so an
-            # ordinary non-streaming run must keep working through one
-            # (Codex review finding).
+            # Passed only when actually in use. All three arguments are part
+            # of the `EngineAdapter` ABC, but sending them unconditionally
+            # would raise TypeError on an adapter written against an older
+            # signature -- this is a documented extension seam (Codex review
+            # finding). That protection is no longer whole for `on_live_event`:
+            # `run_in_background` (ui/backend/runtime.py) supplies it on every
+            # run, not only a streaming one, so a legacy adapter missing the
+            # parameter would now fail universally rather than only on the
+            # runs that actually stream. No such adapter exists today --
+            # `LangGraphAdapter` is the only one, and the ABC declares the
+            # parameter -- so the gap is latent, not live.
             streaming_kwargs = {}
             if on_token is not None:
                 streaming_kwargs["on_token"] = on_token
