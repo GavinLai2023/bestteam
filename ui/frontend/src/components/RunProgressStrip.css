@@ -1,0 +1,6 @@
+.run-progress-strip {
+  width: 100%;
+  margin: 4px 0 0;
+  font-weight: 500;
+  color: var(--text);
+}

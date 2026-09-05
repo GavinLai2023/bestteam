@@ -177,6 +177,13 @@ export const en = {
     disconnected: 'Disconnected',
     waitingFirstStep: 'Waiting for your team to start work…',
     stale: 'No update for {{seconds}}s — still working, this can take a while for longer tasks.',
+    // The live milestone (spec 2026-09-05): who is working right now. Names
+    // are the friendly ones; the technical name never reaches this copy.
+    progressOne: '{{name}} is working · {{seconds}}s',
+    progressOneOfN: '{{name}} is working · agent {{index}} of {{total}} · {{seconds}}s',
+    progressParallel: '{{count}} members working at once · {{seconds}}s',
+    progressParallelOfN: '{{count}} members working at once · {{done}} of {{total}} done · {{seconds}}s',
+    progressDelegated: '{{manager}} is working · handed to {{agent}} · {{seconds}}s',
     runAgain: 'Run again',
     progress: 'Progress',
     showDetails: 'Show details',
