@@ -2361,6 +2361,32 @@ def test_list_pipelines_reports_each_agents_friendly_display_name(client):
     assert body["agent_display_names"]["crew"] == {"triage_agent": "Triage Assistant"}
 
 
+def test_list_pipelines_reports_each_teams_agents_in_order(client):
+    # The Run page's live milestone says "agent k of N". N and the order come
+    # from here -- including an agent with no display_name, which the
+    # friendly-name map above deliberately omits, and in config order, which
+    # a dict does not promise.
+    with open_test_db() as db:
+        db.add(
+            PipelineRecord(
+                name="crew", org_id=get_org_id(), status="deployed",
+                config={
+                    "name": "crew",
+                    "agents": [
+                        {"name": "triage_agent", "display_name": "Triage Assistant"},
+                        {"name": "plain_agent"},
+                    ],
+                    "teams": [{"name": "t", "agents": ["triage_agent", "plain_agent"]}],
+                    "pipeline": {"steps": []},
+                },
+            )
+        )
+        db.commit()
+
+    body = client.get("/api/pipelines", headers=_org_user_headers(client)).json()
+    assert body["agent_names"]["crew"] == ["triage_agent", "plain_agent"]
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 (0.6): deploy refuses email + egress on one agent.
 # ---------------------------------------------------------------------------

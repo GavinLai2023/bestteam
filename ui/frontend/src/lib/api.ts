@@ -265,6 +265,9 @@ export const api = {
       // these were persisted, and an agent without one is simply missing --
       // both cases fall back to the technical name.
       agent_display_names?: Record<string, Record<string, string>>
+      // Per team, its agents' technical names in configuration order -- the
+      // Run page's "agent k of N". Absent for a team with no agents.
+      agent_names?: Record<string, string[]>
     }>('/api/pipelines'),
   pipelineGraph: (name: string) => request<{ mermaid: string }>(`/api/pipelines/${encodeURIComponent(name)}/graph`),
   // The customer's reversible pause on one live team: false stops it running
