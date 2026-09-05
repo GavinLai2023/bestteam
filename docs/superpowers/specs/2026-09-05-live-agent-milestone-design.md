@@ -45,9 +45,15 @@ otherwise be one more black box.
 **Out of scope, deliberately:**
 
 - The share-chat visitor page: it has its own streaming and its own
-  progress-dots rulings, and its `onmessage` acts only on `reply_delta`,
-  `reply_reset` and the terminal types (`ShareChatPage.tsx:154–188`), so the
-  new event is ignored there by construction.
+  progress-dots rulings. Its `onmessage` special-cases only `reply_delta` and
+  `reply_reset`; every other type, `agent_working` included, falls through a
+  catch-all into `liveEvents` (`ShareChatPage.tsx:154–188`), the same list
+  `friendlyStatusFor` reads. Nothing new leaks, though: `visitor_safe_event`
+  nulls `agent`/`data` for anything but `run_completed`/`reply_delta`, so the
+  visitor only ever sees `{"type":"agent_working","agent":null,"data":null}`.
+  `shareTraceEvents.ts`'s `FRIENDLY_STATUS` maps it to the same
+  `share.status.working` wording `agent_started` already gets, so the status
+  line stays exactly as specific as it was before this milestone existed.
 - The Activity history view and the admin Trace page: nothing is "in
   progress" on a historical trace, and a diagnostic re-run is an admin
   surface.
@@ -157,8 +163,15 @@ Three approaches were weighed:
   agents currently working from the event stream — `agent_working
   started` adds, `agent_working completed` and persisted
   `agent_completed` / `subagent_completed` remove, a terminal event clears.
-  The first `started` for an agent also stamps the client-side time its
-  elapsed counter runs from.
+  The elapsed counter is keyed on the whole working set, not on any one
+  agent: `RunProgressStrip` restarts it whenever the joined list of working
+  agents' names changes at all, not just when the agent it is currently
+  narrating changes. That is correct for SEQUENTIAL, the case this feature
+  was built for -- one agent works at a time, so a set change and an agent
+  change are the same event. **Known limitation:** on a PARALLEL team the
+  counter resets to `0s` whenever *any* member starts or finishes, so a
+  member that has been running for minutes appears to restart when a
+  sibling does.
 - One shared component, `RunProgressStrip`, placed on both pages. It does
   **not** touch the friendly event feed or the three registers in
   `traceEvents.ts`; `agent_working` is absent from `FRIENDLY_EVENT_TYPES`
