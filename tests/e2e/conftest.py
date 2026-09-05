@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from ._env import API_URL, BASE_URL, DEMO, FAKE_ARCHITECT_SPEC, OP
+from ._guard import assert_backend_is_ours
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -131,15 +132,42 @@ def _promote_to_admin(db_path: str, username: str) -> None:
     assert result.returncode == 0, f"promoting {username} failed:\n{result.stdout}\n{result.stderr}"
 
 
-def _reshape_model_catalog() -> None:
+def _reshape_model_catalog(db_path: str) -> None:
     """Delete every auto-seeded non-fake: catalog entry and add
     fake-architect:e2e, so the wizard's pickDefaultModel() resolves to it
-    automatically (see the design doc's "Fake-architect mechanism")."""
+    automatically (see the design doc's "Fake-architect mechanism").
+
+    Destructive, and aimed at a fixed port. `_assert_port_free` sampled that
+    port over a minute ago and `_wait_healthy` never asked who answered, so
+    ownership is proven here instead, at the moment it matters: write a
+    random spec through the API, then confirm it landed in our own temp
+    database. See `_guard.assert_backend_is_ours`.
+    """
+    probe_spec = "fake:e2e-probe-" + secrets.token_hex(8)
     with httpx.Client(base_url=API_URL, timeout=10) as client:
         login = client.post("/api/auth/login", json={"username": OP[0], "password": OP[1]})
         login.raise_for_status()
         token = login.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
+
+        resp = client.put(
+            f"/api/config/model-catalog/{probe_spec}",
+            headers=headers,
+            json={
+                "display_name": "E2E ownership probe",
+                "description": "Written to prove this backend serves the fixture's temp DB.",
+                "tier": "fast",
+                "input_price_per_1k": 0.0,
+                "output_price_per_1k": 0.0,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        try:
+            assert_backend_is_ours(probe_spec, db_path)
+        finally:
+            # Leave no litter behind, including in the abort case -- removing
+            # the row we just added is safe whoever owns that catalog.
+            client.delete(f"/api/config/model-catalog/{probe_spec}", headers=headers)
 
         entries = client.get("/api/config/model-catalog", headers=headers).json()
         for entry in entries:
@@ -216,7 +244,7 @@ def e2e_backend():
 
         _wait_healthy(f"{API_URL}/api/health", backend, backend_log)
         _wait_healthy(BASE_URL, frontend, frontend_log)
-        _reshape_model_catalog()
+        _reshape_model_catalog(db_path)
         yield
     finally:
         if backend is not None:

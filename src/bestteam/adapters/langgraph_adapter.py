@@ -104,6 +104,9 @@ class _TeamState(TypedDict):
     # closure would leak into the next run.
     on_token: Optional[Callable[[str], None]]
     should_cancel: Optional[Callable[[], bool]]
+    # Same lifecycle as `on_token`: the live-milestone side channel (see
+    # docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md).
+    on_live_event: Optional[Callable[[TraceEvent], None]]
 
 
 def _fake_architect_specification() -> "Specification":
@@ -1140,6 +1143,52 @@ def _make_delegate_tool(
     return delegate
 
 
+# The persisted events a live subscriber should learn about NOW rather than
+# when the node flushes them, and the `agent_working` kind/state each maps
+# to. `subagent_completed` is here because a subordinate's events are
+# buffered in the MANAGER's node and only flush when the manager returns; a
+# top-level `agent_completed` needs no twin, its node flushes at that moment.
+_LIVE_EVENT_STATES = {
+    "agent_started": ("agent", "started"),
+    "subagent_started": ("subagent", "started"),
+    "subagent_completed": ("subagent", "completed"),
+}
+
+
+def _live_event_sink(
+    buffer: List[TraceEvent],
+    on_live_event: Optional[Callable[[TraceEvent], None]],
+) -> Callable[[TraceEvent], None]:
+    """Build a node's `on_event`: buffer every event for the node-boundary
+    flush as before, and hand the ones in `_LIVE_EVENT_STATES` to
+    `on_live_event` at once as an `agent_working` event. A failing live sink
+    is logged and ignored -- live progress must never fail a node."""
+
+    def sink(event: TraceEvent) -> None:
+        buffer.append(event)
+        if on_live_event is None:
+            return
+        live = _LIVE_EVENT_STATES.get(event.type)
+        if live is None:
+            return
+        kind, state = live
+        try:
+            on_live_event(
+                TraceEvent(
+                    type="agent_working",
+                    pipeline="",
+                    agent=event.agent,
+                    data={"kind": kind, "state": state},
+                )
+            )
+        except Exception:  # noqa: BLE001 -- live progress must never break a node
+            _logger.warning(
+                "Live progress callback failed for agent %s; node unaffected", event.agent, exc_info=True
+            )
+
+    return sink
+
+
 def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False):
     """Build a LangGraph node function that runs a single agent.
 
@@ -1171,7 +1220,7 @@ def _agent_node(agent: Agent, *, propagate_context: bool, streams: bool = False)
             extra_system_prompt=state.get("memory_preamble", ""),
             require_tool_use_on_first_call=_has_knowledge_base_tool(agent),
             usage_sink=usage_sink,
-            on_event=sub_events.append,
+            on_event=_live_event_sink(sub_events, state.get("on_live_event")),
             diagnostic=state.get("diagnostic", False),
             streams=streams,
             on_token=state.get("on_token"),
@@ -1219,6 +1268,12 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
         if member.model is None:
             raise ConfigurationError(f"Agent '{member.name}' has no model configured")
 
+    # `agents` is the manager's subordinates. A generated team routinely lists
+    # the manager there too, which used to hand it a `delegate_to_<itself>`:
+    # forced to call a tool on its first turn, a manager could satisfy that by
+    # delegating to itself and never consult a single specialist.
+    subordinates = [agent for agent in team.agents if agent.name != manager.name]
+
     guidance_lines = [
         "You manage a team of specialists. For any part of the request that "
         "falls within a specialist's domain below, delegate that sub-task to "
@@ -1228,7 +1283,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
         "final answer -- a request can need input from several of them at "
         "once:",
     ]
-    for agent in team.agents:
+    for agent in subordinates:
         guidance_lines.append(
             f"- {agent.name} ({agent.role}, goal: {agent.goal}): "
             f"call delegate_to_{agent.name}(task) to delegate to them."
@@ -1238,6 +1293,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
     def node(state: _TeamState) -> Dict[str, Any]:
         usage_sink: List[Dict[str, Any]] = []
         sub_events: List[TraceEvent] = []
+        on_event = _live_event_sink(sub_events, state.get("on_live_event"))
         preamble = state.get("memory_preamble", "")
         diagnostic = state.get("diagnostic", False)
         # Subordinates get the recalled user memory (like sequential/parallel
@@ -1247,12 +1303,12 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
                 agent,
                 usage_sink=usage_sink,
                 extra_system_prompt=preamble,
-                on_event=sub_events.append,
+                on_event=on_event,
                 manager_name=manager.name,
                 diagnostic=diagnostic,
                 should_cancel=state.get("should_cancel"),
             )
-            for agent in team.agents
+            for agent in subordinates
         ]
         extra_system_prompt = f"{preamble}\n\n{delegation_guidance}" if preamble else delegation_guidance
         text = _run_agent(
@@ -1262,7 +1318,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
             extra_system_prompt=extra_system_prompt,
             require_tool_use_on_first_call=True,
             usage_sink=usage_sink,
-            on_event=sub_events.append,
+            on_event=on_event,
             diagnostic=diagnostic,
             # The manager's final text is the run's output, so it is the one
             # that streams. The delegate tools above deliberately get no sink:
@@ -1288,6 +1344,7 @@ def _initial_state(
     diagnostic: bool = False,
     on_token: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    on_live_event: Optional[Callable[[TraceEvent], None]] = None,
 ) -> _TeamState:
     return {
         "input": input,
@@ -1300,6 +1357,7 @@ def _initial_state(
         "diagnostic": diagnostic,
         "on_token": on_token,
         "should_cancel": should_cancel,
+        "on_live_event": on_live_event,
     }
 
 
@@ -1455,6 +1513,7 @@ class LangGraphAdapter(EngineAdapter):
         *,
         on_token: Optional[Callable[[str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        on_live_event: Optional[Callable[[TraceEvent], None]] = None,
     ) -> Iterator[TraceEvent]:
         """Yield an `agent_completed` TraceEvent each time a node finishes.
 
@@ -1468,10 +1527,12 @@ class LangGraphAdapter(EngineAdapter):
         reach a subscriber while the reply is still being written. Deltas are
         NOT TraceEvents and are never persisted. `should_cancel` is polled
         between deltas so a long reply can be stopped mid-generation.
+        `on_live_event` is the same kind of side channel for the live
+        milestone (see `_live_event_sink`).
         """
         try:
             for update in compiled.stream(
-                _initial_state(input, memory_preamble, diagnostic, on_token, should_cancel),
+                _initial_state(input, memory_preamble, diagnostic, on_token, should_cancel, on_live_event),
                 stream_mode="updates",
             ):
                 for partial in update.values():

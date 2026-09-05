@@ -6,6 +6,63 @@
 
 ## Done
 
+- **A hierarchical manager can no longer delegate to itself, and no agent
+  invents facts it was never given** (2026-09-06). A customer asked a live
+  nutrition team how to reach it on WeChat or WhatsApp and got a confident
+  walkthrough of an official WeChat account and a verified WhatsApp number —
+  neither of which exists. Two independent defects met in that one answer.
+  **First**, `_hierarchical_node` built a `delegate_to_<name>` for every entry
+  in `team.agents`, and the Solution Architect had listed the manager among its
+  own team's members — as it had in **all six** hierarchical teams ever
+  generated here. Forced to call a tool on its first turn
+  (`require_tool_use_on_first_call`), the manager satisfied that by delegating
+  to *itself*: a duplicate model call, and neither specialist consulted. Three
+  of thirteen delegating runs had burned one. The adapter now excludes the
+  manager from its own subordinate list, which fixes the six stored configs
+  with no migration, and the architect prompt says `agents` means the members
+  the manager delegates to. **Second**, `Agent.system_prompt()` was three lines
+  of identity with no constraint on invention, and grounding
+  (`core/grounding.py`) only checks an agent whose turn actually searched a
+  knowledge base — this team had none, so nothing applied. Every agent's prompt
+  now ends with `NO_FABRICATION_GUARD`: state only what you were given, and say
+  you do not know rather than inventing a channel, account, price or policy.
+
+- **The E2E fixture can no longer reshape a real catalog, and `check-env`
+  notices when one is empty** (2026-09-05). A dev box built three Team
+  Builder teams whose specs had nothing to do with the intents typed in:
+  every one came back named `e2e_support_team`. `tests/e2e/conftest.py`'s
+  `_reshape_model_catalog` had run against the real database (twice over the
+  project's life, most recently 2026-09-02), deleting both provider entries
+  and leaving `fake-architect:e2e` -- which sorts first, so
+  `pickDefaultModel()`'s last-resort `?? entries[0]` handed it to the
+  Solution Architect, and `_FakeArchitectChatModel` answers the wizard's
+  `Specification` schema with a hardcoded constant. Nothing errored for three
+  days. The hole: `_assert_port_free` samples port 8000 once, a minute-plus
+  before the DELETEs, and `_wait_healthy` returns on the first healthy
+  /api/health without asking whose it is. The reshape now proves ownership
+  out of band first (`tests/e2e/_guard.py`: write a random spec through the
+  API, require it to appear in the fixture's own temp DB, fail closed), and
+  `admin check-env` grew a `model-catalog` WARN for a catalog holding no real
+  chat model.
+- **Live agent milestone on the Run page and the wizard preview** (2026-09-05).
+  A six-agent team's page used to show nothing for up to three minutes at a
+  stretch -- `LangGraphAdapter.stream()` only yields at node boundaries, so an
+  agent's whole event batch lands when it finishes, and the 20 s stale hint
+  was lit for ~95 % of a run. Now a node hands an `on_live_event` callback
+  (plumbed like `on_token`) a transient `agent_working` event the moment an
+  agent, or a delegated subordinate, starts; `run_in_background` fans it out
+  via `registry.publish_transient`, the registry keeps the working set and
+  re-seeds it to a reconnecting subscriber, and a shared `RunProgressStrip`
+  says "«name» is working · agent k of N · s" (N from the new ordered
+  `agent_names` on `GET /api/pipelines`). The stale hint now shows only while
+  nobody is working. The persisted trace is unchanged. The wizard's two
+  model-blocked stages got the same idea at a smaller scale: Challenge and
+  Documents showed nothing but a changed button label while the Business
+  Analyst or the Solution Architect worked (Questions and Confirm at least
+  carried a notice), which reads as a frozen page once the call runs past a
+  few seconds — a shared `WizardBusyNotice` now pairs a live pulse with one
+  `wizard.busyNotice` line under both. Spec:
+  `docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md`.
 - **Built-in skills lost their `_vN` name suffixes** (2026-09-02). Migration
   `w0x1y2z3a4b5` renames the platform tier (`email_input_security_core`,
   `property_maintenance_intake` — the former `_v2` content, with `_v1`'s
@@ -2630,6 +2687,16 @@
 
 ## Next steps / roadmap
 
+- **The other four sub-projects of the 2026-09-05 slow-run diagnosis**, in the
+  agreed order: a duration ceiling for manual runs (the triggered path has
+  `_release_stale_run`; a manual run has nothing); run-time decline/ask-back
+  for an input that is not a task for this team (the customer's 59-character
+  aside that produced 90k tokens); whether SEQUENTIAL should carry the
+  customer's original input past the first agent (`state["context"] or
+  state["input"]`, `langgraph_adapter.py`); progress for the wizard's long
+  synchronous steps (no real percentage exists for one model call -- an
+  estimate, or streaming, each its own design). Each needs its own design
+  note and ruling.
 - **Feedback phase 3: the self-closing loop** (spec'd out of scope
   2026-08-26). In order of ambition: LLM categorisation/dedup of incoming
   feedback (its bodies are attacker-controlled text — inbound-email

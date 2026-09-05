@@ -594,11 +594,15 @@ leave the org.
 Streaming:
 
 - **`registry.publish_transient`** is `publish`'s record-nothing twin: fans out
-  to live subscribers, appends nothing to `run.events`, drives no status change,
-  replayed to nobody. A long reply would otherwise put thousands of entries into
-  the log every new subscriber is seeded with. Deliberate consequence: a visitor
-  reconnecting mid-run sees no partial text, then the complete reply on
-  `run_completed`, which IS replayed.
+  to live subscribers, appends nothing to `run.events`, drives no status
+  change, deltas replayed to nobody (one synthetic seed carries the text so
+  far); the live `agent_working` milestone (spec
+  `2026-09-05-live-agent-milestone-design.md`) is the one other thing it
+  carries, and a milestone still in force is re-seeded to a new subscriber. A
+  long reply would otherwise put thousands of entries into the log every new
+  subscriber is seeded with. Deliberate consequence: a visitor reconnecting
+  mid-run sees no partial text, then the complete reply on `run_completed`,
+  which IS replayed.
 - **`runtime._TokenSink`** buffers deltas into `reply_delta` events — flushing at
   40 chars or 80 ms since the last flush, **evaluated on arrival, never on a
   timer**, so a provider stall leaves up to 39 chars unshown until the next delta

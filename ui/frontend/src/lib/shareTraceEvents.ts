@@ -19,6 +19,11 @@ const FRIENDLY_STATUS: Record<string, ShareStatusKey> = {
   run_queued: 'share.status.sending',
   run_started: 'share.status.starting',
   agent_started: 'share.status.working',
+  // The live milestone (spec 2026-09-05): a visitor's stream is redacted to
+  // `{"type":"agent_working","agent":null,"data":null}` (share_chat.py's
+  // `visitor_safe_event`), so it carries no more than agent_started already
+  // does here -- same generic "someone is working" wording, not a new key.
+  agent_working: 'share.status.working',
   agent_progress: 'share.status.working',
   tool_started: 'share.status.working',
   tool_completed: 'share.status.working',

@@ -19,7 +19,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import date as _date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -650,6 +650,11 @@ def list_pipelines(
     # the engine emits in each TraceEvent. Same current-config source and same
     # absent-means-fall-back-to-the-technical-name contract as above.
     agent_display_by_name: Dict[str, Dict[str, str]] = {}
+    # Each team's agents in configuration order, so the Run page can say
+    # "agent 3 of 6" while one works (spec 2026-09-05). `agent_display_by_name`
+    # cannot serve: it omits agents without a display_name, and a dict is not
+    # a promise of order.
+    agent_names_by_name: Dict[str, List[str]] = {}
     for row in db.query(PipelineRecord.name, PipelineRecord.id, PipelineRecord.config).filter(
         PipelineRecord.org_id == org.id,
         PipelineRecord.status == "deployed",
@@ -670,6 +675,9 @@ def list_pipelines(
         }
         if agent_names:
             agent_display_by_name[row.name] = agent_names
+        ordered = [agent["name"] for agent in ((row.config or {}).get("agents") or []) if agent.get("name")]
+        if ordered:
+            agent_names_by_name[row.name] = ordered
 
     db_names = set(id_by_name)
     yaml_names = (
@@ -680,6 +688,7 @@ def list_pipelines(
         "pipeline_ids": id_by_name,
         "display_names": display_by_name,
         "agent_display_names": agent_display_by_name,
+        "agent_names": agent_names_by_name,
     }
 
 

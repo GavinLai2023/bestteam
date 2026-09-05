@@ -577,3 +577,13 @@ def test_loader_ignores_an_agents_presentation_fields(tmp_path):
     pipeline = load_pipeline(config)
 
     assert [agent.name for agent in pipeline.steps[0].agents] == ["support_agent"]
+
+
+def test_architect_prompt_keeps_the_manager_out_of_a_teams_agents():
+    """`agents` is the manager's subordinates -- the SDK's own hierarchical
+    teams are built that way. The prompt never said so, and every hierarchical
+    team the architect has generated listed the manager there as well."""
+    from bestteam.core.specification import _ARCHITECT_SYSTEM_PROMPT
+
+    assert "manager" in _ARCHITECT_SYSTEM_PROMPT
+    assert "do not list the manager" in _ARCHITECT_SYSTEM_PROMPT.lower()

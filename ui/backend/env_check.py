@@ -354,3 +354,56 @@ def check_org_retention(db_path: Union[str, Path, None] = None) -> Finding:
                        "Set a retention period per org (PUT /api/org/retention) before "
                        "a real customer uses it")
     return Finding("OK", _ORG_RETENTION, "every org has a retention period")
+
+
+_MODEL_CATALOG = "model-catalog"
+
+# Kept in sync by hand with `db/model_catalog.py::EMBEDDING_TIER` and the
+# `fake:`/`fake-architect:` prefixes `adapters/langgraph_adapter.py::_resolve_model`
+# understands. This module reads SQLite directly rather than importing the
+# ORM, the same way `check_org_retention` does.
+_EMBEDDING_TIER = "embedding"
+_STUB_PREFIXES = ("fake:", "fake-architect:")
+
+
+def check_model_catalog(db_path: Union[str, Path, None] = None) -> Finding:
+    """WARN when the catalog holds no real chat model.
+
+    The Team Builder wizard runs the Solution Architect on whatever
+    `pickDefaultModel()` returns, and that function's last resort is simply
+    the first catalog entry. With only stub entries left, that resort picks
+    one -- and `fake-architect:` answers the wizard's schemas with a canned
+    team, identical for every intent, with no error anywhere. A real
+    deployment never seeds a `fake-architect:` entry, but the E2E fixture
+    creates exactly this shape if it is ever pointed at a real database
+    (observed twice on a dev box), and an admin can delete their way here.
+    """
+    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
+    if str(path) == ":memory:" or not path.exists():
+        return Finding("OK", _MODEL_CATALOG, "no database yet; nothing to check")
+
+    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            rows = list(con.execute("SELECT spec, tier FROM model_catalog"))
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        if "no such table" in str(exc):
+            return Finding("OK", _MODEL_CATALOG, "pre-migration schema; nothing to check")
+        return Finding("WARN", _MODEL_CATALOG, f"could not read the model catalog from {path}: {exc}")
+
+    usable = [
+        spec for spec, tier in rows
+        if tier != _EMBEDDING_TIER and not str(spec).startswith(_STUB_PREFIXES)
+    ]
+    if usable:
+        return Finding("OK", _MODEL_CATALOG, f"{len(usable)} chat model(s) available to the wizard")
+
+    leftover = ", ".join(sorted(str(spec) for spec, _ in rows)) or "the catalog is empty"
+    return Finding("WARN", _MODEL_CATALOG,
+                   f"no real chat model in the catalog ({leftover}). The Team Builder "
+                   "wizard will fall back to a stub entry and build the same canned team "
+                   "for every intent, silently. Add a provider model "
+                   "(PUT /api/config/model-catalog/<spec>)")

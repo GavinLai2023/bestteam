@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import EmailConnect from '../../components/EmailConnect'
+import RunProgressStrip from '../../components/RunProgressStrip'
 import TeamFlow from '../../components/TeamFlow'
 import { WS_BASE, api } from '../../lib/api'
 import { TERMINAL_TYPES, useDetailedEventLine } from '../../lib/traceEvents'
 import type { TraceEvent, WizardOutletContext } from '../../lib/types'
+import { useWorkingAgents } from '../../lib/workingAgents'
 
 type Status = 'idle' | 'running' | 'completed' | 'failed'
 
@@ -33,6 +35,7 @@ export default function PreviewPage() {
   // for the platform's own machinery, which this feed used to render as a raw
   // type string with `JSON.stringify(event.data)` underneath.
   const detailedLine = useDetailedEventLine(friendlyName)
+  const { working, completedAgents } = useWorkingAgents(events)
 
   if (loading) return <p className="hint">{t('common.loading')}</p>
   if (!session) return null
@@ -127,6 +130,15 @@ export default function PreviewPage() {
           {status === 'running' ? t('common.working') : t('wizard.preview.run')}
         </button>
       </div>
+
+      {status === 'running' && (
+        <RunProgressStrip
+          working={working}
+          completedAgents={completedAgents}
+          agentCount={spec.agents.length || undefined}
+          displayNameFor={friendlyName}
+        />
+      )}
 
       {events.length > 0 && (
         <ul className="activity-feed" style={{ marginTop: 16 }}>

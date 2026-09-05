@@ -89,4 +89,24 @@ describe('IntentPage', () => {
 
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents'))
   })
+
+  it('keeps a busy notice on screen while the analyst is working', async () => {
+    let finish: (session: BuilderSession) => void = () => {}
+    mockedApi.submitRequirements.mockReturnValue(
+      new Promise<BuilderSession>((resolve) => {
+        finish = resolve
+      }),
+    )
+    renderPage()
+
+    expect(screen.queryByRole('status')).toBeNull()
+
+    await start()
+
+    expect(await screen.findByRole('status')).toBeInTheDocument()
+
+    finish(sessionWith([]))
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/documents'))
+  })
 })

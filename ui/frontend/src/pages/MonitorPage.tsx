@@ -10,6 +10,8 @@ import {
   useFriendlyEventTitle,
 } from '../lib/traceEvents'
 import type { TraceEvent } from '../lib/types'
+import RunProgressStrip from '../components/RunProgressStrip'
+import { useWorkingAgents } from '../lib/workingAgents'
 import './MonitorPage.css'
 
 const NON_PROGRESS_TYPES = ['run_queued', 'run_started']
@@ -28,6 +30,8 @@ function MonitorPage() {
   // called one team two things (audit finding F4).
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({})
   const [agentDisplayNames, setAgentDisplayNames] = useState<Record<string, Record<string, string>>>({})
+  // Each team's agents in order -- the "of N" on the live milestone.
+  const [agentNames, setAgentNames] = useState<Record<string, string[]>>({})
   const [selected, setSelected] = useState('')
   const [input, setInput] = useState('')
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -52,6 +56,7 @@ function MonitorPage() {
         setPipelines(data.pipelines)
         setDisplayNames(data.display_names ?? {})
         setAgentDisplayNames(data.agent_display_names ?? {})
+        setAgentNames(data.agent_names ?? {})
         // Clear a previous unreachable banner, but never stomp on a run that
         // is currently in flight or has already reached a terminal state.
         setStatus((current) => (current === 'unreachable' ? 'idle' : current))
@@ -203,6 +208,7 @@ function MonitorPage() {
   const friendlyTitle = useFriendlyEventTitle(displayNameFor)
   const detailedLine = useDetailedEventLine(displayNameFor)
   const friendlyEvents = events.filter((e) => FRIENDLY_EVENT_TYPES.includes(e.type))
+  const { working, completedAgents } = useWorkingAgents(events)
 
   return (
     <div className="dashboard">
@@ -269,8 +275,17 @@ function MonitorPage() {
             {connectionStatus === 'connecting' && t('run.connecting')}
             {connectionStatus === 'disconnected' && t('run.disconnected')}
           </span>
+          <RunProgressStrip
+            working={working}
+            completedAgents={completedAgents}
+            agentCount={agentNames[selected]?.length}
+            displayNameFor={displayNameFor}
+          />
           {isWaitingForFirstProgress && <p className="hint">{t('run.waitingFirstStep')}</p>}
-          {secondsSinceLastEvent !== null && secondsSinceLastEvent >= STALE_HINT_SECONDS && (
+          {/* While an agent works the strip above carries its own counter; the
+              hint's remaining job is "nothing at all has happened between
+              agents, or before the first one" (spec 2026-09-05 §3.3). */}
+          {working.length === 0 && secondsSinceLastEvent >= STALE_HINT_SECONDS && (
             <p className="banner run-status-stale">
               {t('run.stale', { seconds: secondsSinceLastEvent })}
             </p>

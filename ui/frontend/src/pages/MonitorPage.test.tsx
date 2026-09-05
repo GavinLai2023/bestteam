@@ -431,6 +431,82 @@ describe('MonitorPage run waiting UX', () => {
     expect(screen.queryByText('✓ agent done')).not.toBeInTheDocument()
     expect(document.body.textContent || '').not.toContain('iteration 2 of 8')
   })
+
+  it('shows which agent is working as soon as its live milestone arrives', async () => {
+    // `mockResolvedValueOnce`, not `mockResolvedValue`: `startARun` sets its
+    // own default `listPipelines` response, which would otherwise clobber
+    // this one -- the once-queue is consumed first regardless of which was
+    // registered last.
+    mockedApi.listPipelines.mockResolvedValueOnce({
+      pipelines: ['wf'],
+      agent_display_names: { wf: { a: 'Ada', b: 'Bert' } },
+      agent_names: { wf: ['a', 'b'] },
+    })
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_working', agent: 'a', data: { kind: 'agent', state: 'started' } })
+    })
+    expect(screen.getByRole('status')).toHaveTextContent('Ada is working · agent 1 of 2')
+    expect(screen.queryByText('Waiting for your team to start work…')).not.toBeInTheDocument()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_started', pipeline: 'wf', agent: 'a', data: { role: 'R', goal: 'G' }, usage: [] })
+      ws!.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'a', data: 'done a', usage: [] })
+    })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_working', agent: 'b', data: { kind: 'agent', state: 'started' } })
+    })
+    expect(screen.getByRole('status')).toHaveTextContent('Bert is working · agent 2 of 2')
+  })
+
+  it('keeps the stale hint off while an agent is working and shows it when none is', async () => {
+    // Fake timers before anything renders: both the page's 1 s ticker and
+    // Date.now() are faked from the start. `startARun` waits with findByRole,
+    // which does not advance vitest's fake clock, so this helper flushes the
+    // mocked promises by hand instead.
+    vi.useFakeTimers()
+    try {
+      mockedApi.listPipelines.mockResolvedValue({ pipelines: ['wf'], agent_names: { wf: ['a'] } })
+      mockedApi.createRun.mockResolvedValue({ run_id: 'run-1' })
+      mockedApi.createWsTicket.mockResolvedValue({ ticket: 't' })
+      renderPage()
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      fireEvent.change(screen.getByLabelText('What should this team do?'), { target: { value: 'do the thing' } })
+      await act(async () => {
+        fireEvent.click(screen.getByText('Run'))
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      const ws = FakeWebSocket.instances.at(-1)!
+
+      await act(async () => {
+        ws.emit({ type: 'agent_working', agent: 'a', data: { kind: 'agent', state: 'started' } })
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(25_000)
+      })
+      expect(screen.queryByText(/No update for/)).not.toBeInTheDocument()
+      expect(screen.getByRole('status')).toHaveTextContent('agent 1 of 1 · 25s')
+
+      await act(async () => {
+        ws.emit({ type: 'agent_completed', pipeline: 'wf', agent: 'a', data: 'done', usage: [] })
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(21_000)
+      })
+      expect(screen.getByText(/No update for 21s/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 // Share/SharedSessionsPanel used to render here (scoped to whichever team

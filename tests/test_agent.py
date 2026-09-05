@@ -56,3 +56,16 @@ def test_agent_rejects_an_unknown_grounding_level():
     message = str(exc.value)
     assert "grounding_level" in message
     assert "citation" in message and "claim" in message
+
+
+def test_agent_system_prompt_forbids_inventing_unknown_facts():
+    """Every agent carries the guard, not just one with a knowledge base.
+    Grounding (core/grounding.py) only checks an agent whose turn ran a
+    knowledge-base search; a team with no knowledge base had nothing at all
+    stopping a model from inventing an organisation's contact channels,
+    prices or policies out of thin air."""
+    agent = Agent(name="bot", role="Helper", goal="do things")
+    prompt = agent.system_prompt()
+
+    assert "Only state facts" in prompt
+    assert "inventing" in prompt

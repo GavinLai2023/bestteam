@@ -9,6 +9,12 @@ memory; `tools/CLAUDE.md` for built-in tools.
 - **State reducer for parallel agents**: `_TeamState.contributions` uses
   `Annotated[Dict[str, str], operator.or_]` so concurrent node writes merge
   instead of raising `InvalidUpdateError`.
+- **Every agent's system prompt ends with `NO_FABRICATION_GUARD`**
+  (`core/agent.py`). Grounding (`core/grounding.py`) only checks an agent whose
+  turn actually searched a knowledge base, so a team without one had nothing at
+  all holding it to what it was told — a customer-facing agent asked about a
+  contact channel, price or policy it had never heard of invented a confident
+  answer instead of declining.
 - **`fake:<response>` model spec**: a custom convenience in `_resolve_model()` so
   YAML pipelines can declare zero-cost deterministic dry-run models
   (`FakeListChatModel`) with no API keys.
@@ -27,6 +33,9 @@ memory; `tools/CLAUDE.md` for built-in tools.
 
 `Pipeline.stream()` / `EngineAdapter.stream()` take optional
 `on_token: Callable[[str], None]` and `should_cancel: Callable[[], bool]`.
+`on_live_event: Callable[[TraceEvent], None]` is the third, for the live
+`agent_working` milestone (who is working right now); same rule — never
+yielded, never persisted.
 
 ⚠️ **They have to be a side channel** because `LangGraphAdapter.stream()` is built
 on `stream_mode="updates"` and therefore only yields at *node* boundaries —
@@ -72,7 +81,10 @@ Five rules in that design are load-bearing:
 ## Collaboration modes
 
 HIERARCHICAL **is** implemented: the `manager` agent gets a
-`delegate_to_<name>(task)` tool per subordinate, bound alongside its own `tools`
+`delegate_to_<name>(task)` tool per subordinate — **`team.agents` minus the
+manager itself**, because a generated team routinely lists the manager there and
+a `delegate_to_<manager>` let the forced first call be spent delegating to
+itself, leaving every specialist unconsulted — bound alongside its own `tools`
 and run through the same tool-calling loop as SEQUENTIAL/PARALLEL agents
 (`_hierarchical_node`). **CrewAI adapter, DEBATE mode and deployment templates are
 planned, not started.**

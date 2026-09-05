@@ -229,8 +229,11 @@ every subscriber and held for up to `_MAX_RETAINED_RUNS` runs.
 def publish_transient(self, run_id: str, event: dict) -> None:
     """Fan out to live subscribers without recording anything.
 
-    Token deltas only: not appended to `run.events`, never replayed to a
-    later subscriber, never persisted, never status-bearing.
+    Token deltas and, since 2026-09-05, the live `agent_working` milestone
+    (see 2026-09-05-live-agent-milestone-design.md): not appended to
+    `run.events`, never persisted, never status-bearing. A delta is never
+    replayed one by one; a milestone still in force IS re-seeded to a
+    later subscriber.
     """
 ```
 
