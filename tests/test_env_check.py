@@ -399,3 +399,97 @@ def test_the_cli_includes_the_org_retention_finding(monkeypatch, capsys, tmp_pat
     out = capsys.readouterr().out
     assert "[WARN] org-retention" in out
     assert "beta-org" in out
+
+
+def _catalog_db(path, rows):
+    """A database holding just a model_catalog table with the given
+    (spec, tier) rows -- the columns check_model_catalog reads."""
+    import sqlite3
+
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE model_catalog (id INTEGER PRIMARY KEY, spec TEXT, tier TEXT)")
+    con.executemany("INSERT INTO model_catalog (spec, tier) VALUES (?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def test_model_catalog_missing_database_is_ok(tmp_path):
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "data" / "bestteam.db"
+    finding = check_model_catalog(db)
+    assert finding.level == "OK"
+    assert not db.exists(), "check_model_catalog created the database"
+
+
+def test_model_catalog_with_a_real_chat_model_is_ok(tmp_path):
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "bestteam.db"
+    _catalog_db(db, [("fake:ok", "fast"), ("openai:gpt-4o", "advanced")])
+    finding = check_model_catalog(db)
+    assert finding.level == "OK", finding
+
+
+def test_model_catalog_of_only_fakes_warns(tmp_path):
+    # Exactly the shape tests/e2e/conftest.py::_reshape_model_catalog leaves
+    # behind if it ever runs against a real database: every provider entry
+    # deleted, fake-architect:e2e added. The wizard then silently builds the
+    # same canned team for every intent.
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "bestteam.db"
+    _catalog_db(db, [("fake-architect:e2e", "fast"), ("fake:ok", "fast")])
+    finding = check_model_catalog(db)
+    assert finding.level == "WARN"
+    assert "fake-architect:e2e" in finding.message
+
+
+def test_model_catalog_empty_warns(tmp_path):
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "bestteam.db"
+    _catalog_db(db, [])
+    finding = check_model_catalog(db)
+    assert finding.level == "WARN"
+
+
+def test_model_catalog_of_only_embedding_models_warns(tmp_path):
+    # Embedding entries share this table but can never be an agent's model
+    # (see db/model_catalog.py::list_chat_entries), so a catalog holding
+    # nothing else still leaves the wizard with no model to build with.
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "bestteam.db"
+    _catalog_db(db, [("openai:text-embedding-3-small", "embedding")])
+    finding = check_model_catalog(db)
+    assert finding.level == "WARN"
+
+
+def test_model_catalog_pre_migration_schema_is_ok(tmp_path):
+    import sqlite3
+
+    from ui.backend.env_check import check_model_catalog
+
+    db = tmp_path / "bestteam.db"
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY)")
+    con.commit()
+    con.close()
+    finding = check_model_catalog(db)
+    assert finding.level == "OK"
+
+
+def test_the_cli_includes_the_model_catalog_finding(monkeypatch, capsys, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from ui.backend import admin
+
+    db = tmp_path / "bestteam.db"
+    _stamped_db(db, _script_head())
+    _catalog_db(db, [("fake-architect:e2e", "fast")])
+    monkeypatch.setattr("sys.argv", ["admin", "check-env"])
+    for key, value in _GOOD.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(db))
+    admin.main()
+    assert "model-catalog" in capsys.readouterr().out

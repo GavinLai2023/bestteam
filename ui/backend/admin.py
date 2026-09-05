@@ -62,7 +62,14 @@ from .db.users import (
     set_admin_status,
     set_user_org,
 )
-from .env_check import check_environment, check_org_retention, check_schema, default_db_path, has_failures
+from .env_check import (
+    check_environment,
+    check_model_catalog,
+    check_org_retention,
+    check_schema,
+    default_db_path,
+    has_failures,
+)
 
 
 def _open_session():
@@ -196,7 +203,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
         db_path = default_db_path(os.environ)
-        findings = check_environment(os.environ) + [check_schema(db_path), check_org_retention(db_path)]
+        findings = check_environment(os.environ) + [
+            check_schema(db_path),
+            check_org_retention(db_path),
+            check_model_catalog(db_path),
+        ]
         return _print_findings(findings)
 
     if args.command == "check-health":
