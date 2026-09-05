@@ -218,6 +218,10 @@ export const EVENT_LABELS: Record<string, string> = {
   // Grounding-lite (core/grounding.py): a knowledge-base agent's citations
   // checked against its own searches.
   grounding_checked: '📎 grounding checked',
+  // The live milestone (spec 2026-09-05): never persisted, so this row is
+  // live-only -- it appears while `useRunTrace` streams a running run and
+  // vanishes on reload, unlike every other row here.
+  agent_working: '⚡ live update',
   // Admin diagnostic re-runs only (core/trace.py) -- never on a customer run.
   agent_prompt: '📝 prompt',
   model_turn: '💬 model turn',
@@ -241,6 +245,10 @@ export function renderEventData(event: TraceEvent): string | null {
   switch (type) {
     case 'agent_started':
       return [data.role as string | undefined, data.goal as string | undefined].filter(Boolean).join(' — ')
+    case 'agent_working': {
+      const kind = data.kind === 'subagent' ? 'sub-agent' : 'agent'
+      return `${kind} ${data.state as string | undefined}`
+    }
     case 'agent_progress':
       return (data.note as string | undefined) ?? null
     case 'tool_started':
