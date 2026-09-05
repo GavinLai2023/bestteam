@@ -1,0 +1,30 @@
+.wizard-busy {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wizard-busy-pulse {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: wizard-busy-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wizard-busy-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wizard-busy-pulse {
+    animation: none;
+  }
+}

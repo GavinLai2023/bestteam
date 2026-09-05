@@ -259,6 +259,10 @@ export const en = {
     sessionLoadFailed: "Couldn't load this session: {{detail}}",
     optional: '(optional)',
     needMore: 'We need a bit more information first.',
+    // Shown beside a live pulse while a stage waits on the model. Says only
+    // what is true of every stage that uses it; which stage is running is
+    // already on the button that started it.
+    busyNotice: 'Please stay on this page until this finishes — it can take a minute or two.',
     teamMode: {
       sequential: 'Step by step',
       parallel: 'All at once',

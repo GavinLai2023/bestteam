@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import WizardBusyNotice from '../../components/WizardBusyNotice'
 import { api } from '../../lib/api'
 import { useConfirm } from '../../lib/useConfirm'
 import { pickDefaultModel } from '../../lib/models'
@@ -560,6 +561,7 @@ export default function DocumentsPage() {
           {busy ? stageLabel() : t('common.continue')}
         </button>
       </div>
+      {busy && <WizardBusyNotice />}
       {confirmNode}
     </div>
   )

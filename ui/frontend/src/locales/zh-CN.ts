@@ -220,6 +220,7 @@ export const zhCN: Resources = {
     sessionLoadFailed: '无法加载该会话：{{detail}}',
     optional: '（选填）',
     needMore: '还需要补充一些信息。',
+    busyNotice: '请留在本页等待完成，通常需要一到两分钟。',
     teamMode: {
       sequential: '逐步执行',
       parallel: '并行执行',

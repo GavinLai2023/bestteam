@@ -754,4 +754,26 @@ describe('DocumentsPage', () => {
     expect(mockedApi.submitSolution).not.toHaveBeenCalled()
     expect(mockedApi.submitSpecification).not.toHaveBeenCalled()
   })
+
+  it('keeps a busy notice on screen while the team is being designed', async () => {
+    let finish: (session: BuilderSession) => void = () => {}
+    mockedApi.submitSpecification.mockReturnValue(
+      new Promise<BuilderSession>((resolve) => {
+        finish = resolve
+      }),
+    )
+
+    renderPage()
+    await screen.findByText('Add your documents')
+
+    expect(screen.queryByRole('status')).toBeNull()
+
+    fireEvent.click(screen.getByText('Skip for now'))
+
+    expect(await screen.findByRole('status')).toBeInTheDocument()
+
+    finish({ ...freshSession(), specification_json: { name: 't', agents: [], teams: [] } })
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/wizard/s1/preview'))
+  })
 })
