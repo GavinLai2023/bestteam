@@ -83,9 +83,9 @@ describe('RunProgressStrip', () => {
   })
 
   it('clamps the position at the team size when completedAgents overshoots it', () => {
-    // A hierarchical node's flush can count a delegated subordinate's
-    // completion too, so completedAgents can exceed agentCount -- the line
-    // must sit at the last position, never claim "agent 4 of 3".
+    // completedAgents can exceed agentCount (see the clamp's own comment in
+    // RunProgressStrip.tsx) -- the line must sit at the last position,
+    // never claim "agent 4 of 3".
     render(
       <RunProgressStrip
         working={[{ agent: 'b', kind: 'agent' }]}
