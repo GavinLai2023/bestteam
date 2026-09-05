@@ -211,10 +211,13 @@ class RunRegistry:
         into a log that is replayed in full to every new subscriber and held
         for up to `_MAX_RETAINED_RUNS` runs.
 
-        The consequence is deliberate -- a visitor who reconnects mid-run sees
-        no partial text, and then receives the complete reply on
-        `run_completed`, which IS replayed. The durable path stays the source
-        of truth.
+        The consequence is deliberate for a delta -- a visitor who reconnects
+        mid-run sees no partial text, and then receives the complete reply on
+        `run_completed`, which IS replayed. A delta is never replayed one by
+        one; a milestone still in force IS re-seeded to a later subscriber
+        (see `subscribe()`'s synthetic `agent_working` replay from
+        `_live_working`). The durable path stays the source of truth either
+        way.
         """
         with self._lock:
             if run_id not in self._runs:
