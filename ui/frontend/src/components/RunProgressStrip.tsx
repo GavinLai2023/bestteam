@@ -46,12 +46,16 @@ export default function RunProgressStrip({ working, completedAgents, agentCount,
       agent: displayNameFor(subordinate.agent),
     })
   } else if (topLevel.length > 1) {
-    // Clamped against the team's declared size: `completedAgents` counts
-    // every persisted `agent_completed`, and the engine emits one for a
-    // delegated subordinate too, so a hierarchical node's flush can bump the
-    // counter past `agentCount` (`config.agents.length`, which does not grow
-    // to match). "4 of 3" is worse than sitting at the last position --
-    // ShareProgress.tsx clamps for the same reason.
+    // Clamped because the numerator and denominator are not the same
+    // quantity: `completedAgents` counts one persisted `agent_completed` per
+    // CONTRIBUTING NODE, while `agentCount` is `config.agents.length`, a
+    // count of DECLARED agents. They diverge downward for a hierarchical
+    // team -- one node, one completion, however many subordinates it
+    // delegates to -- which is harmless, it only under-counts. Nothing in
+    // the specification schema stops an agent's name from appearing in more
+    // than one team, though, and each such node contributes its own
+    // completion; that diverges upward, and "4 of 3" is worse than sitting
+    // at the last position (ShareProgress.tsx clamps for the same reason).
     text = agentCount
       ? t('run.progressParallelOfN', { count: topLevel.length, done: Math.min(completedAgents, agentCount), total: agentCount })
       : t('run.progressParallel', { count: topLevel.length })
