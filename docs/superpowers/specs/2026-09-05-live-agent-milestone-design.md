@@ -172,11 +172,15 @@ Three approaches were weighed:
   counter resets to `0s` whenever *any* member starts or finishes, so a
   member that has been running for minutes appears to restart when a
   sibling does.
-- One shared component, `RunProgressStrip`, placed on both pages. It does
-  **not** touch the friendly event feed or the three registers in
-  `traceEvents.ts`; `agent_working` is absent from `FRIENDLY_EVENT_TYPES`
-  and unknown to `useFriendlyEventTitle`, so it can never leak into the
-  feed as a line.
+- One shared component, `RunProgressStrip`, placed on both pages. It leaves
+  the two **customer-facing** registers in `traceEvents.ts` untouched:
+  `agent_working` is absent from `FRIENDLY_EVENT_TYPES` and unknown to
+  `useFriendlyEventTitle`, and `useDetailedEventLine`'s `default: return
+  null` keeps it out of "Show details" too, so it can never leak into either
+  customer feed as a line. The **admin-only** register, `EVENT_LABELS` +
+  `renderEventData`, does label it deliberately -- an operator watching a
+  live run sees a real row instead of raw JSON, and the row disappears on
+  reload since nothing here is persisted.
 - **The denominator.** `GET /api/pipelines` gains, beside
   `agent_display_names`, an ordered `agent_names: {pipeline → [technical
   name, …]}` built from `config.agents` in order (`main.py:655–671`). The
