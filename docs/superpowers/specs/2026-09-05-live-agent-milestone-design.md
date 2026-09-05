@@ -136,7 +136,11 @@ Three approaches were weighed:
 - `RunRegistry` gains `_live_working: Dict[str, Dict[str, str]]` —
   `run_id → {agent name → kind}`, insertion-ordered — following the
   `_live_text` precedent:
-  - `publish_transient`: `state == "started"` inserts, `"completed"` removes.
+  - `publish_transient`: `state == "started"` inserts **if absent** (first
+    kind wins — a delegated subordinate's own `agent_started` follows its
+    `subagent_started`, since `_run_agent` emits one for every agent it
+    runs, and the subordinate must stay a subordinate), `"completed"`
+    removes. The frontend hook keeps the same first-kind-wins rule.
   - `publish`: a persisted `agent_completed` / `subagent_completed` removes
     that agent (idempotent with the transient removal); a terminal event pops
     the whole entry, beside the existing `_live_text.pop`.
