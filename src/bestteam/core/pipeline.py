@@ -131,6 +131,7 @@ class Pipeline:
         diagnostic: bool = False,
         on_token: Optional[Callable[[str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        on_live_event: Optional[Callable[["TraceEvent"], None]] = None,
     ) -> Iterator[TraceEvent]:
         """Run the pipeline while yielding live TraceEvents — what the
         monitoring UI subscribes to.
@@ -142,6 +143,11 @@ class Pipeline:
         `should_cancel` is polled between deltas so a long reply can be
         stopped mid-generation rather than merely ignored. Both default to
         None → no streaming, current behavior unchanged.
+
+        `on_live_event`, if given, receives an `agent_working` TraceEvent as
+        each agent starts (and as a delegated subordinate starts/finishes),
+        before the node's own events reach this iterator. Live-only: never
+        yielded here, never persisted. Default None → unchanged.
 
         `diagnostic=True` (an admin's diagnostic re-run) makes the adapter also
         emit the prompts, model turns and tool args/results a normal trace
@@ -201,6 +207,8 @@ class Pipeline:
                 streaming_kwargs["on_token"] = on_token
             if should_cancel is not None:
                 streaming_kwargs["should_cancel"] = should_cancel
+            if on_live_event is not None:
+                streaming_kwargs["on_live_event"] = on_live_event
             for event in self._adapter.stream(
                 self._compiled,
                 input,

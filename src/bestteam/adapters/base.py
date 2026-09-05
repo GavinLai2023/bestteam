@@ -46,6 +46,7 @@ class EngineAdapter(ABC):
         *,
         on_token: Optional[Callable[[str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        on_live_event: Optional[Callable[["TraceEvent"], None]] = None,
     ) -> Iterator["TraceEvent"]:
         """Yield TraceEvents live as the pipeline executes, for monitoring/observability.
 
@@ -58,6 +59,12 @@ class EngineAdapter(ABC):
         persisted. `should_cancel`, if given, is polled between deltas so a
         long reply can be stopped mid-generation.
 
-        An adapter whose engine cannot stream may ignore both: the caller
+        `on_live_event`, if given, receives an `agent_working` TraceEvent the
+        moment an agent (or a delegated subordinate) starts or a subordinate
+        finishes -- the same side-channel argument as `on_token`: this
+        iterator only yields at coarse boundaries. Never yielded, never
+        persisted (see core/trace.py).
+
+        An adapter whose engine cannot stream may ignore all three: the caller
         falls back to the progress events this iterator already yields.
         """

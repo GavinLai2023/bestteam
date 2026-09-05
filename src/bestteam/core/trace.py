@@ -46,6 +46,15 @@ class TraceEvent:
     — a consumer that stops on the terminal event won't see them, but the backend
     drains the full stream to meter/record them.
 
+    **Live-only, never in the stream:** "agent_working" (`data` =
+    {"kind": "agent" | "subagent", "state": "started" | "completed"}) is
+    handed to `Pipeline.stream(on_live_event=)` the moment a node emits
+    `agent_started` / `subagent_started` / `subagent_completed` -- the
+    persisted copies of those stay buffered until the node returns. It is
+    never yielded by `stream()`, never persisted, and exists only so a live
+    subscriber can learn who is working right now (see
+    docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md).
+
     **Diagnostic runs only** (`Pipeline.run/stream(..., diagnostic=True)`, an
     admin's diagnostic re-run of a poor run -- never a customer-initiated run):
     "agent_prompt" (`data` = {"system_prompt": str, "input": str}, the exact
