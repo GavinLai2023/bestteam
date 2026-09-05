@@ -170,3 +170,50 @@ describe('PreviewPage Continue button while a test run is in flight', () => {
     expect(shown).not.toContain('hit_count')
   })
 })
+
+describe('PreviewPage live milestone', () => {
+  const realWebSocket = window.WebSocket
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    FakeWebSocket.instances = []
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket
+    const session = sessionWithSpec()
+    session.specification_json = {
+      name: 'support_team',
+      agents: [
+        { name: 'a', display_name: 'Ada' },
+        { name: 'b' },
+      ],
+      teams: [{ name: 't', mode: 'sequential', agents: ['a', 'b'] }],
+    }
+    mockContext = { session, setSession: vi.fn(), loading: false, sessionId: 's1' }
+  })
+
+  afterEach(() => {
+    window.WebSocket = realWebSocket
+  })
+
+  it('shows the working agent by its friendly name with its position', async () => {
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_working', agent: 'a', data: { kind: 'agent', state: 'started' } })
+    })
+    expect(screen.getByRole('status')).toHaveTextContent('Ada is working · agent 1 of 2')
+
+    await act(async () => {
+      ws!.emit({ type: 'run_completed', pipeline: 'support_team', agent: null, data: 'done', usage: [] })
+    })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('never renders the milestone as a line of the feed', async () => {
+    const ws = await startARun()
+
+    await act(async () => {
+      ws!.emit({ type: 'agent_working', agent: 'b', data: { kind: 'agent', state: 'started' } })
+    })
+    expect(document.querySelector('.activity-card.agent_working')).toBeNull()
+  })
+})
