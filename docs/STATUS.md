@@ -34,7 +34,13 @@
   re-seeds it to a reconnecting subscriber, and a shared `RunProgressStrip`
   says "«name» is working · agent k of N · s" (N from the new ordered
   `agent_names` on `GET /api/pipelines`). The stale hint now shows only while
-  nobody is working. The persisted trace is unchanged. Spec:
+  nobody is working. The persisted trace is unchanged. The wizard's two
+  model-blocked stages got the same idea at a smaller scale: Challenge and
+  Documents showed nothing but a changed button label while the Business
+  Analyst or the Solution Architect worked (Questions and Confirm at least
+  carried a notice), which reads as a frozen page once the call runs past a
+  few seconds — a shared `WizardBusyNotice` now pairs a live pulse with one
+  `wizard.busyNotice` line under both. Spec:
   `docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md`.
 - **Built-in skills lost their `_vN` name suffixes** (2026-09-02). Migration
   `w0x1y2z3a4b5` renames the platform tier (`email_input_security_core`,
