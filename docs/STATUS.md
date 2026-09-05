@@ -6,6 +6,23 @@
 
 ## Done
 
+- **The E2E fixture can no longer reshape a real catalog, and `check-env`
+  notices when one is empty** (2026-09-05). A dev box built three Team
+  Builder teams whose specs had nothing to do with the intents typed in:
+  every one came back named `e2e_support_team`. `tests/e2e/conftest.py`'s
+  `_reshape_model_catalog` had run against the real database (twice over the
+  project's life, most recently 2026-09-02), deleting both provider entries
+  and leaving `fake-architect:e2e` -- which sorts first, so
+  `pickDefaultModel()`'s last-resort `?? entries[0]` handed it to the
+  Solution Architect, and `_FakeArchitectChatModel` answers the wizard's
+  `Specification` schema with a hardcoded constant. Nothing errored for three
+  days. The hole: `_assert_port_free` samples port 8000 once, a minute-plus
+  before the DELETEs, and `_wait_healthy` returns on the first healthy
+  /api/health without asking whose it is. The reshape now proves ownership
+  out of band first (`tests/e2e/_guard.py`: write a random spec through the
+  API, require it to appear in the fixture's own temp DB, fail closed), and
+  `admin check-env` grew a `model-catalog` WARN for a catalog holding no real
+  chat model.
 - **Live agent milestone on the Run page and the wizard preview** (2026-09-05).
   A six-agent team's page used to show nothing for up to three minutes at a
   stretch -- `LangGraphAdapter.stream()` only yields at node boundaries, so an
