@@ -54,6 +54,14 @@ describe('deriveWorkingAgents', () => {
     expect(deriveWorkingAgents([persisted('agent_completed', 'zed')]).working).toEqual([])
   })
 
+  it('keeps the first kind when the same agent starts again under a different one', () => {
+    // A delegated subordinate emits `subagent_started` and then, from
+    // `_run_agent`, its own `agent_started`. If the second one relabelled it,
+    // a delegation would render as a parallel team.
+    const { working } = deriveWorkingAgents([started('researcher', 'subagent'), started('researcher', 'agent')])
+    expect(working).toEqual([{ agent: 'researcher', kind: 'subagent' }])
+  })
+
   it('clears everyone at a terminal event', () => {
     for (const type of ['run_completed', 'run_failed', 'run_cancelled']) {
       expect(deriveWorkingAgents([started('a'), started('b'), { type, data: 'x' }]).working).toEqual([])
