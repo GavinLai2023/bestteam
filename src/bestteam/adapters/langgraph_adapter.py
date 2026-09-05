@@ -1268,6 +1268,12 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
         if member.model is None:
             raise ConfigurationError(f"Agent '{member.name}' has no model configured")
 
+    # `agents` is the manager's subordinates. A generated team routinely lists
+    # the manager there too, which used to hand it a `delegate_to_<itself>`:
+    # forced to call a tool on its first turn, a manager could satisfy that by
+    # delegating to itself and never consult a single specialist.
+    subordinates = [agent for agent in team.agents if agent.name != manager.name]
+
     guidance_lines = [
         "You manage a team of specialists. For any part of the request that "
         "falls within a specialist's domain below, delegate that sub-task to "
@@ -1277,7 +1283,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
         "final answer -- a request can need input from several of them at "
         "once:",
     ]
-    for agent in team.agents:
+    for agent in subordinates:
         guidance_lines.append(
             f"- {agent.name} ({agent.role}, goal: {agent.goal}): "
             f"call delegate_to_{agent.name}(task) to delegate to them."
@@ -1302,7 +1308,7 @@ def _hierarchical_node(team: Team, *, streams: bool = False):
                 diagnostic=diagnostic,
                 should_cancel=state.get("should_cancel"),
             )
-            for agent in team.agents
+            for agent in subordinates
         ]
         extra_system_prompt = f"{preamble}\n\n{delegation_guidance}" if preamble else delegation_guidance
         text = _run_agent(

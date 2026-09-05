@@ -66,7 +66,9 @@ Group agents into teams. Use 'sequential' mode when agents hand work to each \
 other in order, 'parallel' mode when they work independently on the same \
 input, and 'hierarchical' mode (with a 'manager' agent) when one agent \
 should coordinate and delegate to the others -- the metaphor customers will \
-see is "hiring a team with a manager". Give each team a friendly \
+see is "hiring a team with a manager". A team's `agents` are the members its \
+manager delegates to, so do not list the manager itself among them. Give each \
+team a friendly \
 display_name and friendly_description describing how the team works \
 together in plain language.
 

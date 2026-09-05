@@ -29,6 +29,7 @@ class _RecordingToolCallingChatModel(_FakeToolCallingChatModel):
         calls = getattr(self, "bind_tools_calls", None) or []
         calls.append(tool_choice)
         object.__setattr__(self, "bind_tools_calls", calls)
+        object.__setattr__(self, "bound_tool_names", [fn.__name__ for fn in tools])
         return self
 
 
@@ -338,3 +339,61 @@ def test_a_failure_that_is_not_about_tool_choice_is_not_retried_away():
 
     with pytest.raises(Exception, match="Invalid API key"):
         Pipeline(name="wf", steps=[team]).run("do the thing")
+
+
+def test_manager_gets_no_delegate_tool_for_itself():
+    """A manager listed in its own team's `agents` must not become its own
+    subordinate. Every hierarchical team the Solution Architect has produced
+    lists the manager there, and the resulting `delegate_to_<manager>` let a
+    manager satisfy its forced first tool call by delegating to itself --
+    burning a model call and leaving the real specialists unconsulted."""
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=FakeMessagesListChatModel(responses=[AIMessage(content="research findings")]),
+    )
+
+    manager_model = _RecordingToolCallingChatModel(
+        responses=[AIMessage(content="Final answer with no delegation")]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(
+        name="team",
+        agents=[manager, researcher],
+        mode=CollaborationMode.HIERARCHICAL,
+        manager=manager,
+    )
+    Pipeline(name="wf", steps=[team]).run("do the thing")
+
+    assert manager_model.bound_tool_names == ["delegate_to_researcher"]
+
+
+def test_delegation_guidance_omits_a_manager_listed_among_its_own_agents():
+    """The guidance is built from a second pass over `team.agents`, so it needs
+    the same exclusion as the tools -- otherwise the manager is told to call a
+    `delegate_to_manager` that no longer exists."""
+    researcher = Agent(
+        name="researcher",
+        role="Researcher",
+        goal="research things",
+        model=FakeMessagesListChatModel(responses=[AIMessage(content="research findings")]),
+    )
+
+    manager_model = _RecordingToolCallingChatModel(
+        responses=[AIMessage(content="Final answer with no delegation")]
+    )
+    manager = Agent(name="manager", role="Manager", goal="coordinate the team", model=manager_model)
+
+    team = Team(
+        name="team",
+        agents=[manager, researcher],
+        mode=CollaborationMode.HIERARCHICAL,
+        manager=manager,
+    )
+    Pipeline(name="wf", steps=[team]).run("do the thing")
+
+    prompt = [m for m in manager_model.last_messages if isinstance(m, SystemMessage)][0].content
+    assert "delegate_to_researcher" in prompt
+    assert "delegate_to_manager" not in prompt

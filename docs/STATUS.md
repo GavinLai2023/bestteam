@@ -6,6 +6,27 @@
 
 ## Done
 
+- **A hierarchical manager can no longer delegate to itself, and no agent
+  invents facts it was never given** (2026-09-06). A customer asked a live
+  nutrition team how to reach it on WeChat or WhatsApp and got a confident
+  walkthrough of an official WeChat account and a verified WhatsApp number —
+  neither of which exists. Two independent defects met in that one answer.
+  **First**, `_hierarchical_node` built a `delegate_to_<name>` for every entry
+  in `team.agents`, and the Solution Architect had listed the manager among its
+  own team's members — as it had in **all six** hierarchical teams ever
+  generated here. Forced to call a tool on its first turn
+  (`require_tool_use_on_first_call`), the manager satisfied that by delegating
+  to *itself*: a duplicate model call, and neither specialist consulted. Three
+  of thirteen delegating runs had burned one. The adapter now excludes the
+  manager from its own subordinate list, which fixes the six stored configs
+  with no migration, and the architect prompt says `agents` means the members
+  the manager delegates to. **Second**, `Agent.system_prompt()` was three lines
+  of identity with no constraint on invention, and grounding
+  (`core/grounding.py`) only checks an agent whose turn actually searched a
+  knowledge base — this team had none, so nothing applied. Every agent's prompt
+  now ends with `NO_FABRICATION_GUARD`: state only what you were given, and say
+  you do not know rather than inventing a channel, account, price or policy.
+
 - **The E2E fixture can no longer reshape a real catalog, and `check-env`
   notices when one is empty** (2026-09-05). A dev box built three Team
   Builder teams whose specs had nothing to do with the intents typed in:

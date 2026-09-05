@@ -11,6 +11,19 @@ from .grounding import GROUNDING_LEVELS, GROUNDING_POLICIES
 # customers never need to know which engine ends up consuming it.
 ModelSpec = Any
 
+#: Appended to every agent's system prompt. Grounding (`core/grounding.py`)
+#: only checks an agent whose turn actually searched a knowledge base, so a
+#: team without one had nothing at all holding it to what it was told -- and a
+#: customer-facing agent asked about a channel, price or policy it had never
+#: heard of would invent a confident answer rather than decline.
+NO_FABRICATION_GUARD = (
+    "Only state facts you were given: in the request, in your background "
+    "above, or returned by your tools. If you are asked about something you "
+    "have no information on -- an organisation's contact channels, accounts, "
+    "prices, policies or availability -- say you do not have that information "
+    "instead of inventing an answer."
+)
+
 
 @dataclass
 class Agent:
@@ -64,4 +77,5 @@ class Agent:
         lines = [f"You are {self.name}, a {self.role}.", f"Your goal: {self.goal}"]
         if self.backstory:
             lines.append(f"Background: {self.backstory}")
+        lines.append(NO_FABRICATION_GUARD)
         return "\n".join(lines)
