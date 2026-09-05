@@ -76,7 +76,6 @@ file in that directory — so keep them short. Deep reference material belongs i
 | `docs/DECISIONS.md` | **Why** decisions were made, so they aren't re-litigated |
 | `docs/KNOWLEDGE_BASES.md` | Full KB reference: retrieval, ingestion, metering, grounding |
 | `docs/ADMIN_MANUAL.md` | The five admin-only pages; keep current when one changes |
-| `docs/RESUME_BRIEF.md` | Portfolio/CV summary: pitch, status, stack, measured code stats |
 
 ## Known limitations — don't assume these exist
 
