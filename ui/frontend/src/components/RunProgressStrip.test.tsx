@@ -67,4 +67,61 @@ describe('RunProgressStrip', () => {
     )
     expect(screen.getByRole('status')).not.toHaveTextContent(/\ba\b is working/)
   })
+
+  it('counts members for a parallel team with no known team size', () => {
+    render(
+      <RunProgressStrip
+        working={[
+          { agent: 'a', kind: 'agent' },
+          { agent: 'b', kind: 'agent' },
+        ]}
+        completedAgents={0}
+        displayNameFor={friendly}
+      />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('2 members working at once · 0s')
+  })
+
+  it('clamps the position at the team size when completedAgents overshoots it', () => {
+    // A hierarchical node's flush can count a delegated subordinate's
+    // completion too, so completedAgents can exceed agentCount -- the line
+    // must sit at the last position, never claim "agent 4 of 3".
+    render(
+      <RunProgressStrip
+        working={[{ agent: 'b', kind: 'agent' }]}
+        completedAgents={5}
+        agentCount={3}
+        displayNameFor={friendly}
+      />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('Bert is working · agent 3 of 3 · 0s')
+  })
+
+  it('clamps "done" at the team size for a parallel team too', () => {
+    render(
+      <RunProgressStrip
+        working={[
+          { agent: 'a', kind: 'agent' },
+          { agent: 'b', kind: 'agent' },
+        ]}
+        completedAgents={5}
+        agentCount={3}
+        displayNameFor={friendly}
+      />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('2 members working at once · 3 of 3 done · 0s')
+  })
+
+  it('keeps the elapsed time out of the announced sentence', () => {
+    render(
+      <RunProgressStrip working={[{ agent: 'a', kind: 'agent' }]} completedAgents={0} displayNameFor={friendly} />,
+    )
+    const status = screen.getByRole('status')
+    const elapsed = status.querySelector('[aria-hidden="true"]')
+    expect(elapsed).not.toBeNull()
+    expect(elapsed).toHaveTextContent('0s')
+    // The sentence itself (the status element minus the hidden span) carries
+    // no aria-hidden marker -- only the ticking part is silenced.
+    expect(status).not.toHaveAttribute('aria-hidden')
+  })
 })

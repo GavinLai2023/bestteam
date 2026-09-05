@@ -178,12 +178,17 @@ export const en = {
     waitingFirstStep: 'Waiting for your team to start work…',
     stale: 'No update for {{seconds}}s — still working, this can take a while for longer tasks.',
     // The live milestone (spec 2026-09-05): who is working right now. Names
-    // are the friendly ones; the technical name never reaches this copy.
-    progressOne: '{{name}} is working · {{seconds}}s',
-    progressOneOfN: '{{name}} is working · agent {{index}} of {{total}} · {{seconds}}s',
-    progressParallel: '{{count}} members working at once · {{seconds}}s',
-    progressParallelOfN: '{{count}} members working at once · {{done}} of {{total}} done · {{seconds}}s',
-    progressDelegated: '{{manager}} is working · handed to {{agent}} · {{seconds}}s',
+    // are the friendly ones; the technical name never reaches this copy. The
+    // elapsed count lives in its own `progressElapsed` key, rendered as a
+    // separate `aria-hidden` span -- folded into these sentences, the ticking
+    // seconds would re-announce the whole line to a screen reader every
+    // second on an 11-12 minute run.
+    progressOne: '{{name}} is working',
+    progressOneOfN: '{{name}} is working · agent {{index}} of {{total}}',
+    progressParallel: '{{count}} members working at once',
+    progressParallelOfN: '{{count}} members working at once · {{done}} of {{total}} done',
+    progressDelegated: '{{manager}} is working · handed to {{agent}}',
+    progressElapsed: ' · {{seconds}}s',
     runAgain: 'Run again',
     progress: 'Progress',
     showDetails: 'Show details',

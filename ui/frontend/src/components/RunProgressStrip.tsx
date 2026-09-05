@@ -44,21 +44,32 @@ export default function RunProgressStrip({ working, completedAgents, agentCount,
     text = t('run.progressDelegated', {
       manager: displayNameFor(manager),
       agent: displayNameFor(subordinate.agent),
-      seconds,
     })
   } else if (topLevel.length > 1) {
+    // Clamped against the team's declared size: `completedAgents` counts
+    // every persisted `agent_completed`, and the engine emits one for a
+    // delegated subordinate too, so a hierarchical node's flush can bump the
+    // counter past `agentCount` (`config.agents.length`, which does not grow
+    // to match). "4 of 3" is worse than sitting at the last position --
+    // ShareProgress.tsx clamps for the same reason.
     text = agentCount
-      ? t('run.progressParallelOfN', { count: topLevel.length, done: completedAgents, total: agentCount, seconds })
-      : t('run.progressParallel', { count: topLevel.length, seconds })
+      ? t('run.progressParallelOfN', { count: topLevel.length, done: Math.min(completedAgents, agentCount), total: agentCount })
+      : t('run.progressParallel', { count: topLevel.length })
   } else {
     const name = displayNameFor(topLevel[0].agent)
     text = agentCount
-      ? t('run.progressOneOfN', { name, index: completedAgents + 1, total: agentCount, seconds })
-      : t('run.progressOne', { name, seconds })
+      ? t('run.progressOneOfN', { name, index: Math.min(completedAgents + 1, agentCount), total: agentCount })
+      : t('run.progressOne', { name })
   }
   return (
     <p className="run-progress-strip" role="status">
       {text}
+      {/* Elapsed time lives outside the live region's announced text: a
+          `role="status"` line is `aria-live="polite"`/`aria-atomic`, and a
+          screen reader ignores changes confined to `aria-hidden` content --
+          so the sentence re-announces only when the agent changes, not once
+          a second for the run's whole 11-12 minutes. */}
+      <span aria-hidden="true">{t('run.progressElapsed', { seconds })}</span>
     </p>
   )
 }
