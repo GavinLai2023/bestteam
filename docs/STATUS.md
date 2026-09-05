@@ -6,6 +6,19 @@
 
 ## Done
 
+- **Live agent milestone on the Run page and the wizard preview** (2026-09-05).
+  A six-agent team's page used to show nothing for up to three minutes at a
+  stretch -- `LangGraphAdapter.stream()` only yields at node boundaries, so an
+  agent's whole event batch lands when it finishes, and the 20 s stale hint
+  was lit for ~95 % of a run. Now a node hands an `on_live_event` callback
+  (plumbed like `on_token`) a transient `agent_working` event the moment an
+  agent, or a delegated subordinate, starts; `run_in_background` fans it out
+  via `registry.publish_transient`, the registry keeps the working set and
+  re-seeds it to a reconnecting subscriber, and a shared `RunProgressStrip`
+  says "«name» is working · agent k of N · s" (N from the new ordered
+  `agent_names` on `GET /api/pipelines`). The stale hint now shows only while
+  nobody is working. The persisted trace is unchanged. Spec:
+  `docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md`.
 - **Built-in skills lost their `_vN` name suffixes** (2026-09-02). Migration
   `w0x1y2z3a4b5` renames the platform tier (`email_input_security_core`,
   `property_maintenance_intake` — the former `_v2` content, with `_v1`'s
@@ -2630,6 +2643,16 @@
 
 ## Next steps / roadmap
 
+- **The other four sub-projects of the 2026-09-05 slow-run diagnosis**, in the
+  agreed order: a duration ceiling for manual runs (the triggered path has
+  `_release_stale_run`; a manual run has nothing); run-time decline/ask-back
+  for an input that is not a task for this team (the customer's 59-character
+  aside that produced 90k tokens); whether SEQUENTIAL should carry the
+  customer's original input past the first agent (`state["context"] or
+  state["input"]`, `langgraph_adapter.py`); progress for the wizard's long
+  synchronous steps (no real percentage exists for one model call -- an
+  estimate, or streaming, each its own design). Each needs its own design
+  note and ruling.
 - **Feedback phase 3: the self-closing loop** (spec'd out of scope
   2026-08-26). In order of ambition: LLM categorisation/dedup of incoming
   feedback (its bodies are attacker-controlled text — inbound-email
