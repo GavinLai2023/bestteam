@@ -26,6 +26,13 @@ describe('friendlyStatusFor', () => {
     expect(friendlyStatusFor(events)).not.toMatch(/email_find/)
   })
 
+  it('maps the live agent_working milestone to the same "working" wording as agent_started', () => {
+    // visitor_safe_event nulls agent/data for this type, so it carries no
+    // more than agent_started already does here (spec 2026-09-05).
+    const events: TraceEvent[] = [{ type: 'agent_working', agent: undefined, data: null }]
+    expect(friendlyStatusFor(events)).toBe('share.status.working')
+  })
+
   it('falls back to the default key for an unmapped event type', () => {
     const events: TraceEvent[] = [{ type: 'some_future_event', agent: undefined, data: null }]
     expect(friendlyStatusFor(events)).toBe('share.status.default')
