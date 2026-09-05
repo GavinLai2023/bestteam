@@ -52,6 +52,13 @@ class RunRegistry:
         # (Codex review finding). Dropped at the terminal event, since
         # `run_completed` then carries the authoritative text.
         self._live_text: Dict[str, str] = {}
+        # The agents currently working, per run -- the second thing kept from
+        # the transient channel (beside `_live_text`), for the same reason: a
+        # subscriber that arrives or reconnects mid-agent would otherwise see
+        # no live milestone until the next node flushes. Agent name -> kind
+        # ("agent" | "subagent"), insertion-ordered. Dropped at the terminal
+        # event. See docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md.
+        self._live_working: Dict[str, Dict[str, str]] = {}
         # One lock serialises the event append, the replay snapshot, and
         # subscriber insertion so a publish landing between subscribe()'s
         # replay and its registration can't be lost to that subscriber
@@ -73,6 +80,7 @@ class RunRegistry:
             self._subscribers[run.id] = []
             self._cancel_flags[run.id] = threading.Event()
             self._live_text[run.id] = ""
+            self._live_working[run.id] = {}
             self._evict_if_over_bound()
         return run
 
@@ -90,6 +98,7 @@ class RunRegistry:
             self._subscribers.pop(run_id, None)
             self._cancel_flags.pop(run_id, None)
             self._live_text.pop(run_id, None)
+            self._live_working.pop(run_id, None)
 
     def _evict_if_over_bound(self) -> None:
         """Evict the oldest terminal, subscriber-free runs until back within
@@ -115,6 +124,7 @@ class RunRegistry:
             del self._subscribers[run_id]
             self._cancel_flags.pop(run_id, None)
             self._live_text.pop(run_id, None)
+            self._live_working.pop(run_id, None)
 
     def get(self, run_id: str) -> "Run | None":
         return self._runs.get(run_id)
@@ -138,6 +148,7 @@ class RunRegistry:
             run.input = ""
             run.events = []
             self._live_text.pop(run_id, None)
+            self._live_working.pop(run_id, None)
             return True
 
     def request_cancel(self, run_id: str) -> bool:
@@ -176,18 +187,25 @@ class RunRegistry:
                 run.status = "failed"
             elif event["type"] == "run_cancelled":
                 run.status = "cancelled"
+            agent = event.get("agent")
+            if event["type"] in ("agent_completed", "subagent_completed") and agent:
+                # The persisted completion is the authoritative "no longer
+                # working" -- idempotent with the transient one below.
+                self._live_working.get(run_id, {}).pop(agent, None)
             if event["type"] in ("run_completed", "run_failed", "run_cancelled"):
                 # The terminal event carries the authoritative reply, so a
                 # retained preview would only show it twice.
                 self._live_text.pop(run_id, None)
+                self._live_working.pop(run_id, None)
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
     def publish_transient(self, run_id: str, event: dict) -> None:
         """Fan an event out to live subscribers without recording it.
 
-        Token deltas only (see
-        docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md).
+        Token deltas and the live `agent_working` milestone (see
+        docs/superpowers/specs/2026-08-23-share-chat-streaming-design.md and
+        docs/superpowers/specs/2026-09-05-live-agent-milestone-design.md).
         Unlike `publish`, this appends nothing to `run.events` and drives no
         status change: a long reply would otherwise put thousands of entries
         into a log that is replayed in full to every new subscriber and held
@@ -206,6 +224,16 @@ class RunRegistry:
                 self._live_text[run_id] = self._live_text.get(run_id, "") + str(event.get("data") or "")
             elif event.get("type") == "reply_reset":
                 self._live_text[run_id] = ""
+            elif event.get("type") == "agent_working" and event.get("agent"):
+                data = event.get("data") or {}
+                working = self._live_working.setdefault(run_id, {})
+                if data.get("state") == "completed":
+                    working.pop(event["agent"], None)
+                else:
+                    # First kind wins: a delegated subordinate's own
+                    # `agent_started` follows its `subagent_started`, and it
+                    # must stay a subordinate for the strip's rendering.
+                    working.setdefault(event["agent"], data.get("kind", "agent"))
             for loop, subscriber_queue in self._subscribers[run_id]:
                 loop.call_soon_threadsafe(subscriber_queue.put_nowait, event)
 
@@ -230,6 +258,12 @@ class RunRegistry:
                 # subscriber arrived, so the preview it builds is the whole
                 # reply rather than whatever suffix it happened to catch.
                 subscriber_queue.put_nowait({"type": "reply_delta", "data": streamed_so_far})
+            for agent, kind in (self._live_working.get(run_id) or {}).items():
+                # One synthetic "started" per agent still working, so a
+                # subscriber arriving mid-agent gets its strip back.
+                subscriber_queue.put_nowait(
+                    {"type": "agent_working", "agent": agent, "data": {"kind": kind, "state": "started"}}
+                )
             self._subscribers[run_id].append((asyncio.get_running_loop(), subscriber_queue))
         return subscriber_queue
 

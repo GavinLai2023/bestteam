@@ -238,3 +238,131 @@ def test_the_seed_is_dropped_once_the_run_is_terminal():
         assert queue.empty()
 
     asyncio.run(_run())
+
+
+# --- The live agent_working milestone (spec 2026-09-05) -------------------
+
+
+def _working(agent, state="started", kind="agent"):
+    return {"type": "agent_working", "agent": agent, "data": {"kind": kind, "state": state}}
+
+
+def test_an_agent_working_event_is_replayed_to_a_late_subscriber():
+    # The worker starts before the client's WebSocket opens, and a client can
+    # reconnect mid-agent; either way the strip must come back.
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, _working("a"))
+
+        queue = reg.subscribe(run.id)
+
+        assert queue.get_nowait() == _working("a")
+        assert queue.empty()
+        assert reg.get(run.id).events == [], "the milestone must never enter the replay log"
+
+    asyncio.run(_run())
+
+
+def test_a_persisted_completion_ends_the_live_milestone():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, _working("a"))
+        reg.publish(run.id, {"type": "agent_completed", "agent": "a", "data": "done"})
+
+        queue = reg.subscribe(run.id)
+
+        assert [e["type"] for e in _drain(queue)] == ["agent_completed"]
+
+    asyncio.run(_run())
+
+
+def test_a_transient_subagent_completion_ends_its_milestone():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, _working("manager"))
+        reg.publish_transient(run.id, _working("researcher", kind="subagent"))
+        reg.publish_transient(run.id, _working("researcher", state="completed", kind="subagent"))
+
+        queue = reg.subscribe(run.id)
+
+        assert _drain(queue) == [_working("manager")]
+
+    asyncio.run(_run())
+
+
+def test_a_subordinates_own_agent_started_does_not_promote_it():
+    # `_run_agent` emits `agent_started` for the subordinate too, right after
+    # its `subagent_started`; the first kind seen must win, or a replay would
+    # render the delegation as a parallel team.
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, _working("researcher", kind="subagent"))
+        reg.publish_transient(run.id, _working("researcher", kind="agent"))
+
+        queue = reg.subscribe(run.id)
+
+        assert _drain(queue) == [_working("researcher", kind="subagent")]
+
+    asyncio.run(_run())
+
+
+def test_the_working_set_is_dropped_at_the_terminal_event():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish_transient(run.id, _working("a"))
+        reg.publish(run.id, {"type": "run_completed", "data": "done"})
+
+        queue = reg.subscribe(run.id)
+
+        assert [e["type"] for e in _drain(queue)] == ["run_completed"]
+
+    asyncio.run(_run())
+
+
+def test_working_milestones_replay_in_start_order_after_the_log():
+    import asyncio
+
+    reg = RunRegistry()
+
+    async def _run():
+        run = reg.create("wf", "input")
+        reg.publish(run.id, {"type": "run_started", "data": "input"})
+        reg.publish_transient(run.id, _working("a"))
+        reg.publish_transient(run.id, _working("b"))
+
+        queue = reg.subscribe(run.id)
+
+        assert _drain(queue) == [
+            {"type": "run_started", "data": "input"},
+            _working("a"),
+            _working("b"),
+        ]
+
+    asyncio.run(_run())
+
+
+def _drain(queue):
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+    return items
