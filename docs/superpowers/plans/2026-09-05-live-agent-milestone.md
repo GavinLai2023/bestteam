@@ -22,7 +22,7 @@
 - Run everything through the project venv: `.\.venv\Scripts\python.exe` on Windows.
 - Every commit ends with:
   ```
-  Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+  Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4
   ```
 
@@ -411,7 +411,7 @@ agent_started / subagent_started / subagent_completed, also hands an
 agent_working TraceEvent to the live sink at once. Never yielded, never
 persisted; a failing sink is logged and ignored.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -553,16 +553,6 @@ def test_working_milestones_replay_in_start_order_after_the_log():
     asyncio.run(_run())
 
 
-def test_purge_content_forgets_the_working_set_too():
-    reg = RunRegistry()
-    run = reg.create("wf", "input")
-    reg.publish_transient(run.id, _working("a"))
-    _complete(reg, run.id)
-
-    assert reg.purge_content(run.id) is True
-    assert run.id not in reg._live_working
-
-
 def _drain(queue):
     items = []
     while not queue.empty():
@@ -593,7 +583,7 @@ In `ui/backend/registry.py`:
 
 (b) `create` — after `self._live_text[run.id] = ""` add `self._live_working[run.id] = {}`.
 
-(c) At each of the four existing `self._live_text.pop(run_id, None)` sites in `remove`, `_evict_if_over_bound`, `purge_content`, and `publish`'s terminal branch, add the line `self._live_working.pop(run_id, None)` directly beneath it.
+(c) At each of the four existing `self._live_text.pop(run_id, None)` sites — in `discard`, `_evict_if_over_bound`, `purge_content`, and `publish`'s terminal branch — add the line `self._live_working.pop(run_id, None)` directly beneath it. Only the `publish` one is reachable with a non-empty working set (a terminal event always precedes eviction and purge, and `discard` only ever sees a run created but never dispatched); the other three are deliberate parity with `_live_text`, so the two dicts share one lifecycle. Tested where reachable, in Step 1's terminal-event test.
 
 (d) `publish` — before the `if event["type"] in ("run_completed", ...)` block add:
 
@@ -661,7 +651,7 @@ registry remembers who is working (beside _live_text), drops an agent on
 its persisted or transient completion and the whole set at the terminal
 event, and seeds a new subscriber with one started event per working agent.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -778,7 +768,7 @@ run_in_background hands Pipeline.stream an on_live_event that fans the
 milestone out via registry.publish_transient. The three places that
 stated the channel was for token deltas only now name the milestone too.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -878,7 +868,7 @@ git commit -m "feat(api): GET /api/pipelines returns each team's agents in order
 The Run page's live milestone needs a denominator; agent_display_names
 omits agents without a display_name and a dict is not a promise of order.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -998,8 +988,6 @@ export interface WorkingAgents {
   completedAgents: number
 }
 
-const EMPTY: WorkingAgents = { working: [], completedAgents: 0 }
-
 function remove(working: WorkingAgent[], agent: string) {
   const index = working.findIndex((w) => w.agent === agent)
   if (index >= 0) working.splice(index, 1)
@@ -1033,7 +1021,7 @@ export function deriveWorkingAgents(events: TraceEvent[]): WorkingAgents {
       remove(working, agent)
     }
   }
-  return working.length === 0 && completedAgents === 0 ? EMPTY : { working, completedAgents }
+  return { working, completedAgents }
 }
 
 export function useWorkingAgents(events: TraceEvent[]): WorkingAgents {
@@ -1052,7 +1040,7 @@ Expected: PASS.
 git add ui/frontend/src/lib/workingAgents.ts ui/frontend/src/lib/workingAgents.test.ts
 git commit -m "feat(frontend): derive the working agents from the live milestone
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -1278,7 +1266,7 @@ Expected: PASS, and `tsc` clean (a missing zh-CN key would fail here).
 git add ui/frontend/src/components/RunProgressStrip.tsx ui/frontend/src/components/RunProgressStrip.css ui/frontend/src/components/RunProgressStrip.test.tsx ui/frontend/src/locales/en.ts ui/frontend/src/locales/zh-CN.ts
 git commit -m "feat(frontend): RunProgressStrip -- who is working, k of N, elapsed
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -1444,7 +1432,7 @@ Expected: all PASS (existing tests included — in particular 'shows a waiting h
 git add ui/frontend/src/pages/MonitorPage.tsx ui/frontend/src/pages/MonitorPage.test.tsx
 git commit -m "feat(run page): show who is working; stale hint only when nobody is
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -1558,7 +1546,7 @@ Expected: all PASS.
 git add ui/frontend/src/pages/wizard/PreviewPage.tsx ui/frontend/src/pages/wizard/PreviewPage.test.tsx
 git commit -m "feat(wizard): live milestone on the preview step's test run
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
@@ -1636,7 +1624,7 @@ Expected: all pass. If a run fails, fix the cause before committing — do not s
 git add docs/STATUS.md
 git commit -m "docs(status): live agent milestone done; the four follow-on sub-projects queued
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PHxcRyEegpcLqDFYSW2En4"
 ```
 
