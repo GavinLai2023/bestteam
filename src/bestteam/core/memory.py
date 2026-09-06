@@ -1460,6 +1460,15 @@ class MemoryManager:
             "Use them to personalize your response where relevant; do not mention "
             "these notes explicitly."
         )
+        # A run's own answer is recorded as episodic/procedural memory, so an
+        # invented fact comes back here next time framed as background -- which
+        # `NO_FABRICATION_GUARD` ("facts you were given ... in your background
+        # above") then licenses repeating. Say what those two types actually are.
+        lines.append(
+            "An (episodic) or (procedural) note records what was said in an "
+            "earlier session, not a verified fact: on its own it is never "
+            "evidence that a channel, account, price or policy it mentions exists."
+        )
         return RecallResult(preamble="\n".join(lines), count=len(hits), expansion_usage=expansion_usage)
 
     def recall_preamble(self, user_id: Optional[str], query: str) -> str:

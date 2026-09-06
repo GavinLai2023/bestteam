@@ -6,6 +6,25 @@
 
 ## Done
 
+- **Recalled memory no longer launders a team's own inventions into fact**
+  (2026-09-06). The day the anti-fabrication guard shipped, the same customer
+  asked the same nutrition team the same question and was told again to search
+  for "our official WeChat account". The guard was working: both specialists
+  answered that they had no such information, and the manager even opened with
+  "sorry, I have no details". It was not inventing anything — it was repeating
+  itself. The *earlier*, pre-guard run's fabricated answer had been recorded as
+  episodic and procedural memory, and at recall time those two rows were the
+  only memories this user had. Recall presents them as "background reference",
+  and `NO_FABRICATION_GUARD` counts "your background above" as a legitimate
+  source of facts, so the two texts between them licensed the repeat — and the
+  repeat was recorded in turn. The preamble now says what those note types are:
+  an `(episodic)` or `(procedural)` note records what was said in an earlier
+  session, not a verified fact, and on its own is never evidence that a
+  channel, account, price or policy exists. **Still a constraint, not a
+  guarantee** — a team that must answer "how do I reach you" needs a knowledge
+  base holding the real channels plus `grounding_policy: refuse`. Memory rows
+  already written stay polluted; purging them is an admin action.
+
 - **The ops half of the Postgres cutover: a `db` service, engine-following
   backup/restore, and the runbook** (2026-09-10,
   `specs/2026-09-10-postgres-cutover-ops-design.md`; brought forward from
