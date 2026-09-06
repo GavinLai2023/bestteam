@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .dependencies import record_version_dependencies
-from .models import PipelineRecord, PipelineVersion
+from .models import EmailTrigger, PipelineRecord, PipelineVersion
 
 
 def publish_pipeline_version(
@@ -31,7 +31,8 @@ def publish_pipeline_version(
     current-version pointer. Returns `(record, version)`; does NOT commit.
 
     `pipeline_id` given and found *within `org_id`* -> that existing head
-    (rename-safe: `record.name = name`). Otherwise resolve-or-create the head by
+    (rename-safe: `record.name = name`, and the org's email trigger follows the
+    rename when it names this head). Otherwise resolve-or-create the head by
     `(org_id, name)` -- so a stale session pointer (deleted team), or one that
     names another org's pipeline, recreates cleanly in the caller's own org, and
     two sessions deploying the same name converge on one head. The lookup is
@@ -53,6 +54,20 @@ def publish_pipeline_version(
             .one_or_none()
         )
     if record is not None:
+        # `email_triggers.pipeline_name` is a name-keyed reference with nothing
+        # else to resolve by, so a rename must carry it along or the org's
+        # trigger is left naming a team that no longer exists: still enabled,
+        # refusing every build, and killing automatic email answering silently.
+        # A rename is a redeploy, and a trigger stays on across redeploys (only
+        # a pause or a mailbox change switches it off). Only a trigger naming
+        # THIS head moves -- the org has one trigger and it may hold another
+        # team's automatic runs.
+        if record.name != name:
+            (
+                db.query(EmailTrigger)
+                .filter_by(org_id=org_id, pipeline_name=record.name)
+                .update({EmailTrigger.pipeline_name: name})
+            )
         record.name = name
         record.config = config
         record.status = "deployed"
