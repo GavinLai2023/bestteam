@@ -1,6 +1,7 @@
 # bestteam — `ui/backend/db/` (persistence layer)
 
-Per-deployment SQLite (or Postgres by URL) via SQLAlchemy 2.0 (`pip install 'bestteam[ui]'`).
+Per-deployment SQLite (or Postgres by URL) via SQLAlchemy 2.0
+(`pip install 'bestteam[ui]'`).
 `db/models.py` defines the schema. Root `CLAUDE.md` for the overview;
 `ui/backend/CLAUDE.md` for the API layer that uses it.
 

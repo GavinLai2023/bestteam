@@ -402,7 +402,9 @@ Append new entries at the bottom using this template:
   - **The migration is not small and not started.** `make_engine` hardcodes
     SQLite and takes a *file path*, not a URL
     (`ui/backend/db/database.py:41`), and `pyproject.toml` carries no
-    Postgres driver.
+    Postgres driver. (*Superseded 2026-09-07*: `make_engine` now takes a URL
+    and `psycopg` ships in the `ui` extra — see the entry below. The
+    single-process ruling stands.)
   - **"One member per org" is an authorisation gap, not a database one.** It
     is the constraint customers will hit first, and RBAC fixes it on SQLite
     exactly as well as on Postgres.
