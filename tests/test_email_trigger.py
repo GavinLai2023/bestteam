@@ -2847,3 +2847,66 @@ def test_poll_once_reconciles_draft_outcomes_per_org(db, monkeypatch):
 
     poll_once(_no_pipeline, session_factory=_Factory())
     assert reconciled == [a.id, b.id]
+
+
+# --- with foreign keys enforced (Postgres always does) ------------------------
+
+
+def test_start_triggered_run_dispatches_when_foreign_keys_are_enforced(tmp_path, monkeypatch):
+    """Both run pointers this path writes name a `runs` row that does not exist
+    yet, by design: the claim (`inbox_events.run_id`) is committed before any
+    pipeline build is attempted, so a build failure releases the messages
+    penalty-free, and the dispatch CAS writes `email_triggers.last_run_id` in
+    the statement before the row is inserted. Were either a foreign key, every
+    autonomous run would be refused by an engine that enforces them -- Postgres
+    always does. Built on its own engine because the suite's does not (Ruling
+    7's fallback), the same way `test_crud_api.py::
+    test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions`
+    does.
+    """
+    from sqlalchemy import event
+
+    from bestteam import (
+        AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification,
+    )
+    from ui.backend.db.models import InboxEvent, Run
+
+    monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
+    engine = make_test_engine(tmp_path)
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _enforce_foreign_keys(dbapi_connection, _record):
+            dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    init_db(engine)
+    pipeline = validate_specification(
+        Specification(
+            name="triage",
+            agents=[AgentSpec(name="a", role="R", goal="g", model="fake:done")],
+            teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
+            pipeline=PipelineSpec(steps=["t"]),
+        ),
+        source=tmp_path / "triage.yaml",
+    )
+    try:
+        with session_factory(engine)() as db:
+            org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+            db.commit()
+            monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+            recorder = _SubmitRecorder()
+            monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+            poll_org(db, trigger, lambda *args: (pipeline, None))  # no IntegrityError
+
+            row = db.query(InboxEvent).one()
+            assert (row.status, row.run_id) == ("claimed", trigger.last_run_id)
+            assert db.get(Run, trigger.last_run_id) is not None
+
+            # ...and the run that was dispatched against those pointers still
+            # reaches a terminal status.
+            fn, args, kwargs = recorder.calls[0]
+            fn(*args, **kwargs)
+            db.expire_all()
+            assert db.get(Run, trigger.last_run_id).status == "completed"
+    finally:
+        engine.dispose()

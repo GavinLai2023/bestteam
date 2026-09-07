@@ -210,6 +210,14 @@ Deleting a KB cascades to all four tables (`delete_kb_ingestion_data`).
   `UPDATE ... WHERE status='pending'`) — **batching is a claim policy now, not a
   coupling.**
 
+  ⚠️ **`inbox_events.run_id` and `email_triggers.last_run_id` are loose
+  pointers, deliberately not foreign keys** (migration `z3a4b5c6d7e8`): the
+  claim is committed before the pipeline is even built and the dispatch CAS
+  writes `last_run_id` in the statement before the `runs` row is inserted, so
+  both routinely name a run that has no row yet — a state
+  `runtime._release_orphaned_claims` reconciles at startup, and one that an
+  engine enforcing keys would otherwise refuse.
+
   Identity is `UniqueConstraint(org_id, connector_type, mailbox_identity,
   mailbox_generation, external_id)`. ⚠️ **`mailbox_generation` (the IMAP
   UIDVALIDITY) is IN the key** because a UID is only meaningful within one: after
