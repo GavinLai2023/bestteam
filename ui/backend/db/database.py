@@ -1,4 +1,4 @@
-"""Engine/session setup for the per-deployment SQLite database (Phase 1).
+"""Engine/session setup for the per-deployment database (SQLite by default, Postgres by URL).
 
 Usage::
 
@@ -105,38 +105,61 @@ def readonly_engine(url: str) -> Engine:
     return create_engine(url, poolclass=NullPool)
 
 
-def make_engine(db_path: Union[str, Path] = "bestteam.db", *, echo: bool = False) -> Engine:
-    """Create a SQLAlchemy engine for a SQLite database.
+def make_engine(target: Union[str, Path] = "bestteam.db", *, echo: bool = False) -> Engine:
+    """Create a SQLAlchemy engine for a path, `:memory:`, or a database URL.
 
-    `db_path` is `:memory:` for an ephemeral database (tests, dry runs) or a
-    file path for a persistent per-deployment database. In-memory databases
-    use a `StaticPool` so every connection shares the same database -- the
-    default pooling behavior would otherwise hand out a fresh, empty
-    in-memory database per connection.
+    Three shapes:
+
+    - `":memory:"` (or `sqlite:///:memory:`): an ephemeral database on a
+      `StaticPool`, so every connection shares the one in-memory database --
+      the default pooling would hand out a fresh, empty database per
+      connection (tests, dry runs).
+    - a file path (anything without `://`): the per-deployment SQLite file.
+    - a URL: a SQLite URL behaves like the path form; any other engine gets
+      `pool_pre_ping` so a dropped server connection is replaced rather than
+      surfaced as the next query's error. Only sqlite and postgresql are
+      supported (`BESTTEAM_DATABASE_URL`).
     """
-    if str(db_path) == ":memory:":
+    target_str = str(target)
+    if target_str in (":memory:", MEMORY_URL):
         return create_engine(
-            "sqlite:///:memory:",
+            MEMORY_URL,
             echo=echo,
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-    engine = create_engine(f"sqlite:///{Path(db_path)}", echo=echo)
+    url = target_str if "://" in target_str else sqlite_url_for(target_str)
+    try:
+        backend = make_url(url).get_backend_name()
+    except ArgumentError as exc:
+        raise ValueError(f"BESTTEAM_DATABASE_URL is not a valid database URL: {exc}") from exc
 
-    @event.listens_for(engine, "connect")
-    def _use_wal(dbapi_connection, _record):
-        # One file is shared by the run workers, the ingestion executor, the
-        # email poller and every request. In the default rollback-journal
-        # mode a write transaction blocks every reader until it commits; WAL
-        # lets readers proceed beside one writer. The mode is persisted in
-        # the file, so repeating it per connection is cheap and makes a fresh
-        # file correct from its very first connection. (Busy waiting needs no
-        # setting: pysqlite's default timeout is already 5 s.)
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.close()
+    if backend == "sqlite":
+        engine = create_engine(url, echo=echo)
 
-    return engine
+        @event.listens_for(engine, "connect")
+        def _use_wal(dbapi_connection, _record):
+            # One file is shared by the run workers, the ingestion executor,
+            # the email poller and every request. In the default
+            # rollback-journal mode a write transaction blocks every reader
+            # until it commits; WAL lets readers proceed beside one writer.
+            # The mode is persisted in the file, so repeating it per
+            # connection is cheap and makes a fresh file correct from its
+            # very first connection. (Busy waiting needs no setting:
+            # pysqlite's default timeout is already 5 s.)
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+        return engine
+
+    try:
+        return create_engine(url, echo=echo, pool_pre_ping=True)
+    except (ModuleNotFoundError, NoSuchModuleError) as exc:
+        raise RuntimeError(
+            f"BESTTEAM_DATABASE_URL names the {backend!r} engine but its driver is not "
+            f"installed ({exc}); install the `ui` extra: pip install 'bestteam[ui]'"
+        ) from exc
 
 
 def init_db(engine: Engine) -> None:
