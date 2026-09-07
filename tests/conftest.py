@@ -12,11 +12,17 @@ database (a supported local-dev setup, see db_session.py) would otherwise
 have that real file created/seeded/mutated by pytest collection, the exact
 class of contamination this fixture exists to prevent. Nothing in the suite
 needs the ambient value: test_migrations.py sets its own via monkeypatch
-per-test, after this module has already run."""
+per-test, after this module has already run. The same holds for
+`BESTTEAM_DATABASE_URL`, which takes precedence over the path and is removed
+here too."""
 import os
 
 os.environ.setdefault("BESTTEAM_SECRET_KEY", "test-secret-key-not-for-production-use")
 os.environ["BESTTEAM_DB_PATH"] = ":memory:"
+# `BESTTEAM_DATABASE_URL` wins over `BESTTEAM_DB_PATH` (2026-09-07), so an
+# ambient URL would point the suite at a real database exactly as an ambient
+# path once did -- dropped for the same reason.
+os.environ.pop("BESTTEAM_DATABASE_URL", None)
 
 import importlib.util
 
