@@ -1149,9 +1149,24 @@ def run_in_background(
             # rows (Codex review finding). Still best-effort (swallowed on
             # failure below) so the terminal event further down -- the hard
             # CR-003 guarantee -- always gets published even if this fails.
-            if db is not None and run_row is not None:
+            row_persisted = False
+            if db is not None:
                 try:
                     db.rollback()
+                    if run_row is None:
+                        # The up-front insert never happened -- the failure
+                        # was in reading or writing the row itself. The
+                        # terminal trace row below needs a parent (Postgres
+                        # enforces the foreign key; the test engine does too),
+                        # so write the row now, as failed, before the event.
+                        run_row = db.get(Run, run_id) or Run(
+                            id=run_id,
+                            pipeline=getattr(pipeline, "name", ""),
+                            input=input,
+                            org_id=org_id,
+                            username=username,
+                            pipeline_version_id=pipeline_version_id,
+                        )
                     run_row.status = "failed"
                     run_row.output = message
                     # Operator-only copy, same reason as the stream loop's
@@ -1159,6 +1174,7 @@ def run_in_background(
                     run_row.internal_error = f"{type(exc).__name__}: {exc}"
                     db.add(run_row)
                     db.commit()
+                    row_persisted = True
                     # A triggered run that fails before pipeline.stream() ever
                     # yields an event (e.g. a compile failure) previously
                     # skipped normalization entirely, so its UID batch just
@@ -1170,10 +1186,15 @@ def run_in_background(
                 except Exception:  # noqa: BLE001
                     _logger.warning("Could not persist failed status for run %s", run_id)
             registry.publish(run_id, dataclasses.asdict(failed_event))
-            if db is not None:
+            if db is not None and row_persisted:
                 # `_safe_record_trace_event` rolls back internally on failure, so
                 # it self-heals a session left poisoned by whatever raised above.
                 _safe_record_trace_event(db, run_id=run_id, seq=seq, event=failed_event)
+            elif db is not None:
+                _logger.warning(
+                    "Run %s: its row could not be written, so its run_failed trace "
+                    "event is not persisted either (it would have no parent)", run_id,
+                )
     finally:
         if db is not None:
             db.close()
