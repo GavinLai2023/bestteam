@@ -67,7 +67,7 @@ from .env_check import (
     check_model_catalog,
     check_org_retention,
     check_schema,
-    default_db_path,
+    default_database_url,
     has_failures,
 )
 
@@ -202,26 +202,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Deliberately before the database is opened (`_open_session` is what
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
-        db_path = default_db_path(os.environ)
+        url = default_database_url(os.environ)
         findings = check_environment(os.environ) + [
-            check_schema(db_path),
-            check_org_retention(db_path),
-            check_model_catalog(db_path),
+            check_schema(url),
+            check_org_retention(url),
+            check_model_catalog(url),
         ]
         return _print_findings(findings)
 
     if args.command == "check-health":
-        # Guard before `_open_session`: on a box with no database yet, opening
-        # the session would CREATE it, and a health check must not.
-        db_path = default_db_path(os.environ)
-        if str(db_path) != ":memory:" and not db_path.exists():
-            print(f"[OK]   triggers: no database at {db_path} yet; nothing to monitor")
+        from sqlalchemy.exc import OperationalError
+
+        from .db.database import describe_database_url, sqlite_path_of
+
+        # Guard before `_open_session`: on a box with no SQLite file yet,
+        # opening the session would CREATE it, and a health check must not.
+        url = default_database_url(os.environ)
+        path = sqlite_path_of(url)
+        if path is not None and not path.exists():
+            print(f"[OK]   triggers: no database at {path} yet; nothing to monitor")
             return 0
         from .email_trigger import poll_seconds
         from .trigger_metrics import backlog_alert_seconds, collect, evaluate
 
-        with _open_session() as db:
-            metrics = collect(db)
+        try:
+            with _open_session() as db:
+                metrics = collect(db)
+        except OperationalError as exc:
+            # A server database that cannot be reached -- the right signal
+            # from a cron job is a FAIL line, not a traceback.
+            print(f"[FAIL] database: cannot reach {describe_database_url(url)} "
+                  f"({str(exc).splitlines()[0]})")
+            return 1
         findings = evaluate(
             metrics,
             poll_interval_seconds=poll_seconds(),
