@@ -96,6 +96,11 @@ def record_events(
     twice.
 
     `on_conflict_do_nothing` needs the dialect's own insert construct -- `_insert_for` picks it.
+
+    The count of newly recorded ids comes from `cursor.rowcount`, which
+    SQLAlchemy only memoizes for UPDATE and DELETE unless `preserve_rowcount`
+    asks for it: pysqlite happens to still answer on a spent cursor, psycopg
+    returns -1, so without the option this reported -1 on Postgres.
     """
     if not external_ids:
         return 0
@@ -120,9 +125,10 @@ def record_events(
     result = db.execute(
         _insert_for(db)(InboxEvent)
         .values(rows)
-        .on_conflict_do_nothing(index_elements=_IDENTITY_COLUMNS)
+        .on_conflict_do_nothing(index_elements=_IDENTITY_COLUMNS),
+        execution_options={"preserve_rowcount": True},
     )
-    return result.rowcount or 0
+    return max(result.rowcount, 0)
 
 
 def claim_events(
