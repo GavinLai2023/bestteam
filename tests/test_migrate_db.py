@@ -13,6 +13,7 @@ pytest.importorskip("alembic")
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import event
 
 import _postgres
 from ui.backend.db import init_db, make_engine, session_factory
@@ -20,12 +21,15 @@ from ui.backend.db.database import readonly_engine, sqlite_url_for
 from ui.backend.db.inbox_events import record_events
 from ui.backend.db.migrate import (
     MigrateError,
+    clear_migration_seed,
     head_revision,
     orphan_report,
     run_migration,
     stamped_revision,
+    upgrade_target,
 )
 from ui.backend.db.models import (
+    Base,
     Organization,
     PipelineRecord,
     PipelineVersion,
@@ -35,6 +39,7 @@ from ui.backend.db.models import (
 )
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db.pipelines import publish_pipeline_version
+from ui.backend.db.skills import publish_skill_version
 from ui.backend.db.users import create_user
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -164,6 +169,7 @@ def test_copies_everything_with_orphans_fixed_and_the_source_untouched(tmp_path)
         engine.dispose()
     assert any("verified" in line for line in lines)
     assert any("trace_events" in line and "1 skipped" in line for line in lines)
+    assert any("skipped trace_events rows" in line for line in lines)
 
 
 def test_refuses_a_non_empty_target_and_the_same_url(tmp_path):
@@ -223,3 +229,38 @@ def test_copies_the_head_pointers_across_the_version_cycle(tmp_path):
     finally:
         engine.dispose()
     assert not any("pipelines:" in line and "nulled" in line for line in lines)
+
+
+def test_clear_migration_seed_survives_a_seeded_head_pointer_cycle(tmp_path):
+    # Two populated head-pointer cycles: `pipelines.current_version_id` <->
+    # `pipeline_versions.pipeline_id`, and `skills.current_version_id` <->
+    # `skill_versions.skill_id` -- the shape the reviewer showed breaks a
+    # plain reverse-copy-order DELETE under foreign-key enforcement. Only the
+    # skills side is actually enforced by a chain-only SQLite target here:
+    # migration a4b5c6d7e8f9 deliberately never backfills the other foreign
+    # key on SQLite (a real deployment gets it from
+    # `Base.metadata.create_all()`, which a bare `upgrade_target` never
+    # runs), so skills is what makes this test genuinely fail pre-fix;
+    # pipelines rides along to prove the fix clears that cycle too.
+    url = sqlite_url_for(tmp_path / "seeded.db")
+    upgrade_target(url)
+    engine = make_engine(url)
+
+    @event.listens_for(engine, "connect")
+    def _enforce_foreign_keys(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with session_factory(engine)() as db:
+            org = get_or_create_org(db, "acme", "Acme")
+            publish_pipeline_version(db, org_id=org.id, name="team", config={"agents": [{"name": "a"}]})
+            publish_skill_version(db, org_id=org.id, name="widget", config={"instructions": "x"})
+            db.commit()
+
+        clear_migration_seed(engine, log=lambda _line: None)
+
+        with session_factory(engine)() as db:
+            for table in Base.metadata.tables.values():
+                assert db.execute(sa.select(sa.func.count()).select_from(table)).scalar_one() == 0, table.name
+    finally:
+        engine.dispose()

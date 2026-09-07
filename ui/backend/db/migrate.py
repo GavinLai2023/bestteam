@@ -164,20 +164,40 @@ def _copy_order() -> List[Table]:
     return [table for table, _constraints in pairs if table is not None]
 
 
+def _forward_pointing_fks(table: Table, position: Dict[str, int]) -> List[sa.ForeignKey]:
+    """`table`'s own foreign keys whose parent sits at or after it in copy order.
+
+    These are the head-pointer and self-reference cycles `_copy_order` breaks:
+    `copy_rows` writes them as NULL and patches them once every table is
+    loaded; `clear_migration_seed` must null them out first so an engine that
+    enforces foreign keys accepts the reverse-copy-order deletes.
+    """
+    return [fk for fk in table.foreign_keys if position[fk.column.table.name] >= position[table.name]]
+
+
 def clear_migration_seed(target: Engine, log: Callable[[str], None]) -> None:
     """Delete whatever the migration chain seeded, so the copy starts empty.
 
     Pre-flight proved the target held no rows; `alembic upgrade head` then ran,
     and migration `b7c8d9e0f1a2` seeds the `default` organisation. That row is
     schema bootstrap, not data -- and the source carries a `default` org of its
-    own, which would collide on both the primary key and the unique name. What
-    makes this safe is the order: everything deleted here was written by the
-    chain moments ago, on a database pre-flight had just found empty. Reverse
-    copy order, so an engine that enforces foreign keys accepts the deletes.
+    own, which would collide on both the primary key and the unique name. Safe
+    against any populated head-pointer cycle the chain might one day seed, not
+    just this one row: every forward-pointing foreign key
+    (`_forward_pointing_fks`, the same test `copy_rows` applies) is nulled out
+    first, table by table in copy order, then each table is deleted in reverse
+    copy order -- the same null-then-delete shape `copy_rows` uses to write
+    rows, so an engine that enforces foreign keys accepts both phases.
     """
+    order = _copy_order()
+    position = {table.name: index for index, table in enumerate(order)}
     cleared: Dict[str, int] = {}
     with target.begin() as conn:
-        for table in reversed(_copy_order()):
+        for table in order:
+            forward = _forward_pointing_fks(table, position)
+            if forward:
+                conn.execute(table.update().values({fk.parent.name: None for fk in forward}))
+        for table in reversed(order):
             deleted = conn.execute(table.delete()).rowcount
             if deleted:
                 cleared[table.name] = deleted
@@ -206,6 +226,7 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
         for table in order:
             stats = TableCopy()
             pk_columns = list(table.primary_key.columns)
+            forward = set(_forward_pointing_fks(table, position))
             keys: set = set()
             batch: List[dict] = []
             for row in src.execute(select(table).order_by(*pk_columns)).mappings():
@@ -217,7 +238,7 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
                     if value is None:
                         continue
                     parent_name = fk.column.table.name
-                    if position[parent_name] >= position[table.name]:
+                    if fk in forward:
                         # Forward (or self) reference: resolved after every table is in.
                         if not fk.parent.nullable:
                             raise MigrateError(
@@ -280,6 +301,8 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
         stats = report.tables[table.name]
         extra = f", {stats.skipped} skipped, {stats.nulled} foreign keys nulled" if stats.skipped or stats.nulled else ""
         log(f"  {table.name}: {stats.copied} copied{extra}")
+        if stats.skipped_keys:
+            log(f"    skipped {table.name} rows (NOT NULL foreign key dangling): {', '.join(stats.skipped_keys)}")
     return report
 
 
