@@ -53,6 +53,9 @@ def _seed_run(db, org_id, *, run_id, status="completed", age_days=0):
         output="Drafted a reply to alice@example.com", status=status,
         org_id=org_id, created_at=created,
     ))
+    # The run row is the parent of all three rows below; flush it first so it
+    # exists before anything references it.
+    db.flush()
     db.add(TraceEventRecord(run_id=run_id, seq=1, type="agent_completed",
                             agent="writer", data='{"text": "alice@example.com"}'))
     db.add(UsageRecord(run_id=run_id, agent="writer", model="fake:",
