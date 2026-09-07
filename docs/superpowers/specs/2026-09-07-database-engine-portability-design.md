@@ -398,6 +398,11 @@ requirement: local development needs no Postgres.
   explanation.
 - **`ui/backend/db/CLAUDE.md`** "Engine and wiring": the resolver, the three
   `make_engine` shapes, foreign keys enforced in tests only.
+- **`ui/backend/CLAUDE.md`**, email-trigger section: the sentence "Real
+  scale-out is blocked on Postgres (`make_engine` hardcodes SQLite and takes
+  a path, not a URL)" becomes untrue once PR 1 lands and is rewritten — after
+  this work, scale-out is blocked on ADR 2's in-process state, not on the
+  engine.
 - **`docs/ADMIN_GUIDE.md`** environment table: the new variable, and
   `migrate-db` in the CLI list.
 - **`docs/STATUS.md`**: one entry per merged PR, plus the SQL-per-request
