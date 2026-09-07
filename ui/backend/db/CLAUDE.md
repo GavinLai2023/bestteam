@@ -29,9 +29,9 @@ CI-verified, not yet operated — `docs/DECISIONS.md`.
   below depend on knowing that nothing catches a dangling FK for you there.
   The *test* engine (`tests/helpers.py::make_test_engine`) turns it on and
   Postgres always enforces, so the suite is where a child-before-parent write
-  is caught: write parents first. Write parents first and flush before adding
-  children — SQLAlchemy has no relationship() here to order the INSERTs, so a
-  Run added in the same flush as its trace rows can be inserted after them.
+  is caught: write parents first, and flush before adding children —
+  SQLAlchemy has no relationship() here to order the INSERTs, so a Run added
+  in the same flush as its trace rows can be inserted after them.
 - Dialect-specific spots, all deliberate: `inbox_events._insert_for` picks the
   sqlite/postgresql `insert` for `on_conflict_do_nothing`; the users partial
   index carries both `sqlite_where` and `postgresql_where`; boolean server
