@@ -30,6 +30,7 @@ def test_file_engine_uses_wal(tmp_path):
     assert _pragma(engine, "journal_mode") == "wal"
 
 
+@pytest.mark.sqlite_only  # asserts a SQLite pragma; there is no Postgres equivalent
 def test_memory_engine_is_unchanged():
     engine = make_test_engine()
 
