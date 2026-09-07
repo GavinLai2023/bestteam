@@ -1,10 +1,11 @@
 """Immutable skill versioning and pipeline pinning unit tests."""
 
 import pytest
+from sqlalchemy import text
 
 from helpers import make_test_engine
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import SkillVersion, PipelineDependency
+from ui.backend.db.models import Organization, SkillVersion, PipelineDependency
 from ui.backend.db.skills import publish_skill_version
 from ui.backend.db.pipelines import publish_pipeline_version
 from ui.backend.skills import load_skills
@@ -15,7 +16,12 @@ pytestmark = pytest.mark.unit
 def _db():
     engine = make_test_engine()
     init_db(engine)
-    return session_factory(engine)()
+    session = session_factory(engine)()
+    # `skills.org_id` / `pipelines.org_id` are foreign keys: write the
+    # organisation this module publishes into before any of its rows.
+    session.add(Organization(id=7, name="acme"))
+    session.commit()
+    return session
 
 
 def _pipeline_config():
@@ -115,6 +121,7 @@ def test_redeploy_is_explicit_upgrade_to_current_skill_version():
     assert dep_v2.resource_version_id == skill_v2.id
 
 
+@pytest.mark.sqlite_only  # writes a dangling pin no enforcing engine can hold
 def test_missing_pinned_version_never_falls_forward_to_mutable_head():
     db = _db()
     publish_skill_version(
@@ -131,8 +138,15 @@ def test_missing_pinned_version_never_falls_forward_to_mutable_head():
         pipeline_version_id=pipeline_version.id,
         resource_kind="skill",
     ).one()
+    # `resource_version_id` is a foreign key, so this corruption cannot be
+    # written while the test engine enforces keys. Production's SQLite file
+    # does not enforce them -- a partial restore or operator surgery can leave
+    # exactly this dangling pin -- so drop enforcement for the one write and
+    # put it straight back. Postgres can never hold the row: hence sqlite_only.
+    db.execute(text("PRAGMA foreign_keys=OFF"))
     dependency.resource_version_id = 999_999
     db.commit()
+    db.execute(text("PRAGMA foreign_keys=ON"))
 
     # Corruption must fail closed at pipeline validation (unknown skill), not
     # silently execute whatever mutable content happens to be current.

@@ -2,7 +2,7 @@ import pytest
 
 from helpers import make_test_engine
 from ui.backend.db.database import init_db, session_factory
-from ui.backend.db.models import PipelineRecord, PipelineVersion
+from ui.backend.db.models import Organization, PipelineRecord, PipelineVersion
 from ui.backend.db.pipelines import publish_pipeline_version, current_version_id
 
 pytestmark = pytest.mark.unit
@@ -11,7 +11,12 @@ pytestmark = pytest.mark.unit
 def _db():
     engine = make_test_engine()
     init_db(engine)
-    return session_factory(engine)()
+    session = session_factory(engine)()
+    # `pipelines.org_id` is a foreign key: write the two organisations this
+    # module deploys into before any of their teams.
+    session.add_all([Organization(id=1, name="acme"), Organization(id=2, name="globex")])
+    session.commit()
+    return session
 
 
 def test_first_deploy_creates_v1_and_sets_pointer():
