@@ -165,3 +165,11 @@ to where the detail and the reasoning live.
   what catches ordering and cross-test isolation bugs.
 - `fake-architect:` is a deterministic model for E2E coverage of the wizard's
   AI-generation steps, and is deliberately never in `DEFAULT_MODEL_CATALOG`.
+- **Every fixture builds its engine with `tests/helpers.make_test_engine()`**
+  (`:memory:`) or `make_test_engine(tmp_path)` (a file, for anything with two
+  live Sessions). Both enforce foreign keys. With `BESTTEAM_TEST_DATABASE_URL`
+  set (the `backend-postgres` CI job) each call is a fresh Postgres database
+  cloned from a template; `sqlite_only` marks the few tests that depend on
+  SQLite-only behaviour (the `:memory:` shared connection, a foreign-key state
+  Postgres cannot hold, or a SQLite pragma). That lane runs serially on every
+  backend PR (about 9 minutes).

@@ -6,6 +6,25 @@
 
 ## Done
 
+- **The backend suite runs against Postgres on every backend PR, and the
+  SQLite suite enforces foreign keys** (2026-09-07, PR 2 of 3 for
+  `specs/2026-09-07-database-engine-portability-design.md`). One test-engine
+  entry point (`make_test_engine`) replaced 113 direct engine constructions in
+  66 test files; on the `backend-postgres` lane every call is a fresh database
+  cloned from a per-session template and dropped after the test. The
+  42-migration chain replays on Postgres and lands on exactly `create_all`'s
+  tables and columns. Enforcing foreign keys in the test engine found 15
+  fixture defects and 2 product defects — a team delete dropped versions its
+  head pointer still named, and the email trigger's claim
+  (`inbox_events.run_id`) and dispatch token (`email_triggers.last_run_id`)
+  were declared as keys the design violates by construction (they are loose
+  pointers now, migration `z3a4b5c6d7e8`); the run failure path also wrote its
+  `run_failed` trace before its own `runs` row (the three 2026-09-05 orphans)
+  and now writes the row first. The lane itself found three more: SQLite-only
+  assumptions in old migrations, aware datetimes shifted by a non-UTC server
+  session (now pinned to UTC), and `record_events` counting -1 new rows on
+  psycopg. Lane duration: 8m38s.
+
 - **The database is chosen by one URL; the code is Postgres-ready, production
   stays on SQLite** (2026-09-07, PR 1 of 3 for
   `specs/2026-09-07-database-engine-portability-design.md`).
