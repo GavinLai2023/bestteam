@@ -13,7 +13,9 @@ SQLite notes: adding FKs / swapping unique constraints requires
 `op.batch_alter_table` (move-and-copy). The original tables were created by
 `create_all` with UNNAMED inline UNIQUE constraints, so each batch block
 passes a `naming_convention` that lets Alembic's reflection assign them the
-deterministic name `uq_<table>_<column>` that `drop_constraint` targets.
+deterministic name `uq_<table>_<column>` that `drop_constraint` targets. On
+Postgres the same constraints already carry the server's own `<table>_name_key`
+name, so the name to drop is reflected rather than assumed.
 
 Guarded ops: `ui/backend/db_session.py` runs `create_all` at import, so by
 the time this migration runs, a booted deployment already has the
@@ -57,6 +59,20 @@ def _has_column(inspector, table: str, column: str) -> bool:
     return column in {col["name"] for col in inspector.get_columns(table)}
 
 
+def _unique_name(inspector, table: str, column: str) -> str:
+    """The name of the single-column UNIQUE constraint on `table.column`.
+
+    SQLite reflects the baseline's unnamed inline UNIQUE as anonymous, and
+    batch mode's `naming_convention` then stamps it `uq_<table>_<column>`.
+    Postgres named it itself when the table was created (`<table>_<column>_key`),
+    so ask the database instead of assuming the SQLite name.
+    """
+    for constraint in inspector.get_unique_constraints(table):
+        if list(constraint["column_names"]) == [column] and constraint.get("name"):
+            return constraint["name"]
+    return f"uq_{table}_{column}"
+
+
 def upgrade() -> None:
     """Upgrade schema."""
     inspector = sa.inspect(op.get_bind())
@@ -85,9 +101,10 @@ def upgrade() -> None:
     for table in COMPONENT_TABLES:
         if _has_column(inspector, table, "org_id"):
             continue  # fresh create_all database already matches head
+        existing_unique = _unique_name(inspector, table, "name")
         with op.batch_alter_table(table, naming_convention=NAMING) as batch:
             batch.add_column(sa.Column("org_id", sa.Integer(), nullable=True))
-            batch.drop_constraint(f"uq_{table}_name", type_="unique")
+            batch.drop_constraint(existing_unique, type_="unique")
             batch.create_unique_constraint(f"uq_{table}_org_id_name", ["org_id", "name"])
             batch.create_foreign_key(
                 f"fk_{table}_org_id_organizations", "organizations", ["org_id"], ["id"]
@@ -108,7 +125,9 @@ def upgrade() -> None:
     # database written by post-multi-tenancy code) are never reassigned.
     op.execute(
         f"UPDATE users SET org_id = {DEFAULT_ORG_SUBQUERY} "
-        "WHERE is_admin = 0 AND org_id IS NULL"
+        # `NOT is_admin`, not `is_admin = 0`: the column is BOOLEAN, and
+        # Postgres has no boolean-to-integer comparison.
+        "WHERE NOT is_admin AND org_id IS NULL"
     )
     for table in ("agents", "teams", "knowledge_bases", "workflows") + OWNED_TABLES:
         op.execute(f"UPDATE {table} SET org_id = {DEFAULT_ORG_SUBQUERY} WHERE org_id IS NULL")
