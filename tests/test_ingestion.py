@@ -19,13 +19,24 @@ from helpers import make_test_engine
 from ui.backend import ingestion
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
+from ui.backend.db.models import (
+    IngestionJob,
+    KnowledgeBaseRecord,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    Organization,
+)
 
 
 @pytest.fixture
 def engine():
     eng = make_test_engine()
     init_db(eng)
+    # Every KB, job and run in this module is stamped org_id=1; the
+    # organisation row has to exist before any of them.
+    with session_factory(eng)() as session:
+        session.add(Organization(id=1, name="acme"))
+        session.commit()
     return eng
 
 
