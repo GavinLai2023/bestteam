@@ -1321,6 +1321,43 @@ def test_delete_pipeline_refused_when_a_run_references_its_version(client):
         assert db.query(PipelineVersion).filter_by(pipeline_id=head.id).count() == 1  # history intact
 
 
+def test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions():
+    """A head and its versions reference each other (`current_version_id` down,
+    `pipeline_id` up), so deleting the versions while the pointer still names
+    one is refused by any engine that enforces foreign keys -- the Postgres
+    lane does, production's SQLite file does not. Built on its own engine
+    because the suite's does not enforce them either (Ruling 7's fallback)."""
+    from sqlalchemy import event
+
+    from ui.backend.db.models import PipelineVersion
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.pipelines import publish_pipeline_version
+
+    engine = make_test_engine()
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _enforce_foreign_keys(dbapi_connection, _record):
+            dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    init_db(engine)
+    try:
+        with session_factory(engine)() as db:
+            org = get_or_create_org(db, "fk_org")
+            head, _version = publish_pipeline_version(
+                db, org_id=org.id, name="fk_wf", config=_VALID_PIPELINE_CONFIG,
+            )
+            db.commit()
+            assert head.current_version_id is not None
+
+            response = backend_crud.delete_pipeline_config("fk_wf", org="fk_org", db=db)
+
+            assert response.status_code == 204
+            assert db.query(PipelineRecord).filter_by(name="fk_wf").one_or_none() is None
+            assert db.query(PipelineVersion).count() == 0
+    finally:
+        engine.dispose()
+
+
 def test_delete_pipeline_detaches_builder_sessions(client):
     """Deleting a never-run pipeline nulls any builder session's pipeline_id, so
     none is left pointing at a deleted head (it self-heals on next deploy)."""
