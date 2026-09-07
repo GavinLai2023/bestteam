@@ -6,6 +6,22 @@
 
 ## Done
 
+- **The database is chosen by one URL; the code is Postgres-ready, production
+  stays on SQLite** (2026-09-07, PR 1 of 3 for
+  `specs/2026-09-07-database-engine-portability-design.md`).
+  `BESTTEAM_DATABASE_URL` (else the legacy `BESTTEAM_DB_PATH`) feeds
+  `db.database.resolve_database_url`, which `db_session`, `alembic/env.py`,
+  `check-env`/`check-health` and the instance lock all follow; `make_engine`
+  takes a path, `:memory:` or a URL. The four SQLite-only spots are gone:
+  boolean `DEFAULT 1` in two models and four migrations (Postgres rejects it
+  on a boolean), the users partial index declared for SQLite only, the dedup
+  insert bound to the SQLite dialect, and `check-env` opening the file with
+  stdlib `sqlite3`. `psycopg` ships in the `ui` extra. Nothing in production
+  changes; the cutover trigger is in `DECISIONS.md`. Measured once for the
+  ops half: SQL statements per request against a copy of the dev database —
+  run list 4, run detail 3, KB list 7. PR 2 adds the Postgres CI lane
+  and foreign-key enforcement in the test engine; PR 3 adds `admin migrate-db`.
+
 - **A hierarchical manager can no longer delegate to itself, and no agent
   invents facts it was never given** (2026-09-06). A customer asked a live
   nutrition team how to reach it on WeChat or WhatsApp and got a confident
@@ -2408,11 +2424,13 @@
   decoding against a backend no test tenant has ever exercised (see the entry
   above) — deliberately not started; recorded so it is not discovered by a
   customer.
-- **Horizontal scale-out of the email poller is blocked on a Postgres
-  migration, not on the poller.** `make_engine` hardcodes SQLite and takes a
-  *file path*, not a URL (`ui/backend/db/database.py:41`), and there is no
-  Postgres driver in `pyproject.toml` — replicas cannot share the file, so no
-  amount of work inside `email_trigger.py` makes multi-host workers possible.
+- **Horizontal scale-out of the email poller is blocked on in-process state,
+  not on the poller or the engine.** The engine half is done (2026-09-07,
+  PR 1 of `specs/2026-09-07-database-engine-portability-design.md`:
+  `make_engine` takes a URL and `psycopg` ships in the `ui` extra), but
+  replicas would each run their own poller and `RunRegistry`, so no amount of
+  work inside `email_trigger.py` makes multi-host workers possible until ADR 2
+  (shared state) lands.
   The joint review's Phase 1 bundled leader election with the durable ledger;
   only the ledger was reachable, and it shipped (above). What remains
   in-process is `RunRegistry`, so the overlap guard and cooperative
@@ -2422,8 +2440,8 @@
   processing is already excluded; making the overlap guard DB-authoritative is
   the next reachable step and is now cheaper than it was, since Phase 0's
   stale-run watchdog removed the original objection to it. The Postgres
-  migration itself is platform-wide and unrelated to email — already raised
-  and deferred once in `docs/DATA_ARCHITECTURE_REVIEW_TRIAGE.md`.
+  migration itself is platform-wide and unrelated to email — its code half is
+  in flight (the spec above) and the cutover trigger is in `DECISIONS.md`.
 - **The email data model is not platformised** — the joint review's Phases
   2-5. Polling is serial across orgs and every email
   tool call opens its own IMAP connection (a 20-message batch is ~41 logins);
