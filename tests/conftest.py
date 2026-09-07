@@ -94,9 +94,17 @@ def pytest_collection_modifyitems(config, items):
     try:
         import _postgres
     except ImportError:  # pragma: no cover
+        if os.environ.get("BESTTEAM_TEST_DATABASE_URL"):
+            # The lane is on and its helper is broken -- fail loudly. Returning
+            # here would leave every test creating a database nothing drops.
+            raise
         return
     if _postgres.enabled():
-        skip = _pytest.mark.skip(reason="depends on SQLite's :memory: shared connection; not meaningful on Postgres")
+        skip = _pytest.mark.skip(reason=(
+            "depends on SQLite-only behaviour (the in-memory shared connection, a "
+            "foreign-key state Postgres cannot hold, or a SQLite pragma); not "
+            "meaningful on Postgres"
+        ))
         for item in items:
             if item.get_closest_marker("sqlite_only"):
                 item.add_marker(skip)
@@ -111,6 +119,8 @@ def _drop_postgres_test_databases():
     try:
         import _postgres
     except ImportError:  # pragma: no cover - SDK-only checkout without sqlalchemy
+        if os.environ.get("BESTTEAM_TEST_DATABASE_URL"):
+            raise
         return
     if _postgres.enabled():
         _postgres.drop_created()
@@ -120,6 +130,8 @@ def pytest_sessionfinish(session, exitstatus):
     try:
         import _postgres
     except ImportError:  # pragma: no cover
+        if os.environ.get("BESTTEAM_TEST_DATABASE_URL"):
+            raise
         return
     if _postgres.enabled():
         _postgres.drop_created()

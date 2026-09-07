@@ -1325,20 +1325,13 @@ def test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions(
     """A head and its versions reference each other (`current_version_id` down,
     `pipeline_id` up), so deleting the versions while the pointer still names
     one is refused by any engine that enforces foreign keys -- the Postgres
-    lane does, production's SQLite file does not. Built on its own engine
-    because the suite's does not enforce them either (Ruling 7's fallback)."""
-    from sqlalchemy import event
-
+    lane does, the suite's own engine does too, production's SQLite file does
+    not. Built on its own engine so the ordering is exercised in isolation."""
     from ui.backend.db.models import PipelineVersion
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.db.pipelines import publish_pipeline_version
 
     engine = make_test_engine()
-    if engine.dialect.name == "sqlite":
-        @event.listens_for(engine, "connect")
-        def _enforce_foreign_keys(dbapi_connection, _record):
-            dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
     init_db(engine)
     try:
         with session_factory(engine)() as db:

@@ -2864,13 +2864,11 @@ def test_start_triggered_run_dispatches_when_foreign_keys_are_enforced(tmp_path,
     penalty-free, and the dispatch CAS writes `email_triggers.last_run_id` in
     the statement before the row is inserted. Were either a foreign key, every
     autonomous run would be refused by an engine that enforces them -- Postgres
-    always does. Built on its own engine because the suite's does not (Ruling
-    7's fallback), the same way `test_crud_api.py::
+    always does, and so does the suite's own engine. Built on its own engine so
+    the dispatch is exercised in isolation, the same way `test_crud_api.py::
     test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions`
     does.
     """
-    from sqlalchemy import event
-
     from bestteam import (
         AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification,
     )
@@ -2878,11 +2876,6 @@ def test_start_triggered_run_dispatches_when_foreign_keys_are_enforced(tmp_path,
 
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
     engine = make_test_engine(tmp_path)
-    if engine.dialect.name == "sqlite":
-        @event.listens_for(engine, "connect")
-        def _enforce_foreign_keys(dbapi_connection, _record):
-            dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
     init_db(engine)
     pipeline = validate_specification(
         Specification(
