@@ -15,6 +15,20 @@ from ui.backend import runtime
 from ui.backend.registry import RunRegistry
 
 
+def _seed_org(engine, org_id=1):
+    """Write the organisation the triggered-run tests stamp on their runs.
+
+    `runs.org_id` is a foreign key, so the organisation has to exist before
+    any `Run` row (or `run_in_background`'s own insert) names it.
+    """
+    from ui.backend.db import session_factory
+    from ui.backend.db.models import Organization
+
+    with session_factory(engine)() as session:
+        session.add(Organization(id=org_id, name="acme"))
+        session.commit()
+
+
 # --- CR-003 -----------------------------------------------------------------
 
 
@@ -96,6 +110,7 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
     })
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
     spec = Specification(
         name="w",
@@ -174,6 +189,7 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -234,6 +250,7 @@ def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path)
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -280,6 +297,7 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("w", "in", org_id=1, username="email-trigger")
@@ -317,6 +335,7 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
@@ -378,6 +397,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -465,6 +485,7 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypa
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -545,6 +566,7 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -625,6 +647,7 @@ def test_pm_contract_run_empties_unverified_grounding_labels_but_keeps_counts(tm
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -681,6 +704,7 @@ def test_non_pm_run_keeps_grounding_checked_labels_intact(tmp_path):
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="alice")
@@ -722,6 +746,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("w", "in", org_id=1, username="email-trigger")
@@ -768,6 +793,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
