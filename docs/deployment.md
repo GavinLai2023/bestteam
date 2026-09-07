@@ -318,6 +318,18 @@ docker compose run --rm --no-deps backend alembic upgrade head
 docker compose up -d
 ```
 
+Moving to a server database is not a migration but a copy: `admin migrate-db
+--to <url>` (see the ADMIN_GUIDE). The procedure around it — provisioning,
+backups, the cutover window — is the ops half of the 2026-09-07 spec and is
+not written yet.
+
+On Postgres the migration chain must run on the EMPTY database before the
+backend ever starts against it: the rename migration `o2p3q4r5s6t7` cannot
+replay over tables the backend's `create_all` has already built (Postgres
+refuses its `DROP TABLE pipelines` while other tables reference it).
+`migrate-db` and the container entrypoint both do this; a hand-provisioned
+server must too.
+
 ## 4. Provision orgs and users (operator CLI)
 
 There is **no public registration** — neither a UI nor an API endpoint.

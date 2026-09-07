@@ -6,6 +6,23 @@
 
 ## Done
 
+- **`admin migrate-db` copies the deployment database into an empty one**
+  (2026-09-08, PR 3 of 3 for
+  `specs/2026-09-07-database-engine-portability-design.md`). Pre-flight
+  refuses a source behind head, a non-empty target, the same URL, and
+  dangling foreign keys unless `--fix-orphans` (nullable → NULL, NOT NULL →
+  row skipped, both reported with keys, and a skipped row's primary key is
+  listed); the target's schema comes from `alembic upgrade head`; the rows
+  the chain seeds are cleared, then rows go through the model tables' types
+  in a dependency order that breaks the two head-pointer cycles at their
+  nullable keys, with every forward reference (the self-referencing run
+  pointers and the `current_version_id` head pointers) patched once every
+  table is in; Postgres sequences are reset; counts and primary keys are
+  verified. Rehearsed on a copy of the development database into a local
+  Postgres: 6,942 rows across 31 tables, 104 orphans handled. The code half
+  of the spec is complete; the ops half (provisioning, backup/restore,
+  runbook, cutover) waits for the trigger in `DECISIONS.md`.
+
 - **The backend suite runs against Postgres on every backend PR, and the
   SQLite suite enforces foreign keys** (2026-09-07, PR 2 of 3 for
   `specs/2026-09-07-database-engine-portability-design.md`). One test-engine
@@ -2459,6 +2476,11 @@
   children by hand because nothing cascades) — how the team-delete defect in
   PR 2 happened. All three belong to the ops half of the spec, before the
   cutover window.
+- Pre-cutover (ops half): on Postgres, `o2p3q4r5s6t7` cannot replay over a
+  `create_all`-built schema (`DROP TABLE pipelines` is refused while other
+  tables reference it), so the chain must run on an empty database before
+  the first backend boot. `migrate-db` and the container entrypoint already
+  order it that way; the runbook says so (2026-09-08).
 - **Horizontal scale-out of the email poller is blocked on in-process state,
   not on the poller or the engine.** The engine half is done (2026-09-07,
   PR 1 of `specs/2026-09-07-database-engine-portability-design.md`:
