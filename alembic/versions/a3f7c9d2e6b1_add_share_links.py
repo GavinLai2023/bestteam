@@ -38,7 +38,7 @@ def upgrade() -> None:
             sa.Column("org_id", sa.Integer(), sa.ForeignKey("organizations.id"), nullable=False),
             sa.Column("token", sa.String(), nullable=False),
             sa.Column("created_by", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("expires_at", sa.DateTime(), nullable=True),
             sa.Column("daily_cap", sa.Integer(), nullable=False, server_default="30"),
             sa.Column("created_at", sa.DateTime(), nullable=True),
