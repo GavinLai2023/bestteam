@@ -1,6 +1,6 @@
 # bestteam — `ui/backend/db/` (persistence layer)
 
-Per-deployment SQLite via SQLAlchemy 2.0 (`pip install 'bestteam[ui]'`).
+Per-deployment SQLite (or Postgres by URL) via SQLAlchemy 2.0 (`pip install 'bestteam[ui]'`).
 `db/models.py` defines the schema. Root `CLAUDE.md` for the overview;
 `ui/backend/CLAUDE.md` for the API layer that uses it.
 
@@ -9,19 +9,29 @@ the dated specs under `docs/superpowers/specs/` and git history.
 
 ## Engine and wiring
 
-`db/database.py`: `make_engine(db_path)`, `init_db(engine)`, `session_factory`.
-`ui/backend/db_session.py` wires the per-deployment engine (default
-`ui/backend/data/bestteam.db`, override `BESTTEAM_DB_PATH`) and the `get_db()`
-dependency.
+`db/database.py`: `resolve_database_url(env)` (`BESTTEAM_DATABASE_URL` wins,
+else `BESTTEAM_DB_PATH` → `sqlite:///…`, default `ui/backend/data/bestteam.db`),
+`make_engine(path | ":memory:" | url)`, `init_db(engine)`, `session_factory`,
+`readonly_engine(url)` (a SQLite file via `mode=ro`, so a check can never
+create it). `ui/backend/db_session.py` wires the per-deployment engine, the
+`get_db()` dependency and `LOCK_ANCHOR` (what the single-instance lock is keyed
+on). **sqlite and postgresql are the two supported engines**; Postgres is
+CI-verified, not yet operated — `docs/DECISIONS.md`.
 
 - `":memory:"` uses a `StaticPool` so all connections share one database —
   needed for tests and dry runs.
-- A file engine sets **`PRAGMA journal_mode=WAL`** on every connection, so
-  readers aren't blocked by the one writer the run workers / ingestion / poller /
-  requests take turns being. ⚠️ The `-wal`/`-shm` siblings are why
+- A SQLite file engine sets **`PRAGMA journal_mode=WAL`** on every connection,
+  so readers aren't blocked by the one writer the run workers / ingestion /
+  poller / requests take turns being. ⚠️ The `-wal`/`-shm` siblings are why
   `scripts/backup-db.sh` goes through the **online backup API**, not a file copy.
-- **SQLite foreign-key enforcement is off** — several notes below depend on
-  knowing that nothing catches a dangling FK for you.
+- **SQLite foreign-key enforcement is off in production** — several notes
+  below depend on knowing that nothing catches a dangling FK for you there.
+  Postgres always enforces, so parents must be written before children.
+- Dialect-specific spots, all deliberate: `inbox_events._insert_for` picks the
+  sqlite/postgresql `insert` for `on_conflict_do_nothing`; the users partial
+  index carries both `sqlite_where` and `postgresql_where`; boolean server
+  defaults are `true()`/`false()`, never `text("1")` (Postgres rejects an
+  integer default on a boolean).
 
 ## Org multi-tenancy
 

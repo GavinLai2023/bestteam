@@ -158,6 +158,17 @@ Edit `.env` and fill in:
   hardcoded `fake:` text that reads like a real answer; `email_triage_demo_live`
   reads the `BESTTEAM_EMAIL_*` mailbox. Set it to `1` only on a dev or
   sales-demo instance.
+- **Database engine.** By default the backend uses a SQLite file on the data
+  volume (`ui/backend/data/bestteam.db`, or `BESTTEAM_DB_PATH`). Setting
+  `BESTTEAM_DATABASE_URL` (for example
+  `postgresql+psycopg://user:password@host:5432/bestteam`) selects a server
+  database instead; the URL wins when both are set, and Alembic, the operator
+  CLI and `check-env` all follow the same setting. **SQLite is the supported
+  production engine today.** Postgres support is code-complete and verified
+  in CI on every change, but it is not yet operated in production — the
+  runbook, backup and cutover procedure for it come with the ops half of
+  `docs/superpowers/specs/2026-09-07-database-engine-portability-design.md`.
+  `check-env` prints which database it resolved to (`[OK] database: ...`).
 
 TLS termination (HTTPS/WSS) is assumed to be handled by a reverse proxy or
 the hosting platform's load balancer in front of these containers.
@@ -271,6 +282,9 @@ without starting the server, or to see a migration's output on its own:
 ```bash
 docker compose run --rm --no-deps backend alembic upgrade head
 ```
+
+The migration runs against whatever `BESTTEAM_DATABASE_URL` /
+`BESTTEAM_DB_PATH` resolves to — the same database the server opens.
 
 Migrations are the canonical way the schema is created/updated
 (replacing a bare `Base.metadata.create_all()`, which still runs

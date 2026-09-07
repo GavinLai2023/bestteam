@@ -217,6 +217,7 @@ erasure, from the **Memory** page (`/api/memory`).
 |----------|-----------|
 | `BESTTEAM_SECRET_KEY` | **Required to boot.** Signs login tokens. |
 | `BESTTEAM_DB_PATH` | The deployment database. The CLI must point at the same DB as the backend (default `ui/backend/data/bestteam.db`). |
+| `BESTTEAM_DATABASE_URL` | A server database (Postgres) instead of the SQLite file; wins over `BESTTEAM_DB_PATH`. Not operated in production yet. |
 | `BESTTEAM_SECRETS_KEY` | Encrypting stored mailbox passwords (`set-email`). |
 | `BESTTEAM_MEMORY_DB` | Per-user memory. Set it for `delete-user`/`move-user` so memory is purged/reconciled correctly (§6). |
 
