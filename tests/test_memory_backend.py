@@ -25,6 +25,19 @@ from ui.backend.runtime import _make_memory, registry, run_in_background
 pytestmark = pytest.mark.unit
 
 
+def _seed_org(engine, org_id=5):
+    """Write the organisation the metering tests stamp on their runs.
+
+    `runs.org_id` is a foreign key, so it has to exist before
+    `run_in_background` inserts the run row.
+    """
+    from ui.backend.db.models import Organization
+
+    with session_factory(engine)() as session:
+        session.add(Organization(id=org_id, name="acme"))
+        session.commit()
+
+
 class _CloseSpyManager(MemoryManager):
     """MemoryManager that counts close() calls (still closes the real store)."""
 
@@ -297,6 +310,7 @@ def test_run_in_background_meters_memory_extraction(monkeypatch, tmp_path):
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     extraction = FakeMessagesListChatModel(
@@ -331,6 +345,7 @@ def test_run_in_background_meters_memory_query_expansion(monkeypatch, tmp_path):
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     expansion = FakeMessagesListChatModel(
@@ -365,6 +380,7 @@ def test_run_in_background_meters_query_expansion_usage_even_when_recall_search_
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     class _FailSearchStore(SqliteBM25Memory):
@@ -403,6 +419,7 @@ def test_usage_persistence_failure_does_not_fail_run(monkeypatch, tmp_path):
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
 
     extraction = FakeMessagesListChatModel(
         responses=[
@@ -438,6 +455,7 @@ def test_total_write_failure_still_meters_extraction(monkeypatch, tmp_path):
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     class _FailAddStore(SqliteBM25Memory):

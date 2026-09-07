@@ -10,7 +10,13 @@ pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
 from ui.backend.db import init_db, session_factory
-from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, Run, RunKnowledgeGeneration
+from ui.backend.db.models import (
+    IngestionJob,
+    KnowledgeBaseRecord,
+    Organization,
+    Run,
+    RunKnowledgeGeneration,
+)
 from ui.backend.db.run_knowledge_generations import (
     delete_for_jobs,
     delete_for_run,
@@ -25,6 +31,9 @@ def db():
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
+        # Every KB, job and run in this module is stamped org_id=1.
+        session.add(Organization(id=1, name="acme"))
+        session.commit()
         yield session
 
 
@@ -131,6 +140,9 @@ class _SearchesTwicePipeline:
 def file_engine(tmp_path):
     engine = make_test_engine(tmp_path)
     init_db(engine)
+    with session_factory(engine)() as session:
+        session.add(Organization(id=1, name="acme"))
+        session.commit()
     return engine
 
 

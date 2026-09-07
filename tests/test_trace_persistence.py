@@ -169,8 +169,9 @@ def test_per_agent_usage_is_admin_only(client):
 
 
 def test_get_run_trace_cross_org_is_404(client):
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=other_org_id))
         db.commit()
 
     resp = client.get("/api/runs/other-org-run/trace")
@@ -190,8 +191,9 @@ def test_list_runs_by_run_id_cross_org_is_404(client):
     GET /api/runs/{id}, not silently return an empty `runs` list (Codex
     review finding: that would let a caller distinguish "not yours" from
     "doesn't exist" by diffing it against a real 404 elsewhere)."""
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=other_org_id))
         db.commit()
 
     resp = client.get("/api/runs", params={"run_id": "other-org-run"})
@@ -336,13 +338,14 @@ def test_list_runs_defaults_to_a_bounded_page(client):
 
 def test_list_runs_filters_by_manual_pipeline_and_status(client):
     org_id = get_org_id()
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
         db.add_all(
             [
                 Run(id="r-manual", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"),
                 Run(id="r-auto", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="email-trigger"),
                 Run(id="r-other-wf", pipeline="wf-b", input="in", status="failed", org_id=org_id, username="test"),
-                Run(id="r-other-org", pipeline="wf-a", input="in", status="completed", org_id=org_id + 1000, username="test"),
+                Run(id="r-other-org", pipeline="wf-a", input="in", status="completed", org_id=other_org_id, username="test"),
             ]
         )
         db.commit()
