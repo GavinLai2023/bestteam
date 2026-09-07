@@ -13,8 +13,11 @@
   the suite (about 120 call sites across 66 test files); on the
   `backend-postgres` lane every call is a fresh database cloned from a
   per-session template and dropped after the test. The
-  41-migration chain replays on Postgres and lands on exactly `create_all`'s
-  tables and columns. Enforcing foreign keys in the test engine found 15
+  42-migration chain replays on Postgres and lands on exactly `create_all`'s
+  tables and columns. The Postgres replay now compares foreign-key sets too;
+  that comparison found five keys the chain had never declared (columns added
+  by bare `batch.add_column`), repaired for Postgres by migration
+  `a4b5c6d7e8f9`. Enforcing foreign keys in the test engine found 15
   fixture defects and 2 product defects — a team delete dropped versions its
   head pointer still named, and the email trigger's claim
   (`inbox_events.run_id`) and dispatch token (`email_triggers.last_run_id`)

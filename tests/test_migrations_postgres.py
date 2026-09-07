@@ -56,7 +56,7 @@ def test_upgrade_head_on_postgres_matches_create_all():
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     cfg.set_main_option("sqlalchemy.url", migrated.render_as_string(hide_password=False).replace("%", "%%"))
-    command.upgrade(cfg, "head")  # must not raise: 41 migrations on a dialect they never ran on
+    command.upgrade(cfg, "head")  # must not raise: 42 migrations on a dialect they never ran on
 
     fresh = _postgres.empty_database_url()
     fresh_engine = sa.create_engine(fresh)
