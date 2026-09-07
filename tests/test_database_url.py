@@ -88,8 +88,21 @@ def test_make_engine_path_and_sqlite_url_are_the_same_engine(tmp_path):
         by_url.dispose()
 
 
-def test_make_engine_names_the_variable_on_a_bad_url():
+def test_make_engine_refuses_a_bad_url_and_other_dialects_by_name():
     with pytest.raises(ValueError, match="BESTTEAM_DATABASE_URL"):
         make_engine("://")
-    with pytest.raises(RuntimeError, match="BESTTEAM_DATABASE_URL"):
+    with pytest.raises(ValueError, match="mysql"):
+        make_engine("mysql+pymysql://user:pw@host/db")
+    with pytest.raises(ValueError, match="nosuchdb"):
         make_engine("nosuchdb://user:pw@host/db")
+
+
+def test_make_engine_names_the_ui_extra_when_the_driver_is_missing(monkeypatch):
+    from ui.backend.db import database
+
+    def _no_driver(*args, **kwargs):
+        raise ModuleNotFoundError("No module named 'psycopg'")
+
+    monkeypatch.setattr(database, "create_engine", _no_driver)
+    with pytest.raises(RuntimeError, match=r"BESTTEAM_DATABASE_URL.*bestteam\[ui\]"):
+        make_engine("postgresql+psycopg://user:pw@host/db")

@@ -118,7 +118,7 @@ def make_engine(target: Union[str, Path] = "bestteam.db", *, echo: bool = False)
     - a URL: a SQLite URL behaves like the path form; any other engine gets
       `pool_pre_ping` so a dropped server connection is replaced rather than
       surfaced as the next query's error. Only sqlite and postgresql are
-      supported (`BESTTEAM_DATABASE_URL`).
+      supported; any other dialect is refused by name (`BESTTEAM_DATABASE_URL`).
     """
     target_str = str(target)
     if target_str in (":memory:", MEMORY_URL):
@@ -152,6 +152,11 @@ def make_engine(target: Union[str, Path] = "bestteam.db", *, echo: bool = False)
             cursor.close()
 
         return engine
+
+    if backend != "postgresql":
+        raise ValueError(
+            f"BESTTEAM_DATABASE_URL names the {backend!r} engine; only sqlite and postgresql are supported"
+        )
 
     try:
         return create_engine(url, echo=echo, pool_pre_ping=True)
