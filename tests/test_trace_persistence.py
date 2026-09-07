@@ -14,7 +14,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
-from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, PipelineRecord, PipelineVersion
@@ -23,7 +23,7 @@ from ui.backend.runtime import registry, run_in_background
 
 
 def _engine(tmp_path):
-    e = make_concurrent_safe_engine(tmp_path)
+    e = make_test_engine(tmp_path)
     init_db(e)
     return e
 
@@ -88,8 +88,8 @@ def client(tmp_path, monkeypatch):
 
     # File-backed, not `:memory:` -- this fixture drives run_in_background,
     # which opens its own Session on a worker thread (see
-    # make_concurrent_safe_engine's docstring in helpers.py).
-    engine = make_concurrent_safe_engine(tmp_path)
+    # make_test_engine's docstring in helpers.py).
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

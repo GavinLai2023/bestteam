@@ -17,7 +17,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
 from ui.backend import org_knowledge_bases as backend_org_kb
@@ -71,11 +71,11 @@ def client(tmp_path, monkeypatch):
     # ingestion job onto `ingestion.py`'s executor, and that worker thread
     # opens its own `Session` on this same engine while the request that
     # dispatched it -- and the job-status polling below -- are still using it.
-    # `make_engine(":memory:")` backs every Session with ONE `StaticPool`
+    # `make_test_engine()` backs every Session with ONE `StaticPool`
     # connection, so those Sessions share a single transaction and a single
-    # sqlite3 cursor; see `helpers.make_concurrent_safe_engine` for why that
+    # sqlite3 cursor; see `helpers.make_test_engine` for why that
     # is a harness artefact rather than production behaviour.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

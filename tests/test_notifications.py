@@ -13,8 +13,9 @@ pytest.importorskip("cryptography")
 
 from cryptography.fernet import Fernet
 
+from helpers import make_test_engine
 from ui.backend import notifications, secret_store
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.notifications import (
     create_notification,
     set_notification_settings,
@@ -33,7 +34,7 @@ from ui.backend.notifications import (
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv(secret_store.SECRETS_KEY_ENV, Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:

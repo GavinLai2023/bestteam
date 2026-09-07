@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import email_trigger, email_trigger_api
 from ui.backend import main as backend_main
 from ui.backend.automation_results import ITEM_RESULT_TYPE
@@ -33,7 +33,7 @@ def client(monkeypatch, tmp_path):
 
     # POST /api/runs/{id}/retry dispatches a real run, so a worker thread's
     # Session overlaps the request's -- see the helper's docstring.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

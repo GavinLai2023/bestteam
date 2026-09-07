@@ -18,12 +18,12 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import crud as backend_crud
 from ui.backend import ingestion as backend_ingestion
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, SkillRecord, PipelineRecord
 from ui.backend.db_session import get_db
 
@@ -127,11 +127,11 @@ def client(tmp_path, monkeypatch):
     # ingestion job onto `ingestion.py`'s executor, and that worker thread
     # opens its own `Session` on this same engine while the request that
     # dispatched it -- and the job-status polling below -- are still using it.
-    # `make_engine(":memory:")` backs every Session with ONE `StaticPool`
+    # `make_test_engine()` backs every Session with ONE `StaticPool`
     # connection, so those Sessions share a single transaction and a single
-    # sqlite3 cursor; see `helpers.make_concurrent_safe_engine` for why that
+    # sqlite3 cursor; see `helpers.make_test_engine` for why that
     # is a harness artefact rather than production behaviour.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -601,7 +601,7 @@ def test_dependency_freshness_changes_when_non_latest_kb_deleted():
 
     from ui.backend.db.models import KnowledgeBaseRecord
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
     with TestSessionLocal() as db:

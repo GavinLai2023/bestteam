@@ -24,8 +24,9 @@ pytest.importorskip("fastapi")
 
 from cryptography.fernet import Fernet
 
+from helpers import make_test_engine
 from ui.backend import email_tools, email_trigger, org_settings
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import (
     AUTH_MICROSOFT_OAUTH,
     MICROSOFT_IMAP_HOST,
@@ -40,7 +41,7 @@ from ui.backend.email_trigger import poll_org
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     session = session_factory(engine)()
     yield session

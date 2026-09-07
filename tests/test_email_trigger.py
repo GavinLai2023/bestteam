@@ -7,6 +7,7 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("fastapi")
 
+from helpers import make_test_engine
 from ui.backend import email_trigger
 from ui.backend.email_trigger import check_mailbox, mailbox_state
 
@@ -93,7 +94,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 from ui.backend.db.orgs import get_or_create_org
@@ -103,7 +104,7 @@ from ui.backend.email_trigger import daily_cap, poll_org
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()

@@ -12,6 +12,7 @@ pytestmark = pytest.mark.integration
 
 pytest.importorskip("sqlalchemy")
 
+from helpers import make_test_engine
 from ui.backend import draft_outcomes
 from ui.backend.draft_outcomes import (
     MISS_THRESHOLD,
@@ -23,7 +24,7 @@ from ui.backend.draft_outcomes import (
     reconcile_org,
     record_outcomes_for_run,
 )
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import DraftOutcome, Run, TraceEventRecord
 from ui.backend.db.orgs import get_or_create_org
 
@@ -33,7 +34,7 @@ _PREFIX = "mailbox:7:uidvalidity:3:uid:"
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()

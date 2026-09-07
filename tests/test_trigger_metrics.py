@@ -14,8 +14,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from cryptography.fernet import Fernet
 
+from helpers import make_test_engine
 from ui.backend import admin, email_trigger, trigger_metrics
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_triggers import upsert_email_trigger
 from ui.backend.db.models import InboxEvent, Notification
 from ui.backend.db.orgs import get_or_create_org
@@ -114,7 +115,7 @@ def test_outstanding_backlog_does_not_block_a_success_from_resetting_the_streak(
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     session = session_factory(engine)()
     yield session

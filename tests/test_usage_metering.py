@@ -132,7 +132,7 @@ def test_tool_reported_usage_survives_a_failing_tool_call():
 
 pytest.importorskip("sqlalchemy")
 
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db.models import Run
@@ -142,7 +142,7 @@ from ui.backend.runtime import registry, run_in_background
 
 @pytest.fixture
 def db_session_factory(tmp_path):
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     return engine, session_factory(engine)
 

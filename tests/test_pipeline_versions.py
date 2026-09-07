@@ -1,6 +1,7 @@
 import pytest
 
-from ui.backend.db.database import make_engine, init_db, session_factory
+from helpers import make_test_engine
+from ui.backend.db.database import init_db, session_factory
 from ui.backend.db.models import PipelineRecord, PipelineVersion
 from ui.backend.db.pipelines import publish_pipeline_version, current_version_id
 
@@ -8,7 +9,7 @@ pytestmark = pytest.mark.unit
 
 
 def _db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     return session_factory(engine)()
 

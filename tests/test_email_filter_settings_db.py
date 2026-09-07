@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_budget_settings import (
     get_budget_caps,
     set_budget_caps,
@@ -22,7 +23,7 @@ OTHER = 2
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()

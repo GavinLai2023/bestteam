@@ -14,13 +14,14 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy.exc import IntegrityError
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import InboxEvent, Organization
 
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()

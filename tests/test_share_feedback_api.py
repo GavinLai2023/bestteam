@@ -9,7 +9,7 @@ pytestmark = pytest.mark.integration
 
 from fastapi.testclient import TestClient
 
-from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.feedback import get_feedback, list_feedback
@@ -33,7 +33,7 @@ def client(tmp_path, monkeypatch):
 
     # File-based like test_share_chat_api.py: the cookie-minting message send
     # dispatches a real run whose worker thread opens its own Session.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

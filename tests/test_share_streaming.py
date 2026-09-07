@@ -63,12 +63,12 @@ def test_flush_on_an_empty_buffer_publishes_nothing(published):
 def test_a_share_run_publishes_its_reply_as_deltas(tmp_path, monkeypatch):
     """End to end through the real worker: SDK sink -> coalescer -> registry."""
     from bestteam import AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run
     from ui.backend.runtime import registry, run_in_background
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 
@@ -111,11 +111,11 @@ def test_a_share_run_publishes_its_reply_as_deltas(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_a_non_share_run_gets_no_sink(tmp_path, monkeypatch):
     from bestteam import AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.runtime import registry, run_in_background
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     spec = Specification(
         name="w",

@@ -12,7 +12,8 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import inspect
 
-from ui.backend.db import SkillRecord, PipelineRecord, init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import SkillRecord, PipelineRecord, init_db, session_factory
 from ui.backend.db.builder_sessions import (
     STATUSES,
     append_feedback,
@@ -24,7 +25,7 @@ from ui.backend.db.builder_sessions import (
 
 @pytest.fixture
 def db_session():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
@@ -32,7 +33,7 @@ def db_session():
 
 
 def test_init_db_creates_all_tables():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
 
     tables = set(inspect(engine).get_table_names())
@@ -232,9 +233,9 @@ def test_skill_record_round_trip(db_session):
 def test_share_tables_exist():
     from sqlalchemy import inspect
 
-    from ui.backend.db import init_db, make_engine
+    from ui.backend.db import init_db
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     tables = set(inspect(engine).get_table_names())
     assert {"share_links", "share_sessions", "share_messages"} <= tables

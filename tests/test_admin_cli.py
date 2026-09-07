@@ -6,8 +6,9 @@ import pytest
 pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
+from helpers import make_test_engine
 from ui.backend import admin as admin_cli
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.orgs import create_org, get_org_by_name
 from ui.backend.db.users import create_user, get_user_by_username
 
@@ -15,7 +16,7 @@ from ui.backend.db.users import create_user, get_user_by_username
 @pytest.fixture
 def session_local(monkeypatch):
     # In-memory StaticPool engine shared across sessions; patch the CLI's factory.
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     monkeypatch.setattr(admin_cli, "_open_session", Session)

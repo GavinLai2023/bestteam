@@ -9,8 +9,8 @@ pytest.importorskip("cryptography")
 
 from cryptography.fernet import Fernet
 
-from helpers import open_test_db
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine, open_test_db
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.models import PipelineRecord
 from ui.backend.db.orgs import get_or_create_org
@@ -29,7 +29,7 @@ _TEAM = {
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     s = Session()

@@ -15,15 +15,16 @@ pytest.importorskip("sqlalchemy")
 from langchain_core.embeddings import Embeddings
 
 from bestteam.core.embeddings import embed_documents_in_batches
+from helpers import make_test_engine
 from ui.backend import ingestion
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, KnowledgeChunk, KnowledgeDocument
 
 
 @pytest.fixture
 def engine():
-    eng = make_engine(":memory:")
+    eng = make_test_engine()
     init_db(eng)
     return eng
 

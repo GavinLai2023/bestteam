@@ -15,6 +15,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import text
 
+from helpers import make_test_engine
 from ui.backend.db import make_engine
 
 
@@ -30,7 +31,7 @@ def test_file_engine_uses_wal(tmp_path):
 
 
 def test_memory_engine_is_unchanged():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
 
     # An in-memory database has no WAL; it must keep reporting its own mode
     # rather than erroring on a pragma that doesn't apply.

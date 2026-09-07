@@ -10,7 +10,7 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from helpers import create_user_and_login, make_concurrent_safe_engine
+from helpers import create_user_and_login, make_test_engine
 from ui.backend import main as backend_main
 from ui.backend import runtime, ws_tickets
 from ui.backend.db import init_db, session_factory
@@ -22,7 +22,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

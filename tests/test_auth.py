@@ -10,10 +10,10 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, make_concurrent_safe_engine
+from helpers import create_user_and_login, make_test_engine
 from ui.backend import auth
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db_session import get_db
 
 
@@ -129,7 +129,7 @@ def client(pipelines_dir, tmp_path, monkeypatch):
     # The WS-stream tests dispatch a run and then write to the DB from the test
     # thread while the run worker's own Session is still live -- see the
     # helper's docstring. (pipelines_dir is this same tmp_path.)
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -164,10 +164,10 @@ def test_provisioned_user_can_login(client):
 
 
 def test_create_user_rejects_duplicate_username():
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.users import create_user
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -177,10 +177,10 @@ def test_create_user_rejects_duplicate_username():
 
 
 def test_create_user_rejects_reserved_sentinel_name():
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.users import create_user
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     with session_factory(engine)() as db:
         with pytest.raises(ValueError):
@@ -227,7 +227,7 @@ def test_promote_org_member_is_rejected():
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.db.users import create_user, get_user_by_username, set_admin_status
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -267,10 +267,10 @@ def test_provisioned_user_named_admin_is_not_admin(client):
 
 
 def test_set_admin_status_promotes_and_demotes():
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.users import create_user, get_user_by_username, set_admin_status
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -284,10 +284,10 @@ def test_set_admin_status_promotes_and_demotes():
 
 
 def test_set_admin_status_rejects_unknown_user():
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.users import set_admin_status
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -299,11 +299,11 @@ def test_create_user_enforces_one_member_per_org():
     # One member per org is enforced (not assumed): org resources such as the
     # shared mailbox have no per-member privilege separation yet, so a second
     # member would be unprivileged co-management. Platform operators are exempt.
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.db.users import create_user
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -325,11 +325,11 @@ def test_db_index_rejects_second_org_member_even_bypassing_app_check():
     from sqlalchemy.exc import IntegrityError
 
     from ui.backend.auth import hash_password
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import User
     from ui.backend.db.orgs import get_or_create_org
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -382,12 +382,12 @@ def test_startup_guard_refuses_legacy_multi_member_org():
     import sqlalchemy as sa
 
     from ui.backend.auth import hash_password
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import User
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.main import _enforce_one_member_per_org_or_raise
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -403,12 +403,12 @@ def test_startup_guard_refuses_legacy_multi_member_org():
 
 
 def test_startup_guard_passes_when_invariant_holds():
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.orgs import get_or_create_org
     from ui.backend.db.users import create_user
     from ui.backend.main import _enforce_one_member_per_org_or_raise
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -426,11 +426,11 @@ def test_lifespan_refuses_to_serve_with_multi_member_org(monkeypatch):
 
     from ui.backend import main as backend_main
     from ui.backend.auth import hash_password
-    from ui.backend.db import init_db, make_engine, session_factory
+    from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import User
     from ui.backend.db.orgs import get_or_create_org
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
