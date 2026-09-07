@@ -524,6 +524,7 @@ def test_database_line_fails_on_garbage_and_on_unsupported_engines():
 
 
 def test_check_health_reports_an_unreachable_server_database(monkeypatch, capsys):
+    pytest.importorskip("psycopg")
     from sqlalchemy.exc import OperationalError
     from ui.backend import admin
 

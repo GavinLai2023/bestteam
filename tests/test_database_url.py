@@ -9,11 +9,13 @@ pytestmark = pytest.mark.unit
 pytest.importorskip("sqlalchemy")
 
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import StaticPool
 
 from ui.backend.db.database import (
     DEFAULT_DB_PATH,
     describe_database_url,
     lock_anchor_for,
+    make_engine,
     readonly_engine,
     resolve_database_url,
     sqlite_path_of,
@@ -64,11 +66,6 @@ def test_readonly_engine_does_not_create_a_missing_sqlite_file(tmp_path):
         with engine.connect() as conn:
             conn.exec_driver_sql("SELECT 1")
     assert not missing.exists()
-
-
-from sqlalchemy.pool import StaticPool
-
-from ui.backend.db.database import make_engine
 
 
 def test_make_engine_memory_url_uses_the_static_pool():

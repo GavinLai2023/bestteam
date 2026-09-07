@@ -205,11 +205,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
         findings = check_environment(os.environ)
-        database = next(finding for finding in findings if finding.name == "database")
+        database = next((finding for finding in findings if finding.name == "database"), None)
         # A URL that cannot be parsed, an unsupported dialect or a missing
         # driver is already a FAIL line; reading through it would only add a
         # traceback on top of it.
-        if database.level != "FAIL":
+        if database is None or database.level != "FAIL":
             url = default_database_url(os.environ)
             findings += [
                 check_schema(url),
