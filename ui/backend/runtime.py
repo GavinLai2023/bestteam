@@ -507,10 +507,12 @@ def _safe_record_knowledge_generation(db: Session, *, run_id: str, ingestion_job
     KB `tool_completed` can reach here well after the search happened. If two
     ingestions of that collection complete inside one agent node's buffering
     window, the referenced job may already have been pruned by the time this
-    call lands -- FK enforcement is off, so the row is inserted anyway and is
-    never removed except by deleting the KB. Vanishingly rare, and the only
-    consequence is a dangling reference to a generation whose trace was
-    already unresolvable by the time it was pruned."""
+    call lands -- on the SQLite file (keys off) the row is inserted with the
+    stale pointer and is never removed except by deleting the KB; on Postgres
+    the insert is refused and swallowed here. Either way the run itself is
+    unaffected, and the only consequence is a dangling (or missing) reference
+    to a generation whose trace was already unresolvable by the time it was
+    pruned."""
     try:
         record_knowledge_generation(db, run_id, ingestion_job_id)
         db.commit()
@@ -1150,6 +1152,10 @@ def run_in_background(
             # failure below) so the terminal event further down -- the hard
             # CR-003 guarantee -- always gets published even if this fails.
             row_persisted = False
+            # The up-front persist (or a caller that wrote the row before
+            # dispatch) already committed it, so a trace row has its parent
+            # whatever happens below.
+            row_existed = run_row is not None
             if db is not None:
                 try:
                     db.rollback()
@@ -1185,8 +1191,18 @@ def run_in_background(
                     _maybe_record_share_reply(None)
                 except Exception:  # noqa: BLE001
                     _logger.warning("Could not persist failed status for run %s", run_id)
+                    try:
+                        # A failed flush leaves the session needing a rollback
+                        # before it will accept anything else, and the trace row
+                        # below is written on this same session -- without this
+                        # it would be refused with PendingRollbackError and
+                        # swallowed, losing the terminal event's only durable
+                        # record.
+                        db.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
             registry.publish(run_id, dataclasses.asdict(failed_event))
-            if db is not None and row_persisted:
+            if db is not None and (row_existed or row_persisted):
                 # `_safe_record_trace_event` rolls back internally on failure, so
                 # it self-heals a session left poisoned by whatever raised above.
                 _safe_record_trace_event(db, run_id=run_id, seq=seq, event=failed_event)
