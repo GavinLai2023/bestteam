@@ -91,3 +91,36 @@ def pytest_collection_modifyitems(config, items):
         _COLLECTED_MARKERS_ATTR,
         [(item.nodeid, {mark.name for mark in item.iter_markers()}) for item in items],
     )
+    try:
+        import _postgres
+    except ImportError:  # pragma: no cover
+        return
+    if _postgres.enabled():
+        skip = _pytest.mark.skip(reason="depends on SQLite's :memory: shared connection; not meaningful on Postgres")
+        for item in items:
+            if item.get_closest_marker("sqlite_only"):
+                item.add_marker(skip)
+
+
+@_pytest.fixture(autouse=True)
+def _drop_postgres_test_databases():
+    """Spec §8: on the Postgres lane every database a test created is dropped
+    when the test ends -- per test, because a template clone is several
+    megabytes and a session creates more than a thousand of them."""
+    yield
+    try:
+        import _postgres
+    except ImportError:  # pragma: no cover - SDK-only checkout without sqlalchemy
+        return
+    if _postgres.enabled():
+        _postgres.drop_created()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    try:
+        import _postgres
+    except ImportError:  # pragma: no cover
+        return
+    if _postgres.enabled():
+        _postgres.drop_created()
+        _postgres.drop_template()

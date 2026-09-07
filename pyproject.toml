@@ -50,6 +50,7 @@ markers = [
     "e2e: Playwright browser scenario",
     "slow: real Alembic migrations, concurrency timing, or full E2E journeys",
     "optional: requires an optional extra (e.g. interview/providers-openai)",
+    "sqlite_only: depends on SQLite's in-memory shared connection on purpose; skipped on the Postgres lane",
 ]
 
 [build-system]

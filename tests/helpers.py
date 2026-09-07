@@ -18,6 +18,7 @@ from typing import Optional
 
 from sqlalchemy import event
 
+import _postgres
 from ui.backend import main as backend_main
 from ui.backend.db import make_engine
 from ui.backend.db.orgs import get_or_create_org
@@ -25,19 +26,13 @@ from ui.backend.db.users import create_user, set_admin_status
 from ui.backend.db_session import get_db
 
 
-def make_concurrent_safe_engine(tmp_path: Path):
-    """A file-backed SQLite engine for any test where two Sessions can be live at once.
+def make_test_engine(tmp_path: Optional[Path] = None):
+    """The one engine every test fixture uses.
 
-    Use this instead of `make_engine(":memory:")` in every fixture whose tests
-    can have a request overlap another request, a run worker, an ingestion
-    worker, or any other background thread.
-
-    `make_engine(":memory:")` *has* to use a `StaticPool`, because a second
-    connection to `:memory:` would be a second, empty database. The
-    consequence is that ONE DBAPI connection backs every Session in the
-    process -- so two concurrent Sessions do not merely share a database, they
-    share a single transaction. Whoever commits or rolls back first does it
-    for both:
+    Default: SQLite. With no `tmp_path`, an in-memory database on a
+    `StaticPool` -- ONE DBAPI connection backs every Session, so two
+    concurrent Sessions share a single transaction and whoever commits or
+    rolls back first does it for both:
 
         T1 (request A)                  T2 (request B / worker thread)
         --------------------------      -------------------------------------
@@ -47,38 +42,45 @@ def make_concurrent_safe_engine(tmp_path: Path):
         commit() -> COMMIT (no-op)
           -> endpoint answers 200/204 having written nothing
 
-    That failure is silent -- the endpoint still returns success -- so it
-    surfaces as an unrelated assertion failing much later, intermittently.
-    It is also purely an artefact of the harness: production runs on a file
-    database whose default `QueuePool` gives each Session its own connection
-    and therefore its own transaction, so one request's rollback can never
-    reach into another's.
+    That failure is silent, so it surfaces as an unrelated assertion failing
+    much later, intermittently. Fine for a test with one live Session; wrong
+    for any test where a request overlaps another request, a run worker or an
+    ingestion thread. Those pass `tmp_path` and get a file-backed database
+    whose `QueuePool` gives each Session its own connection, as production
+    does. The file lives in its own subdirectory because callers reuse
+    `tmp_path` for pipelines, sessions and uploads; fsync is off because the
+    database dies with `tmp_path`.
 
-    The database lives in its own subdirectory because callers routinely reuse
-    `tmp_path` as `PIPELINES_DIR`, `_SESSIONS_DIR`, or a knowledge-base upload
-    root.
+    Both SQLite shapes enforce foreign keys (`PRAGMA foreign_keys=ON`) -- the
+    production file does not, Postgres always does, and the suite is where a
+    child-before-parent write should be caught (spec 2026-09-07 §5).
 
-    Do NOT reach for this reflexively. A test that only ever has one Session
-    live gains nothing, and a few tests depend on the shared-connection
-    behaviour on purpose: `test_email_trigger.py` simulates a concurrent
-    writer by committing through a second Session while the first still holds
-    an uncommitted write, which works only because both are the same
-    connection. On a file database that is a genuine single-thread deadlock
-    against SQLite's write lock (`database is locked`), so it deliberately
-    stays on `make_engine(":memory:")`.
+    With `BESTTEAM_TEST_DATABASE_URL` set (the `backend-postgres` CI lane, or
+    a local server), either shape returns a fresh Postgres database cloned
+    from a per-session template; `tests/conftest.py` drops it when the test
+    ends. A test that depends on the `:memory:` shared-connection behaviour
+    on purpose (`test_email_trigger.py` commits through a second Session
+    while the first holds an uncommitted write) is marked `sqlite_only` and
+    skipped there.
     """
-    db_dir = tmp_path / "_db"
-    db_dir.mkdir(exist_ok=True)
-    engine = make_engine(db_dir / "test.db")
+    if _postgres.enabled():
+        return _postgres.clone_engine()
+    if tmp_path is None:
+        engine = make_engine(":memory:")
+    else:
+        db_dir = tmp_path / "_db"
+        db_dir.mkdir(exist_ok=True)
+        engine = make_engine(db_dir / "test.db")
+
+        @event.listens_for(engine, "connect")
+        def _no_fsync(dbapi_connection, _record):
+            # Pay for the isolation above, not for durability: `synchronous`
+            # governs only when writes reach the platter.
+            dbapi_connection.execute("PRAGMA synchronous=OFF")
 
     @event.listens_for(engine, "connect")
-    def _no_fsync(dbapi_connection, _record):
-        # Pay for the isolation above, not for durability: this database dies
-        # with tmp_path, so fsync-per-commit buys nothing and costs roughly 5x
-        # on commit-heavy tests. `synchronous` governs only when writes reach
-        # the platter -- transaction visibility and locking, which are the
-        # entire point of using a file here, are untouched.
-        dbapi_connection.execute("PRAGMA synchronous=OFF")
+    def _enforce_foreign_keys(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     return engine
 
