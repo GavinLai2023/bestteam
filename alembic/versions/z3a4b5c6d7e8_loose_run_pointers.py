@@ -14,6 +14,10 @@ crash leaves in that window. SQLite never enforced the keys, so the modelling
 error was invisible; Postgres always enforces, and would refuse every
 autonomous email run. They are loose pointers, so the constraints go.
 
+`downgrade` nulls any dangling pointer first -- a constraint that the data
+violates cannot be re-added, and those values carry nothing the product reads
+back.
+
 Guarded op (same reason as the other migrations): `ui/backend/db_session.py`
 runs `create_all` at import, and the current models declare no such keys, so a
 fresh database has nothing to drop.
@@ -66,6 +70,25 @@ def _drop_fk(table: str, column: str) -> None:
         op.drop_constraint(fk["name"], table, type_="foreignkey")
 
 
+def _clear_dangling(table: str, column: str) -> None:
+    """Null every value in `table.column` that names no `runs` row.
+
+    A claim the sweep dead-lettered keeps its run_id (`inbox_events.
+    release_events` clears it only on the pending branch), and a trigger's
+    last_run_id may name a run that was never persisted -- both are exactly the
+    values the upgrade made legal. Re-adding a validating key would be refused
+    by them, so clear them first: the product treats these pointers as loose,
+    and nothing reads a dead-lettered claim's run id back.
+    """
+    bind = op.get_bind()
+    if table not in sa.inspect(bind).get_table_names():
+        return
+    bind.execute(sa.text(
+        f"UPDATE {table} SET {column} = NULL "
+        f"WHERE {column} IS NOT NULL AND {column} NOT IN (SELECT id FROM runs)"
+    ))
+
+
 def _create_fk(table: str, column: str) -> None:
     bind = op.get_bind()
     if table not in sa.inspect(bind).get_table_names():
@@ -89,9 +112,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Downgrade schema.
 
+    Each key is restored only after the values that would violate it are
+    cleared (`_clear_dangling`), because `ALTER TABLE ... ADD CONSTRAINT`
+    validates the existing rows -- on Postgres a dead-lettered orphan claim
+    would otherwise refuse the whole downgrade with a ForeignKeyViolation.
+
     Restores the constraints under an explicit name rather than the anonymous
     one SQLite/Postgres generated originally -- a foreign key's name is a
     diagnostic label here, never queried against.
     """
     for table, column in _POINTERS:
+        _clear_dangling(table, column)
         _create_fk(table, column)
