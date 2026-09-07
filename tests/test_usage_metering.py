@@ -150,6 +150,10 @@ def db_session_factory(tmp_path):
 def test_record_usage_without_catalog_entry_has_no_cost_estimate(db_session_factory):
     _, Session = db_session_factory
     with Session() as db:
+        # `usage_records.run_id` is a foreign key: write the run first.
+        db.add(Run(id="run1", pipeline="wf", input="in", status="completed"))
+        db.commit()
+
         record = record_usage(db, run_id="run1", agent="a", model="unknown-model", input_tokens=10, output_tokens=5)
 
         assert record.cost_estimate is None
@@ -158,6 +162,9 @@ def test_record_usage_without_catalog_entry_has_no_cost_estimate(db_session_fact
 def test_record_usage_with_catalog_entry_computes_cost(db_session_factory):
     _, Session = db_session_factory
     with Session() as db:
+        # `usage_records.run_id` is a foreign key: write the run first.
+        db.add(Run(id="run1", pipeline="wf", input="in", status="completed"))
+        db.commit()
         upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick", input_price_per_1k=0.001, output_price_per_1k=0.002)
 
         record = record_usage(db, run_id="run1", agent="a", model="openai:gpt-4o-mini", input_tokens=1000, output_tokens=1000)

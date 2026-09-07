@@ -65,12 +65,32 @@ def test_a_share_run_publishes_its_reply_as_deltas(tmp_path, monkeypatch):
     from bestteam import AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification
     from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
-    from ui.backend.db.models import Run
+    from ui.backend.db.models import PipelineRecord, Run
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.share_links import create_share_link
+    from ui.backend.db.share_sessions import create_share_session
+    from ui.backend.db.users import create_user
     from ui.backend.runtime import registry, run_in_background
 
     engine = make_test_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
+
+    # The reply is appended to a share transcript, so the link and session the
+    # run's trigger_context names have to exist (share_messages.share_session_id
+    # is a foreign key).
+    with Session() as session:
+        org = get_or_create_org(session, "acme")
+        owner = create_user(session, "owner", "pw", org_id=org.id)
+        team = PipelineRecord(
+            name="team1", org_id=org.id, status="deployed",
+            config={"name": "team1", "agents": [], "teams": [], "pipeline": {"steps": []}},
+        )
+        session.add(team)
+        session.commit()
+        link = create_share_link(session, pipeline_id=team.id, org_id=org.id, created_by=owner.id)
+        share_session = create_share_session(session, link.id)
+        link_id, share_session_id = link.id, share_session.id
 
     spec = Specification(
         name="w",
@@ -94,7 +114,11 @@ def test_a_share_run_publishes_its_reply_as_deltas(tmp_path, monkeypatch):
                 input="in",
                 status="running",
                 username="share-link",
-                trigger_context={"share_link_id": 1, "share_session_id": 1, "turn_number": 1},
+                trigger_context={
+                    "share_link_id": link_id,
+                    "share_session_id": share_session_id,
+                    "turn_number": 1,
+                },
             )
         )
         session.commit()

@@ -416,7 +416,12 @@ def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeyp
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     # The builder reports a DIFFERENT version than the current pointer -- as if a
     # redeploy landed after the build read. The run must record the built one.
-    stale = version.id + 999
+    # `runs.pipeline_version_id` is a foreign key, so that version has to be a
+    # real row: publish v2 to move the pointer, and keep naming v1.
+    stale = version.id
+    _, current = publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 2})
+    db.commit()
+    assert current_version_id(db, org.id, "triage") == current.id != stale
     poll_org(db, trigger, _fake_pipeline_getter([], version_id=stale))
 
     run_id = recorder.calls[0][1][0]
