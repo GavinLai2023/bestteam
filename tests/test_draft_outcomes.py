@@ -88,6 +88,10 @@ def _draft_trace_event(db, run_id, message_id, *, seq=0):
 
 def _row(db, *, org_id, uid="42", status="pending", created_at=None,
          prefix=_PREFIX, run_id="run-1", **kwargs):
+    # A draft outcome belongs to a run: write the parent first unless this
+    # test already created it.
+    if db.get(Run, run_id) is None:
+        _make_run(db, org_id=org_id, uids=[], run_id=run_id)
     row = DraftOutcome(
         org_id=org_id,
         run_id=run_id,
